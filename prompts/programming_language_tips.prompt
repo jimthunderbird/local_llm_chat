@@ -1,0 +1,120 @@
+code_generation_llm: ollama local model ornith:35b
+
+task (persistent) {
+  complete tasks in ./code_snippet_block.prompt  
+}
+
+task (completed) {
+  when the tag is "php":
+  question: write a cli script to get transcript from youtube, only get the first 100 character of it
+  the code that's generated does not work
+  can you think of a way so that the generated code will learn from knowledge/php/youtube_transcript_cli.md as much as possible?
+}
+
+task (completed) {
+  bug:
+  when the tag is "php":
+  question: write a cli script to get transcript from youtube
+  the code that's generated does not work
+  can you think of a way so that the generated code will learn from knowledge/php/youtube_transcript_cli.md as much as possible?
+}
+
+task (completed) {
+  for any code snippet generation, use {code_generation_llm}
+}
+
+task (completed) {
+  if ./knowledge/common_language exits, use it as an addition to the documentation
+  note that:
+  - all documents are markdown files
+}
+
+task (completed) {
+  use {programming_llm} as the chat and code generation model
+}
+
+task (completed) {
+  bug:
+  question: "code: write me a cli: i have a youtube video: https://www.youtube.com/watch?v=PgPmZrB14Xk transcript: please get its transcript print first 50 letter of the {transcript} 
+  note: 
+  - please put all functions on top of the code
+  - please use OOP as much as possible"
+  answer: the code that is generated contains weird thing like: $fetcher = new YouTubeTranscript```phpFetcher($videoUrl);
+  expect: $fetcher = new YouTubeTranscriptFetcher($videoUrl);
+}
+
+task (completed) {
+  in task.code_snippet_copy, put the copy button on top of the snippet
+}
+
+task (completed) {
+  if ./knowledge/{tag} exists, use it as an addition to the documentation
+  note that:
+  - all documents are markdown files
+}
+
+task.code_snippet_copy (completed) {
+  below each code snippet in the answer, add a button with copy icon, when click:
+  - copy the content of the code snippet to system clipboard so that i can paste the code in another editor
+}
+
+task (completed) {
+  bug:
+  tag: php
+  question: write a cli script to get the english transcript of a youtube video
+  result: the code sample is cutoff early and show:
+  ```
+  function selectEnglishTrack(array $tracks): ?array141{142    //143144Sources:145  [1] stream_context_create146      https://www.php.net/manual/en/function.stream-context-create.php
+  ```
+  }
+
+  task (completed) {
+    bug:
+    often times, i see the answer has: The provided context does not contain...
+    expect: even though there are insufficient context, do not display that message
+  }
+
+  task (completed) {
+    bug:
+    question: show me code to implement bubble sort
+
+    answer: The indexed PHP documentation does not contain a bubble sort implementation. The excerpts show PHP's built-in sort() function, which uses Quicksort internally [10], and general array usage [1], [2]...
+
+    expect: even though there are no matching excerpts in php documentation, do not show that message
+  }
+
+  task (completed) {
+    if a tag is in one of the {document_backed_tags}:
+    - there is a bug:
+    when question is: write code about a binary search
+    it outputs thinking...
+    then it shows me a sample code
+    but then there is a refresh and the sample code is regenerated again!
+    whatever has been generated as part of the answer should not disappear!
+  }
+
+  task (completed) {
+    if a tag is in one of the {document_backed_tags}:
+    in the answer, we saw message like:
+    [answer source: local LLM ornith:35b][relevance filter returned no candidates; keeping the top 5 BM25 match(es)][using 5 of 10 BM25 trunk(s) (depth 20, default)][context size: ~352 token(s) estimated across 5 trunk(s); context window: 32,768 token(s)][tag 'php' could not answer; consulting www.php.net/manual/en with ornith:35b instead of switching tags][php: searching the official PHP documentation at https://www.php.net/manual/en/ instead of calling the GitHub API][php: Using cached index: /Users/jhuang/.cache/php_doc_search/index.json][php: Analyzing question...][php: Search keywords: Iterator, IteratorAggregate, Traversable, Iterator::current, Iterator::key, Iterator::next, Iterator::rewind, Iterator::valid][answer source: PHP documentation (www.php.net/manual/en)][php: PHP documentation answer received][php: merged the www.php.net/manual/en answer with the local knowledge answer]
+    please do not show those messages, instead, put output "thinking..." is ok
+  }
+
+  task (completed) {
+    bug: 
+    in task.line_hinting, when clicking on the question mark icon, it will say something like:
+    "Line 13..."
+    it shows the line number of the snippet
+    please, in the code snippets, add a little margin space in the left, inside, shows the line number
+  }
+
+  task.line_hinting (completed) {
+    if a tag is in one of the {document_backed_tags}:
+    - in the code snippets in the answers:
+    - next to each line of code (except comments), show a question mark icon, when click on this icon:
+    - open up a modal, use ollama local model ornith:35b to explain what does this line do in the context of the current code snippet
+  }
+
+  task (completed) {
+    clone the feature for php, learn from current implementation of rust and golang
+  }

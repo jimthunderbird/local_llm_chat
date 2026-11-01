@@ -1,0 +1,35 @@
+/**
+  all tasks related to the code snippet block in the frontend UI
+ */
+
+snippet_question_llm: ollama local model ornith:35b
+
+task.codesnippet_ask_a_question (completed) {
+  on top of each code snippet block {
+    add a new button "Ask" {
+      name: "Ask"
+      on click {
+        - show a message box on top of the code snippet:
+          - allow me to enter a question, hit "Send", then use {snippet_question_llm} to stream the answer under the question
+        - the message box should have a "X" mark, when click, the message box will be closed
+      }
+    }
+    maintain this button orders: "Search", "Ask", "Copy"
+  }
+}
+
+task.codesnippet_search_bar (completed) {
+  on top of each code snippet block, add a new button before "Copy":
+  button {
+    name: "Search"
+    on click {
+      show a search bar on top of the code snippet:
+      - allow me to search keywords against the code snippet's content
+      - when enter, show me number of matching lines in the code snippet's content
+        - when i hit enter key, allow me to jump the matching lines
+        - the matching lines should be highlighted
+      - in the right end of the search bar, there should be a "X", when click:
+        - close the search bar
+    }
+  }
+}

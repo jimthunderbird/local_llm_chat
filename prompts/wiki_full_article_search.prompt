@@ -1,0 +1,93 @@
+task (completed) {
+  bug:
+  /wiki when is donald trump and elon musk's birthday?
+  expect: both donald trump and elon musk's birthdays will show
+  actual: only elon musk's birthday shows
+}
+
+task (completed) {
+  bug:
+  /wiki what is nato
+  expect: one summary about NATO shows up
+  actual: 2 summary about NATO show up!
+}
+
+task (completed) {
+  bug:
+  /wiki who wrote rust programming language?
+  expect: the answer should contain the rust programming author's information
+}
+
+task (completed) {
+  bug:
+  /wiki rust programming language
+  i expect that we can find https://en.wikipedia.org/wiki/Rust_(programming_language)
+  please fix it in a systematic way
+}
+
+task (completed) {
+  bug:
+  /wiki is terrence tao from china?
+  this is a very narrow question as well, please show me the answer instead of quoting wiki summaries
+}
+
+task (completed) {
+  bug:
+  when i do: /wiki what is terrence tao's birthday
+  see that i purposely spell terrence tao incorrect, then the answer is able to pick up the correct term "terence tao", that's great
+  but i expect the answer still contain terence tao's birthday since we know the source wiki article
+}
+
+task (completed) {
+  update wiki command:
+  - for narrow questions like "what is the birthday of donald trump":
+    articles: get related source articles 
+    keywords: comp up with 5 keywords that is related to <question>
+    for each {article} in {articles}:
+      - use ag to search {keywords} against {article}
+      - check if we got the answer:
+        - if yes: break out of the loop
+        - else: continue
+}
+
+task (completed) {
+  update wiki command: 
+  - related_entities: find out the main entities of <question>:
+  - for each {entity} in {related_entities}:
+    - result: get the summary of the <entity> from wiki api
+    - output the result immediately
+}
+
+task (completed) {
+  reference task.see_top_content_of_article:
+  - the behavior on UI is not right, I want to see the top content of the article right away, while the scrollbar move, do not scroll the article to the bottom! I want to read the top part of the article while the scrolling is still going
+  - also, can we stream the output of wiki so I can see the initial part of the article faster?
+}
+
+task.see_top_content_of_article (completed) {
+  in /wiki_article command:
+  when the result articles are displayed, it scroll to the bottom
+  we want the article sticky on the top while the scrolling continue happening
+}
+
+task (completed) {
+  add command: /wiki_article <question>:
+  - related_entities: find out the main entities of <question>:
+  - for each {entity} in {related_entities}:
+    - result: run ./wiki_full_article_search.php <entity>
+    - output result immediately
+}
+
+task (completed) {
+  update /wiki command, when doing: /wiki <question>:
+  - related_entities: find out the main entities of <question>:
+  - for each {entity} in {related_entities}:
+    - result: run ./wiki_full_article_search.php <question>
+    - add result to context
+  - based on the context, answer the <question>
+}
+
+task (completed) {
+  create or update ./wiki_full_article_search.php:
+  please return me a full wiki article 
+}

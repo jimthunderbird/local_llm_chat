@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chat.py — question-to-answer research notes</title>
+<style>
+  :root{
+    --bg:#10151c; --panel:#171f29; --panel2:#1d2733; --ink:#dbe6f2;
+    --muted:#94a7bc; --line:#2c3b4d; --accent:#5cc8ff; --accent2:#ffd166;
+    --good:#69d29a; --warn:#ffae6b; --code:#0b1016;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+  header{
+    padding:54px 28px 40px; border-bottom:1px solid var(--line);
+    background:linear-gradient(160deg,#13202e 0%,#10151c 70%);
+  }
+  header .wrap, main{max-width:1120px; margin:0 auto}
+  h1{margin:0 0 10px; font-size:2.15rem; letter-spacing:-.02em}
+  h2{margin:46px 0 14px; font-size:1.45rem; letter-spacing:-.01em; border-bottom:1px solid var(--line); padding-bottom:8px}
+  h3{margin:28px 0 10px; font-size:1.12rem; color:#eaf3fc}
+  h4{margin:20px 0 8px; font-size:1rem; color:var(--accent2)}
+  p{margin:11px 0}
+  .sub{color:var(--muted); max-width:900px}
+  .meta{color:var(--muted); font-size:.9rem; margin-top:16px}
+  .meta code{font-size:.85rem}
+  main{padding:8px 28px 80px}
+  nav.toc{
+    background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:18px 22px; margin:30px 0 10px;
+  }
+  nav.toc strong{display:block; margin-bottom:8px; color:var(--accent2)}
+  nav.toc ol{margin:0; padding-left:22px; columns:2; column-gap:36px}
+  nav.toc li{margin:4px 0; break-inside:avoid}
+  code{
+    background:var(--code); border:1px solid #223142; border-radius:5px;
+    padding:.12em .38em; font:0.88em/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    color:#b9e3ff;
+  }
+  pre{
+    background:var(--code); border:1px solid var(--line); border-radius:10px;
+    padding:16px 18px; overflow-x:auto; color:#c8ddf0;
+    font:0.86rem/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  pre code{background:none; border:0; padding:0; color:inherit; font-size:inherit}
+  .grid{display:grid; grid-template-columns:1fr 1fr; gap:16px}
+  @media(max-width:820px){.grid{grid-template-columns:1fr} nav.toc ol{columns:1}}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 18px}
+  .card h4{margin-top:0}
+  .callout{
+    border-left:4px solid var(--accent); background:#12202c; border-radius:0 9px 9px 0;
+    padding:12px 16px; margin:16px 0;
+  }
+  .callout.warn{border-left-color:var(--warn); background:#241b12}
+  .callout.good{border-left-color:var(--good); background:#11231a}
+  .callout p:first-child{margin-top:0}
+  .callout p:last-child{margin-bottom:0}
+  table{border-collapse:collapse; width:100%; margin:14px 0; font-size:.93rem}
+  th,td{border:1px solid var(--line); padding:9px 11px; text-align:left; vertical-align:top}
+  th{background:var(--panel2); color:#eaf3fc; font-weight:600}
+  tr:nth-child(even) td{background:#141c25}
+  td.num{text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap}
+  .pill{display:inline-block; border:1px solid var(--line); background:var(--panel2); color:var(--muted); border-radius:999px; padding:1px 9px; font-size:.78rem; margin-left:6px; white-space:nowrap}
+  .flow{
+    display:grid; grid-template-columns:repeat(6,1fr); gap:8px; margin:18px 0;
+    counter-reset:step;
+  }
+  .flow .step{
+    position:relative; background:var(--panel2); border:1px solid var(--line);
+    border-radius:10px; padding:12px 10px 10px; font-size:.82rem; line-height:1.35;
+  }
+  .flow .step::before{
+    counter-increment:step; content:counter(step);
+    display:inline-grid; place-items:center; width:22px; height:22px;
+    border-radius:50%; background:var(--accent); color:#06121c; font-weight:700;
+    font-size:.78rem; margin-bottom:6px;
+  }
+  @media(max-width:900px){.flow{grid-template-columns:repeat(2,1fr)}}
+  .small{font-size:.88rem; color:var(--muted)}
+  .kbd{border:1px solid #3b4d62; border-bottom-width:2px; border-radius:5px; padding:0 5px; background:#1a2430; font-size:.8em}
+  .good{color:var(--good)} .warn{color:var(--warn)}
+  hr{border:0; border-top:1px solid var(--line); margin:34px 0}
+  .foot{margin-top:50px; color:var(--muted); font-size:.88rem}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>Inside <code>chat.py</code></h1>
+    <p class="sub">Research notes for the interactive, local, <strong>lexical RAG</strong> chatbot over YouTube transcript trunks. This document traces a question through every stage of retrieval, context construction, prompting, streaming, filtering, and caching, then quantifies the Python-side memory footprint in megabytes.</p>
+    <p class="meta">
+      Source: <code>./chat.py</code> (2,973 lines) &nbsp;•&nbsp;
+      Measured: 2026-10-28 &nbsp;•&nbsp;
+      Runtime: CPython 3.14 on macOS &nbsp;•&nbsp;
+      Corpus: 5,348 trunk files, 229 titles, 3 tags
+    </p>
+  </div>
+</header>
+
+<main>
+<nav class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#overview">High-level shape</a></li>
+    <li><a href="#startup">Startup path</a></li>
+    <li><a href="#workflow">Question-to-answer workflow</a></li>
+    <li><a href="#retrieval">BM25 retrieval and selection</a></li>
+    <li><a href="#filter">Small-LLM filter and cross-tag fallback</a></li>
+    <li><a href="#context">Context, prompt, streaming</a></li>
+    <li><a href="#state">Data structures and caches</a></li>
+    <li><a href="#memory">Memory usage (measured, MB)</a></li>
+    <li><a href="#timing">Timing and TTFT accounting</a></li>
+    <li><a href="#commands">Commands and state changes</a></li>
+    <li><a href="#failure">Failure behavior / safety nets</a></li>
+    <li><a href="#reference">Constants and quick reference</a></li>
+  </ol>
+</nav>
+
+<section id="overview">
+<h2>1. High-level shape</h2>
+<p><code>chat.py</code> is a local chatbot over transcript “trunks”: one short paragraph of knowledge per <code>./youtube_transcript/&lt;video_id&gt;.&lt;index&gt;.trunk</code> file. It deliberately does <strong>not</strong> use embeddings, cosine similarity, or a vector database. Retrieval is lexical BM25; a small local model expands the query and filters candidates; a larger local model synthesizes the answer.</p>
+
+<pre><code>question
+  │
+  ├─ optional: Simplified Chinese → English (retrieval only)
+  ├─ answer-cache lookup
+  ├─ query expansion with qwen3:1.7b
+  ├─ BM25 over loaded trunks (question terms ×2 + expansion)
+  ├─ fixed top-N by /depth, or adaptive selection (/depth auto)
+  ├─ optional qwen3:1.7b relevance filter
+  ├─ optional cross-tag fallback when the active scope has no match
+  ├─ numbered &lt;chunk id="N"&gt; blocks
+  ├─ prompt from research/100_trunks_prompt.txt
+  ├─ streaming answer from ornith:35b over Ollama
+  ├─ streaming filters remove [Chunk N] and “Supporting Evidence”
+  └─ answer stored in cache; sources + metrics kept for commands</code></pre>
+
+<div class="grid">
+  <div class="card">
+    <h4>Two data scopes</h4>
+    <p><strong>Tag scope</strong> — all video ids listed in <code>./tags/&lt;tag&gt;</code>. Default tag: <code>japan</code>.</p>
+    <p><strong>Transcript scope</strong> — one video selected with <code>/transcript</code>. Cross-tag fallback is disabled in this scope.</p>
+    <p class="small"><code>./tags</code> is a plain-text index: one YouTube video id per line.</p>
+  </div>
+  <div class="card">
+    <h4>Three local models</h4>
+    <table>
+      <tr><th>Model</th><th>Role</th></tr>
+      <tr><td><code>qwen3:1.7b</code></td><td>query expansion, relevance filter, Chinese→English question translation</td></tr>
+      <tr><td><code>ornith:35b</code></td><td>final answer synthesis (streaming)</td></tr>
+      <tr><td><code>gemma3:1b</code></td><td><code>/dict</code> definitions</td></tr>
+    </table>
+    <p class="small">All model weights live in Ollama processes, outside the chatbot’s Python memory.</p>
+  </div>
+</div>
+</section>
+
+<section id="startup">
+<h2>2. Startup path</h2>
+<ol>
+  <li><strong><code>parse_args()</code></strong> <span class="pill">chat.py:2626</span> accepts:
+    <ul>
+      <li><code>--tag &lt;tag&gt;</code> (default <code>japan</code>); bare <code>--tag</code> opens an interactive, tab-completed picker.</li>
+      <li><code>--max-context-tokens N</code> (default 4,096) for adaptive retrieval.</li>
+      <li><code>--progressive</code> for optional two-pass streaming (off by default).</li>
+    </ul>
+  </li>
+  <li><strong><code>prewarm()</code></strong> <span class="pill">chat.py:2606</span> runs in a daemon thread and sends a one-token request to <code>qwen3:1.7b</code> and <code>ornith:35b</code> with <code>keep_alive="30m"</code>. This moves model loading off the input critical path. Failures are ignored.</li>
+  <li><strong><code>load_chunks(tag)</code></strong> <span class="pill">chat.py:532</span>:
+    <ul>
+      <li>reads <code>./tags/&lt;tag&gt;</code> into a set of video ids;</li>
+      <li>globs <code>./youtube_transcript/*.trunk</code> and keeps files whose video id is in that set;</li>
+      <li>creates lightweight <code>Chunk(video_id, index, trunk_path)</code> objects, sorted by <code>(video_id, index)</code>;</li>
+      <li>reads <em>no</em> trunk text and builds <em>no</em> BM25 index yet.</li>
+    </ul>
+  </li>
+  <li><strong>Text is loaded lazily</strong> through two LRU caches:
+    <div class="grid" style="margin-top:10px">
+      <div class="card"><code>paragraph_text(chunk)</code> — extracts the <code>&lt;paragraph&gt;…&lt;/paragraph&gt;</code> body; <code>@lru_cache(maxsize=8192)</code>.</div>
+      <div class="card"><code>video_title(video_id)</code> — reads <code>&lt;video_id&gt;.title</code>; <code>@lru_cache(maxsize=4096)</code>.</div>
+    </div>
+  </li>
+  <li><strong><code>PlainFileHistory</code></strong> loads <code>./.chat/question_history.txt</code>, one entry per line. Questions and slash commands are both saved, so <span class="kbd">↑</span>/<span class="kbd">↓</span> walks the whole session. <code>prompt_toolkit</code> supplies vi bindings, tab completion, and the toolbar.</li>
+  <li>The banner prints the loaded-chunk count, tag, default depth, prompt file, and command list. <code>index_memory_report(chunks, build_index=False)</code> reports trunk/video counts and peak RSS; the BM25 index is still lazy.</li>
+</ol>
+
+<div class="callout">
+  <p><strong>Why lazy indexing matters:</strong> startup only pays for directory scanning and tiny <code>Chunk</code> objects. The expensive tokenized corpus and <code>BM25Okapi</code> structures are created on the first question. <code>/memory</code> before the first question therefore reports “index: built lazily on the first question.”</p>
+</div>
+</section>
+
+<section id="workflow">
+<h2>3. Question-to-answer workflow in detail</h2>
+<div class="flow">
+  <div class="step">Input &amp; command dispatch</div>
+  <div class="step">Chinese detection &amp; question translation</div>
+  <div class="step">Answer-cache lookup</div>
+  <div class="step">Query expansion</div>
+  <div class="step">BM25 + selection</div>
+  <div class="step">Candidate filter</div>
+  <div class="step">Cross-tag fallback</div>
+  <div class="step">Context blocks</div>
+  <div class="step">Prompt build</div>
+  <div class="step">Streaming answer</div>
+  <div class="step">Output filters</div>
+  <div class="step">Cache + metrics</div>
+</div>
+
+<h3>3.1 Input and command dispatch</h3>
+<p><code>session.prompt("You: ")</code> returns a line, stripped of surrounding whitespace. Empty lines are ignored. A line beginning with <code>/</code> is parsed as <code>&lt;name&gt; &lt;argument&gt;</code> and dispatched to the command handler. Otherwise it is a question and goes to <code>answer()</code> <span class="pill">chat.py:2279</span>.</p>
+<p>Exit aliases are <code>/exit</code>, <code>/quit</code>, <code>/q</code>, and the bare words <code>exit</code>/<code>quit</code>.</p>
+
+<h3>3.2 Simplified Chinese detection</h3>
+<p><code>contains_simplified_chinese()</code> <span class="pill">chat.py:1251</span> is deliberately lightweight:</p>
+<ul>
+  <li>returns <code>False</code> if the text contains kana (Japanese) or no Han characters;</li>
+  <li>counts characters that occur only in Simplified vs. only in Traditional Chinese;</li>
+  <li>treats shared Han-only text such as <code>你好</code> as Simplified.</li>
+</ul>
+<p>For a Simplified Chinese question:</p>
+<ul>
+  <li>the question is translated to English with <code>qwen3:1.7b</code> <strong>for retrieval only</strong>; the prompt tells the model to use standard romanized Japanese place names (e.g. 二条市场 → Nijo Market);</li>
+  <li><code>answer_language = "Simplified Chinese"</code>, which inserts <code>Answer in Simplified Chinese. Do not translate proper nouns.</code> into the final prompt;</li>
+  <li><code>ornith:35b</code> answers directly in Simplified Chinese. The default path does <strong>not</strong> translate the answer afterward (<code>translate_answer=False</code>). A streaming Chinese translation path still exists in <code>stream_answer()</code> for callers that request it.</li>
+</ul>
+
+<h3>3.3 Answer-cache lookup</h3>
+<p><code>make_cache_key()</code> <span class="pill">chat.py:2210</span> includes:</p>
+<pre><code>(tag, transcript, depth, max_context_tokens,
+ answer_language, progressive, normalize_question(question))</code></pre>
+<p><code>AnswerCache</code> <span class="pill">chat.py:411</span> is a 32-entry LRU of complete answers, each with its source list and estimated context size. On a hit, the cached answer is reprinted, sources are restored, and benchmark stats are filled with zeroes plus <code>cached=True</code>. No retrieval, expansion, filter, or model call occurs.</p>
+<p>The cache is cleared by <code>/tag</code>, <code>/refresh</code>, <code>/transcript</code>, <code>/learn</code>, and every <code>/depth</code> change.</p>
+
+<h3>3.4 Query expansion</h3>
+<p><code>expand_query()</code> <span class="pill">chat.py:1346</span> sends the (possibly translated) question to <code>qwen3:1.7b</code>:</p>
+<ul>
+  <li>asks for 4–8 synonyms / related terms on one line;</li>
+  <li><code>temperature=0.1</code>, <code>num_predict=32</code>, stop sequences at newline / role labels;</li>
+  <li>strips <code>&lt;think&gt;</code> blocks, removes punctuation, collapses whitespace, caps at 500 characters.</li>
+</ul>
+<p>Failure is non-fatal: a warning is printed and retrieval proceeds with the original question only.</p>
+
+<h3>3.5 BM25 index construction</h3>
+<p><code>get_bm25_index()</code> <span class="pill">chat.py:511</span> builds lazily and caches in <code>_BM25_CACHE</code> (at most two entries, keyed by <code>id(chunks)</code> with an identity check). The two slots let the active-tag index and the cross-tag fallback index coexist.</p>
+<p>For each chunk, <code>build_bm25_index()</code> <span class="pill">chat.py:496</span> forms:</p>
+<pre><code>document = "&lt;video title&gt;\n&lt;paragraph text&gt;"
+tokenized_documents.append(tokenize(document))</code></pre>
+<p><code>tokenize()</code> is a lowercase Unicode word-boundary split with regex <code>\b\w+\b</code>. <code>rank_bm25.BM25Okapi</code> then computes document frequencies, IDF, and document lengths in memory.</p>
+
+<h3>3.6 Ranking</h3>
+<p><code>top_chunks()</code> <span class="pill">chat.py:1173</span> builds the BM25 query as:</p>
+<pre><code>query_tokens = tokenize(question) * 2 + tokenize(expansion)</code></pre>
+<p>Duplicating the original question terms makes them outweigh expansion terms. BM25 scores every chunk; non-positive scores are dropped; results are sorted descending. Selection then depends on <code>depth</code>: fixed top-N, or adaptive selection described in <a href="#retrieval">section 4</a>.</p>
+
+<h3>3.7 Context construction</h3>
+<p><code>build_context()</code> <span class="pill">chat.py:1211</span> emits numbered blocks:</p>
+<pre><code>&lt;chunk id="1"&gt;
+[Video: &lt;title&gt;]
+&lt;paragraph text&gt;
+&lt;/chunk&gt;
+&lt;chunk id="2"&gt;
+&lt;paragraph text from a different video: title NOT repeated&gt;
+&lt;/chunk&gt;
+...</code></pre>
+<p>The video title is emitted once per video, before its first chunk. Chunk ids are internal metadata; the prompt forbids mentioning them, and streaming filters remove them if the model disobeys. Unreadable paragraphs are skipped, and ids advance only for emitted chunks.</p>
+<p><code>estimate_tokens()</code> <span class="pill">chat.py:1239</span> is a cheap approximation: <code>ceil(ASCII_chars / 4) + non_ASCII_chars</code>. It powers the context-size line and the adaptive budget, not billing.</p>
+<p>After selection the chatbot prints:</p>
+<pre><code>[using N of M BM25 trunk(s) (depth D, default/explicit)]
+[context size: ~T token(s) estimated across N trunk(s);
+ context window: 32,768 token(s)]</code></pre>
+<p>In adaptive mode the first line becomes <code>[auto retrieval: …]</code>.</p>
+
+<h3>3.8 Prompt construction</h3>
+<p><code>build_prompt()</code> <span class="pill">chat.py:2230</span> loads <code>research/100_trunks_prompt.txt</code> (or a built-in equivalent). It:</p>
+<ul>
+  <li>replaces the template’s <code>&lt;context&gt;…&lt;/context&gt;</code> block with the numbered chunk blocks;</li>
+  <li>replaces <code>[Insert your question here]</code> with the question;</li>
+  <li>changes “the 100 chunks” to the actual chunk count when present;</li>
+  <li>injects the language instruction immediately before <code>### TARGET QUESTION:</code> when needed;</li>
+  <li>prepends <code>prompt_prefix</code> if supplied.</li>
+</ul>
+<p>The template enforces grounding in the provided chunks, no chunk citations, conflict disclosure, deduplication for counts, and an exact missing-data sentence. It asks for a direct synthesis with no separate evidence section.</p>
+
+<h3>3.9 Answer generation and streaming</h3>
+<p><code>stream_answer()</code> <span class="pill">chat.py:1609</span> POSTs to Ollama’s <code>/api/generate</code> with:</p>
+<table>
+  <tr><th>Parameter</th><th>Value</th></tr>
+  <tr><td>model</td><td><code>ornith:35b</code></td></tr>
+  <tr><td>stream</td><td><code>true</code></td></tr>
+  <tr><td>think</td><td><code>false</code></td></tr>
+  <tr><td>keep_alive</td><td><code>30m</code></td></tr>
+  <tr><td>temperature</td><td><code>0.2</code></td></tr>
+  <tr><td>num_ctx</td><td><code>32,768</code></td></tr>
+</table>
+<p>Each NDJSON line is parsed and its <code>response</code> token passes through two stateful streaming filters:</p>
+<div class="grid">
+  <div class="card">
+    <h4><code>ChunkCitationFilter</code></h4>
+    <p>Removes <code>[Chunk 11]</code>, <code>[Chunks 11, 14]</code>, <code>[chunk #3]</code>, including partial citations split across tokens. It holds ambiguous <code>[</code> prefixes until they can be resolved, and trims whitespace that would otherwise be duplicated.</p>
+  </div>
+  <div class="card">
+    <h4><code>SupportingEvidenceFilter</code></h4>
+    <p>Suppresses a trailing “Supporting Evidence” section, including Markdown headings, bold markers, bullets, and blockquotes, even when the heading is split across tokens. The same section is stripped again from the final string.</p>
+  </div>
+</div>
+<p>The full English answer is accumulated and returned. If translation is requested, sentence/line groups are translated on the fly by <code>qwen3:1.7b</code> and printed in Simplified Chinese; list markers are restored if the small model drops them. The default chatbot path does not enable this because it asks <code>ornith:35b</code> to answer in Chinese directly.</p>
+<p>Ollama’s final event supplies <code>load_duration</code>, <code>prompt_eval_count</code>, <code>prompt_eval_cached_count</code>, <code>prompt_eval_duration</code>, <code>eval_count</code>, and <code>eval_duration</code>. The first displayed token time is recorded as request TTFT. End-to-end TTFT is retrieval time + request TTFT.</p>
+
+<h3>3.10 Optional progressive mode</h3>
+<p>With <code>--progressive</code>, if more than 10 chunks were selected, the first 10 are streamed in one call. A second call receives the remaining chunks and the answer so far, with instructions to add only missing details without repetition. The two responses are concatenated. This trades a little coherence for a faster first token and is off by default. The progressive flag is part of the answer-cache key.</p>
+
+<h3>3.11 Post-processing, caching, metrics</h3>
+<p>The returned answer passes once more through <code>strip_chunk_citations()</code> and <code>strip_supporting_evidence()</code>. It is stored with its selected <code>(chunk, BM25 score)</code> sources and estimated context tokens. The latest answer, sources, and benchmark stats are retained for <code>/dict</code>, <code>/sources</code>, and <code>/benchmark</code>.</p>
+<p>No metrics line is printed by default. With <code>/benchmark</code> (or <code>/benchmark on</code>), <code>format_benchmark_line()</code> prints retrieval, expansion, BM25, filter, context build, prompt build, prefill, model load, TTFT, prompt tokens (and cached tokens), estimated context tokens, and total time.</p>
+</section>
+
+<section id="retrieval">
+<h2>4. BM25 retrieval and chunk selection</h2>
+<h3>4.1 Fixed depth (default)</h3>
+<p><code>DEFAULT_DEPTH = 20</code>. <code>/depth &lt;n&gt;</code> changes the number of top-scoring chunks. Only chunks with a positive BM25 score are eligible. There is no score threshold beyond <code>&gt; 0</code> in fixed mode.</p>
+
+<h3>4.2 Adaptive depth (<code>/depth auto</code>)</h3>
+<p><code>_select_auto_chunks()</code> <span class="pill">chat.py:1097</span> applies deterministic rules. It makes no extra model call:</p>
+<ol>
+  <li><strong>Candidate cap.</strong> Consider at most <code>AUTO_CANDIDATE_LIMIT = 50</code> ranked chunks.</li>
+  <li><strong>Minimum context.</strong> Always keep at least <code>min(FALLBACK_TOP_N = 10, available)</code> chunks.</li>
+  <li><strong>Score elbow.</strong> After the minimum, stop when a score is below 15% of the best score (<code>SCORE_FLOOR_RATIO</code>) or drops more than 35% from the previous score (<code>SCORE_ELBOW_RATIO</code>).</li>
+  <li><strong>Per-video diversity.</strong> At most <code>MAX_CHUNKS_PER_VIDEO = 5</code> chunks from one video.</li>
+  <li><strong>Near-duplicate removal.</strong> Drop a chunk if the Jaccard overlap of its token set with an already-selected chunk is ≥ 0.90 (<code>NEAR_DUPLICATE_JACCARD</code>).</li>
+  <li><strong>Token budget.</strong> Stop at <code>MAX_CONTEXT_TOKENS = 4,096</code> estimated tokens by default; list/aggregation questions get <code>LIST_CONTEXT_TOKENS = 6,144</code>. A chunk costs <code>estimate_tokens(paragraph) + 16</code>.</li>
+  <li><strong>Never empty.</strong> If every rule filtered everything out, keep the single best chunk.</li>
+</ol>
+<div class="callout good">
+  <p><strong>List/aggregation detection</strong> uses <code>LIST_QUERY_PATTERN</code>: <em>list, all, every, each, compare, comparison, detail(s), detailed, enumerate, options, type(s), kind(s), level(s), example(s), recommendation(s)</em>. Such questions skip the relevance filter (to preserve breadth) and receive the larger adaptive budget.</p>
+</div>
+</section>
+
+<section id="filter">
+<h2>5. Small-LLM relevance filter and cross-tag fallback</h2>
+<h3>5.1 When the filter runs</h3>
+<p><code>filter_candidates()</code> <span class="pill">chat.py:1360</span> runs only when all of these hold:</p>
+<ul>
+  <li><code>LLM_FILTER_ENABLED</code> is true (it is);</li>
+  <li>the question is <strong>not</strong> a list/aggregation question;</li>
+  <li><code>5 ≤ candidate count ≤ 20</code> (<code>FILTER_MIN_CANDIDATES</code> / <code>FILTER_MAX_CANDIDATES</code>).</li>
+</ul>
+<p>Fewer than 5 candidates are returned unchanged. More than 20 are not filtered because the prompt would become too large and the filter’s precision benefit drops.</p>
+
+<h3>5.2 Filter prompt and parsing</h3>
+<p>The filter prompt lists each candidate number plus a snippet capped at 700 characters (<code>FILTER_SNIPPET_CHARS</code>). <code>qwen3:1.7b</code> must return a comma-separated list of useful candidate numbers, or exactly <code>NONE</code>. The call uses <code>temperature=0</code>, <code>num_predict=96</code>, and stops at a blank line.</p>
+<ul>
+  <li><strong>Parsed list</strong> → keep only those candidates.</li>
+  <li><strong><code>NONE</code></strong> → candidate set treated as empty; cross-tag fallback may run.</li>
+  <li><strong>Unparseable / request failure</strong> → filter reported as skipped; unfiltered BM25 candidates are kept.</li>
+</ul>
+
+<h3>5.3 Cross-tag fallback</h3>
+<p>If the active tag yields no selected chunk, or the filter returns <code>NONE</code>, and the scope is a tag (not an explicit transcript), <code>answer()</code> calls <code>load_all_tagged_chunks()</code> <span class="pill">chat.py:607</span>. That function:</p>
+<ul>
+  <li>unions the video ids from every <code>./tags/*</code> file;</li>
+  <li>loads the corresponding trunks with the normal loader, suppressing its progress output;</li>
+  <li>caches the union and invalidates it when any tag file’s mtime changes or after <code>/learn</code>;</li>
+  <li>re-runs the same expansion + BM25 + filter pipeline over the larger corpus.</li>
+</ul>
+<p>If fallback finds chunks, the chatbot prints a note such as:</p>
+<pre><code>[out-of-scope question: tag 'japan' had no BM25 match; using all tagged
+ knowledge in tag 'ai_and_coding']</code></pre>
+<p>This prevents a false “insufficient information” answer for an out-of-scope question. The fallback index costs memory only when needed and then stays in the two-entry BM25 cache.</p>
+<div class="callout warn">
+  <p><strong>Filter safety net:</strong> if the filter returns nothing but BM25 did return candidates, <code>answer()</code> keeps the best <code>FILTER_MIN_KEEP = 3</code> unfiltered candidates rather than refusing to answer.</p>
+</div>
+</section>
+
+<section id="context">
+<h2>6. Context, prompt, and streaming at a glance</h2>
+<table>
+  <tr><th>Stage</th><th>Input</th><th>Output</th><th>Key function</th></tr>
+  <tr><td>Query expansion</td><td>question</td><td>≤ 32-token synonym line</td><td><code>expand_query()</code></td></tr>
+  <tr><td>BM25 rank</td><td>question + expansion</td><td>(chunk, score) list, best first</td><td><code>top_chunks()</code></td></tr>
+  <tr><td>Select</td><td>ranked list, depth/budget</td><td>selected (chunk, score) list</td><td><code>_select_auto_chunks()</code></td></tr>
+  <tr><td>Filter</td><td>≤ 20 candidates + question</td><td>kept candidate numbers</td><td><code>filter_candidates()</code></td></tr>
+  <tr><td>Fallback</td><td>active tag, question</td><td>chunks from all tags (optional)</td><td><code>load_all_tagged_chunks()</code></td></tr>
+  <tr><td>Context</td><td>selected chunks</td><td>numbered <code>&lt;chunk&gt;</code> blocks</td><td><code>build_context()</code></td></tr>
+  <tr><td>Prompt</td><td>context + question + language</td><td>full prompt string</td><td><code>build_prompt()</code></td></tr>
+  <tr><td>Answer</td><td>prompt</td><td>streamed, filtered answer</td><td><code>stream_answer()</code></td></tr>
+  <tr><td>Finalize</td><td>answer + sources</td><td>cached entry, stats</td><td><code>answer()</code></td></tr>
+</table>
+</section>
+
+<section id="state">
+<h2>7. Data structures and caches</h2>
+<table>
+  <tr><th>Structure</th><th>Contents</th><th>Bound</th></tr>
+  <tr><td><code>Chunk</code></td><td><code>video_id</code>, <code>index</code>, <code>trunk_path</code>; no text held in the object</td><td>one per loaded trunk</td></tr>
+  <tr><td><code>BM25Index</code></td><td><code>chunks</code>, <code>tokenized_documents</code>, <code>BM25Okapi</code></td><td>one per indexed scope</td></tr>
+  <tr><td><code>_BM25_CACHE</code></td><td>active-scope index + cross-tag fallback index</td><td>2 entries, LRU</td></tr>
+  <tr><td><code>_read_paragraph_cached</code></td><td>paragraph body per trunk path</td><td>8,192-entry LRU</td></tr>
+  <tr><td><code>_read_title_cached</code></td><td>title per video</td><td>4,096-entry LRU</td></tr>
+  <tr><td><code>AnswerCache</code></td><td>answer text, sources, context token count</td><td>32-entry LRU</td></tr>
+  <tr><td><code>_ALL_TAGGED_CHUNKS</code></td><td>lazy union of all tagged videos</td><td>1 list, signature-invalidated</td></tr>
+  <tr><td><code>PlainFileHistory</code></td><td>questions + commands on disk</td><td>no in-memory index</td></tr>
+</table>
+<p>Switching tags calls <code>chunks.clear()</code>, replaces the list, clears the BM25 cache, and runs <code>gc.collect()</code>. The paragraph/title LRU caches are <strong>not</strong> cleared, so switching tags does not immediately return all text memory to the OS; entries are reused when paths overlap and evicted only by LRU pressure.</p>
+</section>
+
+<section id="memory">
+<h2>8. Memory usage (measured, in MB)</h2>
+<div class="callout">
+  <p><strong>Scope of these numbers.</strong> Process RSS measured on macOS with CPython 3.14, using <code>ps -o rss</code> for current RSS and <code>resource.getrusage(RUSAGE_SELF).ru_maxrss</code> for peak RSS. Deep sizes use recursive <code>sys.getsizeof()</code>. These figures cover the <strong>chatbot Python process only</strong>. Ollama runs in separate processes and holds all model weights outside this footprint.</p>
+</div>
+
+<h3>8.1 Corpus in this checkout</h3>
+<table>
+  <tr><th>Item</th><th class="num">Count / size</th></tr>
+  <tr><td><code>./youtube_transcript/*.trunk</code> files</td><td class="num">5,348</td></tr>
+  <tr><td>Union of all tagged videos</td><td class="num">4,959 trunks / 211 videos</td></tr>
+  <tr><td>Tag <code>japan</code></td><td class="num">2,916 trunks / 124 videos</td></tr>
+  <tr><td>Tag <code>ai_and_coding</code></td><td class="num">1,719 trunks / 76 videos</td></tr>
+  <tr><td>Tag <code>artificial_intelligence</code></td><td class="num">1,932 trunks / 81 videos</td></tr>
+  <tr><td>Total tagged trunk text</td><td class="num">~1.24 MiB chars (1,299,063 chars)</td></tr>
+  <tr><td>Tag <code>japan</code> trunk text</td><td class="num">~0.69 MiB chars (723,143 chars)</td></tr>
+  <tr><td>Average trunk paragraph</td><td class="num">~262 chars, ~66 estimated tokens</td></tr>
+  <tr><td>Tag <code>japan</code> BM25 tokenized terms</td><td class="num">170,702</td></tr>
+  <tr><td>All-tagged BM25 tokenized terms</td><td class="num">298,330</td></tr>
+</table>
+
+<h3>8.2 Measured process RSS</h3>
+<table>
+  <tr><th>State</th><th class="num">Current RSS</th><th class="num">Peak RSS</th><th class="num">Delta</th></tr>
+  <tr><td>Python + imports, before loading trunks</td><td class="num">52.5 MB</td><td class="num">52.5 MB</td><td class="num">—</td></tr>
+  <tr><td>After loading 2,916 <code>japan</code> chunks (no index)</td><td class="num">59.3 MB</td><td class="num">59.3 MB</td><td class="num">+6.8 MB</td></tr>
+  <tr><td>After building the <code>japan</code> BM25 index</td><td class="num">73.5 MB</td><td class="num">73.5 MB</td><td class="num">+14.2 MB</td></tr>
+  <tr><td>After loading all tagged chunks (4,959)</td><td class="num">92.9 MB</td><td class="num">93.1 MB</td><td class="num">+19.4 MB</td></tr>
+  <tr><td>After indexing all tagged chunks (both indexes resident)</td><td class="num">118.5 MB</td><td class="num">118.5 MB</td><td class="num">+25.6 MB</td></tr>
+</table>
+<p>In practical terms: <strong>tag <code>japan</code> with its BM25 index is about 74 MB RSS</strong> in a clean run; <strong>all tagged knowledge with both indexes resident is about 119 MB peak</strong>. Expect roughly <strong>75–100 MB</strong> for the default tag and <strong>110–130 MB</strong> for the all-tagged fallback, depending on allocator behavior, whether the paragraph/title caches are warm, and how RSS is sampled.</p>
+
+<h3>8.3 Where the <code>japan</code> index memory goes</h3>
+<table>
+  <tr><th>Component</th><th class="num">Deep size</th></tr>
+  <tr><td><code>tokenized_documents</code> (term strings + per-document lists)</td><td class="num">8.9 MB</td></tr>
+  <tr><td><code>BM25Okapi.doc_freqs</code> (per-document term counters)</td><td class="num">10.3 MB</td></tr>
+  <tr><td><code>BM25Okapi.idf</code> dictionary</td><td class="num">0.9 MB</td></tr>
+  <tr><td><code>BM25Okapi.doc_len</code></td><td class="num">~0.03 MB</td></tr>
+  <tr><td><code>Chunk</code> objects and paths</td><td class="num">0.16 MB</td></tr>
+  <tr><td>Cached paragraph text (~723k chars)</td><td class="num">~1.5–2 MB</td></tr>
+  <tr><td>Other interpreter / list / allocator overhead</td><td class="num">remainder of the RSS delta</td></tr>
+</table>
+<p>All-tagged deep sizes grow proportionally: <code>tokenized_documents</code> is about <strong>15.6 MB</strong> and <code>doc_freqs</code> about <strong>18.0 MB</strong>. Because the fallback index is cached beside the active-tag index, answering one out-of-scope question can add roughly <strong>25–45 MB</strong> that remains resident until cache eviction.</p>
+
+<h3>8.4 Rules of thumb</h3>
+<table>
+  <tr><th>Item</th><th class="num">Approximate cost</th></tr>
+  <tr><td>Per loaded chunk, fully indexed</td><td class="num">~7–8 KiB</td></tr>
+  <tr><td>Per 1,000 chunks, fully indexed</td><td class="num">~7–8 MB</td></tr>
+  <tr><td>Default tag <code>japan</code> (2,916 chunks)</td><td class="num">~75–100 MB total process</td></tr>
+  <tr><td>All 4,959 tagged chunks</td><td class="num">~110–130 MB total process</td></tr>
+  <tr><td>Answer cache (32 answers + sources)</td><td class="num">usually &lt; 1–3 MB</td></tr>
+  <tr><td>Cross-tag fallback index, once used</td><td class="num">roughly +25–40 MB</td></tr>
+</table>
+
+<h3>8.5 Why memory stays moderate</h3>
+<ul>
+  <li>No embeddings and no cosine-similarity matrix: memory scales with <em>total tokens</em>, not with an embedding dimension.</li>
+  <li>Trunk text is read lazily; the <code>Chunk</code> object stores only a path.</li>
+  <li>One BM25 index per active scope, with at most two cached indexes.</li>
+  <li>Cross-tag data is lazy and invalidated by tag-file mtime.</li>
+  <li>The answer cache is bounded to 32 entries.</li>
+  <li>The paragraph and title LRUs are bounded at 8,192 and 4,096 entries.</li>
+  <li>Model weights live in Ollama, not in the chatbot process.</li>
+</ul>
+<p class="small"><strong>/memory</strong> calls <code>index_memory_report(chunks)</code>, which reports trunk/video counts, BM25 tokenized-term count, and process peak RSS. It does not report Ollama’s RSS or model-weight memory.</p>
+</section>
+
+<section id="timing">
+<h2>9. Timing and TTFT accounting</h2>
+<p><code>answer()</code> times the retrieval phase separately from the model request. <code>stream_answer()</code> records the first non-empty filtered token and reads Ollama’s prefill/load counters from the final NDJSON event.</p>
+<table>
+  <tr><th>Field</th><th>Meaning</th></tr>
+  <tr><td><code>retrieval</code></td><td>question translation + expansion + BM25 + filter + context build (up to <code>retrieval_done</code>)</td></tr>
+  <tr><td><code>expansion</code></td><td>qwen3:1.7b query-expansion call</td></tr>
+  <tr><td><code>bm25</code></td><td>BM25 scoring (and lazy index build on the first question)</td></tr>
+  <tr><td><code>filter</code></td><td>small-LLM candidate filter, if applied</td></tr>
+  <tr><td><code>context_build</code></td><td><code>build_context()</code></td></tr>
+  <tr><td><code>prompt_build</code></td><td><code>build_prompt()</code> (plus first-pass build in progressive mode)</td></tr>
+  <tr><td><code>prefill</code></td><td>Ollama <code>prompt_eval_duration</code></td></tr>
+  <tr><td><code>load</code></td><td>Ollama <code>load_duration</code></td></tr>
+  <tr><td><code>request_ttft</code></td><td>first displayed token − request start</td></tr>
+  <tr><td><code>end_to_end_ttft</code></td><td><code>retrieval + request_ttft</code></td></tr>
+  <tr><td><code>prompt_tokens</code></td><td>Ollama <code>prompt_eval_count</code>; cached count shown separately</td></tr>
+  <tr><td><code>context_tokens</code></td><td>chat.py’s own <code>estimate_tokens()</code> over the assembled context</td></tr>
+  <tr><td><code>total</code></td><td>end-to-end <code>answer()</code> wall time</td></tr>
+</table>
+<p>The benchmark line is hidden unless requested. A cache hit prints a short <code>[cache hit | context ~T token(s) estimated | no retrieval or prefill]</code> line instead.</p>
+</section>
+
+<section id="commands">
+<h2>10. Commands and state changes</h2>
+<table>
+  <tr><th>Command</th><th>Effect</th><th>Reloads trunks?</th><th>Clears answer cache?</th></tr>
+  <tr><td><code>/memory</code></td><td>Trunk/video counts, tokenized terms, peak RSS. Builds the index if needed.</td><td>No</td><td>No</td></tr>
+  <tr><td><code>/tag [tag]</code></td><td>Switch tag; release old chunk list, load new trunks.</td><td>Yes</td><td>Yes</td></tr>
+  <tr><td><code>/refresh</code></td><td>Reload the current tag’s trunks.</td><td>Yes</td><td>Yes</td></tr>
+  <tr><td><code>/transcript &lt;hash|url&gt;</code></td><td>Switch to one video; disable cross-tag fallback.</td><td>Yes (one video)</td><td>Yes</td></tr>
+  <tr><td><code>/transcript &lt;keyword&gt;</code></td><td>Search <code>*.title</code> with <code>ag</code>, then choose from a hint list.</td><td>Yes (one video)</td><td>Yes</td></tr>
+  <tr><td><code>/search_transcript …</code></td><td>Alias for the keyword form.</td><td>Yes (one video)</td><td>Yes</td></tr>
+  <tr><td><code>/learn &lt;hash|url&gt;</code></td><td>Fetch → rewrite → chunk → embed → tag. Reloads only if the video belongs to the current scope.</td><td>Conditionally</td><td>Yes</td></tr>
+  <tr><td><code>/wiki &lt;word&gt;</code></td><td>Wikipedia REST summary.</td><td>No</td><td>No</td></tr>
+  <tr><td><code>/dict &lt;word&gt;</code></td><td>Local-model dictionary entry; also explains the word’s use in the latest answer when present.</td><td>No</td><td>No</td></tr>
+  <tr><td><code>/depth &lt;n|auto|default&gt;</code></td><td>Fixed top-N BM25 or adaptive selection.</td><td>No</td><td>Yes</td></tr>
+  <tr><td><code>/status</code></td><td>Tag, scope, loaded counts, retrieval mode, cache, history.</td><td>No</td><td>No</td></tr>
+  <tr><td><code>/sources</code></td><td>Latest answer’s chunks and BM25 scores.</td><td>No</td><td>No</td></tr>
+  <tr><td><code>/benchmark [on|off]</code></td><td>Show one metrics line, or toggle per-answer metrics.</td><td>No</td><td>No</td></tr>
+  <tr><td><code>/exit</code>, <code>/quit</code>, <code>/q</code></td><td>Leave the chatbot.</td><td>—</td><td>—</td></tr>
+</table>
+<p>Tab completion covers commands, tag names, video ids, and <code>/transcript</code> title matches. Commands that take an argument receive an automatic trailing space. <code>/dict</code> uses <code>gemma3:1b</code>, not an external dictionary API.</p>
+</section>
+
+<section id="failure">
+<h2>11. Failure behavior and safety nets</h2>
+<ul>
+  <li><strong>Ollama unreachable:</strong> generation raises <code>RuntimeError</code>; <code>main()</code> prints <code>Error: …</code> and keeps the session alive.</li>
+  <li><strong>Query expansion failure:</strong> warning; retrieval uses the original question only.</li>
+  <li><strong>Filter failure / unparseable output:</strong> keep unfiltered BM25 candidates.</li>
+  <li><strong>Filter returns <code>NONE</code>:</strong> try cross-tag fallback unless in transcript scope; if still empty, keep the top 3 BM25 candidates rather than refuse.</li>
+  <li><strong>No trunks in scope:</strong> <code>load_chunks()</code> exits with a hint to run <code>learn.py</code>.</li>
+  <li><strong>Trunk read failure during context build:</strong> that chunk is skipped; if no text remains, <code>answer()</code> reports that it could not read matching contents.</li>
+  <li><strong>Model leaks chunk citations or a Supporting Evidence section:</strong> streaming filters and a final post-pass remove them.</li>
+  <li><strong>Stale cached answer:</strong> the cache key includes tag, transcript, depth, token budget, language, progressive flag, and normalized question, so configuration or scope changes cannot reuse an old answer.</li>
+</ul>
+</section>
+
+<section id="reference">
+<h2>12. Constants and quick reference</h2>
+<div class="grid">
+  <div class="card">
+    <h4>Retrieval</h4>
+    <table>
+      <tr><td><code>DEFAULT_DEPTH</code></td><td class="num">20</td></tr>
+      <tr><td><code>MAX_CONTEXT_TOKENS</code></td><td class="num">4,096</td></tr>
+      <tr><td><code>LIST_CONTEXT_TOKENS</code></td><td class="num">6,144</td></tr>
+      <tr><td><code>AUTO_CANDIDATE_LIMIT</code></td><td class="num">50</td></tr>
+      <tr><td><code>FALLBACK_TOP_N</code></td><td class="num">10</td></tr>
+      <tr><td><code>SCORE_FLOOR_RATIO</code></td><td class="num">0.15</td></tr>
+      <tr><td><code>SCORE_ELBOW_RATIO</code></td><td class="num">0.35</td></tr>
+      <tr><td><code>MAX_CHUNKS_PER_VIDEO</code></td><td class="num">5</td></tr>
+      <tr><td><code>NEAR_DUPLICATE_JACCARD</code></td><td class="num">0.90</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h4>Models and context</h4>
+    <table>
+      <tr><td><code>EXPANSION_MODEL</code></td><td><code>qwen3:1.7b</code></td></tr>
+      <tr><td><code>FILTER_MODEL</code></td><td><code>qwen3:1.7b</code></td></tr>
+      <tr><td><code>CHAT_MODEL</code></td><td><code>ornith:35b</code></td></tr>
+      <tr><td><code>DICT_MODEL</code></td><td><code>gemma3:1b</code></td></tr>
+      <tr><td><code>ANSWER_NUM_CTX</code></td><td class="num">32,768</td></tr>
+      <tr><td><code>OLLAMA_KEEP_ALIVE</code></td><td><code>30m</code></td></tr>
+      <tr><td><code>EXPANSION_NUM_PREDICT</code></td><td class="num">32</td></tr>
+      <tr><td><code>FILTER_NUM_PREDICT</code></td><td class="num">96</td></tr>
+      <tr><td><code>PROGRESSIVE_FIRST_PASS</code></td><td class="num">10</td></tr>
+    </table>
+  </div>
+</div>
+
+<h3>Quick usage</h3>
+<pre><code>Run:                  python3 chat.py [--tag &lt;tag&gt;]
+Pick a tag:           python3 chat.py --tag
+Adaptive retrieval:   /depth auto
+Fixed depth:          /depth 40
+Single transcript:    /transcript &lt;hash|url|keyword&gt;
+Learn a video:        /learn &lt;hash|url&gt;   (or python3 learn.py ...)
+Source list:          /sources
+Metrics:              /benchmark [on|off]
+Memory report:        /memory</code></pre>
+
+<h3>Primary code locations</h3>
+<table>
+  <tr><th>Area</th><th>Location</th></tr>
+  <tr><td>CLI and main loop</td><td><code>parse_args()</code> chat.py:2626; <code>main()</code> chat.py:2657</td></tr>
+  <tr><td>Corpus loading</td><td><code>load_chunks()</code> chat.py:532; <code>load_all_tagged_chunks()</code> chat.py:607</td></tr>
+  <tr><td>BM25</td><td><code>tokenize()</code> chat.py:476; <code>build_bm25_index()</code> chat.py:496; <code>top_chunks()</code> chat.py:1173</td></tr>
+  <tr><td>Adaptive selection</td><td><code>_select_auto_chunks()</code> chat.py:1097</td></tr>
+  <tr><td>Filter / expansion</td><td><code>filter_candidates()</code> chat.py:1360; <code>expand_query()</code> chat.py:1346</td></tr>
+  <tr><td>Context / prompt</td><td><code>build_context()</code> chat.py:1211; <code>build_prompt()</code> chat.py:2230</td></tr>
+  <tr><td>Answer pipeline</td><td><code>answer()</code> chat.py:2279; <code>stream_answer()</code> chat.py:1609</td></tr>
+  <tr><td>Output filters</td><td><code>ChunkCitationFilter</code> chat.py:1554; <code>SupportingEvidenceFilter</code> chat.py:1515</td></tr>
+  <tr><td>Memory / status reports</td><td><code>index_memory_report()</code> chat.py:681; <code>chat_status_report()</code> chat.py:719</td></tr>
+</table>
+</section>
+
+<p class="foot">Research notes generated from a direct reading of <code>./chat.py</code> and live measurements of this checkout. The companion plain-text version is <code>./documents/chat.py</code>; run it with <code>python3 documents/chat.py</code>.</p>
+</main>
+</body>
+</html>

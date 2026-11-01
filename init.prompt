@@ -1,0 +1,766 @@
+objective: perform the following tasks
+
+restrictions: 
+- DO NOT perform tasks that are marked as completed
+- after a task is completed, in ./init.prompt or in any prompt files being referenced in a persistent task, mark the task as completed
+- if a task is persistent, DO NOT mark it as completed
+
+task git_repo (persistent) {
+  complete tasks in ./prompts/git_repo.prompt  
+}
+
+task.import_japn_knowledge (completed) {
+  txt_files: run cli command: find ~/airesearch/japan_knowledge/knowledge/japan/youtube_transcript/ -type f -name "*.txt" -depth 1
+  youtube_video_hashes: for all the txt_files, extract all the youtube video ids 
+  save youtube_video_hashes into ./japan.knowledge.youtube_video_hashes
+}
+
+group wiki_search.php {
+  task (persistent) {
+    complete tasks in ./prompts/wiki_full_article_search.prompt
+  }
+}
+
+group golang_doc_search.py {
+  task (completed) {
+    enhancement: if the question is about code sample and if there are specific golang packages are mentioned, search "https://pkg.go.dev/{package_name}" as well
+  }
+
+  task (completed) {
+    create ./golang_doc_search.py <question>:
+    - source: https://go.dev/doc/
+    - use {source} as the only source of truth
+    - use ollama local model ornith:35b (no thinking mode) to understand the question, find out keywords to search in {source}
+  }
+}
+
+group search_youtube.py related to ./search_youtube.py {
+  task (completed) {
+    only return the videos that has english transcript
+  }
+
+  task (completed) {
+    in ./search_youtube.py script, please return the videos that are at most 20 minutes long
+  }
+
+  task (completed) {
+    create ./search_youtube.py <keyword>:
+    - sample code:
+    ```
+    from youtubesearchpython import VideosSearch
+
+    videosSearch = VideosSearch('quantum physics', limit=5)
+    results = videosSearch.result()
+    ```
+    - return:
+    <youtube_video_hash_1>
+    <youtube_video_hash_2>
+    <youtube_video_hash_3>
+    ...
+
+    - requirement: please return only videos that are published within 1 year
+  }
+}
+
+group chat_gradual_context.py related to ./chat_gradual_context.py {
+  task (completed) {
+    bug: 
+    - question: can i do left turn on redlight
+    the answer is yes
+    - questoin: can i do left turn on red light
+    the answer is no
+  }
+
+  task (completed) {
+    after we gathered the trunks for the answer:
+    - display a rough estimate of tokens in context
+    - display the current maximum context window size
+  }
+
+  task (completed) {
+    for the question: list me all levels of wagyu in details
+    we should need more trunks, why it only uses 3 trunks
+  }
+
+  task (completed) {
+    - create ./chat_gradual_context.py:
+    - clone all features in chat.py
+    - change the answer genertion logic to:
+    loop {
+      if total number of trunks in context exceed 100, stop
+
+      1. grep 3 new trunks of context
+      2. check if they are enough for fulfilling the requirements of the answer, please use ollama local model qwen3:1.7b, construct to prompt to check it
+      if yes: stop
+      if no:
+      continue the loop
+    }
+  }
+}
+
+group chat_lowcontext.py, related to file: ./chat_lowcontext.py only {
+  task (completed) {
+    bug: 
+    question:  i want to get 90-day long-stay visa, what are the requirements
+    the answer shows incorrect information: The 90-day long-stay visa requires approximately 30 million yen (around $200,000 USD)
+    the correct answer should be: The **visa fee** for a 90-day long-stay visa in Japan is typically **around 300,000 yen (approximately $2,000 USD)**
+  }
+
+  task (completed) {
+    bug:
+    question: what are all levels of wagyu
+    the answer gave me unrelated questions like: Sushi Yasuki is a third-floor sushi restaurant...
+    the answer should be very focus
+    please fix it in a generic and systematic way
+  }
+
+  task (completed) {
+    bug: 
+    question: i want to buy electronics in japan, give me a recommendation in 600 words
+    the answer shows unrelated information like:
+    Japanese gas station terms like "Man" for a full tank, "Genkin" for cash, and "Kurejitto Kaado" for credit card...
+  }
+
+  task (completed) {
+    bug:
+    question: what time does nijo market open
+    the answer contains more than it needs, it contains information of other markets
+    please fix it in a systematic and generic way
+  }
+
+  task (completed) {
+    currently, the chat will display messages like:
+    - [batch 1/2: 5 chunk(s), 0 item(s) tracked]
+    - +3 new item(s); 3 tracked.
+
+    DO NOT display them and instead, make an empty line so that the answer looks like an integrated article 
+  }
+
+  task (completed) {
+    bug: when i ask: where is nijo market, it keeps giving me unrelated answers like: The Toyosu Fish Market...
+    please fix it in generic and systematic way
+  }
+
+  task (completed) {
+    - create ./chat_lowcontext.py:
+    - clone all features of chat.py, but implement it with the following:
+    - study research/low_context_streaming_rag_architecture.md, use it to help guide the architectural decision
+  }
+}
+
+group: generate_tags.py {
+  task (completed) {
+    if we do --tag <tag_name>, and if the <tag_name> does not exist, just create it
+  }
+
+  task (completed) {
+    create ./generate_tags.py:
+    logic:
+    - tags: examine all files in ./tags
+    - titles: execulte command "find youtube_transcript/*.title"
+    for each {title} in {titles} {
+      youtube_video_hash: youtube_video_hash_related_to_{title}
+      for each {tag} in {tags} {
+        if {youtube_video_hash} does not exist in ./tags/{tag} {
+          use ollama local model ornith:35b to find out if {youtube_video_hash} is related to {tag}
+          if yes {
+            append youtube_video_hash_related_to_{title} to ./tags/{tag} with new line at the end 
+          }
+        }
+      }
+    }  
+  }
+
+  task (completed) {
+    add a new flag --youtube_video_hash <youtube_video_hash>
+    logic:
+    - tags: examine all files in ./tags
+    for each {tag} in {tags} {
+      if {youtube_video_hash} does not exist in ./tags/{tag} {
+        use ollama local model ornith:35b to find out if {youtube_video_hash} is related to {tag}
+        if yes {
+          append youtube_video_hash_related_to_{title} to ./tags/{tag} with new line at the end 
+        }
+      }
+    }
+  }
+}
+
+group app/chat.html and app/chat_server.py {
+
+  document_backed_tags:rust, golang, php
+
+  task (persistent) {
+    if the current tag is in one of the {document_backed_tags} {
+      complete tasks in ./prompts/programming_language_tips.prompt
+    }
+  }
+
+  tag japan {
+    task (completed) {
+      bug: 
+      in tag "japan"
+      when asking this question: write me an article about nijo market, focus on a leisure lifestyle, in 200 words
+      the answer shows Nijo Market is located in Fukuoka, that is incorrect
+      please fix it in a systematic way
+    }
+  }
+
+  task (completed) {
+    bug:
+    question:
+    code:
+    write a cli, given --list <list of integers in csv format> --target <target>
+    perform binary search of <target> in <list of integers in csv format>
+
+    the answer said:
+    The provided excerpts do not contain enough information to write a complete CLI binary search program. Here's what the excerpts cover and what's missing: ...
+
+    please fix it so that if the excerpts do not contain enough information, still use the local llm to generate the code given the limited excertps we have
+  }
+
+  task (completed) {
+    if we are in tag "rust" or "golang":
+    - any code that we want to generate should automatically refer to rust or golang based on the tag
+    for example, if i am in tag "rust" and for question: give me sample code: write cli in to output "hello, merry christmas and happy new year 2016", it should generate the code in rust
+    - in the answer, remove the final "Complementary notes from the local transcript context" section!
+  }
+
+  task (completed) {
+    if tags are "rust" or "golang" and we need to get code sample or generate code:
+    - do not let local llm generate code first, make sure it has the corresponding documentation reference first before generating the code
+  }
+
+  task (completed) {
+    in the chat, convert all urls that shows up in the answer to an url that I can click open in the browser
+  }
+
+  task (completed) {
+    when tag is rust, DO NOT ever search github for sample code!
+  }
+
+  task (completed) {
+    when the tag is golang or rust, when the answer is being generated, tell me whether the answer is coming from ollama local llm or from the language documentation
+  }
+
+  task (completed) {
+    for the textbox that input the question:
+    - when hitting enter key, go to a new line
+    - double the textbox height by default
+  }
+
+  task (completed) {
+    refer to task.rich_questionbox, for the question textbox:
+    - render it multi-line by default
+    - next the question textbox, add a button "Send", when clicked, send the question
+  }
+
+  task.rich_questionbox (completed) {
+    in the textbox that input the question:
+    - make it multiline
+    - allow me to use ``` and ``` to wrap around code snippet and format the code in nice color in the textbox
+  }
+
+  task (completed) {
+    if the tag is rust or golang, if the answer is not found, do not switch to another tag to search, instead:
+    1. turn to the rust or golang documents together with ollama local model ornith:35b see if we can get the answer
+  }
+
+  task (completed) {
+    in task.rust_doc_search:
+    - DO NOT search github for code samples
+    - try to find code samples from rust documentation
+  }
+
+  task.rust_doc_search (completed) {
+    - learn from task.golang_doc_search, when the tag is "rust", do the same behavior for rust programming language related questions
+    - learn from ./golang_doc_search.py, create ./rust_doc_search.py
+  }
+
+  task.golang_doc_search (completed) {
+    in the task.golang_doc_search_related_package_lookup, the answer from the documents should be streamed so that I can see part of the answer right away
+    please reference golang_doc_search.py as the proper behavior, if we run golang_doc_search.py "show me code sample of iterator over map keys", we can see the answer is streamed as well
+  }
+
+  task.golang_doc_search_related_package_lookup (completed) {
+    bug: 
+    in task.golang_doc_search
+    if i ask question: "show me code sample of iterator"
+    we should also look at the documentation of the related "iter" package using "https://pkg.go.dev/iter" because "iter" is mentioned in the context
+    please fix this in a generic way
+  }
+
+  task (completed) {
+    reference task.golang_doc_search:
+    enhancement: if the question is about code sample and if there are specific golang packages are mentioned, search "https://pkg.go.dev/{package_name}" as well
+  }
+
+  task.golang_doc_search (completed) {
+    when the tag is golang:
+    reference task.code_sample_question_with_github, DO NOT use github api at all, instead:
+    - use ./golang_doc_search.py to pass in the question, get the result and merge the result with the answer from the chat context
+  }
+
+  task.code_sample_question_with_github (completed) {
+    in task.code_sample_question, if the CODING_MODE shows no answer, use github's public api to search for related code snippets, return 2 code snippets and construct an answer
+  }
+
+  task.code_sample_question (completed) {
+    when the question is about showing code sample on certain programming language feature/structure/architecture, use CODING_MODE ollama local model: ornith:35b without the thinking option
+  }
+
+  task (completed) {
+    create new command: /learn_playlist <youtube_playlist_id>:
+    - youtube_video_hash_list: use get_videos_in_playlist.py to get list of video hashes
+    for each {youtube_video_hash} in {youtube_video_hash_list} {
+      use learn.py <youtube_video_hash>
+    }
+  }
+
+  task (completed) {
+    create new command: /learn_topic <topic>
+    - youtube_video_hash_list: use search_youtube.py <topic>, get the top 3 videos
+    for each {youtube_video_hash} in {youtube_video_hash_list} {
+      use learn.py <youtube_video_hash>
+    }
+  }
+
+  task (completed) {
+    in the answer, nex to each paragraph, show me a video icon, when clicking on it, it should go to the related video url in youtube
+  }
+
+  task (completed) {
+    add a button "中文" next to the beginning of the answer, when click:
+    - translate the answer to chinese using ollama local model ornith:35b to translate the answer to simplified chinese, paragraph by paragraph with streaming
+  }
+
+  task (completed) {
+    bug:
+    when we do: /tag_gen travel, it supposes to run ./generate_tags.py --tag travel, it should create the tag even through it does exist before
+  }
+
+  task (completed) {
+    add new command: /tag_gen <tag_name>, internally it should run ./generate_tags.py --tag <tag_name>
+  }
+
+  task (completed) {
+    if we can not find the answer for a question in the current tag, try to find the most possible next tag one by one, switch to that tag and find the answer
+  }
+
+  task (completed) {
+    bug:
+    when in the tag: ai_math_coding
+    when asking question:any new books from terrance tao, can find result
+    when asking question:does terrence tao have new book, it finds the result
+    please fix this bug in a general and systematic way
+  }
+
+  task (completed) {
+    after typing the /new command, please also clear the previous conversation content in the UI
+  }
+
+  task (completed) {
+    in the front end, when i click on the dictionary icon that has minimize, it disappear
+    it should show up again
+
+    also, please make the dictionary popup shows up in the center of the screen
+  }
+
+  task (completed) {
+    in the front end, when i click on a word, the dictionary popup shows up, but please allow me to minimize it and i can also show it again by clicking it in the right boom corner of the status bar
+  }
+
+  task (completed) {
+    deep conversation feature request:
+
+    when i ask chain of questions, for example:
+    question 1: did terrance tao write a new book
+    question 2: what does he think about ai
+    in question 2, i expect the chat knows "he" refers to terrance tao
+  }
+
+  task (completed) {
+    please allow me to use mouse to select/copy/paste words anywhere in the output in the chat (except the words for dictionary)
+  }
+
+  task (completed) {
+    in the html frontend, add shortcut command + k to clear the screen
+  }
+
+  task (completed) {
+    move ./chat_server.py to ./app/
+  }
+
+  task (completed) {
+    - create app/chat.html:
+    - this is a single page application with pure html/css/javascript
+
+    - create chat_server.py:
+    - this is a python api server that chat.html will interact with
+
+    - clone all functionalities in chat.py using chat.html as the front end and chat_server.py as the api backend
+
+    - chat.html should present a vim like console using javascript
+    - in chat.html, when user clicks on individual words on the answer, a dedicated popup should show up, streaming the output like /dict
+  }
+}
+
+group chat.py {
+  task (completed) {
+    update ./documents/chat.py.html, do an extensive research of ./chat.py
+    explain to me:
+    - the detail workflow from question to matching context to answer
+    - how much memory are used typically, in unit of megabytes
+  }
+
+  task (completed) {
+    - stop using embedding and consine similarity altogether
+    - use similar architectural decision at ./research/no_embedding_bm25_small_llm_filter.pipeline.txt 
+  }
+
+  task (completed) {
+    for all embeddings in memory, DO NOT store as Python float objects, pack them as float32 instead
+  }
+
+  task (completed) {
+    use ollama local model ornith:35b as the chat model    
+  }
+
+  task (completed) {
+    remove bm25, set default trunks to be 25
+  }
+
+  task (completed) {
+    use ollama local model ornith:35b as the chat model    
+  }
+
+  task (completed) {
+    do not show information like:
+    [retrieval 0.17 s (embed 0.04 s, rank 0.11 s, bm25 0.02 s) | context 0.002 s | prompt 0.000 s | prefill 1.33 s | load 0.01 s | TTFT 1.56 s | prompt_tokens 2,179 (cached 207) | context 2,333 estimated | total 2.67 s]
+
+    instead, show the information above only when typing the /benchmark command 
+  }
+
+  task (completed) {
+    use ollama local model qwen3:1.7b as the chat model
+  }
+
+  task (completed) {
+    in the answer, do not show Supporting Evidence
+  }
+
+  task (completed) {
+    in the answer, do not show the chunk information (like: [Chunk 11])
+  }
+
+  task (completed) {
+    can we please make rank-bm25 pick the top 25 matches?
+  }
+
+  task (completed) {
+    set default top matching trunks size to be 100
+  }
+
+  task (completed) {
+    algorithm improvement:
+    before constructing the prompt to get the answer:
+    filtered_trunks: use python rank-bm25 package to rerank the top matching trunks
+    use {filtered_trunks} as the context to construct the prompt to get the answer
+  }
+
+  task (completed) {
+    bug:
+    question:  will ai kill software jobs
+    the answer mentioned that: The provided context does not contain sufficient information to answer this question...
+  }
+
+  task (completed) {
+    set default top matching trunks size to be 50
+  }
+
+  task (completed) {
+    use ollama local model ornith:35b as the chat model
+  }
+
+  task (completed) {
+    refactor, by default, load top 100 matching trunks of texts and construct a prompt based on ./research/100_trunks_prompt.txt to get the answer
+  }
+
+  task (completed) {
+    perform the list of actions in "## Action Plan" section in ./research/speed_up_first_time_tokens.md
+  }
+
+  task (completed) {
+    based on ./research/speed_up_first_time_tokens.md, update it so that it will have a secion: action plan, detailing every step to speed up TTFT
+  }
+
+  task (completed) {
+    create ./research/speed_up_first_time_tokens.md:
+    do a deep research on how to speed up time for first token in ./chat.py
+  }
+
+  task (completed) {
+    after we gathered the trunks for the answer:
+    - display a rough estimate of tokens in context
+    - display the current maximum context window size
+  }
+
+  task (completed) {
+    translation_model: ollama local model qwen3:1.7b
+    - allow question to be typed in simplified chinese
+    - if question contains simplified chinese:
+    - translate it to english using {translation_model}
+    - as the answer is streaming, translate it to simplified chinese using {translation_model}
+  }
+
+  task (completed) {
+    set default depth to 100
+  }
+
+  task (completed) {
+    - do not show sources list for the answer
+    - add a new command: /sources, once enter, show the source list for the answer 
+  }
+
+  task (completed) {
+    add new command: /status: show current status of the chat
+  }
+
+  task (completed) {
+    create chat.py:
+    - it should behave like a chatbot
+    - all_embeddings: when the chatbot is started, load all the embeddings from ./youtube_transcript/<youtube_video_hash>.*.embedding into memory
+    - main logic for answer generation for <question>
+    - question_embedding: use ollama local model embeddinggemma-2:570m to create the embedding for <question>
+    - top_embeddings:perform consine similarity between {question_embedding} and every single embedding in {all_embeddings}, pick the top 10 embeddings 
+    - find {the corresponding trunk contents} for {top_embeddings}
+    - add all corresponding trunk contents to {context}
+    - question_prompt: <context>{context}</context> based on <context>, perform the instruction or answer the following question: {question}
+    - send {question_prompt} to ollama local model ornith:35b, stream output
+  }
+
+  task (completed) {
+    update ./chat.py:
+    - for {top_embeddings}, pick the top 30 embeddings 
+  }
+
+  task (completed) {
+    when displaying the source of the matching chunks, also show (<the cosine similarity score>)
+  }
+
+  task (completed) {
+    - for {top_embeddings}, pick the top N embeddings that has cosine similarity score > 0.75
+  }
+
+  task (completed) {
+    - for {top_embeddings}, if there are no embeddings with cosine similarity score > 0.75, simply pick the top 10 embeddings
+  }
+
+  task (completed) {
+    bug: 
+    question: show me a list of small towns
+    answer: The provided context does not contain a list of small towns...
+    we should have enough data for list of small towns
+  }
+
+  task.terminal_ux_improvement (completed) {
+    - tell of the memory usage of all the loaded embeddings
+    - inside the chatbot, allow me to use vim like shortcuts:
+    - visual mode with the following functionalities:
+    - delete a word, delete a line, use vim shortcut to move the cursor left and right
+    - please keep track of the answers that are asked in ./.chat/question_history.txt, every time agent.py starts, it will load ./.chat/question_history.txt
+    - allow me to navigate all asked questions backward using the up arrow key, forward using the down arrow key
+  }
+
+  task.dictionary_and_wiki_command (completed) {
+    - add a new command:
+    /wiki <word>
+    - it should call https://en.wikipedia.org/api/rest_v1/page/summary/<word>
+    - /wiki, after typing the command, append one extra space so that we can immediately enter the <word>
+    - add new command: 
+    /dict <word>
+    - it should accept an argument <word>
+    - it should call https://api.datamuse.com/words?sp=<word>&md=d&max=1 and then return the word's definition in the chat
+    - after typing the command, append one extra space so that we can immediately enter the <word>
+  }
+
+  task.commands_auto_complete (completed) {
+    for all commands in chatbot, allow tab completion
+  }
+
+  task (completed) {
+    use ollama local model qwen3:1.7b as the chat model
+  }
+
+  task (completed) {
+    bug: 
+    question: show me list of airports
+    - the answer should contain more airports
+  }
+
+  task (completed) {
+    add new cli flag --tag {tag}
+    - default value: japan
+    - instead of loading all embeddings in memory, only load all corresponding embeddings of video hashes in ./tags/{tag}
+  }
+
+  task (completed) {
+    implement autocomplete on tags in cli, for example:
+    if i type:
+    python chat.py --tag, it then will look up ./tags and allow me to tab autocomplete the tag
+  }
+
+  task (completed) {
+    add new command: /tag:
+    - allow me to switch to another tag
+    - reset all the embeddings in memory, load all the embeddings related to a new tag
+  }
+
+  task (completed) {
+    add new command: /learn:
+    - achieve similar effect as running ./learn.py
+    - output the result in chat
+  }
+
+  task (completed) {
+    add new command: /transcript, allowing me ask a question only on a specific transcript
+    - /transcript <youtube_video_hash> (reset in-memory embeddings to all the embeddings of this transcript only, then any subsequent question will only have answer from this specific transcript)
+  }
+
+  task (completed) {
+    update command: /transcript 
+    - it should use ag to perform keyword search against "./youtube_transcript/*.title" files
+    - it should return list of <youtube_video_hash> <title> in the hinting list
+    - once selected an entry in the list:
+    reset in-memory embeddings to all the embeddings of this transcript only, then any subsequent question will only have answer from this specific transcript
+  }
+
+  task (completed) {
+    in the command: /dict, if the <word> appeared in the latest answer, explain the usage of it and also its meaning in the latest answer 
+  }
+
+  task (completed) {
+    add new command: /depth <reseach-dept>, set number of top matching trunks 
+  }
+
+  task (completed) {
+    bug: 
+    remove command ./dept, it's a typo, it should be /depth
+  }
+
+  task (completed) {
+    in the status bar, add the following:
+    - current tag that is selected
+  }
+
+  task (completed) {
+    add new command ./refresh: it will reload all embeddings related to the existing tag
+  }
+
+  task (completed) {
+    update ./dict command:
+    if there is the dictionary api endpoint is failing, fall back to use ollama local model gemma3:1b to generate the definition 
+  }
+
+  task (completed) {
+    update ./dict command:
+    stop using dictionary api endpoint, only use ollama local model gemma3:1b to generate the definition
+  }
+
+  task (completed) {
+    in chat history, also keep track of the command history so the commands can be navigated back and forth 
+  }
+}
+
+group get_videos_in_playlist.py {
+  task (completed) {
+    in the playlist, if a <youtube_video_hash>.transcript file exists, skip it
+  }
+
+  task (completed) {
+    create ./get_videos_in_playlist.py <youtube_playlist_id>:
+    - given the <youtube_playlist_id>, return list of all youtube_video_hashes, line by line 
+  }
+}
+
+group learn.py {
+  task (completed) {
+    create ./learn.py:
+    - it should have one cil argument <youtube_video_hash>
+    - logic:
+    1. run ./fetch_youtube_transcript.py <youtube_video_hash>
+    2. run ./rewrite.py <youtube_video_hash>
+    3. run ./create_trunks.py <youtube_video_hash>
+    4. run ./create_embeddings.py <youtube_video_hash>
+    5. run ./generate_tags.py --youtube_video_hash <youtube_video_hash>
+  }
+
+  task (completed) {
+    allow the cli argument to be in formats like: https://www.youtube.com/watch?v=T594Cg4sTq4, or even https://youtu.be/T594Cg4sTq4?t=227
+    we need to smart way to extract the <youtube_video_hash> from the urls
+  }
+
+  task (completed) {
+    bug:
+    we can not download the transcript for https://www.youtube.com/watch?v=-PcBFgkrR2o 
+  }
+
+  task (completed) {
+    bug:
+    when i do: learn.py https://www.youtube.com/watch?v=vDjW_dRyKXY
+    it does not convert the transcript into small paragraphs, please make sure they put it into small paragraphs
+  }
+
+  task (completed) {
+    bug:
+    running learn.py https://www.youtube.com/watch?v=q1tw29SieHo
+    this video should be tagged as related to AI and artificial intelligence, why is it not doing so, try to fix it in a systematic way
+  }
+
+}
+
+task (completed) {
+  create ./create_embeddings.py:
+  - it should have one cil argument <youtube_video_hash>
+  - logic:
+  - remove all existing ./youtube_transcript/<youtube_video_hash>.*.embedding files
+  - for all {trunk_file}, {trunk_file_index_starting_from_1} in ./youtube_transcript/<youtube_video_hash>.*.trunk:
+  - embedding: use ollama local model embeddinggemma-2:570m to create an embedding for {the content of {trunk_file}}
+  - save {embedding} to ./youtube_transcript/<youtube_video_hash>.{trunk_file_index_starting_from_1}.embedding
+}
+
+task (completed) {
+  create ./create_trunks.py:
+  - it should have one cil argument <youtube_video_hash>
+  - logic:
+  - remove all existing ./youtube_transcript/<youtube_video_hash>.*.trunk files
+  - rewritten_content: read the content of ./youtube_transcript/<youtube_video_hash>.rewrite
+  for each {paragraph}, {paragraph_index_starting_from_1} in {rewritten_content}:
+  - paragraph: trim all spaces and new lines around {paragraph}
+  - trunk: 
+  <article><title>{content of ./youtube_transcript/<youtube_video_hash>.title}</title><paragraph>{paragraph}</paragraph></article>
+  - save {trunk} to ./youtube_transcript/<youtube_video_hash>.{paragraph_index_starting_from_1}.trunk
+}
+
+task (completed) {
+  create ./rewrite.py:
+  - it should have one cil argument <youtube_video_hash>
+  - logic:
+  - transcript_content: take .youtube_transcript/<youtube_video_hash>.transcript 
+  - rewritten_content: use ollama model ornith:35b to rewrite {transcript_content}
+  - note: 
+  - during the transcript rewriting process, extract all the detail knowledges
+  - during the transcript rewriting process, stream the rewritten content to the terminal
+  - the rewritten_content should contain short paragraphs, each paragraph should serve as a piece of knowlege, the paragraph will be used as a trunk that will be used in RAG
+  - save {rewritten_content} to ./youtube_transcript/<youtube_video_hash>.rewrite 
+}
+
+task (completed) {
+  create ./fetch_youtube_transcript.py:
+  - it should have one cli argument <youtube_video_hash>
+  example: FTwxtyOEGyM
+  we then fetch the english transcript of https://www.youtube.com/watch?v=FTwxtyOEGyM
+  - it should use free youtube api to fetch the transcript of a youtube video
+  - use ollama model ornith:35b to summarize transcript into 20 words and store into ./youtube_transcript/<youtube_video_hash>.title
+  - the transcript should be stored in ./youtube_transcript/<youtube_video_hash>.transcript
+}
