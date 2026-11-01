@@ -1,6 +1,6 @@
 repo_url: git@github.com:jimthunderbird/local_llm_chat.git
 
-task {
+task (completed) {
   - link the current repo to {repo_url}
   - allow me to commit to {repo_url}'s master branch
 }
