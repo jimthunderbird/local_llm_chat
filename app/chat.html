@@ -224,6 +224,26 @@
     border-left: 2px solid #2f4a60;
     color: #b4c5d5;
   }
+  .markdown math {
+    color: #e6f0f8;
+    font-family: "STIX Two Math", "Cambria Math", "Latin Modern Math", serif;
+  }
+  .markdown .math-inline {
+    display: inline;
+    white-space: nowrap;
+  }
+  .markdown .math-inline math { font-size: 1.04em; }
+  .markdown .math-display {
+    margin: .6em 0;
+    padding: .15em 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    text-align: center;
+  }
+  .markdown .math-display math {
+    display: block;
+    font-size: 1.12em;
+  }
   .markdown code {
     background: #1b2734;
     color: #ffd28a;
@@ -1503,6 +1523,478 @@ const completion = {
 /* ------------------------------------------------------------------ *
  *  Markdown renderer (safe DOM construction, clickable words)
  * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ *  Math rendering (LaTeX subset -> native MathML)
+ *
+ *  Local models occasionally answer with LaTeX such as `$$ ... $$` or
+ *  `$w$`.  Converting the common subset to MathML lets the browser draw
+ *  real symbols, subscripts, fractions and sums.  MathML is built into
+ *  modern browsers, so the UI stays offline and dependency-free.
+ * ------------------------------------------------------------------ */
+const MATH_SYMBOLS = Object.freeze({
+  alpha: "α", beta: "β", gamma: "γ", delta: "δ", epsilon: "ϵ",
+  varepsilon: "ε", zeta: "ζ", eta: "η", theta: "θ", vartheta: "ϑ",
+  iota: "ι", kappa: "κ", lambda: "λ", mu: "μ", nu: "ν", xi: "ξ",
+  omicron: "ο", pi: "π", varpi: "ϖ", rho: "ρ", varrho: "ϱ",
+  sigma: "σ", varsigma: "ς", tau: "τ", upsilon: "υ", phi: "ϕ",
+  varphi: "φ", chi: "χ", psi: "ψ", omega: "ω",
+  Gamma: "Γ", Delta: "Δ", Theta: "Θ", Lambda: "Λ", Xi: "Ξ",
+  Pi: "Π", Sigma: "Σ", Upsilon: "Υ", Phi: "Φ", Psi: "Ψ",
+  Omega: "Ω",
+  sum: "∑", prod: "∏", coprod: "∐", int: "∫", iint: "∬",
+  iiint: "∭", oint: "∮",
+  infty: "∞", partial: "∂", nabla: "∇", emptyset: "∅",
+  varnothing: "∅", aleph: "ℵ", hbar: "ℏ", ell: "ℓ", wp: "℘",
+  Re: "ℜ", Im: "ℑ",
+  in: "∈", notin: "∉", ni: "∋", subset: "⊂", supset: "⊃",
+  subseteq: "⊆", supseteq: "⊇", setminus: "∖",
+  cup: "∪", cap: "∩", times: "×", div: "÷", cdot: "⋅",
+  pm: "±", mp: "∓", ast: "∗", star: "⋆", circ: "∘", bullet: "∙",
+  le: "≤", leq: "≤", ge: "≥", geq: "≥", ne: "≠", neq: "≠",
+  approx: "≈", sim: "∼", simeq: "≃", equiv: "≡", propto: "∝",
+  ll: "≪", gg: "≫",
+  to: "→", rightarrow: "→", leftarrow: "←", leftrightarrow: "↔",
+  Rightarrow: "⇒", Leftarrow: "⇐", Leftrightarrow: "⇔",
+  implies: "⟹", iff: "⟺", mapsto: "↦", uparrow: "↑",
+  downarrow: "↓",
+  forall: "∀", exists: "∃", neg: "¬", land: "∧", lor: "∨",
+  wedge: "∧", vee: "∨", oplus: "⊕", otimes: "⊗",
+  ldots: "…", cdots: "⋯", dots: "…", vdots: "⋮", ddots: "⋱",
+  langle: "⟨", rangle: "⟩", lfloor: "⌊", rfloor: "⌋",
+  lceil: "⌈", rceil: "⌉", vert: "|", Vert: "‖",
+  degree: "°", prime: "′", therefore: "∴", because: "∵",
+});
+const MATH_OPERATOR_NAMES = new Set([
+  "in", "notin", "ni", "subset", "supset", "subseteq", "supseteq",
+  "setminus", "cup", "cap", "times", "div", "cdot", "pm", "mp",
+  "ast", "star", "circ", "bullet", "le", "leq", "ge", "geq",
+  "ne", "neq", "approx", "sim", "simeq", "equiv", "propto", "ll",
+  "gg", "to", "rightarrow", "leftarrow", "leftrightarrow", "Rightarrow",
+  "Leftarrow", "Leftrightarrow", "implies", "iff", "mapsto", "uparrow",
+  "downarrow", "forall", "exists", "neg", "land", "lor", "wedge",
+  "vee", "oplus", "otimes", "ldots", "cdots", "dots", "vdots",
+  "ddots", "langle", "rangle", "lfloor", "rfloor", "lceil", "rceil",
+  "vert", "Vert", "degree", "prime", "therefore", "because",
+]);
+const MATH_FUNCTIONS = new Set([
+  "log", "ln", "lg", "exp", "sin", "cos", "tan", "cot", "sec",
+  "csc", "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh",
+  "det", "dim", "ker", "deg", "gcd", "hom", "arg", "Pr",
+]);
+const MATH_LIMIT_FUNCTIONS = new Set(["lim", "liminf", "limsup", "max", "min", "sup", "inf"]);
+const MATH_FONTS = Object.freeze({
+  mathrm: "normal", mathbf: "bold", mathit: "italic", mathbb: "double-struck",
+  mathcal: "script", mathfrak: "fraktur", mathsf: "sans-serif",
+  mathtt: "monospace", mathnormal: "italic",
+});
+const MATH_ACCENTS = Object.freeze({
+  hat: "^", widehat: "^", bar: "¯", overline: "¯", vec: "→",
+  tilde: "~", widetilde: "~", dot: "˙", ddot: "¨", check: "ˇ",
+  breve: "˘", acute: "´", grave: "`",
+});
+const MATH_SPACES = Object.freeze({
+  ",": "0.1667em", ";": "0.2778em", ":": "0.2222em",
+  "!": "-0.1667em", quad: "1em", qquad: "2em", " ": "0.3333em",
+});
+const MATH_NARY = new Set(["sum", "prod", "coprod", "int", "iint", "iiint", "oint"]);
+
+function mathCharNode(ch) {
+  if (/[A-Za-z]/.test(ch)) return { ml: `<mi>${escapeText(ch)}</mi>` };
+  if (/[0-9]/.test(ch)) return { ml: `<mn>${escapeText(ch)}</mn>` };
+  if (ch === "-") return { ml: "<mo>−</mo>" };
+  if (ch === "*") return { ml: "<mo>∗</mo>" };
+  if (ch === "'") return { ml: "<mo>′</mo>" };
+  if (ch === "~") return { ml: "<mo>∼</mo>" };
+  if (ch === "&") return { ml: '<mspace width="1em"/>' };
+  if ("+=<>()[]|,;:!?/".includes(ch)) {
+    return { ml: `<mo>${escapeText(ch)}</mo>` };
+  }
+  return { ml: `<mi>${escapeText(ch)}</mi>` };
+}
+
+function latexToMathML(source, display = false) {
+  const tokens = [];
+  const input = String(source || "");
+  let pos = 0;
+  while (pos < input.length) {
+    const ch = input[pos];
+    if (ch === "\\") {
+      if (pos + 1 >= input.length) { pos += 1; continue; }
+      const next = input[pos + 1];
+      if (/[a-zA-Z]/.test(next)) {
+        let end = pos + 1;
+        while (end < input.length && /[a-zA-Z]/.test(input[end])) end += 1;
+        tokens.push({ type: "cmd", value: input.slice(pos + 1, end) });
+        pos = end;
+      } else {
+        tokens.push({ type: "cmd", value: next });
+        pos += 2;
+      }
+    } else if (ch === "{" || ch === "}" || ch === "_" || ch === "^") {
+      tokens.push({ type: ch });
+      pos += 1;
+    } else if (/\s/.test(ch)) {
+      tokens.push({ type: "space" });
+      pos += 1;
+    } else if (/[0-9]/.test(ch)) {
+      let end = pos;
+      while (end < input.length && /[0-9.]/.test(input[end])) end += 1;
+      tokens.push({ type: "number", value: input.slice(pos, end) });
+      pos = end;
+    } else {
+      tokens.push({ type: "char", value: ch });
+      pos += 1;
+    }
+  }
+
+  let i = 0;
+
+  function skipSpaces() {
+    while (i < tokens.length && tokens[i].type === "space") i += 1;
+  }
+
+  function readTextArgument() {
+    skipSpaces();
+    const token = tokens[i];
+    if (!token) return "";
+    if (token.type !== "{") {
+      i += 1;
+      if (token.type === "cmd") return MATH_SYMBOLS[token.value] || token.value;
+      return token.value || "";
+    }
+    i += 1;
+    let depth = 1;
+    let out = "";
+    while (i < tokens.length) {
+      const inner = tokens[i];
+      if (inner.type === "{") {
+        depth += 1;
+        out += "{";
+        i += 1;
+        continue;
+      }
+      if (inner.type === "}") {
+        depth -= 1;
+        i += 1;
+        if (depth === 0) break;
+        out += "}";
+        continue;
+      }
+      if (inner.type === "space") {
+        out += " ";
+        i += 1;
+        continue;
+      }
+      if (inner.type === "cmd") {
+        out += MATH_SYMBOLS[inner.value] || inner.value;
+        i += 1;
+        continue;
+      }
+      out += String(inner.value ?? "");
+      i += 1;
+    }
+    return out;
+  }
+
+  function readDelimiter() {
+    skipSpaces();
+    const token = tokens[i];
+    if (!token) return "";
+    i += 1;
+    if (token.type === "char") return token.value === "." ? "" : token.value;
+    if (token.type === "cmd") {
+      if (token.value === "{") return "{";
+      if (token.value === "}") return "}";
+      const named = {
+        langle: "⟨", rangle: "⟩", lfloor: "⌊", rfloor: "⌋",
+        lceil: "⌈", rceil: "⌉", vert: "|", Vert: "‖",
+      };
+      return named[token.value] || MATH_SYMBOLS[token.value] || "";
+    }
+    return "";
+  }
+
+  function parseArgumentNode() {
+    skipSpaces();
+    const token = tokens[i];
+    if (!token) return { ml: "" };
+    if (token.type === "{") {
+      i += 1;
+      const body = parseSequence(true);
+      if (tokens[i] && tokens[i].type === "}") i += 1;
+      return { ml: `<mrow>${body}</mrow>` };
+    }
+    if (token.type === "cmd") {
+      i += 1;
+      return parseCommand(token.value);
+    }
+    if (token.type === "number") {
+      i += 1;
+      return { ml: `<mn>${escapeText(token.value)}</mn>` };
+    }
+    if (token.type === "char") {
+      i += 1;
+      return mathCharNode(token.value);
+    }
+    i += 1;
+    return { ml: "" };
+  }
+
+  function parseAtom() {
+    skipSpaces();
+    const token = tokens[i];
+    if (!token) return { ml: "" };
+    if (token.type === "{") {
+      i += 1;
+      const body = parseSequence(true);
+      if (tokens[i] && tokens[i].type === "}") i += 1;
+      return { ml: `<mrow>${body}</mrow>` };
+    }
+    if (token.type === "cmd") {
+      i += 1;
+      return parseCommand(token.value);
+    }
+    if (token.type === "number") {
+      i += 1;
+      return { ml: `<mn>${escapeText(token.value)}</mn>` };
+    }
+    if (token.type === "char") {
+      i += 1;
+      return mathCharNode(token.value);
+    }
+    if (token.type === "_" || token.type === "^") {
+      i += 1;
+      return parseArgumentNode();
+    }
+    i += 1;
+    return { ml: "" };
+  }
+
+  function parseCommand(name) {
+    if (!name) return { ml: "" };
+    if (name === "\\") return { ml: '<mspace linebreak="newline"/>' };
+    if (name === "text" || name === "textrm" || name === "textnormal" || name === "mbox") {
+      return { ml: `<mtext>${escapeText(readTextArgument())}</mtext>` };
+    }
+    if (name === "operatorname") {
+      return { ml: `<mi mathvariant="normal">${escapeText(readTextArgument())}</mi>` };
+    }
+    if (MATH_FONTS[name]) {
+      return { ml: `<mstyle mathvariant="${MATH_FONTS[name]}">${parseArgumentNode().ml}</mstyle>` };
+    }
+    if (name === "frac" || name === "dfrac" || name === "tfrac" || name === "cfrac") {
+      const numerator = parseArgumentNode().ml;
+      const denominator = parseArgumentNode().ml;
+      return { ml: `<mfrac>${numerator}${denominator}</mfrac>` };
+    }
+    if (name === "binom" || name === "dbinom" || name === "tbinom") {
+      const top = parseArgumentNode().ml;
+      const bottom = parseArgumentNode().ml;
+      return {
+        ml: `<mrow><mo>(</mo><mfrac linethickness="0">${top}${bottom}</mfrac><mo>)</mo></mrow>`,
+      };
+    }
+    if (name === "sqrt") {
+      skipSpaces();
+      let root = "";
+      if (tokens[i] && tokens[i].type === "char" && tokens[i].value === "[") {
+        i += 1;
+        const parts = [];
+        while (i < tokens.length && !(tokens[i].type === "char" && tokens[i].value === "]")) {
+          parts.push(parseAtom().ml);
+        }
+        if (tokens[i] && tokens[i].type === "char" && tokens[i].value === "]") i += 1;
+        root = parts.join("");
+      }
+      const radicand = parseArgumentNode().ml;
+      return {
+        ml: root ? `<mroot>${radicand}${root}</mroot>` : `<msqrt>${radicand}</msqrt>`,
+      };
+    }
+    if (name === "left" || name === "right" || name === "middle") {
+      const delimiter = readDelimiter();
+      if (!delimiter) return { ml: "" };
+      return { ml: `<mo fence="true" stretchy="true">${escapeText(delimiter)}</mo>` };
+    }
+    if (MATH_ACCENTS[name]) {
+      const argument = parseArgumentNode().ml;
+      return {
+        ml: `<mover accent="true">${argument}<mo>${escapeText(MATH_ACCENTS[name])}</mo></mover>`,
+      };
+    }
+    if (name === "underbrace" || name === "overbrace") {
+      const argument = parseArgumentNode().ml;
+      return name === "underbrace"
+        ? { ml: `<munder accentunder="true">${argument}<mo>⏟</mo></munder>` }
+        : { ml: `<mover accent="true">${argument}<mo>⏞</mo></mover>` };
+    }
+    if (name === "underline") {
+      return {
+        ml: `<munder accentunder="true">${parseArgumentNode().ml}<mo>_</mo></munder>`,
+      };
+    }
+    if (Object.prototype.hasOwnProperty.call(MATH_SPACES, name)) {
+      return { ml: `<mspace width="${MATH_SPACES[name]}"/>` };
+    }
+    if (name === "{" || name === "}") {
+      return { ml: `<mo>${name}</mo>` };
+    }
+    if (name === "%" || name === "$" || name === "&" || name === "#" || name === "_") {
+      return { ml: `<mi>${escapeText(name)}</mi>` };
+    }
+    if (MATH_FUNCTIONS.has(name) || MATH_LIMIT_FUNCTIONS.has(name)) {
+      const label = name === "liminf" ? "lim inf" : name === "limsup" ? "lim sup" : name;
+      return {
+        ml: `<mi mathvariant="normal">${escapeText(label)}</mi>`,
+        limits: MATH_LIMIT_FUNCTIONS.has(name),
+      };
+    }
+    if (MATH_NARY.has(name)) {
+      return {
+        ml: `<mo largeop="true" movablelimits="false">${escapeText(MATH_SYMBOLS[name])}</mo>`,
+        nary: true,
+      };
+    }
+    if (Object.prototype.hasOwnProperty.call(MATH_SYMBOLS, name)) {
+      const value = MATH_SYMBOLS[name];
+      if (MATH_OPERATOR_NAMES.has(name)) {
+        return { ml: `<mo>${escapeText(value)}</mo>` };
+      }
+      return { ml: `<mi>${escapeText(value)}</mi>` };
+    }
+    if (name.length === 1) {
+      return mathCharNode(name);
+    }
+    return { ml: `<mi mathvariant="normal">${escapeText(name)}</mi>` };
+  }
+
+  function parseSequence(endOnBrace) {
+    const parts = [];
+    while (i < tokens.length) {
+      if (tokens[i].type === "}") {
+        if (endOnBrace) break;
+        i += 1;
+        continue;
+      }
+      if (tokens[i].type === "space") {
+        i += 1;
+        continue;
+      }
+      let node = parseAtom();
+      if (!node || !node.ml) continue;
+      let sub = "";
+      let sup = "";
+      let sawScript = false;
+      while (i < tokens.length) {
+        skipSpaces();
+        const script = tokens[i];
+        if (!script || (script.type !== "_" && script.type !== "^")) break;
+        sawScript = true;
+        i += 1;
+        const argument = parseArgumentNode().ml;
+        if (script.type === "_") sub = argument;
+        else sup = argument;
+      }
+      if (sawScript) {
+        const underOver = display && (node.nary || node.limits);
+        if (sub && sup) {
+          node = {
+            ml: underOver
+              ? `<munderover>${node.ml}${sub}${sup}</munderover>`
+              : `<msubsup>${node.ml}${sub}${sup}</msubsup>`,
+          };
+        } else if (sub) {
+          node = {
+            ml: underOver
+              ? `<munder>${node.ml}${sub}</munder>`
+              : `<msub>${node.ml}${sub}</msub>`,
+          };
+        } else {
+          node = {
+            ml: underOver
+              ? `<mover>${node.ml}${sup}</mover>`
+              : `<msup>${node.ml}${sup}</msup>`,
+          };
+        }
+      }
+      parts.push(node.ml);
+    }
+    return parts.join("");
+  }
+
+  return parseSequence(false);
+}
+
+function looksLikeMath(body) {
+  const text = String(body || "");
+  if (!text.trim() || text.length > 1200) return false;
+  // Inline math hugs its delimiters; this keeps currency like "$5 and $10"
+  // from being mistaken for a formula.
+  if (text !== text.trim()) return false;
+  if (/\\[a-zA-Z]+/.test(text)) return true;
+  if (!/[A-Za-z]/.test(text)) return false;
+  if (/^[\d.,]+\s+(?:and|or|to)\s*$/i.test(text)) return false;
+  return true;
+}
+
+function makeMathElement(latex, display = false) {
+  const el = document.createElement(display ? "div" : "span");
+  el.className = display ? "math-display" : "math-inline";
+  let markup = "";
+  try {
+    markup = latexToMathML(latex, display);
+  } catch (_error) {
+    markup = "";
+  }
+  if (!markup) {
+    el.textContent = String(latex);
+    return el;
+  }
+  el.innerHTML = `<math${display ? ' display="block"' : ""} xmlns="http://www.w3.org/1998/Math/MathML"><mrow>${markup}</mrow></math>`;
+  const math = el.firstElementChild;
+  if (math) math.setAttribute("aria-label", String(latex).trim());
+  return el;
+}
+
+function readDisplayMathBlock(lines, start) {
+  const line = String(lines[start] || "");
+  const trimmed = line.trim();
+  let open = "";
+  let close = "";
+  if (trimmed.startsWith("$$")) {
+    open = "$$";
+    close = "$$";
+  } else if (trimmed.startsWith("\\[")) {
+    open = "\\[";
+    close = "\\]";
+  } else {
+    return null;
+  }
+  const first = trimmed.slice(open.length);
+  const sameLine = first.indexOf(close);
+  if (sameLine >= 0) {
+    if (first.slice(sameLine + close.length).trim()) return null;
+    return { body: first.slice(0, sameLine), next: start + 1 };
+  }
+  const bodyLines = [first];
+  let index = start + 1;
+  while (index < lines.length) {
+    const current = String(lines[index]);
+    const closeAt = current.indexOf(close);
+    if (closeAt >= 0) {
+      if (current.slice(closeAt + close.length).trim()) return null;
+      bodyLines.push(current.slice(0, closeAt));
+      return { body: bodyLines.join("\n"), next: index + 1 };
+    }
+    bodyLines.push(current);
+    index += 1;
+  }
+  // Unclosed while streaming: show the raw text until the closing marker
+  // arrives instead of swallowing the rest of the answer.
+  return null;
+}
+
 function wordNodes(text, clickable) {
   const frag = document.createDocumentFragment();
   if (!clickable) {
@@ -1548,7 +2040,7 @@ function appendAutoLink(parent, raw, clickable) {
 }
 
 function appendInline(parent, text, clickable) {
-  const inlineRe = /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|_[^_\n]+_|\[[^\]\n]+\]\([^)\s]+\)|\b(?:https?:\/\/|www\.)[^\s<>"'`]+)/gi;
+  const inlineRe = /(`[^`\n]+`|\$\$?[^$\n]+\$\$?|\\\(.+?\\\)|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|_[^_\n]+_|\[[^\]\n]+\]\([^)\s]+\)|\b(?:https?:\/\/|www\.)[^\s<>"'`]+)/g;
   let last = 0;
   let match;
   while ((match = inlineRe.exec(text)) !== null) {
@@ -1560,6 +2052,16 @@ function appendInline(parent, text, clickable) {
       const code = document.createElement("code");
       code.textContent = token.slice(1, -1);
       parent.appendChild(code);
+    } else if (token.startsWith("$") || token.startsWith("\\(")) {
+      const wrapped = token.startsWith("$$");
+      const body = token.startsWith("\\(")
+        ? token.slice(2, -2)
+        : token.slice(wrapped ? 2 : 1, wrapped ? -2 : -1);
+      if (looksLikeMath(body)) {
+        parent.appendChild(makeMathElement(body, false));
+      } else {
+        parent.appendChild(wordNodes(token, clickable));
+      }
     } else if (token.startsWith("**") || token.startsWith("__")) {
       const strong = document.createElement("strong");
       appendInline(strong, token.slice(2, -2), clickable);
@@ -2170,6 +2672,16 @@ function renderMarkdown(text, clickable = true, annotations = null, options = nu
     const line = lines[i];
 
     if (/^\s*$/.test(line)) { i += 1; continue; }
+
+    // Display math: $$ ... $$ or \[ ... \].
+    const displayMath = readDisplayMathBlock(lines, i);
+    if (displayMath) {
+      const mathEl = makeMathElement(displayMath.body, true);
+      annotate(mathEl);
+      container.appendChild(mathEl);
+      i = displayMath.next;
+      continue;
+    }
 
     // Fenced code block.
     if (/^\s*```/.test(line)) {

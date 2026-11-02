@@ -32,7 +32,7 @@ task.cover_picture (completed) {
   for every single source in the detail view, please try your best to include source images
 }
 
-task {
+task (completed) {
   update news sources {source}
 }
 

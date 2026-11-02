@@ -1,5 +1,14 @@
 simple_answer_model: ollama local model ornith:35b
 
+task.symbol_rendering (completed) {
+  found the following content in the answer:
+  $$ \text{Score}(A, B) = \sum{w \in A \cap B} \text{tf}{A}(w) \cdot \text{tf}_{B}(w) \cdot \text{idf}(w) $$
+  $w$ ranges over words common to both documents
+  $\text{tf}_{A}(w)$ is the term frequency of $w$ in document A (sometimes just binary 0/1)
+  
+  can we have a generic way to render these symbol nicely
+}
+
 task (completed) {
   create new command /ask <question> {
     - this command is for asking a quick question and get answer from the {simple_answer_model}
