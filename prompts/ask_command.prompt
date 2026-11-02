@@ -1,6 +1,6 @@
 simple_answer_model: ollama local model ornith:35b
 
-task {
+task (completed) {
   create new command /ask <question> {
     - this command is for asking a quick question and get answer from the {simple_answer_model}
   }

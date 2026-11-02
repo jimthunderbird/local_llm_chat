@@ -1,0 +1,20 @@
+task (completed) {
+  create command /news <source>:
+  <source> can be the following {
+    cnn: {
+      - https://openrss.org/www.cnn.com
+      - https://openrss.org/www.cnn.com/world
+      - https://openrss.org/www.cnn.com/us
+      - https://openrss.org/www.cnn.com/politics
+      - https://openrss.org/www.cnn.com/business
+    }
+    kqed: {
+      - https://ww2.kqed.org/news/feed/
+    }
+    sfbayview: {
+      - https://sfbayview.com/wp-json/wp/v2/posts?per_page=10
+    }
+  }
+  - please allow me to tab auto complete the <source>
+  - if <source> is not given, please all sources, each source will be a section
+}

@@ -1199,15 +1199,25 @@ def format_bytes(num: float) -> str:
     return f"{value:.1f} TiB"
 
 
-def index_memory_report(chunks: list[Chunk], build_index: bool = True) -> str:
-    """Describe the loaded trunks and the in-memory BM25 index."""
+def index_memory_report(
+    chunks: list[Chunk],
+    build_index: bool = True,
+    article: str | None = None,
+) -> str:
+    """Describe the loaded trunks and the in-memory BM25 index.
+
+    When ``article`` is set the active scope is a single article file rather
+    than a set of YouTube transcripts, so the source count is labelled
+    ``Article(s)`` instead of ``video(s)``.
+    """
     if not chunks:
         return "BM25 index: no trunks loaded."
 
     video_ids = {chunk.video_id for chunk in chunks}
+    source_label = "Article(s)" if article is not None else "video(s)"
     lines = [
         f"BM25 index: {len(chunks):,} trunk(s) from "
-        f"{len(video_ids):,} video(s)"
+        f"{len(video_ids):,} {source_label}"
     ]
     if build_index:
         index = get_bm25_index(chunks)
@@ -1274,7 +1284,8 @@ def chat_status_report(
         f"  tag:         {tag}",
         f"  scope:       {scope}",
         f"  loaded:      {len(chunks):,} trunks from "
-        f"{len(video_ids):,} video(s)",
+        f"{len(video_ids):,} "
+        + ("Article(s)" if article is not None else "video(s)"),
         f"  retrieval:   {retrieval}",
         "  filter:      small-LLM relevance filter (skipped for "
         "list/aggregation questions)",

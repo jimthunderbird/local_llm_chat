@@ -1,5 +1,12 @@
 research_doc: ../research/super_long_article_q_and_a.html
 
+task (completed) {
+  bug:
+  after typing: /article <path_to_an_article>, for the OUTPUT
+  expect:BM25 index: ... trunk(s) from ... Article(s)
+  actual:BM25 index: ... trunk(s) from ... Video(s)
+}
+
 task.auto_complete_path (completed) {
   as we type after /article, allow user to use tab auto completion on the article's file path
 }

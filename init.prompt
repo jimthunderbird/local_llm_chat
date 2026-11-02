@@ -210,12 +210,8 @@ group app/chat.html and app/chat_server.py {
     complete tasks in ./prompts/dictionary.prompt
   }
 
-  task (persistent) {
-    complete tasks in ./prompts/cnn_news.prompt
-  }
-
-  task (persistent) {
-    complete tasks in ./prompts/kqed_news.prompt
+  task.news (persistent) {
+    complete tasks in ./prompts/news.prompt
   }
 
   task (persistent) {

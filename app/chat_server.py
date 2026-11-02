@@ -4,7 +4,7 @@
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, tag/transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /learn, /learn_topic, /learn_playlist,
-/tag_gen, /kqed, /cnn, /wiki, /wiki_article, /article, /dict, and
+/tag_gen, /news, /wiki, /wiki_article, /article, /dict, and
 /ask. The browser is a pure HTML/CSS/JavaScript single-page app served from
 ./app/chat.html.
 
@@ -33,8 +33,9 @@ Endpoints:
                                   The tag also pins the generated language:
                                   code in the "rust" tag is always Rust, code in
                                   the "golang" tag is always Go, and code in the
-                                  "php" tag is always PHP. /kqed and /cnn
-                                  stream "news" events from their RSS feeds).
+                                  "php" tag is always PHP. /news
+                                  streams "news" events from CNN, KQED, and
+                                  SF Bay View).
     POST /api/dict               SSE: dictionary + latest-answer usage stream
     POST /api/translate          SSE: paragraph-by-paragraph Simplified Chinese
                                   translation of an answer
@@ -100,13 +101,16 @@ WEB_COMMANDS = {
     "/learn_topic": "search YouTube for <topic> and learn the top 3 videos",
     "/learn_playlist": "learn every video in a YouTube playlist",
     "/tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
-    "/kqed": "list the latest KQED News stories (optionally /kqed <count>)",
-    "/cnn": "list the latest CNN News stories (optionally /cnn [section] [count])",
+    "/news": "list the latest news from cnn, kqed, or sfbayview (optionally /news [source] [count])",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
 }
 
-# Sections served by openrss.org for cnn_news_fetch.php.
-CNN_SECTIONS = {"top", "world", "us", "politics", "business"}
+# News sources accepted by /news and completed by news_fetch.php.
+NEWS_SOURCES = {
+    "cnn": "CNN News",
+    "kqed": "KQED News",
+    "sfbayview": "SF Bay View",
+}
 
 COMMAND_ARGUMENTS = {
     "/tag",
@@ -123,6 +127,7 @@ COMMAND_ARGUMENTS = {
     "/dict",
     "/depth",
     "/benchmark",
+    "/news",
 }
 
 # The browser's "中文" button translates a finished answer paragraph by
@@ -3692,6 +3697,10 @@ class ChatState:
                 for name, description in sorted(WEB_COMMANDS.items())
             ],
             "argument_commands": sorted(COMMAND_ARGUMENTS),
+            "news_sources": [
+                {"name": name, "label": label}
+                for name, label in sorted(NEWS_SOURCES.items())
+            ],
         }
         if include_history:
             data["history"] = self.history[-1000:]
@@ -3912,6 +3921,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 {"value": tag, "description": "tag"}
                 for tag in chat.available_tags()
                 if tag.startswith(query)
+            ]
+
+        if kind == "news_sources":
+            lowered = query.lower()
+            return [
+                {"value": name, "description": label}
+                for name, label in sorted(NEWS_SOURCES.items())
+                if name.startswith(lowered)
             ]
 
         if kind == "paths":
@@ -5089,7 +5106,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         elif name == "/help":
             self._command_help()
         elif name == "/memory":
-            report = chat.index_memory_report(self.state.chunks)
+            report = chat.index_memory_report(
+                self.state.chunks, article=self.state.article_path
+            )
             self._sse_text("output", "\n" + report + "\n")
         elif name == "/tag":
             self._command_tag(argument)
@@ -5109,10 +5128,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_learn_playlist(argument)
         elif name == "/ask":
             self._command_ask(argument)
-        elif name == "/kqed":
-            self._command_kqed(argument)
-        elif name == "/cnn":
-            self._command_cnn(argument)
+        elif name == "/news":
+            self._command_news(argument)
         elif name == "/wiki":
             self._command_wiki(argument)
         elif name == "/wiki_article":
@@ -5339,7 +5356,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         self._sse_text(
             "output",
             "\n"
-            + chat.index_memory_report(new_chunks, build_index=False)
+            + chat.index_memory_report(
+                new_chunks, build_index=False, article=article_path
+            )
             + f"\nNow answering from article {article_path!r} "
             f"({sum(1 for chunk in new_chunks if chunk.index > 0)} "
             "paragraph(s)).\n",
@@ -5831,53 +5850,53 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
         self._sse("meta", state.snapshot())
 
-    def _command_kqed(self, argument: str) -> None:
-        """Stream the latest KQED News stories to the browser."""
-        argv: list[str] = []
-        count_arg = argument.strip()
-        if count_arg:
-            if not count_arg.isdigit() or int(count_arg) < 1:
-                self._sse_text("output", "\nUsage: /kqed [number-of-stories]\n")
-                return
-            argv.extend(["--limit", count_arg])
-        self._command_news("kqed_news_fetch.php", "/kqed", argv)
+    def _command_news(self, argument: str) -> None:
+        """Stream the latest news stories to the browser.
 
-    def _command_cnn(self, argument: str) -> None:
-        """Stream the latest CNN News stories to the browser.
-
-        Usage: /cnn [top|world|us|politics|business] [number-of-stories]
-        Without a section, all five openrss.org CNN feeds are merged.
+        Usage: /news [cnn|kqed|sfbayview] [number-of-stories]
+        Without a source, every supported source is shown as its own section.
         """
         argv: list[str] = []
+        source = None
         for part in argument.split():
             lowered = part.lower()
             if part.isdigit():
                 if int(part) < 1:
                     self._sse_text(
                         "output",
-                        "\nUsage: /cnn [section] [number-of-stories]\n",
+                        "\nUsage: /news [cnn|kqed|sfbayview] "
+                        "[number-of-stories]\n",
                     )
                     return
                 argv.extend(["--limit", part])
-            elif lowered in CNN_SECTIONS:
-                argv.extend(["--section", lowered])
+            elif lowered in NEWS_SOURCES:
+                if source is not None:
+                    self._sse_text(
+                        "output",
+                        "\nUsage: /news [cnn|kqed|sfbayview] "
+                        "[number-of-stories]\n",
+                    )
+                    return
+                source = lowered
             else:
                 self._sse_text(
                     "output",
-                    "\nUsage: /cnn [top|world|us|politics|business] "
+                    "\nUsage: /news [cnn|kqed|sfbayview] "
                     "[number-of-stories]\n",
                 )
                 return
-        self._command_news("cnn_news_fetch.php", "/cnn", argv)
+        if source is not None:
+            argv.extend(["--source", source])
+        self._stream_news_events("news_fetch.php", "/news", argv)
 
-    def _command_news(
+    def _stream_news_events(
         self, script_name: str, command: str, extra_argv: list[str]
     ) -> None:
         """Stream a news fetcher's NDJSON events as `news` SSE events.
 
-        Both kqed_news_fetch.php and cnn_news_fetch.php emit one JSON event
-        per line; relaying each one lets the title list appear story by story
-        while the feeds are still being downloaded.
+        news_fetch.php emits one JSON event per line; relaying each one lets
+        the title list appear story by story while the feeds are still being
+        downloaded.
         """
         script = SCRIPT_DIR / script_name
         if not script.exists():
@@ -6073,7 +6092,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         self._sse_text(
             "output",
             "\n"
-            + chat.index_memory_report(new_chunks, build_index=False)
+            + chat.index_memory_report(
+                new_chunks, build_index=False, article=str(path)
+            )
             + f"\nNow answering from article {str(path)!r} "
             f"({sum(1 for chunk in new_chunks if chunk.index > 0)} "
             "paragraph(s), "

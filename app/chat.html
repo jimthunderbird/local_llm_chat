@@ -813,7 +813,7 @@
   #popup-loading { color: var(--warn); font-size: 12px; margin-bottom: 8px; }
   #popup-loading[hidden] { display: none; }
 
-  /* /kqed and /cnn story lists in the transcript and the details modal. */
+  /* /news story lists in the transcript and the details modal. */
   .news-list { margin: 11px 0 4px; }
   .news-list-head {
     display: flex;
@@ -831,6 +831,15 @@
     font-size: 11px;
     letter-spacing: 0;
     text-transform: none;
+  }
+  .news-source-head {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    margin: 12px 0 6px;
+    user-select: none;
   }
   .news-list-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   .news-item {
@@ -886,7 +895,7 @@
   }
   .news-details:hover { border-color: var(--accent-2); color: #fff; }
 
-  #kqed-panel {
+  #news-panel {
     position: fixed;
     inset: 0;
     z-index: 56;
@@ -896,8 +905,8 @@
     justify-content: center;
     padding: 20px;
   }
-  #kqed-panel[hidden] { display: none; }
-  .kqed-card {
+  #news-panel[hidden] { display: none; }
+  .news-card {
     width: min(760px, 100%);
     max-height: 82vh;
     display: flex;
@@ -908,7 +917,7 @@
     box-shadow: 0 24px 80px rgba(0,0,0,.7);
     overflow: hidden;
   }
-  .kqed-head {
+  .news-head {
     display: flex;
     align-items: flex-start;
     gap: 12px;
@@ -917,10 +926,10 @@
     border-bottom: 1px solid #223344;
     user-select: none;
   }
-  .kqed-head-main { min-width: 0; flex: 1; }
-  .kqed-title { color: var(--accent); font-weight: 700; font-size: 14px; line-height: 1.35; }
-  .kqed-meta { color: var(--dim); font-size: 11px; margin-top: 4px; }
-  .kqed-link {
+  .news-head-main { min-width: 0; flex: 1; }
+  .news-modal-title { color: var(--accent); font-weight: 700; font-size: 14px; line-height: 1.35; }
+  .news-modal-meta { color: var(--dim); font-size: 11px; margin-top: 4px; }
+  .news-link {
     flex: 0 0 auto;
     color: var(--accent-2);
     font-size: 11.5px;
@@ -928,9 +937,9 @@
     border-bottom: 1px dotted #3d6b8f;
     margin-top: 3px;
   }
-  .kqed-link:hover { border-bottom-style: solid; }
-  .kqed-link[hidden] { display: none; }
-  #kqed-close {
+  .news-link:hover { border-bottom-style: solid; }
+  .news-link[hidden] { display: none; }
+  #news-close {
     flex: 0 0 auto;
     background: transparent;
     border: 0;
@@ -941,27 +950,27 @@
     padding: 0 3px;
     user-select: none;
   }
-  #kqed-close:hover { color: var(--text); }
-  .kqed-body {
+  #news-close:hover { color: var(--text); }
+  .news-body {
     padding: 14px 18px 18px;
     overflow-y: auto;
     font-size: 13px;
     color: #cfdae5;
   }
-  .kqed-body p { margin: 0 0 .9em; }
-  .kqed-body p:first-child { margin-top: 0; }
-  .kqed-body .news-loading { color: var(--warn); font-size: 12px; }
-  .kqed-body .news-summary { color: #dfeaf4; font-style: italic; }
-  .kqed-translate { flex: 0 0 auto; margin-top: 2px; }
-  #kqed-translation {
+  .news-body p { margin: 0 0 .9em; }
+  .news-body p:first-child { margin-top: 0; }
+  .news-body .news-loading { color: var(--warn); font-size: 12px; }
+  .news-body .news-summary { color: #dfeaf4; font-style: italic; }
+  .news-translate { flex: 0 0 auto; margin-top: 2px; }
+  #news-translation {
     margin-top: 15px;
     padding: 8px 0 0 11px;
     border-left: 2px solid #2f4a60;
   }
-  #kqed-translation[hidden] { display: none; }
-  #kqed-translation .translation-label { margin-bottom: 6px; }
-  #kqed-translation .markdown p:last-child { margin-bottom: 0; }
-  #kqed-translation .caret {
+  #news-translation[hidden] { display: none; }
+  #news-translation .translation-label { margin-bottom: 6px; }
+  #news-translation .markdown p:last-child { margin-bottom: 0; }
+  #news-translation .caret {
     display: inline-block;
     width: 7px;
     height: 13px;
@@ -1171,22 +1180,22 @@
   </div>
 </div>
 
-<div id="kqed-panel" hidden>
-  <div class="kqed-card" role="dialog" aria-modal="true" aria-labelledby="kqed-title">
-    <div class="kqed-head">
-      <div class="kqed-head-main">
-        <div id="kqed-title" class="kqed-title">News</div>
-        <div id="kqed-meta" class="kqed-meta"></div>
+<div id="news-panel" hidden>
+  <div class="news-card" role="dialog" aria-modal="true" aria-labelledby="news-title">
+    <div class="news-head">
+      <div class="news-head-main">
+        <div id="news-title" class="news-modal-title">News</div>
+        <div id="news-meta" class="news-modal-meta"></div>
       </div>
-      <a id="kqed-link" class="kqed-link" href="#" target="_blank" rel="noopener noreferrer">Open article ↗</a>
-      <button id="kqed-translate" class="translate-btn kqed-translate" type="button" disabled
+      <a id="news-link" class="news-link" href="#" target="_blank" rel="noopener noreferrer">Open article ↗</a>
+      <button id="news-translate" class="translate-btn news-translate" type="button" disabled
               title="Translate this story into Simplified Chinese with the local LLM">中文</button>
-      <button id="kqed-close" type="button" title="Close (Esc)">×</button>
+      <button id="news-close" type="button" title="Close (Esc)">×</button>
     </div>
-    <div id="kqed-body" class="kqed-body">
-      <div id="kqed-translation" hidden>
-        <div id="kqed-translation-label" class="translation-label">中文翻译</div>
-        <div id="kqed-translation-body" class="markdown"></div>
+    <div id="news-body" class="news-body">
+      <div id="news-translation" hidden>
+        <div id="news-translation-label" class="translation-label">中文翻译</div>
+        <div id="news-translation-body" class="markdown"></div>
       </div>
     </div>
   </div>
@@ -1232,8 +1241,8 @@
       <span class="k">Ctrl+C</span><span class="d">cancel a streaming answer (or copy a selection)</span>
       <span class="k">Ctrl+L / ⌘K</span><span class="d">clear the console</span>
       <span class="k">Drag text</span><span class="d">select output text, then Ctrl+C / ⌘C to copy</span>
-      <span class="k">Click a word</span><span class="d">open a streaming /dict popup (drag instead to select); also works in /kqed and /cnn stories</span>
-      <span class="k">中文 in /kqed, /cnn</span><span class="d">translate a news title or the open news story into Simplified Chinese</span>
+      <span class="k">Click a word</span><span class="d">open a streaming /dict popup (drag instead to select); also works in /news stories</span>
+      <span class="k">中文 in /news</span><span class="d">translate a news title or the open news story into Simplified Chinese</span>
       <span class="k">? in code</span><span class="d">explain that line (rust, golang, and php answers)</span>
       <span class="k">− in popup</span><span class="d">minimize the dictionary popup; click its chip at the right of the status bar to reopen</span>
     </div>
@@ -1269,15 +1278,15 @@ const popupRestoreEl = $("#popup-restore");
 const popupRestoreWordEl = $("#popup-restore-word");
 const popupPrevEl = $("#popup-prev");
 const popupNextEl = $("#popup-next");
-const kqedPanelEl = $("#kqed-panel");
-const kqedTitleEl = $("#kqed-title");
-const kqedMetaEl = $("#kqed-meta");
-const kqedLinkEl = $("#kqed-link");
-const kqedBodyEl = $("#kqed-body");
-const kqedTranslateBtn = $("#kqed-translate");
-const kqedTranslationEl = $("#kqed-translation");
-const kqedTranslationLabelEl = $("#kqed-translation-label");
-const kqedTranslationBodyEl = $("#kqed-translation-body");
+const newsPanelEl = $("#news-panel");
+const newsTitleEl = $("#news-title");
+const newsMetaEl = $("#news-meta");
+const newsLinkEl = $("#news-link");
+const newsBodyEl = $("#news-body");
+const newsTranslateBtn = $("#news-translate");
+const newsTranslationEl = $("#news-translation");
+const newsTranslationLabelEl = $("#news-translation-label");
+const newsTranslationBodyEl = $("#news-translation-body");
 const lineHelpPanel = $("#line-help-panel");
 const lineHelpTitleEl = $("#line-help-title");
 const lineHelpLangEl = $("#line-help-lang");
@@ -1341,10 +1350,10 @@ let askController = null;
 let popupMinimized = false;
 let popupAnchorEl = null;
 let popupAnchorRect = null;
-let kqedItem = null;
-let kqedTranslationGeneration = 0;
-let kqedTranslationRenderPending = false;
-const kqedTranslation = {
+let newsItem = null;
+let newsTranslationGeneration = 0;
+let newsTranslationRenderPending = false;
+const newsTranslation = {
   text: "",
   sourceText: "",
   error: "",
@@ -2324,6 +2333,7 @@ function makeEntry(kind, options = {}) {
     newsItems: [],
     newsSource: "",
     newsFeed: "",
+    newsSources: [],
     newsDone: false,
     newsEl: document.createElement("div"),
     el: document.createElement("div"),
@@ -2567,7 +2577,7 @@ function addError(entry, text) {
 }
 
 /* ------------------------------------------------------------------ *
- *  /kqed and /cnn news lists and the story-details modal
+ *  /news story lists and the story-details modal
  * ------------------------------------------------------------------ */
 function formatNewsDate(value) {
   if (!value) return "";
@@ -2588,6 +2598,7 @@ function addNewsEvent(entry, data) {
   if (type === "start") {
     entry.newsSource = data.source || "News";
     entry.newsFeed = data.feed || "";
+    entry.newsSources = Array.isArray(data.sources) ? data.sources : [];
     scheduleRender(entry);
     return;
   }
@@ -2597,6 +2608,7 @@ function addNewsEvent(entry, data) {
       title: data.title || "(untitled)",
       link: data.link || "",
       published: data.published || "",
+      source: data.source || entry.newsSource || "News",
       section: data.section || "",
       summary: data.summary || "",
       paragraphs: [],
@@ -2621,7 +2633,7 @@ function addNewsEvent(entry, data) {
       || entry.newsItems[entry.newsItems.length - 1];
     if (item && data.text) {
       item.paragraphs.push(String(data.text));
-      if (kqedItem === item) renderKqedModal(item);
+      if (newsItem === item) renderNewsModal(item);
       scheduleRender(entry);
     }
     return;
@@ -2632,7 +2644,7 @@ function addNewsEvent(entry, data) {
       || entry.newsItems[entry.newsItems.length - 1];
     if (item) {
       item.complete = true;
-      if (kqedItem === item) renderKqedModal(item);
+      if (newsItem === item) renderNewsModal(item);
       scheduleRender(entry);
     }
     return;
@@ -2788,10 +2800,26 @@ function renderNewsList(entry) {
   }
   container.hidden = false;
 
+  // Keep each source together so /news without a source shows one section
+  // per feed, while a single-source request still renders one clean list.
+  const groups = [];
+  const groupsBySource = new Map();
+  for (const item of items) {
+    const source = item.source || entry.newsSource || "News";
+    let group = groupsBySource.get(source);
+    if (!group) {
+      group = { source, items: [] };
+      groupsBySource.set(source, group);
+      groups.push(group);
+    }
+    group.items.push(item);
+  }
+
   const head = document.createElement("div");
   head.className = "news-list-head";
   const source = document.createElement("span");
-  source.textContent = entry.newsSource || "News";
+  source.textContent = entry.newsSource
+    || (groups.length === 1 ? groups[0].source : "News");
   const note = document.createElement("span");
   note.className = "news-list-note";
   const storyWord = items.length === 1 ? "story" : "stories";
@@ -2802,82 +2830,97 @@ function renderNewsList(entry) {
   head.appendChild(note);
   container.appendChild(head);
 
-  const list = document.createElement("ol");
-  list.className = "news-list-items";
-  items.forEach((item, position) => {
-    const li = document.createElement("li");
-    li.className = "news-item";
-
-    const main = document.createElement("div");
-    main.className = "news-item-main";
-    const indexEl = document.createElement("span");
-    indexEl.className = "news-index";
-    indexEl.textContent = `${item.index || position + 1}.`;
-    main.appendChild(indexEl);
-
-    const titleEl = item.link
-      ? document.createElement("a")
-      : document.createElement("span");
-    titleEl.className = "news-title";
-    titleEl.textContent = item.title;
-    if (item.link) {
-      titleEl.href = item.link;
-      titleEl.target = "_blank";
-      titleEl.rel = "noopener noreferrer";
-      titleEl.title = `Open this story on ${entry.newsSource || "the source site"}`;
+  const showSourceHeads = groups.length > 1;
+  let position = 0;
+  for (const group of groups) {
+    if (showSourceHeads) {
+      const groupHead = document.createElement("div");
+      groupHead.className = "news-source-head";
+      groupHead.textContent = group.source;
+      container.appendChild(groupHead);
     }
-    titleEl.addEventListener("click", (event) => event.stopPropagation());
 
-    const titleRow = document.createElement("div");
-    titleRow.className = "news-title-row";
-    titleRow.appendChild(titleEl);
+    const list = document.createElement("ol");
+    list.className = "news-list-items";
+    group.items.forEach((item) => {
+      position += 1;
+      const li = document.createElement("li");
+      li.className = "news-item";
 
-    const titleTranslate = document.createElement("button");
-    titleTranslate.type = "button";
-    titleTranslate.className = "translate-btn news-title-translate";
-    syncNewsTitleTranslateButton(item, titleTranslate);
-    titleTranslate.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      toggleNewsTitleTranslation(entry, item);
+      const main = document.createElement("div");
+      main.className = "news-item-main";
+      const indexEl = document.createElement("span");
+      indexEl.className = "news-index";
+      indexEl.textContent = `${item.index || position}.`;
+      main.appendChild(indexEl);
+
+      const itemSource = item.source || entry.newsSource || "the source site";
+      const titleEl = item.link
+        ? document.createElement("a")
+        : document.createElement("span");
+      titleEl.className = "news-title";
+      titleEl.textContent = item.title;
+      if (item.link) {
+        titleEl.href = item.link;
+        titleEl.target = "_blank";
+        titleEl.rel = "noopener noreferrer";
+        titleEl.title = `Open this story on ${itemSource}`;
+      }
+      titleEl.addEventListener("click", (event) => event.stopPropagation());
+
+      const titleRow = document.createElement("div");
+      titleRow.className = "news-title-row";
+      titleRow.appendChild(titleEl);
+
+      const titleTranslate = document.createElement("button");
+      titleTranslate.type = "button";
+      titleTranslate.className = "translate-btn news-title-translate";
+      syncNewsTitleTranslateButton(item, titleTranslate);
+      titleTranslate.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleNewsTitleTranslation(entry, item);
+      });
+      titleRow.appendChild(titleTranslate);
+      main.appendChild(titleRow);
+      renderNewsTitleTranslation(entry, item, main);
+
+      const meta = document.createElement("div");
+      meta.className = "news-meta";
+      const metaParts = [];
+      if (item.section && item.section !== itemSource) {
+        metaParts.push(item.section);
+      }
+      if (item.published) metaParts.push(formatNewsDate(item.published));
+      if (!item.complete) {
+        metaParts.push("fetching paragraphs…");
+      } else {
+        const count = item.paragraphs.length;
+        metaParts.push(`${count} paragraph${count === 1 ? "" : "s"}`);
+      }
+      meta.textContent = metaParts.join(" · ");
+      main.appendChild(meta);
+
+      const details = document.createElement("button");
+      details.type = "button";
+      details.className = "news-details";
+      details.textContent = "details";
+      details.title = "Read this story in a popup";
+      details.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openNewsModal(item);
+      });
+
+      li.appendChild(main);
+      li.appendChild(details);
+      list.appendChild(li);
     });
-    titleRow.appendChild(titleTranslate);
-    main.appendChild(titleRow);
-    renderNewsTitleTranslation(entry, item, main);
-
-    const meta = document.createElement("div");
-    meta.className = "news-meta";
-    const metaParts = [];
-    if (item.section) metaParts.push(item.section);
-    if (item.published) metaParts.push(formatNewsDate(item.published));
-    if (!item.complete) {
-      metaParts.push("fetching paragraphs…");
-    } else {
-      const count = item.paragraphs.length;
-      metaParts.push(`${count} paragraph${count === 1 ? "" : "s"}`);
-    }
-    meta.textContent = metaParts.join(" · ");
-    main.appendChild(meta);
-
-    const details = document.createElement("button");
-    details.type = "button";
-    details.className = "news-details";
-    details.textContent = "details";
-    details.title = "Read this story in a popup";
-    details.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      openKqedModal(item);
-    });
-
-    li.appendChild(main);
-    li.appendChild(details);
-    list.appendChild(li);
-  });
-  container.appendChild(list);
+    container.appendChild(list);
+  }
 }
 
-function kqedArticleText(item) {
+function newsArticleText(item) {
   if (!item) return "";
   const paragraphs = Array.isArray(item.paragraphs) ? item.paragraphs : [];
   const summary = String(item.summary || "");
@@ -2890,20 +2933,20 @@ function kqedArticleText(item) {
   return parts.join("\n\n");
 }
 
-function appendKqedParagraph(text, className) {
+function appendNewsParagraph(text, className) {
   const p = document.createElement("p");
   if (className) p.className = className;
   // Word spans keep every news word clickable for the /dict popup, exactly
   // like the words in a chat answer.
   p.appendChild(wordNodes(String(text || ""), true));
-  kqedBodyEl.appendChild(p);
+  newsBodyEl.appendChild(p);
 }
 
-function syncKqedTranslateButton() {
-  const button = kqedTranslateBtn;
+function syncNewsTranslateButton() {
+  const button = newsTranslateBtn;
   if (!button) return;
-  const state = kqedTranslation;
-  const currentText = kqedArticleText(kqedItem);
+  const state = newsTranslation;
+  const currentText = newsArticleText(newsItem);
   if (state.busy) {
     button.textContent = "翻译中…";
     button.disabled = true;
@@ -2933,101 +2976,101 @@ function syncKqedTranslateButton() {
     : "Waiting for the story text…";
 }
 
-function renderKqedTranslation() {
-  if (!kqedTranslationEl) return;
-  const state = kqedTranslation;
+function renderNewsTranslation() {
+  if (!newsTranslationEl) return;
+  const state = newsTranslation;
   const show = state.visible || state.busy;
-  kqedTranslationEl.hidden = !show;
+  newsTranslationEl.hidden = !show;
   // The modal body is rebuilt whenever a new paragraph streams in, so keep
   // the translation element attached after the article paragraphs.
-  if (show && kqedTranslationEl.parentNode !== kqedBodyEl) {
-    kqedBodyEl.appendChild(kqedTranslationEl);
+  if (show && newsTranslationEl.parentNode !== newsBodyEl) {
+    newsBodyEl.appendChild(newsTranslationEl);
   }
   if (!show) {
-    kqedTranslationBodyEl.textContent = "";
-    syncKqedTranslateButton();
+    newsTranslationBodyEl.textContent = "";
+    syncNewsTranslateButton();
     return;
   }
-  kqedTranslationLabelEl.textContent = state.busy
+  newsTranslationLabelEl.textContent = state.busy
     ? "中文翻译 · streaming"
     : "中文翻译";
-  kqedTranslationBodyEl.textContent = "";
+  newsTranslationBodyEl.textContent = "";
   if (state.text) {
-    kqedTranslationBodyEl.appendChild(renderMarkdown(state.text, true));
+    newsTranslationBodyEl.appendChild(renderMarkdown(state.text, true));
   }
   if (state.busy) {
     const caret = document.createElement("span");
     caret.className = "caret";
-    kqedTranslationBodyEl.appendChild(caret);
+    newsTranslationBodyEl.appendChild(caret);
   }
   if (state.error) {
     const error = document.createElement("div");
     error.className = "error-text";
     error.textContent = state.error;
-    kqedTranslationBodyEl.appendChild(error);
+    newsTranslationBodyEl.appendChild(error);
   }
-  syncKqedTranslateButton();
+  syncNewsTranslateButton();
 }
 
-function scheduleKqedTranslationRender() {
-  if (kqedTranslationRenderPending) return;
-  kqedTranslationRenderPending = true;
+function scheduleNewsTranslationRender() {
+  if (newsTranslationRenderPending) return;
+  newsTranslationRenderPending = true;
   window.setTimeout(() => {
-    kqedTranslationRenderPending = false;
-    renderKqedTranslation();
+    newsTranslationRenderPending = false;
+    renderNewsTranslation();
   }, 70);
 }
 
-function resetKqedTranslation() {
-  if (kqedTranslation.controller) {
-    kqedTranslation.controller.abort();
-    kqedTranslation.controller = null;
+function resetNewsTranslation() {
+  if (newsTranslation.controller) {
+    newsTranslation.controller.abort();
+    newsTranslation.controller = null;
   }
-  kqedTranslationGeneration += 1;
-  kqedTranslation.text = "";
-  kqedTranslation.sourceText = "";
-  kqedTranslation.error = "";
-  kqedTranslation.busy = false;
-  kqedTranslation.done = false;
-  kqedTranslation.visible = false;
-  if (kqedTranslationEl) kqedTranslationEl.hidden = true;
-  syncKqedTranslateButton();
+  newsTranslationGeneration += 1;
+  newsTranslation.text = "";
+  newsTranslation.sourceText = "";
+  newsTranslation.error = "";
+  newsTranslation.busy = false;
+  newsTranslation.done = false;
+  newsTranslation.visible = false;
+  if (newsTranslationEl) newsTranslationEl.hidden = true;
+  syncNewsTranslateButton();
 }
 
-function startKqedTranslation() {
-  const text = kqedArticleText(kqedItem);
-  if (!text || kqedTranslation.busy) return;
-  if (kqedTranslation.controller) kqedTranslation.controller.abort();
+function startNewsTranslation() {
+  const text = newsArticleText(newsItem);
+  if (!text || newsTranslation.busy) return;
+  if (newsTranslation.controller) newsTranslation.controller.abort();
 
-  const state = kqedTranslation;
+  const state = newsTranslation;
   state.sourceText = text;
   state.text = "";
   state.error = "";
   state.busy = true;
   state.done = false;
   state.visible = true;
-  renderKqedTranslation();
+  renderNewsTranslation();
 
   const controller = new AbortController();
   state.controller = controller;
-  const generation = ++kqedTranslationGeneration;
-  const isCurrent = () => generation === kqedTranslationGeneration;
+  const generation = ++newsTranslationGeneration;
+  const isCurrent = () => generation === newsTranslationGeneration;
   const handlers = {
     delta: (data) => {
       if (!isCurrent() || !data?.text) return;
       state.text += data.text;
-      scheduleKqedTranslationRender();
+      scheduleNewsTranslationRender();
     },
     error: (data) => {
       if (!isCurrent()) return;
       state.error = data?.message || "Translation failed.";
-      scheduleKqedTranslationRender();
+      scheduleNewsTranslationRender();
     },
     done: () => {
       if (!isCurrent()) return;
       state.busy = false;
       state.done = Boolean(state.text);
-      renderKqedTranslation();
+      renderNewsTranslation();
     },
   };
 
@@ -3043,98 +3086,101 @@ function startKqedTranslation() {
       state.busy = false;
       state.controller = null;
       state.done = Boolean(state.text);
-      renderKqedTranslation();
+      renderNewsTranslation();
     });
 }
 
-function toggleKqedTranslation() {
-  if (!kqedItem || kqedTranslation.busy) return;
-  const state = kqedTranslation;
+function toggleNewsTranslation() {
+  if (!newsItem || newsTranslation.busy) return;
+  const state = newsTranslation;
   const unchanged = state.done && state.text
-    && kqedArticleText(kqedItem) === state.sourceText;
+    && newsArticleText(newsItem) === state.sourceText;
   if (unchanged) {
     state.visible = !state.visible;
-    renderKqedTranslation();
+    renderNewsTranslation();
     if (state.visible) {
-      kqedTranslationEl.scrollIntoView({ block: "nearest" });
+      newsTranslationEl.scrollIntoView({ block: "nearest" });
     }
     return;
   }
-  startKqedTranslation();
-  kqedTranslationEl.scrollIntoView({ block: "nearest" });
+  startNewsTranslation();
+  newsTranslationEl.scrollIntoView({ block: "nearest" });
 }
 
-function renderKqedModal(item) {
-  kqedTitleEl.textContent = "";
+function renderNewsModal(item) {
+  newsTitleEl.textContent = "";
   // Title words are dictionary-searchable too, just like the story body.
-  kqedTitleEl.appendChild(
+  newsTitleEl.appendChild(
     wordNodes(item.title || "News", true)
   );
-  kqedMetaEl.textContent = [item.section, item.published ? formatNewsDate(item.published) : ""]
-    .filter(Boolean)
-    .join(" · ");
+  const metaParts = [];
+  for (const part of [item.source, item.section]) {
+    if (part && !metaParts.includes(part)) metaParts.push(part);
+  }
+  if (item.published) metaParts.push(formatNewsDate(item.published));
+  newsMetaEl.textContent = metaParts.join(" · ");
   if (item.link) {
-    kqedLinkEl.href = item.link;
-    kqedLinkEl.hidden = false;
+    newsLinkEl.href = item.link;
+    newsLinkEl.hidden = false;
   } else {
-    kqedLinkEl.removeAttribute("href");
-    kqedLinkEl.hidden = true;
+    newsLinkEl.removeAttribute("href");
+    newsLinkEl.hidden = true;
   }
 
-  kqedBodyEl.textContent = "";
+  newsBodyEl.textContent = "";
   const paragraphs = Array.isArray(item.paragraphs) ? item.paragraphs : [];
   const summary = String(item.summary || "");
   if (summary && summary !== paragraphs[0]) {
-    appendKqedParagraph(summary, "news-summary");
+    appendNewsParagraph(summary, "news-summary");
   }
   for (const text of paragraphs) {
-    appendKqedParagraph(text, "");
+    appendNewsParagraph(text, "");
   }
   if (!item.complete) {
     const loading = document.createElement("div");
     loading.className = "news-loading";
     loading.textContent = "loading paragraphs…";
-    kqedBodyEl.appendChild(loading);
+    newsBodyEl.appendChild(loading);
   } else if (!paragraphs.length && !summary) {
     const empty = document.createElement("div");
     empty.className = "news-loading";
     empty.textContent = "This story has no readable paragraphs in the feed.";
-    kqedBodyEl.appendChild(empty);
+    newsBodyEl.appendChild(empty);
   }
   // Keep the (possibly streaming) translation after the article body.
-  renderKqedTranslation();
-  kqedBodyEl.scrollTop = 0;
+  renderNewsTranslation();
+  newsBodyEl.scrollTop = 0;
 }
 
-function openKqedModal(item) {
-  kqedItem = item;
-  resetKqedTranslation();
-  renderKqedModal(item);
-  kqedPanelEl.hidden = false;
+function openNewsModal(item) {
+  newsItem = item;
+  resetNewsTranslation();
+  renderNewsModal(item);
+  newsPanelEl.hidden = false;
 }
 
-function closeKqedModal() {
-  kqedItem = null;
-  resetKqedTranslation();
-  kqedPanelEl.hidden = true;
-  kqedBodyEl.textContent = "";
-  if (kqedTranslationEl.parentNode !== kqedBodyEl) {
-    kqedBodyEl.appendChild(kqedTranslationEl);
+function closeNewsModal() {
+  newsItem = null;
+  resetNewsTranslation();
+  newsPanelEl.hidden = true;
+  newsBodyEl.textContent = "";
+  if (newsTranslationEl.parentNode !== newsBodyEl) {
+    newsBodyEl.appendChild(newsTranslationEl);
   }
 }
-$("#kqed-close").addEventListener("click", closeKqedModal);
-kqedTranslateBtn.addEventListener("click", (event) => {
+$("#news-close").addEventListener("click", closeNewsModal);
+newsTranslateBtn.addEventListener("click", (event) => {
   event.preventDefault();
   event.stopPropagation();
-  toggleKqedTranslation();
+  toggleNewsTranslation();
 });
-kqedPanelEl.addEventListener("click", (event) => {
-  if (event.target === kqedPanelEl) closeKqedModal();
+newsPanelEl.addEventListener("click", (event) => {
+  if (event.target === newsPanelEl) closeNewsModal();
 });
 
 /* News words (in the story body and the modal title) open the same
  * streaming /dict popup as answer words. */
-function handleKqedWordClick(event) {
+function handleNewsWordClick(event) {
   const wordEl = event.target.closest(".word");
   if (!wordEl) return;
   const selection = window.getSelection();
@@ -3143,12 +3189,12 @@ function handleKqedWordClick(event) {
   event.stopPropagation();
   openDictionaryPopup(
     wordEl.dataset.word || wordEl.textContent,
-    kqedArticleText(kqedItem),
+    newsArticleText(newsItem),
     wordEl
   );
 }
-kqedBodyEl.addEventListener("click", handleKqedWordClick);
-kqedTitleEl.addEventListener("click", handleKqedWordClick);
+newsBodyEl.addEventListener("click", handleNewsWordClick);
+newsTitleEl.addEventListener("click", handleNewsWordClick);
 
 /* ------------------------------------------------------------------ *
  *  Answer translation (中文 button)
@@ -3736,11 +3782,7 @@ function submitText(text, fromChoice = false) {
     clickable: !isCommand,
     tag: appState?.tag || "",
     wikiArticle: commandName === "wiki_article",
-    label: commandName === "kqed"
-      ? "KQED News"
-      : commandName === "cnn"
-        ? "CNN News"
-        : undefined,
+    label: commandName === "news" ? "News" : undefined,
   });
   appendEntry(entry);
   resetAnswerSourceStatus();
@@ -3915,6 +3957,7 @@ function completionContext() {
   let kind = null;
   if (name === "/tag" || name === "/tag_gen") kind = "tags";
   else if (name === "/transcript" || name === "/search_transcript") kind = "transcripts";
+  else if (name === "/news") kind = "news_sources";
   else if (name === "/article") kind = "paths";
   else return null;
   return {
@@ -4284,9 +4327,9 @@ function handleKeyDown(event) {
     return;
   }
 
-  if (!kqedPanelEl.hidden && key === "Escape") {
+  if (!newsPanelEl.hidden && key === "Escape") {
     event.preventDefault();
-    closeKqedModal();
+    closeNewsModal();
     return;
   }
 
@@ -4607,9 +4650,9 @@ document.addEventListener("keydown", (event) => {
     closeLineHelp();
     return;
   }
-  if (!kqedPanelEl.hidden && key === "Escape") {
+  if (!newsPanelEl.hidden && key === "Escape") {
     event.preventDefault();
-    closeKqedModal();
+    closeNewsModal();
     return;
   }
   if (!helpPanel.hidden && key === "Escape") {
@@ -4649,7 +4692,7 @@ inputEl.addEventListener("blur", () => {
   // Do not let clicking the page accidentally leave the console unfocused,
   // but do not steal focus while the user is selecting text in the output.
   window.setTimeout(() => {
-    if (!popupEl.hidden || !helpPanel.hidden || !lineHelpPanel.hidden || !kqedPanelEl.hidden) return;
+    if (!popupEl.hidden || !helpPanel.hidden || !lineHelpPanel.hidden || !newsPanelEl.hidden) return;
     if (outputPointerDown || selectionInsideOutput()) return;
     if (document.activeElement === document.body) {
       inputEl.focus({ preventScroll: true });
