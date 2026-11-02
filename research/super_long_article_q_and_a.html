@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Long-Article Question Answering with a Local 35B Model</title>
+<style>
+  :root {
+    --fg: #1b1f23;
+    --muted: #57606a;
+    --line: #d0d7de;
+    --bg: #ffffff;
+    --soft: #f6f8fa;
+    --accent: #0969da;
+    --warn: #9a6700;
+    --good: #1a7f37;
+    --bad: #cf222e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto;
+    max-width: 1040px;
+    padding: 40px 28px 80px;
+    color: var(--fg);
+    background: var(--bg);
+    font: 16px/1.62 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  h1, h2, h3, h4 { line-height: 1.25; margin-top: 2em; }
+  h1 { margin-top: 0; font-size: 2rem; border-bottom: 1px solid var(--line); padding-bottom: .35em; }
+  h2 { font-size: 1.45rem; border-bottom: 1px solid var(--line); padding-bottom: .25em; }
+  h3 { font-size: 1.15rem; }
+  p, li { max-width: 82ch; }
+  a { color: var(--accent); }
+  code {
+    font: .88em/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--soft);
+    border: 1px solid #eaeef2;
+    border-radius: 4px;
+    padding: .1em .3em;
+  }
+  pre {
+    background: #0d1117;
+    color: #e6edf3;
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font: .84rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre code { background: none; border: 0; padding: 0; color: inherit; }
+  table { border-collapse: collapse; width: 100%; margin: 1.1em 0; font-size: .94rem; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; vertical-align: top; text-align: left; }
+  th { background: var(--soft); }
+  .muted { color: var(--muted); }
+  .callout {
+    border-left: 4px solid var(--accent);
+    background: #f0f6ff;
+    padding: 12px 16px;
+    margin: 1.2em 0;
+    border-radius: 0 6px 6px 0;
+  }
+  .callout.warn { border-left-color: var(--warn); background: #fff8e5; }
+  .callout.good { border-left-color: var(--good); background: #eefbf1; }
+  .callout.bad { border-left-color: var(--bad); background: #fff0f0; }
+  .pill {
+    display: inline-block;
+    font-size: .75rem;
+    font-weight: 600;
+    letter-spacing: .02em;
+    padding: .14em .55em;
+    border-radius: 999px;
+    background: var(--soft);
+    border: 1px solid var(--line);
+    color: var(--muted);
+    vertical-align: middle;
+  }
+  .toc { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 14px 20px; }
+  .toc ol { margin: .4em 0; }
+  .num { font-variant-numeric: tabular-nums; }
+  .small { font-size: .9rem; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 2.4em 0; }
+</style>
+</head>
+<body>
+
+<h1>Can a Very Long Article Fit in a Local 35B Model's Context?</h1>
+<p class="muted">
+  Research note for the <code>/article</code> command in <code>app/chat_server.py</code>.<br>
+  Date: 2026-11-02 · Model: <code>ornith:35b</code> · Sample article: <code>item_tagging_overview.html</code>
+</p>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#summary">Executive summary</a></li>
+    <li><a href="#measurements">What the sample article actually costs</a></li>
+    <li><a href="#limits">Model window vs. application window</a></li>
+    <li><a href="#why-not-stuff">Why “just put the whole article in the prompt” is the wrong default</a></li>
+    <li><a href="#strategies">Three ways to get high-quality answers</a></li>
+    <li><a href="#recommendation">Recommended routing by question type</a></li>
+    <li><a href="#mapping">How this maps onto the current code</a></li>
+    <li><a href="#evaluation">Evaluation plan</a></li>
+    <li><a href="#risks">Risks and failure modes</a></li>
+    <li><a href="#appendix">Appendix: reproduction commands</a></li>
+  </ol>
+</div>
+
+<h2 id="summary">1. Executive summary</h2>
+
+<div class="callout bad">
+  <strong>Short answer:</strong> not as the default. The sample article is
+  <strong>26,687 words / ~55k estimated tokens</strong> of text
+  (<strong>~86.7k tokens</strong> once split into the app's per-paragraph
+  trunks). The model's native window is large enough on paper, but the answer
+  call in this application uses <code>num_ctx = 32,768</code>, so the whole
+  article does <em>not</em> fit. Even after raising the window, stuffing 55k
+  tokens into every turn is slow, expensive, and gives worse answers than
+  targeted retrieval because of context dilution and “lost in the middle.”
+</div>
+
+<p>
+  The article can be answered well without ever putting all of it in the
+  prompt. The existing <code>/article</code> implementation already contains
+  the right primitives: a compact <em>overview</em> trunk (728 estimated
+  tokens), a bounded <em>digest</em> trunk (2,881 estimated tokens), and 2,089
+  paragraph trunks that are retrieved with BM25. The missing pieces are a
+  clearer routing policy, section-level expansion, and an iterative mode for
+  questions that require evidence from several distant parts of the document.
+</p>
+
+<p>The three recommended approaches, in order of value for this codebase:</p>
+<ol>
+  <li><strong>Structure-aware hierarchical summarization with a question router</strong> — precompute an overview, a document digest, and per-section summaries; send broad questions to summaries and narrow questions to retrieved paragraphs. <em>This is the smallest change and should be the default.</em></li>
+  <li><strong>Retrieve-then-rerank with parent-section expansion</strong> — retrieve many candidate paragraphs cheaply, rerank with the small model, then expand each winning paragraph to its enclosing section. Best for narrow, factual, and multi-hop questions.</li>
+  <li><strong>Iterative agentic retrieval with a sufficiency loop</strong> — plan sub-questions, retrieve in small batches, ask a small model whether the evidence is sufficient, and stop when it is. Best for “list every…” or “compare sections…” questions, at the cost of extra model calls.</li>
+</ol>
+
+<h2 id="measurements">2. What the sample article actually costs</h2>
+
+<p>
+  Measurements below were produced with the same extraction, paragraph
+  splitter, and token estimator used by the running application, using the
+  example article from the original request:
+  <code>~/projects/learning_and_development/home-cms/HOME-126045-product-tag-audit/research/item_tagging_overview.html</code>.
+</p>
+
+<table>
+  <thead>
+    <tr><th>Metric</th><th class="num">Value</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Raw file size</td><td class="num">279,031 bytes</td><td>HTML with markup, scripts, navigation</td></tr>
+    <tr><td>Extracted text</td><td class="num">190,182 chars</td><td>After removing scripts/styles/tags</td></tr>
+    <tr><td>Words</td><td class="num">26,687</td><td>≈ 2.7× a 10,000-word longread</td></tr>
+    <tr><td>Paragraphs / trunks</td><td class="num">2,089</td><td>One trunk per extracted paragraph</td></tr>
+    <tr><td>Headings</td><td class="num">166</td><td>Used to build the overview outline</td></tr>
+    <tr><td>Estimated text tokens</td><td class="num">55,265</td><td><code>chat.estimate_tokens()</code> (≈4 ASCII chars/token; non-ASCII counted 1:1)</td></tr>
+    <tr><td>Estimated full-trunk context</td><td class="num">86,695</td><td>All 2,091 trunks including overview/digest and <code>&lt;article&gt;</code> wrappers</td></tr>
+    <tr><td>Overview trunk</td><td class="num">728</td><td>Title + outline + TL;DR/summary (chunk 0)</td></tr>
+    <tr><td>Digest trunk</td><td class="num">2,881</td><td>Overview + representative content from each major section (chunk −1)</td></tr>
+    <tr><td>Largest paragraph trunk</td><td class="num">233</td><td>Every individual paragraph fits comfortably in a 4,096-token retrieval budget</td></tr>
+  </tbody>
+</table>
+
+<p class="small muted">
+  The estimator deliberately over-counts non-ASCII characters (math symbols,
+  smart quotes, Unicode punctuation in this document). A byte-pair tokenizer
+  would give a lower number for some of that text, but the order of magnitude
+  is stable: this is a <strong>tens-of-thousands-of-tokens</strong> document,
+  not a 5-page memo.
+</p>
+
+<div class="callout warn">
+  <strong>Important distinction:</strong> raw text is ~55k tokens, but the
+  application stores context as one trunk per paragraph and adds
+  <code>&lt;article&gt;&lt;title&gt;…&lt;/title&gt;&lt;paragraph&gt;…&lt;/paragraph&gt;&lt;/article&gt;</code>
+  around each one. Small paragraphs are cheap individually, but at 2,089 of
+  them the wrappers alone add ~33k estimated tokens. “Use all chunks” is
+  therefore much more expensive than “concatenate the article.”
+</div>
+
+<h2 id="limits">3. Model window vs. application window</h2>
+
+<table>
+  <thead>
+    <tr><th>Layer</th><th class="num">Tokens</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>ornith:35b</code> native context length</td><td class="num">262,144</td><td>Advertised maximum from <code>ollama show ornith:35b</code></td></tr>
+    <tr><td><code>chat.ANSWER_NUM_CTX</code></td><td class="num">32,768</td><td>Window actually requested for answer generation</td></tr>
+    <tr><td><code>chat.MAX_CONTEXT_TOKENS</code></td><td class="num">4,096</td><td>Default adaptive retrieval budget (context, not total prompt)</td></tr>
+    <tr><td>Default retrieval depth</td><td class="num">20</td><td>BM25 candidate count before filtering/selection</td></tr>
+    <tr><td>Full sample article as trunks</td><td class="num">86,695</td><td>≈ 2.6× the requested answer window</td></tr>
+    <tr><td>Full sample article as plain text</td><td class="num">55,265</td><td>≈ 1.7× the requested answer window</td></tr>
+  </tbody>
+</table>
+
+<p>
+  So the honest answer to “can I fit the entire article in the context?” is:
+  <strong>not with the current answer settings, and not with a meaningful
+  quality guarantee even if you raise them.</strong> The model's 262k ceiling
+  is a capability, not a quality target. Long-context quality is usually
+  degraded well before the hard limit, and the degradation is uneven: models
+  tend to use the beginning and the end of the prompt much better than the
+  middle. Long-context benchmarks also typically measure retrieval of a
+  planted sentence, not reasoning over an entire technical document.
+</p>
+
+<h3>What happens if we raise <code>num_ctx</code> to 65,536?</h3>
+<p>
+  The plain text would fit; the full trunk set would not. Three other costs
+  appear immediately:
+</p>
+<ul>
+  <li><strong>Prefill latency.</strong> Time-to-first-token grows with prompt
+      length. A 55k-token prompt must be processed before the first output
+      token; on a local machine that is a noticeable pause on every turn,
+      unless the prompt is cached and unchanged.</li>
+  <li><strong>Memory.</strong> KV-cache memory grows roughly linearly with
+      context length. The exact size depends on layer count, KV heads, head
+      dimension, and quantization. Multi-GB KV caches are expected at this
+      length; verify with <code>ollama ps</code> before committing to it as a
+      product default.</li>
+  <li><strong>Answer quality.</strong> A 55k-token prompt is mostly irrelevant
+      to a narrow question such as “what is the retention window for a removed
+      tag?”. Retrieval quality often improves when the prompt is 2–8k tokens
+      of highly relevant evidence instead of 55k tokens of everything.</li>
+</ul>
+
+<div class="callout">
+  <strong>Practical rule:</strong> use long context as a <em>fallback for
+  small documents</em> and as a <em>last synthesis step</em> over retrieved
+  evidence. Do not use it as the first-line retrieval strategy for a
+  document that is larger than the retrieval budget by an order of magnitude.
+</div>
+
+<h2 id="why-not-stuff">4. Why “just put the whole article in the prompt” is the wrong default</h2>
+
+<ol>
+  <li><strong>Context dilution.</strong> Every retrieved paragraph competes with
+      thousands of unrelated paragraphs for the model's attention. Narrow
+      answers become less precise and more likely to mix sections.</li>
+  <li><strong>Lost in the middle.</strong> Long prompts are used unevenly;
+      evidence placed in the middle of a large context is recalled less
+      reliably than evidence near the start or end (Liu et al.,
+      <em>Lost in the Middle</em>, 2023).</li>
+  <li><strong>No citations.</strong> If the whole document is one blob, the
+      model cannot tell the user which section supports a claim. The current
+      app's per-paragraph trunks solve this; a single blob loses it.</li>
+  <li><strong>Cost per turn.</strong> Every follow-up question re-sends the
+      whole document unless prefix caching can reuse it. Even with caching,
+      a changed question or system preamble can invalidate the cache.</li>
+  <li><strong>Refusals and hallucination both increase.</strong> When the
+      relevant evidence is buried, models either claim the context is
+      insufficient or fill the gap from parametric memory. The first behavior
+      is visible in the bug reports that motivated this research; the second
+      is worse because it is silent.</li>
+  <li><strong>Hard failure for bigger documents.</strong> The sample is
+      already at 55k tokens. A 200-page HTML report or a book-length document
+      breaks the strategy entirely, whereas retrieval degrades gracefully.</li>
+</ol>
+
+<h2 id="strategies">5. Three ways to get high-quality answers</h2>
+
+<h3>Strategy A — Structure-aware hierarchical summarization + question router <span class="pill">recommended default</span></h3>
+
+<p>
+  Build a small summary tree when the article is loaded, then route each
+  question to the right level of that tree.
+</p>
+
+<pre><code>Article
+├── Document overview        title + outline + TL;DR/executive summary   (~700 tokens)
+├── Document digest          overview + 1 excerpt per major section      (~3k tokens)
+├── Section summaries        one 150–300-word summary per H2              (~100–300 tokens each)
+└── Paragraph trunks         one knowledge piece per paragraph            (retrieval unit)
+</code></pre>
+
+<p><strong>How it answers questions</strong></p>
+<ul>
+  <li><strong>Broad questions</strong> (“what is this about?”, “summarize in
+      1000 words”, “what are the main recommendations?”) are answered from the
+      overview or digest, not from BM25 paragraphs. Generic words such as
+      “what”, “this”, and “about” otherwise match arbitrary paragraphs.</li>
+  <li><strong>Narrow questions</strong> (“what is the retention window?”) go
+      through normal BM25 retrieval over paragraph trunks, with the small-model
+      relevance filter and token budget already implemented.</li>
+  <li><strong>Section-level questions</strong> (“explain the audit process”)
+      retrieve the best paragraph, then attach its section summary and its
+      neighboring paragraphs so the answer has local coherence.</li>
+</ul>
+
+<p><strong>Why it works</strong></p>
+<ul>
+  <li>The summary tree is built once per content hash and can be cached on
+      disk (the current code already hashes the path + bytes into
+      <code>app/.article_cache/</code>).</li>
+  <li>The router is cheap: the existing <code>article_overview_question()</code>
+      recognizes broad/deictic phrasing, and word-count requests are already
+      parsed.</li>
+  <li>Every answer level keeps provenance: overview/digest are synthetic
+      trunks, paragraph and section chunks still map back to headings.</li>
+</ul>
+
+<p><strong>Cost and limits</strong></p>
+<ul>
+  <li>Summary generation needs one pass over the article with a local model
+      (map: section summaries; reduce: document digest). Do it at load time and
+      cache it. A failure must fall back to the current extractive overview so
+      <code>/article</code> never blocks.</li>
+  <li>Summaries can lose specifics. Narrow factual questions must still be
+      answered from raw paragraphs, not from summaries.</li>
+  <li>For documents without usable headings, fall back to fixed-size windows
+      with overlap and summarize each window.</li>
+</ul>
+
+<div class="callout good">
+  <strong>Best fit for this app:</strong> it extends the existing
+  overview/digest design instead of replacing it, keeps the current BM25 path,
+  and fixes the most common failure mode (broad questions receiving unrelated
+  paragraphs) without increasing per-question prompt size.
+</div>
+
+<h3>Strategy B — Retrieve-then-rerank with parent-section expansion</h3>
+
+<p>
+  Treat paragraph trunks as leaves and headings as parents. Retrieve broadly,
+  rerank aggressively, then send only the most useful local neighborhood.
+</p>
+
+<pre><code>question
+  → query expansion / keyword extraction          (small model, optional)
+  → BM25 over all paragraph trunks                (top 50–100)
+  → small-model relevance filter                  (keep 10–20)
+  → rerank by query–paragraph relevance           (cross-encoder or LLM)
+  → expand each winner to its section:
+       previous paragraph + heading + next paragraph
+  → deduplicate and enforce a 6–10k token budget
+  → synthesize with citations to paragraph/section IDs
+</code></pre>
+
+<p><strong>Why it works</strong></p>
+<ul>
+  <li>Retrieval recall is separated from prompt budget: you can inspect many
+      candidates without sending them all to the 35B model.</li>
+  <li>Parent-section expansion fixes the “orphan paragraph” problem. A
+      paragraph that says “the default is 30 days” is useless without the
+      heading that says which retention period it refers to.</li>
+  <li>Neighbor expansion helps multi-hop and definitional questions without
+      pulling in a whole section of 20k tokens.</li>
+</ul>
+
+<p><strong>Cost and limits</strong></p>
+<ul>
+  <li>An extra reranking call per question; keep it on <code>qwen3:1.7b</code>
+      or a lightweight embedding/BM25 hybrid to avoid latency.</li>
+  <li>Requires a reliable heading-to-paragraph map. The current extractor
+      already collects headings; it needs to record each paragraph's
+      section span during <code>_load_article_chunks()</code>.</li>
+  <li>For questions that deliberately span many sections (“list every
+      retention period in the document”), local expansion is not enough;
+      use Strategy C.</li>
+</ul>
+
+<h3>Strategy C — Iterative agentic retrieval with a sufficiency loop</h3>
+
+<p>
+  Instead of deciding the context once, let the system search, check, and
+  search again. This is the same idea as
+  <code>chat_gradual_context.py</code>, adapted to article retrieval.
+</p>
+
+<pre><code>plan = decompose(question)                   # 1–5 sub-questions
+evidence = []
+loop:
+    for each uncovered sub-question:
+        new = bm25(search_terms(sub-question), exclude=already_seen)
+        new = rerank(new)[:3]
+        evidence += new
+    if estimate_tokens(evidence) &gt; budget: break
+    verdict = small_model(
+        "Given these excerpts, can every part of the question be answered "
+        "with a specific fact or quote? Answer YES or NO and name missing parts."
+    )
+    if verdict is YES: break
+    search_terms = expand_from_missing_parts(verdict)
+synthesize(question, evidence)               # with citations
+</code></pre>
+
+<p><strong>Why it works</strong></p>
+<ul>
+  <li>It handles multi-part and enumerative questions (“list all levels”,
+      “compare X and Y across the document”) that a single top-k retrieval
+      cannot cover.</li>
+  <li>The small model only judges sufficiency; the 35B model is called once
+      for the final synthesis, which keeps output quality high.</li>
+  <li>A hard token budget prevents runaway context growth. A typical stopping
+      point is 8–16k tokens of evidence, far below the 32,768 window.</li>
+</ul>
+
+<p><strong>Cost and limits</strong></p>
+<ul>
+  <li>Multiple small-model calls per question; latency grows with the number
+      of iterations. Cap iterations (e.g., 4) and token budget (e.g., 16k).</li>
+  <li>Sufficiency prompts can be overconfident. Require a cited evidence
+      snippet in the verdict, not just “YES”.</li>
+  <li>Risk of looping on a genuinely absent answer. After the iteration cap,
+      answer from what exists and explicitly say which part is unsupported
+      (without the current blanket refusal).</li>
+</ul>
+
+<h3>Long-context fallback (not a primary strategy)</h3>
+<p>
+  If the document is small (say, under ~20k estimated tokens) and the user
+  explicitly asks for a whole-document answer, a single long-context call can
+  be acceptable: raise <code>num_ctx</code>, keep the overview at the start
+  and the question at the end, and stream the answer. This is a special case,
+  not the default. For the sample article it would require at least a 64k
+  window and would still be slower and less precise than Strategies A–C.
+</p>
+
+<h2 id="recommendation">6. Recommended routing by question type</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Question shape</th>
+      <th>Examples</th>
+      <th>Context source</th>
+      <th>Target evidence budget</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Broad summary / “what is this about”</td>
+      <td>“Summarize this article”, “what is this about in 1000 words?”</td>
+      <td>Overview (short) or digest (long/detailed)</td>
+      <td class="num">0.7k–3k</td>
+    </tr>
+    <tr>
+      <td>Narrow factual</td>
+      <td>“What is the default retention period?”</td>
+      <td>Top paragraph(s) + heading + neighbors</td>
+      <td class="num">1k–4k</td>
+    </tr>
+    <tr>
+      <td>Section explanation</td>
+      <td>“Explain how the audit process works”</td>
+      <td>Section summary + best paragraphs in that section</td>
+      <td class="num">3k–8k</td>
+    </tr>
+    <tr>
+      <td>Enumerative / comparative / multi-hop</td>
+      <td>“List every tag type and its retention rule”</td>
+      <td>Iterative retrieval over sub-questions</td>
+      <td class="num">8k–16k</td>
+    </tr>
+    <tr>
+      <td>Whole-document, small doc</td>
+      <td>“Rewrite this 8k-token spec as a checklist”</td>
+      <td>Full text in one call, <code>num_ctx</code> raised</td>
+      <td class="num">≤ 20k</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  Two guardrails apply to every row: <strong>never exceed the answer
+  window</strong>, and <strong>always keep citation IDs</strong> so the user
+  can see which section a claim came from.
+</p>
+
+<h2 id="mapping">7. How this maps onto the current code</h2>
+
+<h3>Already implemented</h3>
+<ul>
+  <li><code>app/chat_server.py</code>
+    <ul>
+      <li><code>_load_article_chunks()</code> decodes HTML/Markdown, extracts
+          title and headings, splits paragraphs, content-hashes the cache, and
+          writes one trunk per paragraph.</li>
+      <li><code>_article_overview()</code> builds chunk 0 from the title,
+          outline, and TL;DR/summary.</li>
+      <li><code>_article_digest()</code> builds chunk −1 from the overview plus
+          the first substantive content of each major section (capped at
+          <code>ARTICLE_DIGEST_CHARS = 16,000</code>).</li>
+      <li><code>article_overview_question()</code> routes broad/deictic and
+          word-count questions to the overview or digest.</li>
+      <li>Chunk −1 is excluded from ordinary BM25 so its headings cannot
+          crowd out paragraph matches.</li>
+    </ul>
+  </li>
+  <li><code>chat.py</code>
+    <ul>
+      <li><code>answer()</code> retrieves paragraph trunks with BM25, applies
+          the <code>qwen3:1.7b</code> relevance filter, enforces the
+          <code>MAX_CONTEXT_TOKENS</code> budget, and streams the final answer
+          with <code>ornith:35b</code> at <code>ANSWER_NUM_CTX = 32,768</code>.</li>
+      <li><code>_select_auto_chunks()</code> already implements an elbow,
+          diversity, per-video cap, and token-budget stopping rule. For
+          article mode, “per-video” is effectively “per-document”, so the cap
+          should be revisited if one article dominates retrieval.</li>
+    </ul>
+  </li>
+</ul>
+
+<h3>Highest-value changes</h3>
+<ol>
+  <li><strong>Persist a section map.</strong> During
+      <code>_load_article_chunks()</code>, record for every paragraph its
+      nearest preceding heading and its section span. This enables parent
+      expansion (Strategy B) and precise citations.</li>
+  <li><strong>Cache generated section summaries and the digest.</strong> The
+      existing cache directory is content-addressed, so summaries can live
+      beside the trunks. Build extractive summaries first (fast, deterministic)
+      and upgrade to model-written summaries only if quality demands it.</li>
+  <li><strong>Make the router explicit.</strong> Extend
+      <code>article_overview_question()</code> into a small classifier with
+      three labels: <em>overview</em>, <em>section</em>, <em>narrow</em>.
+      Keep the current regex rules as the fallback when the classifier is
+      uncertain.</li>
+  <li><strong>Add parent/neighbor expansion to the narrow path.</strong> After
+      selecting the top paragraph(s), append the heading and one or two
+      neighboring paragraphs, then re-check the token budget.</li>
+  <li><strong>Add an opt-in iterative mode.</strong> Reuse the loop design
+      from <code>chat_gradual_context.py</code>, but cap iterations at 4 and
+      evidence at 16k tokens. Enable it automatically for enumerative phrasing
+      (“list all”, “every”, “compare”, “across the document”).</li>
+  <li><strong>Report real token usage in benchmark mode.</strong> The current
+      estimate is character-based. For tuning, log Ollama's reported
+      prompt/eval token counts so the budget and summary sizes are based on
+      real tokenizer numbers.</li>
+</ol>
+
+<h3>Concrete defaults to try</h3>
+<table>
+  <thead>
+    <tr><th>Setting</th><th>Current</th><th>Suggested experiment</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Answer window <code>num_ctx</code></td><td class="num">32,768</td><td>Keep; do not raise globally</td></tr>
+    <tr><td>Narrow retrieval budget</td><td class="num">4,096</td><td>Try 6,144 with parent expansion</td></tr>
+    <tr><td>Overview size</td><td class="num">~728 tokens</td><td>Keep</td></tr>
+    <tr><td>Digest size</td><td class="num">~2,881 tokens</td><td>Try 4k–6k for “1000 words” requests</td></tr>
+    <tr><td>Iterative evidence cap</td><td>—</td><td>12k–16k, max 4 rounds</td></tr>
+    <tr><td>BM25 candidates</td><td class="num">20</td><td>Try 50–100 before reranking</td></tr>
+  </tbody>
+</table>
+
+<h2 id="evaluation">8. Evaluation plan</h2>
+
+<p>
+  Build a small, fixed question set for the sample article (20–30 questions)
+  and score each strategy on the same machine. Do not judge by one anecdotal
+  question.
+</p>
+
+<table>
+  <thead>
+    <tr><th>Question class</th><th>Count</th><th>Example</th><th>What “good” means</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Broad summary</td><td>5</td><td>“What is this article about in 500 words?”</td><td>Covers the main sections; no invented facts</td></tr>
+    <tr><td>Narrow factual</td><td>8</td><td>“What happens to a tag when it is removed?”</td><td>Correct fact + correct section citation</td></tr>
+    <tr><td>Definitional</td><td>4</td><td>“What is a product tag in this system?”</td><td>Answer grounded in the document's definition</td></tr>
+    <tr><td>Enumerative</td><td>4</td><td>“List all tag audit checks.”</td><td>High recall of distinct items</td></tr>
+    <tr><td>Multi-hop</td><td>3</td><td>“How does tagging affect search ranking, and where is that enforced?”</td><td>Correctly combines two or more sections</td></tr>
+    <tr><td>Unanswerable</td><td>3</td><td>“What is the pricing of the tagging service?”</td><td>Says the document does not contain it; no hallucination</td></tr>
+  </tbody>
+</table>
+
+<p><strong>Metrics</strong></p>
+<ul>
+  <li><strong>Faithfulness:</strong> every claim is supported by a cited
+      excerpt (human or LLM judge with the excerpts in the prompt).</li>
+  <li><strong>Answer coverage:</strong> fraction of key points present for
+      enumerative and summary questions.</li>
+  <li><strong>Citation accuracy:</strong> cited section actually contains the
+      supporting fact.</li>
+  <li><strong>Time to first token and total latency:</strong> measured with
+      the app's existing timing hooks / <code>/benchmark</code>.</li>
+  <li><strong>Prompt tokens per answer:</strong> real Ollama counts, not only
+      the character estimate.</li>
+  <li><strong>Refusal rate on answerable questions</strong> and
+      <strong>hallucination rate on unanswerable questions</strong>.</li>
+</ul>
+
+<h2 id="risks">9. Risks and failure modes</h2>
+
+<ul>
+  <li><strong>Summary drift.</strong> Model-written summaries can omit the
+      exact number or exception the user later asks about. Keep raw
+      paragraphs as the retrieval source of truth; summaries are only for
+      broad questions.</li>
+  <li><strong>Heading detection is heuristic.</strong> HTML headings,
+      numbered sections, and Markdown headings are handled, but documents
+      that use styled <code>&lt;div&gt;</code>s or PDF-like layouts may have
+      no usable structure. Fall back to fixed windows with overlap.</li>
+  <li><strong>One giant paragraph.</strong> A paragraph longer than the
+      retrieval budget cannot be used whole. Split it by sentence groups
+      before trunking.</li>
+  <li><strong>Multiple documents.</strong> The current per-video cap in
+      <code>_select_auto_chunks()</code> is designed for transcripts. In
+      article mode it is effectively a per-document cap; verify it still
+      behaves when several articles are loaded in one session.</li>
+  <li><strong>Cache invalidation.</strong> The content hash covers path and
+      bytes, so edited articles get fresh trunks. If summary generation
+      becomes model-dependent, include the model name and prompt version in
+      the cache key.</li>
+  <li><strong>Privacy and cost.</strong> All strategies are local, but
+      iterative modes multiply local inference calls. Cap loops and expose
+      the number of retrieval rounds in benchmark mode.</li>
+</ul>
+
+<h2 id="appendix">10. Appendix: reproduction commands</h2>
+
+<p>Inspect the model's advertised window:</p>
+<pre><code>ollama show ornith:35b | grep -i "context length"</code></pre>
+
+<p>Measure the sample article with the application's own helpers:</p>
+<pre><code>cd /Users/jhuang/airesearch/local_llm_chat
+python3 - &lt;&lt;'PY'
+# (abridged) import app.chat_server with local stubs for GUI-only deps,
+# then call _load_article_chunks(), _article_overview(), _article_digest()
+# and chat.estimate_tokens() on the sample path.
+PY</code></pre>
+
+<p>Quick independent estimate of text size:</p>
+<pre><code>python3 - &lt;&lt;'PY'
+import re, html, pathlib
+p = pathlib.Path("~/…/item_tagging_overview.html").expanduser()
+raw = p.read_text(encoding="utf-8", errors="replace")
+t = re.sub(r"&lt;\s*(script|style|noscript|svg|head)\b[^&gt;]*&gt;.*?&lt;\s*/\s*\1\s*&gt;", "\n", raw, flags=re.I|re.S)
+t = re.sub(r"&lt;\s*/?\s*(?:br|p|div|li|ul|ol|h[1-6]|section|article)\b[^&gt;]*&gt;", "\n\n", t, flags=re.I)
+t = re.sub(r"&lt;[^&gt;]+&gt;", " ", t)
+t = html.unescape(t)
+print("chars:", len(t), "words:", len(t.split()), "rough tokens:", len(t)//4)
+PY</code></pre>
+
+<hr>
+<p class="small muted">
+  References for the general long-context findings: N. F. Liu et al.,
+  “Lost in the Middle: How Language Models Use Long Contexts” (2023);
+  P. Sarthi et al., “RAPTOR: Recursive Abstractive Processing for
+  Tree-Organized Retrieval” (2024); the map-reduce and refine patterns
+  described in LangChain's long-document summarization documentation.
+  Local measurements were taken against <code>ornith:35b</code> on the
+  sample article on 2026-11-02.
+</p>
+
+</body>
+</html>

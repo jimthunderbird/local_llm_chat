@@ -64,7 +64,7 @@ import time
 from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 from urllib.parse import parse_qs, quote, urlparse
 from xml.sax.saxutils import escape as xml_escape
 
@@ -102,7 +102,7 @@ WEB_COMMANDS = {
     "/tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
     "/kqed": "list the latest KQED News stories (optionally /kqed <count>)",
     "/cnn": "list the latest CNN News stories (optionally /cnn [section] [count])",
-    "/article": "use one local article file as the only context for follow-up questions",
+    "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
 }
 
 # Sections served by openrss.org for cnn_news_fetch.php.
@@ -2312,6 +2312,7 @@ def build_answer_annotations(
             {
                 "index": index,
                 "video_id": chunk.video_id,
+                "chunk_index": chunk.index,
                 "title": title or chunk.video_id,
                 "url": YOUTUBE_URL_TEMPLATE.format(video_id=chunk.video_id),
                 "rank": rank,
@@ -2373,7 +2374,9 @@ ARTICLE_BROAD_OVERVIEW_RE = re.compile(
     r"\bwhat(?:'s|\s+is|\s+was)?\s+(?:this|it)\s+(?:all\s+)?about\b"
     r"|\b(?:summari[sz]e|overview|tl\s*;?\s*dr)\s+(?:this|it)\b"
     r"|\b(?:tell|show)\s+me\s+(?:about\s+)?(?:this|it)\b"
-    r"|\bdescribe\s+(?:this|it)\b",
+    r"|\bdescribe\s+(?:this|it)\b"
+    r"|\b(?:main|key|top|core)\s+(?:recommendations?|takeaways?|"
+    r"points?|findings?|conclusions?)\b",
     re.IGNORECASE,
 )
 ARTICLE_DETAILED_OVERVIEW_RE = re.compile(
@@ -2394,6 +2397,71 @@ ARTICLE_OVERVIEW_INDEX = 0
 ARTICLE_DIGEST_INDEX = -1
 ARTICLE_TOP_SECTION_RE = re.compile(r"^\s*\d+[.)]?\s+\S")
 ARTICLE_SUBSECTION_RE = re.compile(r"^\s*\d+\.\d+")
+
+# Structure-aware article routing. The cache directory is content-addressed, so
+# these generated artifacts can live beside the paragraph trunks and be reused
+# until the article bytes change.
+ARTICLE_META_VERSION = 3
+ARTICLE_META_FILENAME = "article_structure.json"
+ARTICLE_SECTION_SUMMARY_CHARS = 1400
+ARTICLE_SECTION_SUMMARY_INDEX_BASE = -100
+ARTICLE_SECTION_DEPTH = 12
+ARTICLE_SECTION_CONTEXT_TOKENS = 8192
+ARTICLE_NARROW_CONTEXT_TOKENS = 6144
+ARTICLE_ITERATIVE_MAX_ROUNDS = 4
+ARTICLE_ITERATIVE_EVIDENCE_TOKENS = 16000
+ARTICLE_ITERATIVE_BATCH = 4
+ARTICLE_ITERATIVE_CANDIDATES = 50
+ARTICLE_ROUTER_MODEL = chat.FILTER_MODEL
+ARTICLE_ENUMERATIVE_RE = re.compile(
+    r"\b(?:list|all|every|each|enumerate|compare|comparison|across\s+the\s+"
+    r"(?:article|document)|types?|kinds?|levels?|categories)\b",
+    re.IGNORECASE,
+)
+ARTICLE_SECTION_INTENT_RE = re.compile(
+    r"\b(?:explain|describe|walk\s+me\s+through|how\s+(?:does|do|is|are)|"
+    r"workflow|process|section|chapter|part\s+\d+|why\s+(?:does|do|is|are))\b",
+    re.IGNORECASE,
+)
+ARTICLE_ROUTER_PROMPT = """Classify a question about one long article.
+
+Choose exactly one label:
+- OVERVIEW: the question asks for a summary of the whole article.
+- SECTION: the question is mainly about one section. Also name its number.
+- NARROW: the question asks for a specific fact from somewhere in the article.
+
+Article sections:
+{sections}
+
+Question: {question}
+
+Reply with one line in exactly one of these forms:
+OVERVIEW
+SECTION <number>
+NARROW
+"""
+ARTICLE_SUFFICIENCY_PROMPT = """You are checking whether retrieved excerpts are enough to answer a question.
+
+Question: {question}
+
+Excerpts:
+{excerpts}
+
+Can every part of the question be answered with a specific fact or quote from
+these excerpts? Reply in exactly this format:
+VERDICT: YES or NO
+EVIDENCE: [excerpt number] (required when the verdict is YES)
+MISSING: what is still missing (short; write NONE when nothing is missing)
+"""
+
+
+class ArticleRoute(NamedTuple):
+    """Routing decision for one question about the active article."""
+
+    label: str
+    section: int | None = None
+    iterative: bool = False
+    source: str = "regex"
 
 
 def article_requested_word_count(question: str) -> int | None:
@@ -2671,6 +2739,572 @@ def _article_digest(
     return digest[:max_chars]
 
 
+def _normalize_article_text(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _article_section_map(
+    paragraphs: list[str], headings: list[str], title: str
+) -> list[dict]:
+    """Record each paragraph's nearest preceding heading and section span.
+
+    Headings are matched against the paragraphs produced by the normal
+    HTML/Markdown extractor. Numbered headings are also accepted as a fallback
+    for documents whose markup does not use ``<h1>``-``<h6>`` tags. The result
+    is persisted next to the article trunks, so parent-section expansion does
+    not need to re-parse the document for every question.
+    """
+    heading_keys = {
+        _normalize_article_text(heading).casefold()
+        for heading in headings
+        if _normalize_article_text(heading)
+    }
+    sections: list[dict] = []
+    current: dict | None = None
+
+    for index, paragraph in enumerate(paragraphs, start=1):
+        normalized = _normalize_article_text(paragraph)
+        is_heading = bool(normalized) and normalized.casefold() in heading_keys
+        if (
+            not is_heading
+            and len(normalized) <= 160
+            and ARTICLE_NUMBERED_HEADING_RE.match(normalized)
+        ):
+            is_heading = True
+
+        if is_heading:
+            current = {
+                "number": len(sections) + 1,
+                "heading": normalized,
+                "heading_index": index,
+                "start": index,
+                "end": index,
+            }
+            sections.append(current)
+        elif current is None:
+            current = {
+                "number": len(sections) + 1,
+                "heading": title or "Introduction",
+                "heading_index": 0,
+                "start": index,
+                "end": index,
+            }
+            sections.append(current)
+        else:
+            current["end"] = index
+
+    return sections
+
+
+def _article_section_summary(
+    section: dict, paragraphs: list[str]
+) -> str:
+    """Return a fast, deterministic extractive summary for one section."""
+    heading_index = int(section.get("heading_index") or 0)
+    start = heading_index + 1 if heading_index else int(section["start"])
+    end = int(section["end"])
+    chosen: list[str] = []
+    used = 0
+    for index in range(start, end + 1):
+        if index < 1 or index > len(paragraphs):
+            continue
+        paragraph = _normalize_article_text(paragraphs[index - 1])
+        if not paragraph or _article_heading_like(paragraph):
+            continue
+        if len(paragraph) < 24 and chosen:
+            continue
+        chosen.append(paragraph)
+        used += len(paragraph) + 1
+        if used >= ARTICLE_SECTION_SUMMARY_CHARS:
+            break
+    if not chosen:
+        return ""
+    summary = "\n".join(chosen)
+    if len(summary) > ARTICLE_SECTION_SUMMARY_CHARS:
+        summary = summary[:ARTICLE_SECTION_SUMMARY_CHARS].rsplit(" ", 1)[0]
+    return summary
+
+
+def _article_build_structure(
+    video_id: str,
+    title: str,
+    headings: list[str],
+    paragraphs: list[str],
+) -> dict:
+    """Build and return the persisted article structure/summary tree."""
+    sections = _article_section_map(paragraphs, headings, title)
+    for section in sections:
+        section["summary"] = _article_section_summary(section, paragraphs)
+
+    paragraph_map: dict[int, dict] = {}
+    for section in sections:
+        for index in range(int(section["start"]), int(section["end"]) + 1):
+            paragraph_map[index] = {
+                "index": index,
+                "heading": section["heading"],
+                "section": section["number"],
+                "section_start": section["start"],
+                "section_end": section["end"],
+            }
+
+    return {
+        "version": ARTICLE_META_VERSION,
+        "video_id": video_id,
+        "title": title,
+        "headings": headings,
+        "overview": _article_overview(title, headings, paragraphs),
+        "digest": _article_digest(title, headings, paragraphs),
+        "sections": sections,
+        "paragraph_map": [
+            paragraph_map[index] for index in sorted(paragraph_map)
+        ],
+    }
+
+
+def _article_structure_is_valid(
+    structure: object, video_id: str, paragraph_count: int
+) -> bool:
+    if not isinstance(structure, dict):
+        return False
+    if structure.get("version") != ARTICLE_META_VERSION:
+        return False
+    if structure.get("video_id") != video_id:
+        return False
+    if not isinstance(structure.get("overview"), str):
+        return False
+    if not isinstance(structure.get("digest"), str):
+        return False
+    if not isinstance(structure.get("sections"), list):
+        return False
+    paragraph_map = structure.get("paragraph_map")
+    return isinstance(paragraph_map, list) and len(paragraph_map) == paragraph_count
+
+
+def _load_article_structure(
+    cache_dir: Path, video_id: str, paragraph_count: int
+) -> dict | None:
+    meta_path = cache_dir / ARTICLE_META_FILENAME
+    try:
+        structure = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not _article_structure_is_valid(structure, video_id, paragraph_count):
+        return None
+    return structure
+
+
+def _save_article_structure(cache_dir: Path, structure: dict) -> None:
+    persisted = {
+        key: value
+        for key, value in structure.items()
+        if not key.startswith("_")
+    }
+    try:
+        (cache_dir / ARTICLE_META_FILENAME).write_text(
+            json.dumps(persisted, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        # The structure is already in memory; a read-only cache must not stop
+        # /article from working.
+        pass
+
+
+def _article_add_runtime_indexes(structure: dict) -> dict:
+    structure["_section_lookup"] = {
+        section["number"]: section for section in structure.get("sections", [])
+    }
+    structure["_paragraph_lookup"] = {
+        item["index"]: item for item in structure.get("paragraph_map", [])
+    }
+    return structure
+
+
+def _article_heading_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in chat.tokenize(text)
+        if not token.isdigit() and token not in chat.FUZZY_ANCHOR_STOPWORDS
+    }
+
+
+def _article_match_section(question: str, structure: dict | None) -> int | None:
+    """Return the section whose heading best matches the question, if any."""
+    if not structure:
+        return None
+    question_text = question.casefold()
+    question_tokens = _article_heading_tokens(question)
+    best: tuple[float, int] | None = None
+    for section in structure.get("sections", []):
+        if int(section.get("end", 0)) <= int(
+            section.get("heading_index") or section.get("start", 0)
+        ):
+            continue
+        heading = str(section.get("heading", ""))
+        heading_key = heading.casefold().strip()
+        if not heading_key:
+            continue
+        heading_tokens = _article_heading_tokens(heading)
+        score = 0.0
+        if len(heading_key) >= 4 and heading_key in question_text:
+            score = 1.5
+        elif heading_tokens:
+            overlap = question_tokens & heading_tokens
+            coverage = len(overlap) / len(heading_tokens)
+            if len(overlap) >= 1 and coverage >= 0.6:
+                score = coverage + min(0.4, len(overlap) / 10)
+        if score <= 0:
+            continue
+        if best is None or score > best[0]:
+            best = (score, int(section["number"]))
+    return best[1] if best is not None else None
+
+
+def _article_classify_with_model(
+    question: str, structure: dict | None
+) -> ArticleRoute | None:
+    """Ask the small model to disambiguate an uncertain article question."""
+    if not structure:
+        return None
+    usable = [
+        section
+        for section in structure.get("sections", [])
+        if int(section.get("end", 0))
+        > int(section.get("heading_index") or section.get("start", 0))
+    ]
+    if len(usable) < 2:
+        return None
+    lines = []
+    for section in usable[:80]:
+        heading = str(section.get("heading", "")).splitlines()[0][:160]
+        lines.append(f"{section['number']}. {heading}")
+    prompt = ARTICLE_ROUTER_PROMPT.format(
+        sections="\n".join(lines), question=question
+    )
+    try:
+        response = chat.generate_text(
+            prompt,
+            model=ARTICLE_ROUTER_MODEL,
+            temperature=0.0,
+            num_predict=32,
+            num_ctx=4096,
+            stop=["\n"],
+        )
+    except RuntimeError:
+        return None
+    cleaned = chat.THINK_PATTERN.sub("", response).strip().upper()
+    if cleaned.startswith("OVERVIEW"):
+        return ArticleRoute("overview", source="model")
+    match = re.search(r"SECTION\s+(\d+)", cleaned)
+    if match:
+        number = int(match.group(1))
+        if number in structure.get("_section_lookup", {}):
+            return ArticleRoute("section", number, source="model")
+    if "NARROW" in cleaned:
+        return ArticleRoute("narrow", source="model")
+    return None
+
+
+def article_question_route(
+    question: str,
+    structure: dict | None,
+    iterative_default: bool = True,
+) -> ArticleRoute:
+    """Route an article question to overview, section, or narrow retrieval.
+
+    The existing regex rules remain the final fallback. The small model is only
+    consulted when the question looks section-oriented but no heading matches;
+    a failed or unparseable model response therefore behaves exactly like the
+    previous ``article_overview_question`` implementation.
+    """
+    if article_overview_question(question):
+        return ArticleRoute("overview", source="regex")
+
+    enumerative = bool(ARTICLE_ENUMERATIVE_RE.search(question))
+    iterative = iterative_default or enumerative
+    section = _article_match_section(question, structure)
+    if section is not None and not enumerative:
+        return ArticleRoute("section", section, False, "heading")
+
+    if (
+        section is None
+        and not enumerative
+        and structure
+        and ARTICLE_SECTION_INTENT_RE.search(question)
+    ):
+        classified = _article_classify_with_model(question, structure)
+        if classified is not None:
+            if classified.label == "overview":
+                return classified
+            if classified.label == "section":
+                return ArticleRoute(
+                    "section", classified.section, False, "model"
+                )
+            if classified.label == "narrow":
+                return ArticleRoute("narrow", None, iterative, "model")
+    return ArticleRoute("narrow", None, iterative, "regex")
+
+
+def _article_section_summary_index(section_number: int) -> int:
+    return ARTICLE_SECTION_SUMMARY_INDEX_BASE - section_number
+
+
+def _article_source_section(
+    structure: dict | None, chunk_index: int
+) -> dict | None:
+    if not structure:
+        return None
+    section_lookup = structure.get("_section_lookup", {})
+    if chunk_index <= ARTICLE_SECTION_SUMMARY_INDEX_BASE:
+        return section_lookup.get(
+            ARTICLE_SECTION_SUMMARY_INDEX_BASE - chunk_index
+        )
+    item = structure.get("_paragraph_lookup", {}).get(chunk_index)
+    if not item:
+        return None
+    return section_lookup.get(item["section"])
+
+
+def _make_article_expansion(
+    structure: dict | None,
+    chunks: list[chat.Chunk],
+    budget: int,
+    log: Callable[[str], None],
+) -> tuple[Callable, dict]:
+    """Return a parent-section/neighbor expansion callback for chat.answer."""
+    by_index = {chunk.index: chunk for chunk in chunks}
+    stats: dict = {"summaries": 0, "neighbors": 0, "added": 0}
+
+    def prepare(
+        selected: list[tuple[chat.Chunk, float]],
+        _raw_selected: list[tuple[chat.Chunk, float]],
+    ) -> list[tuple[chat.Chunk, float]]:
+        if not structure:
+            return selected
+        result: list[tuple[chat.Chunk, float]] = []
+        seen: set[int] = set()
+        used = 0
+
+        def add(chunk: chat.Chunk | None, score: float) -> bool:
+            nonlocal used
+            if chunk is None or chunk.index in seen:
+                return False
+            text = chat.paragraph_text(chunk)
+            if not text:
+                return False
+            tokens = chat.estimate_tokens(text) + 16
+            if result and used + tokens > budget:
+                return False
+            seen.add(chunk.index)
+            result.append((chunk, score))
+            used += tokens
+            return True
+
+        # Parent summaries first, so the model sees the heading that gives each
+        # paragraph its meaning. Limit this to the strongest few matches.
+        summary_sections: list[int] = []
+        for chunk, _score in selected[:4]:
+            item = structure.get("_paragraph_lookup", {}).get(chunk.index)
+            if item and item["section"] not in summary_sections:
+                summary_sections.append(item["section"])
+        for number in summary_sections:
+            summary_chunk = by_index.get(_article_section_summary_index(number))
+            if add(summary_chunk, 0.0):
+                stats["summaries"] += 1
+
+        for chunk, score in selected:
+            add(chunk, score)
+
+        for chunk, _score in selected:
+            item = structure.get("_paragraph_lookup", {}).get(chunk.index)
+            if not item:
+                continue
+            # Neighbor expansion is deliberately local: one paragraph on each
+            # side inside the same section, never the whole section.
+            for neighbor_index in (chunk.index - 1, chunk.index + 1):
+                neighbor_item = structure.get("_paragraph_lookup", {}).get(
+                    neighbor_index
+                )
+                if not neighbor_item or neighbor_item["section"] != item["section"]:
+                    continue
+                if add(by_index.get(neighbor_index), 0.0):
+                    stats["neighbors"] += 1
+
+        stats["added"] = max(0, len(result) - len(selected))
+        if stats["added"]:
+            log(
+                "[article: parent-section expansion added "
+                f"{stats['summaries']} section summary(ies) and "
+                f"{stats['neighbors']} neighbor paragraph(s)]"
+            )
+        return result or selected
+
+    return prepare, stats
+
+
+def _article_excerpts_for_check(
+    evidence: list[tuple[chat.Chunk, float]], max_chars: int = 6000
+) -> str:
+    lines: list[str] = []
+    used = 0
+    for number, (chunk, _score) in enumerate(evidence, start=1):
+        text = _normalize_article_text(chat.paragraph_text(chunk))
+        if not text:
+            continue
+        snippet = text
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        if len(snippet) > remaining:
+            snippet = snippet[:remaining].rsplit(" ", 1)[0]
+        lines.append(f"[{number}] {snippet}")
+        used += len(snippet) + 8
+    return "\n".join(lines)
+
+
+def _article_sufficiency_check(
+    question: str, evidence: list[tuple[chat.Chunk, float]]
+) -> dict:
+    """Ask the small model whether the gathered evidence answers the question."""
+    excerpts = _article_excerpts_for_check(evidence)
+    if not excerpts:
+        return {"sufficient": False, "missing": ""}
+    prompt = ARTICLE_SUFFICIENCY_PROMPT.format(
+        question=question, excerpts=excerpts
+    )
+    try:
+        response = chat.generate_text(
+            prompt,
+            model=ARTICLE_ROUTER_MODEL,
+            temperature=0.0,
+            num_predict=96,
+            num_ctx=8192,
+            stop=["\n\n"],
+        )
+    except RuntimeError:
+        return {"sufficient": False, "missing": ""}
+    cleaned = chat.THINK_PATTERN.sub("", response)
+    verdict = re.search(r"VERDICT\s*:\s*(YES|NO)", cleaned, re.IGNORECASE)
+    citation = re.search(r"EVIDENCE\s*:[^\n]*\d", cleaned, re.IGNORECASE)
+    missing_match = re.search(r"MISSING\s*:\s*(.+)", cleaned, re.IGNORECASE)
+    missing = missing_match.group(1).strip() if missing_match else ""
+    if missing.upper().startswith("NONE"):
+        missing = ""
+    sufficient = bool(
+        verdict
+        and verdict.group(1).upper() == "YES"
+        and citation is not None
+    )
+    return {"sufficient": sufficient, "missing": missing[:300]}
+
+
+def _article_iterative_evidence(
+    question: str,
+    chunks: list[chat.Chunk],
+    structure: dict | None,
+    budget: int,
+    log: Callable[[str], None],
+) -> list[tuple[chat.Chunk, float]]:
+    """Gather evidence in small rounds, stopping when it is sufficient.
+
+    This is the local analogue of ``chat_gradual_context.py``'s loop: retrieve
+    a few new paragraphs, ask the small model whether they answer the question,
+    and search again with the missing terms. It is capped by both the number of
+    rounds and a hard evidence-token budget.
+    """
+    seen: set[int] = set()
+    evidence: list[tuple[chat.Chunk, float]] = []
+    used = 0
+    search_question = question
+    paragraph_chunks = [chunk for chunk in chunks if chunk.index > 0]
+
+    for round_number in range(1, ARTICLE_ITERATIVE_MAX_ROUNDS + 1):
+        if used >= budget:
+            break
+        try:
+            expansion = chat.expand_query(search_question)
+        except RuntimeError:
+            expansion = ""
+        ranked = chat.top_chunks(
+            search_question,
+            paragraph_chunks,
+            limit=ARTICLE_ITERATIVE_CANDIDATES,
+            expansion=expansion,
+        )
+        candidates = [item for item in ranked if item[0].index not in seen]
+        if not candidates:
+            break
+
+        if len(candidates) >= chat.FILTER_MIN_CANDIDATES:
+            filtered = chat.filter_candidates(
+                search_question, candidates[: chat.FILTER_MAX_CANDIDATES]
+            )
+            if filtered:
+                filtered_ids = {id(chunk) for chunk, _score in filtered}
+                candidates = filtered + [
+                    item for item in candidates
+                    if id(item[0]) not in filtered_ids
+                ]
+
+        added = 0
+        for chunk, score in candidates:
+            if chunk.index in seen:
+                continue
+            tokens = chat.estimate_tokens(chat.paragraph_text(chunk)) + 16
+            if evidence and used + tokens > budget:
+                continue
+            evidence.append((chunk, score))
+            seen.add(chunk.index)
+            used += tokens
+            added += 1
+            if added >= ARTICLE_ITERATIVE_BATCH:
+                break
+        if not added:
+            break
+        log(
+            f"[article iterative: round {round_number}/"
+            f"{ARTICLE_ITERATIVE_MAX_ROUNDS}, added {added} paragraph(s), "
+            f"evidence ~{used:,} token(s)]"
+        )
+        if used >= budget:
+            break
+        verdict = _article_sufficiency_check(question, evidence)
+        if verdict["sufficient"]:
+            log("[article iterative: evidence is sufficient; stopping]")
+            break
+        if verdict["missing"]:
+            search_question = f"{question} {verdict['missing']}"
+
+    if not evidence or not structure:
+        return evidence
+
+    # Add one parent summary per section represented in the evidence, keeping
+    # the final context in document order for coherent synthesis.
+    final: list[tuple[chat.Chunk, float]] = []
+    seen_summaries: set[int] = set()
+    by_index = {chunk.index: chunk for chunk in chunks}
+    for chunk, score in sorted(evidence, key=lambda item: item[0].index):
+        item = structure.get("_paragraph_lookup", {}).get(chunk.index)
+        if item and item["section"] not in seen_summaries:
+            seen_summaries.add(item["section"])
+            summary_chunk = by_index.get(
+                _article_section_summary_index(item["section"])
+            )
+            if summary_chunk is not None:
+                final.append((summary_chunk, 0.0))
+        final.append((chunk, score))
+
+    limited: list[tuple[chat.Chunk, float]] = []
+    total = 0
+    for chunk, score in final:
+        tokens = chat.estimate_tokens(chat.paragraph_text(chunk)) + 16
+        if limited and total + tokens > budget:
+            continue
+        limited.append((chunk, score))
+        total += tokens
+    return limited
+
+
 def _decode_article_bytes(data: bytes) -> str:
     """Decode a local article without assuming a single text encoding."""
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
@@ -2697,13 +3331,16 @@ def _article_title(text: str, path: Path) -> str:
     return path.stem
 
 
-def _load_article_chunks(path: Path) -> tuple[list[chat.Chunk], str]:
-    """Split one article into numbered trunk files and return its chunks.
+def _load_article_chunks(
+    path: Path,
+) -> tuple[list[chat.Chunk], str, dict]:
+    """Split one article into a cached summary tree and paragraph trunks.
 
-    The path is content-hashed, so reloading an unchanged article reuses the
-    generated trunks while an edited article gets a fresh cache directory.
-    ``chat.answer`` can then use the normal BM25 retrieval and prompt path
-    without any article-specific branching in chat.py.
+    The path and bytes are content-hashed, so reloading an unchanged article
+    reuses the generated structure: document overview, digest, per-section
+    extractive summaries, and the section span for every paragraph. Paragraph
+    trunks remain the retrieval source of truth; the summaries are synthetic
+    context used by the article router.
     """
     data = path.read_bytes()
     raw_text = _decode_article_bytes(data)
@@ -2722,10 +3359,6 @@ def _load_article_chunks(path: Path) -> tuple[list[chat.Chunk], str]:
     paragraphs = split_paragraphs(text)
     if not paragraphs:
         raise ValueError("the article contains no readable paragraphs")
-    # Make the title part of the first paragraph so a broad question such as
-    # "what is this about?" still retrieves the article heading.
-    if title and title.casefold() not in paragraphs[0].casefold():
-        paragraphs[0] = f"{title}\n\n{paragraphs[0]}"
 
     digest = hashlib.sha1(
         str(path).encode("utf-8") + b"\0" + data
@@ -2736,11 +3369,30 @@ def _load_article_chunks(path: Path) -> tuple[list[chat.Chunk], str]:
     for old_trunk in cache_dir.glob("*.trunk"):
         old_trunk.unlink()
 
+    # The summary tree is expensive to build and is a pure function of the
+    # article bytes, so load it from the content-addressed cache when valid.
+    structure = _load_article_structure(
+        cache_dir, video_id, len(paragraphs)
+    )
+    if structure is None:
+        structure = _article_build_structure(
+            video_id, title, headings, paragraphs
+        )
+        _save_article_structure(cache_dir, structure)
+    _article_add_runtime_indexes(structure)
+    overview = str(structure["overview"])
+    digest_text = str(structure["digest"])
+
+    # Make the title part of the first paragraph so a broad question such as
+    # "what is this about?" still retrieves the article heading. Do this after
+    # the section map is built, so paragraph indexes stay aligned.
+    if title and title.casefold() not in paragraphs[0].casefold():
+        paragraphs[0] = f"{title}\n\n{paragraphs[0]}"
+
     # Chunk 0 is a compact document overview (title + outline + TL;DR). It
     # gives article-wide questions useful context even when their generic
     # wording ("what is this article about?") has no good BM25 match among
     # thousands of paragraphs.
-    overview = _article_overview(title, headings, paragraphs)
     overview_trunk = (
         f"<article><title>{xml_escape(title)}</title>"
         f"<paragraph>{xml_escape(overview)}</paragraph></article>"
@@ -2754,16 +3406,40 @@ def _load_article_chunks(path: Path) -> tuple[list[chat.Chunk], str]:
     # Chunk -1 is a broader digest used only for article-wide questions. It
     # is excluded from ordinary BM25 retrieval (see _run_question) so its
     # many headings and terms cannot crowd out question-specific paragraphs.
-    digest = _article_digest(title, headings, paragraphs)
     digest_trunk = (
         f"<article><title>{xml_escape(title)}</title>"
-        f"<paragraph>{xml_escape(digest)}</paragraph></article>"
+        f"<paragraph>{xml_escape(digest_text)}</paragraph></article>"
     )
     digest_path = cache_dir / f"{video_id}.-1.trunk"
     digest_path.write_text(digest_trunk + "\n", encoding="utf-8")
     chunks.append(
         chat.Chunk(video_id=video_id, index=-1, trunk_path=digest_path)
     )
+
+    # Per-section summaries are cached in the structure file. Each one becomes
+    # a synthetic trunk with a unique negative index so it can be attached as
+    # parent context without entering normal BM25 retrieval.
+    for section in structure["sections"]:
+        summary = str(section.get("summary") or "")
+        if not summary:
+            continue
+        summary_index = _article_section_summary_index(int(section["number"]))
+        summary_text = f"{section['heading']}\n{summary}"
+        summary_trunk = (
+            f"<article><title>{xml_escape(title)}</title>"
+            f"<paragraph>{xml_escape(summary_text)}</paragraph></article>"
+        )
+        summary_path = (
+            cache_dir / f"{video_id}.section-{section['number']}.trunk"
+        )
+        summary_path.write_text(summary_trunk + "\n", encoding="utf-8")
+        chunks.append(
+            chat.Chunk(
+                video_id=video_id,
+                index=summary_index,
+                trunk_path=summary_path,
+            )
+        )
 
     for index, paragraph in enumerate(paragraphs, start=1):
         trunk = (
@@ -2775,7 +3451,7 @@ def _load_article_chunks(path: Path) -> tuple[list[chat.Chunk], str]:
         chunks.append(
             chat.Chunk(video_id=video_id, index=index, trunk_path=trunk_path)
         )
-    return chunks, title
+    return chunks, title, structure
 
 
 class ChatState:
@@ -2795,6 +3471,8 @@ class ChatState:
         self.transcript: str | None = None
         self.article_path: str | None = None
         self.article_title: str = ""
+        self.article_structure: dict | None = None
+        self.article_iterative = False
         self.cache = chat.AnswerCache()
         self.latest_answer: str | None = None
         self.latest_sources: list[tuple[chat.Chunk, float]] = []
@@ -2869,6 +3547,8 @@ class ChatState:
         chunks: list[chat.Chunk],
         article_path: str | None = None,
         article_title: str = "",
+        article_structure: dict | None = None,
+        article_iterative: bool = False,
     ) -> None:
         """Install a new knowledge scope and drop the current conversation.
 
@@ -2879,6 +3559,8 @@ class ChatState:
         self.chunks = chunks
         self.article_path = article_path
         self.article_title = article_title
+        self.article_structure = article_structure
+        self.article_iterative = bool(article_iterative and article_path)
         chat.clear_bm25_cache()
         self.reset_conversation()
         gc.collect()
@@ -2890,6 +3572,8 @@ class ChatState:
         self.transcript = None
         self.article_path = None
         self.article_title = ""
+        self.article_structure = None
+        self.article_iterative = False
         chat.clear_bm25_cache()
         gc.collect()
 
@@ -2982,6 +3666,10 @@ class ChatState:
             ),
             "article": self.article_path,
             "article_title": self.article_title,
+            "article_iterative": self.article_iterative,
+            "article_sections": len(
+                (self.article_structure or {}).get("sections", [])
+            ),
             "models": {
                 "chat": tag_chat_model(self.tag),
                 "coding": tag_coding_model(self.tag),
@@ -3030,6 +3718,15 @@ class ChatState:
             # Context-dependent questions must not hit an answer cached for a
             # different "he", "that book", etc.
             key += (conversation_revision,)
+        if self.article_path is not None:
+            # Article answers depend on the section map and route, not only on
+            # the tag that happened to be active when /article was entered.
+            key += (
+                "article",
+                self.article_path,
+                (self.article_structure or {}).get("video_id", ""),
+                self.article_iterative,
+            )
         if coding_mode:
             # The coding model and prompt differ from the regular RAG answer.
             key += ("coding", tag_coding_model(tag or self.tag))
@@ -3478,18 +4175,137 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
                 retrieval_question = resolved_question
 
-        article_overview_mode = article_mode and (
-            article_overview_question(question)
-            or article_overview_question(retrieval_question)
-        )
-        answer_chunks = (
-            [
-                chunk
-                for chunk in state.chunks
-                if chunk.index != ARTICLE_DIGEST_INDEX
-            ]
+        article_route: ArticleRoute | None = None
+        article_prepare_selected: Callable | None = None
+        article_prepare_stats: dict = {}
+        article_attempt_depth: int | None = state.depth
+        article_attempt_budget = state.max_context_tokens
+        article_use_all_chunks = False
+        article_prompt_prefix: str | None = None
+        article_cache_variant = ""
+        article_overview_mode = False
+        if article_mode:
+            article_route = article_question_route(
+                retrieval_question,
+                state.article_structure,
+                iterative_default=state.article_iterative,
+            )
+            route_label = article_route.label
+            if article_route.section is not None:
+                route_label += f" {article_route.section}"
+            if article_route.iterative:
+                route_label += " + iterative"
+            self._sse_text(
+                "log",
+                f"[article router: {route_label} ({article_route.source})]",
+            )
+
+        paragraph_chunks = (
+            [chunk for chunk in state.chunks if chunk.index > 0]
             if article_mode
             else state.chunks
+        )
+        answer_chunks = (
+            paragraph_chunks if article_mode else state.chunks
+        )
+        if article_route is not None:
+            if article_route.label == "section" and article_route.section is not None:
+                section = (state.article_structure or {}).get(
+                    "_section_lookup", {}
+                ).get(article_route.section)
+                if section is None:
+                    article_route = ArticleRoute(
+                        "narrow", None, False, "section-missing"
+                    )
+                else:
+                    answer_chunks = [
+                        chunk
+                        for chunk in paragraph_chunks
+                        if int(section["start"]) <= chunk.index <= int(section["end"])
+                    ]
+                    if not answer_chunks:
+                        answer_chunks = paragraph_chunks
+                    article_attempt_depth = ARTICLE_SECTION_DEPTH
+                    article_attempt_budget = ARTICLE_SECTION_CONTEXT_TOKENS
+                    article_cache_variant = (
+                        f"article-section:{article_route.section}"
+                    )
+                    article_prompt_prefix = (
+                        "### ARTICLE SECTION\n"
+                        f"The context is focused on the article section "
+                        f"'{section.get('heading', '')}'. It includes the "
+                        "section summary and neighboring paragraphs. Prefer "
+                        "the specific paragraphs for facts and use the "
+                        "section summary only for orientation. Ground every "
+                        "claim in this context; if a detail is absent, omit "
+                        "it rather than refusing.\n\n"
+                    )
+                    article_prepare_selected, article_prepare_stats = (
+                        _make_article_expansion(
+                            state.article_structure,
+                            state.chunks,
+                            ARTICLE_SECTION_CONTEXT_TOKENS,
+                            lambda text: self._sse_text("log", text),
+                        )
+                    )
+            elif article_route.iterative:
+                evidence = _article_iterative_evidence(
+                    retrieval_question,
+                    state.chunks,
+                    state.article_structure,
+                    ARTICLE_ITERATIVE_EVIDENCE_TOKENS,
+                    lambda text: self._sse_text("log", text),
+                )
+                if evidence:
+                    answer_chunks = [chunk for chunk, _score in evidence]
+                    article_use_all_chunks = True
+                    article_attempt_depth = state.depth
+                    article_attempt_budget = ARTICLE_ITERATIVE_EVIDENCE_TOKENS
+                    article_cache_variant = "article-iterative"
+                    article_prompt_prefix = (
+                        "### ARTICLE EVIDENCE\n"
+                        "The context below was gathered in several retrieval "
+                        "rounds across the whole article, in document order; "
+                        "it includes section summaries. Answer the complete "
+                        "question, including enumerations and comparisons, "
+                        "using every relevant part of this evidence. Do not "
+                        "say that the context is insufficient; if one detail "
+                        "is genuinely absent, answer the supported parts and "
+                        "omit the unsupported detail.\n\n"
+                    )
+                else:
+                    article_route = ArticleRoute(
+                        "narrow", None, False, "iterative-empty"
+                    )
+                    self._sse_text(
+                        "log",
+                        "[article iterative: no new evidence found; using the "
+                        "normal narrow retrieval path]",
+                    )
+            if article_route.label == "narrow" and not article_route.iterative:
+                article_attempt_depth = state.depth
+                article_attempt_budget = ARTICLE_NARROW_CONTEXT_TOKENS
+                article_cache_variant = "article-narrow"
+                article_prompt_prefix = (
+                    "### ARTICLE CONTEXT\n"
+                    "The context was retrieved from one article and includes "
+                    "parent-section summaries and neighboring paragraphs. "
+                    "Use the specific paragraphs for facts and the section "
+                    "summary only for orientation. Ground every claim in the "
+                    "context; if a specific detail is absent, omit it rather "
+                    "than refusing.\n\n"
+                )
+                article_prepare_selected, article_prepare_stats = (
+                    _make_article_expansion(
+                        state.article_structure,
+                        state.chunks,
+                        ARTICLE_NARROW_CONTEXT_TOKENS,
+                        lambda text: self._sse_text("log", text),
+                    )
+                )
+
+        article_overview_mode = bool(
+            article_route is not None and article_route.label == "overview"
         )
         article_overview_prefix: str | None = None
         article_overview_context_ready = False
@@ -3680,6 +4496,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             prompt_prefix_override: str | None = None,
             cache_variant: str = "",
             use_all_chunks: bool = False,
+            depth_override: int | None = None,
+            max_context_tokens_override: int | None = None,
+            prepare_selected: Callable | None = None,
+            prepare_stats: dict | None = None,
         ):
             """Answer once from a single tag; no union fallback inside this."""
             attempt_stats: dict = {}
@@ -3714,8 +4534,16 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 response, sources = chat.answer(
                     retrieval_question,
                     chunks,
-                    depth=state.depth,
-                    max_context_tokens=state.max_context_tokens,
+                    depth=(
+                        depth_override
+                        if depth_override is not None
+                        else state.depth
+                    ),
+                    max_context_tokens=(
+                        max_context_tokens_override
+                        if max_context_tokens_override is not None
+                        else state.max_context_tokens
+                    ),
                     answer_language=answer_language,
                     cache=state.cache,
                     cache_key=state.cache_key(
@@ -3740,6 +4568,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     cross_tag_fallback=False,
                     scope_label=scope_label,
                     use_all_chunks=use_all_chunks,
+                    prepare_selected=prepare_selected,
                     emit=emit_answer_delta,
                     log=lambda text: self._sse_text("log", text),
                 )
@@ -3768,6 +4597,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 response = repair_code_fences(
                     strip_leading_insufficient_context(response)
                 )
+            if prepare_stats is not None and prepare_stats.get("added"):
+                attempt_stats["article_expansion"] = dict(prepare_stats)
             return response, sources or [], attempt_stats, None
 
         original_tag = state.tag
@@ -3965,8 +4796,20 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     original_tag,
                     answer_chunks,
                     original_scope,
-                    prompt_prefix_override=article_overview_prefix,
-                    use_all_chunks=article_overview_context_ready,
+                    prompt_prefix_override=(
+                        article_overview_prefix
+                        if article_overview_prefix is not None
+                        else article_prompt_prefix
+                    ),
+                    cache_variant=article_cache_variant,
+                    use_all_chunks=(
+                        article_overview_context_ready
+                        or article_use_all_chunks
+                    ),
+                    depth_override=article_attempt_depth,
+                    max_context_tokens_override=article_attempt_budget,
+                    prepare_selected=article_prepare_selected,
+                    prepare_stats=article_prepare_stats,
                 )
                 if error:
                     return
@@ -3992,8 +4835,19 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 original_tag,
                 answer_chunks,
                 original_scope,
-                prompt_prefix_override=article_overview_prefix,
-                use_all_chunks=article_overview_context_ready,
+                prompt_prefix_override=(
+                    article_overview_prefix
+                    if article_overview_prefix is not None
+                    else article_prompt_prefix
+                ),
+                cache_variant=article_cache_variant,
+                use_all_chunks=(
+                    article_overview_context_ready or article_use_all_chunks
+                ),
+                depth_override=article_attempt_depth,
+                max_context_tokens_override=article_attempt_budget,
+                prepare_selected=article_prepare_selected,
+                prepare_stats=article_prepare_stats,
             )
             if error:
                 return
@@ -4204,11 +5058,19 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         annotations = build_answer_annotations(response, sources)
         if article_mode:
             # Article paragraphs have no YouTube source. Keep the paragraph
-            # mapping for the UI but suppress the video icon/link.
+            # mapping for the UI but suppress the video icon/link and add the
+            # nearest cached section heading as a precise citation.
             for item in annotations:
                 item["video_id"] = ""
                 item["url"] = ""
-                item["title"] = state.article_title or "article"
+                title = state.article_title or "article"
+                section = _article_source_section(
+                    state.article_structure, int(item.get("chunk_index", -1))
+                )
+                heading = str(section.get("heading", "")) if section else ""
+                item["title"] = (
+                    f"{title} — {heading}" if heading else title
+                )
         self._sse("annotations", {"items": annotations})
         state.record_turn(question, retrieval_question, response)
         if switched:
@@ -4456,7 +5318,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         state = self.state
         path = Path(article_path)
         try:
-            new_chunks, title = _load_article_chunks(path)
+            new_chunks, title, structure = _load_article_chunks(path)
         except (OSError, ValueError) as exc:
             self._sse_text(
                 "output",
@@ -4467,6 +5329,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             new_chunks,
             article_path=article_path,
             article_title=title,
+            article_structure=structure,
+            article_iterative=state.article_iterative,
         )
         state.cache.clear()
         self._sse_text(
@@ -5105,12 +5969,23 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         """Use one local article file as the complete context for the chat."""
         state = self.state
         raw_path = argument.strip()
+        simple = bool(
+            re.search(r"(?:^|\s)--(?:simple|fast)\b", raw_path)
+        )
+        iterative = not simple or bool(
+            re.search(r"(?:^|\s)--(?:iterative|deep)\b", raw_path)
+        )
+        raw_path = re.sub(
+            r"(?:^|\s)--(?:iterative|deep|simple|fast)\b", " ", raw_path
+        ).strip()
         if not raw_path:
             self._sse_text(
                 "output",
-                "\nUsage: /article <path_to_an_article>\n"
+                "\nUsage: /article [--simple] <path_to_an_article>\n"
                 "The file becomes the only context; follow-up questions keep "
-                "the article scope until /tag or /transcript is used.\n",
+                "the article scope until /tag or /transcript is used.\n"
+                "The capped multi-round evidence loop is enabled by default "
+                "(--simple or --fast disables it).\n",
             )
             return
         if (
@@ -5129,7 +6004,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            new_chunks, title = _load_article_chunks(path)
+            new_chunks, title, structure = _load_article_chunks(path)
         except (OSError, ValueError) as exc:
             self._sse_text(
                 "output",
@@ -5142,6 +6017,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             new_chunks,
             article_path=str(path),
             article_title=title,
+            article_structure=structure,
+            article_iterative=iterative,
         )
         state.cache.clear()
         self._sse_text(
@@ -5150,8 +6027,15 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             + chat.index_memory_report(new_chunks, build_index=False)
             + f"\nNow answering from article {str(path)!r} "
             f"({sum(1 for chunk in new_chunks if chunk.index > 0)} "
-            "paragraph(s)). Existing conversation "
-            "context was cleared; follow-up questions stay on this article.\n",
+            "paragraph(s), "
+            f"{len(structure.get('sections', []))} section(s)). Existing "
+            "conversation context was cleared; follow-up questions stay on "
+            "this article."
+            + (
+                " Iterative evidence mode is enabled.\n"
+                if state.article_iterative
+                else " Fast single-pass retrieval mode is enabled.\n"
+            ),
         )
         self._sse("meta", state.snapshot())
 
@@ -5171,7 +6055,16 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return
         lines = ["", "Sources for the latest answer:"]
         for index, (chunk, score) in enumerate(sources, start=1):
-            lines.append(f"  [Chunk {index}] {chunk.label} (bm25 {score:.4f})")
+            label = chunk.label
+            if self.state.article_path is not None:
+                section = _article_source_section(
+                    self.state.article_structure, chunk.index
+                )
+                if section is not None:
+                    heading = str(section.get("heading", ""))
+                    if heading:
+                        label += f" ({heading})"
+            lines.append(f"  [Chunk {index}] {label} (bm25 {score:.4f})")
         self._sse_text("output", "\n".join(lines) + "\n")
 
     def _command_benchmark(self, argument: str) -> None:

@@ -4343,6 +4343,11 @@ def answer(
     cross_tag_fallback: bool = CROSS_TAG_FALLBACK_ENABLED,
     scope_label: str = "current tag",
     use_all_chunks: bool = False,
+    prepare_selected: Callable[
+        [list[tuple[Chunk, float]], list[tuple[Chunk, float]]],
+        list[tuple[Chunk, float]],
+    ]
+    | None = None,
     emit: Callable[[str], None] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> tuple[str | None, list[tuple[Chunk, float]]]:
@@ -4354,6 +4359,9 @@ def answer(
     enables the model's reasoning mode (disabled by default).
     ``use_all_chunks`` skips BM25 and uses every supplied chunk in order;
     callers use it for a prebuilt synthetic context (an article digest).
+    ``prepare_selected`` receives the BM25 selection and may append parent
+    summaries or neighboring paragraphs before the context is built; this is
+    used by /article's section-level expansion.
     """
     def _emit(text: str) -> None:
         if emit is not None:
@@ -4402,6 +4410,8 @@ def answer(
                         "end_to_end_ttft": 0.0,
                         "prompt_tokens": 0,
                         "prompt_tokens_cached": 0,
+                        "response_tokens": 0,
+                        "eval_seconds": 0.0,
                         "total": 0.0,
                     }
                 )
@@ -4544,6 +4554,16 @@ def answer(
             f"{len(selected)} BM25 match(es)]"
         )
 
+    bm25_selected_count = len(selected)
+    if selected and prepare_selected is not None:
+        try:
+            prepared = prepare_selected(selected, raw_selected)
+        except Exception as exc:  # A failed expansion must not lose context.
+            _warn(f"Warning: context expansion failed: {exc}")
+            prepared = selected
+        if prepared:
+            selected = prepared
+
     retrieval_done = time.monotonic()
     if not selected:
         _log("No trunks available to use as context.")
@@ -4566,8 +4586,9 @@ def answer(
             )
         else:
             _log(
-                f"[using {len(selected)} of {candidate_count} BM25 trunk(s) "
-                f"(depth {depth}, {depth_label})]"
+                f"[using {len(selected)} context trunk(s) "
+                f"({bm25_selected_count} BM25 match(es) of "
+                f"{candidate_count}, depth {depth}, {depth_label})]"
             )
     else:
         budget = (
@@ -4640,8 +4661,17 @@ def answer(
         metrics["expansion_prompt_eval_count"] = expansion_metrics.get(
             "prompt_eval_count", 0
         )
+        metrics["expansion_prompt_eval_cached_count"] = (
+            expansion_metrics.get("prompt_eval_cached_count", 0)
+        )
         metrics["expansion_prompt_eval_duration"] = expansion_metrics.get(
             "prompt_eval_duration", 0.0
+        )
+        metrics["expansion_eval_count"] = expansion_metrics.get(
+            "eval_count", 0
+        )
+        metrics["expansion_eval_duration"] = expansion_metrics.get(
+            "eval_duration", 0.0
         )
     else:
         prompt = build_prompt(context, question, answer_language, prompt_prefix)
@@ -4684,10 +4714,16 @@ def answer(
                 "load": load_seconds,
                 "request_ttft": request_ttft,
                 "end_to_end_ttft": end_to_end_ttft,
-                "prompt_tokens": metrics.get("prompt_eval_count", 0),
+                "prompt_tokens": metrics.get("prompt_eval_count", 0)
+                + metrics.get("expansion_prompt_eval_count", 0),
                 "prompt_tokens_cached": metrics.get(
                     "prompt_eval_cached_count", 0
-                ),
+                )
+                + metrics.get("expansion_prompt_eval_cached_count", 0),
+                "response_tokens": metrics.get("eval_count", 0)
+                + metrics.get("expansion_eval_count", 0),
+                "eval_seconds": metrics.get("eval_duration", 0.0)
+                + metrics.get("expansion_eval_duration", 0.0),
                 "total": finished - started,
             }
         )
@@ -4712,8 +4748,9 @@ def format_benchmark_line(stats: dict) -> str:
         f"prefill {stats.get('prefill', 0.0):.2f} s | "
         f"load {stats.get('load', 0.0):.2f} s | "
         f"TTFT {stats.get('end_to_end_ttft', 0.0):.2f} s | "
-        f"prompt_tokens {stats.get('prompt_tokens', 0):,} "
+        f"prompt_tokens {stats.get('prompt_tokens', 0):,} actual "
         f"(cached {stats.get('prompt_tokens_cached', 0):,}) | "
+        f"answer_tokens {stats.get('response_tokens', 0):,} | "
         f"context {stats.get('context_tokens', 0):,} estimated | "
         f"total {stats.get('total', 0.0):.2f} s]"
     )
