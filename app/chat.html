@@ -784,10 +784,10 @@
     border-bottom: 1px solid #223344;
     user-select: none;
   }
-  #popup-word { color: var(--accent); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #popup-word { color: var(--accent); font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #popup-head .popup-note { color: var(--dim); font-size: 11px; }
   #popup-head .spacer { flex: 1; }
-  #popup-close, #popup-minimize {
+  #popup-close, #popup-minimize, #popup-prev, #popup-next {
     background: transparent;
     border: 0;
     color: var(--dim);
@@ -797,8 +797,12 @@
     padding: 0 3px;
     user-select: none;
   }
-  #popup-close:hover, #popup-minimize:hover { color: var(--text); }
+  #popup-close:hover, #popup-minimize:hover,
+  #popup-prev:hover:not(:disabled), #popup-next:hover:not(:disabled) { color: var(--text); }
   #popup-minimize { font-size: 16px; }
+  #popup-prev, #popup-next, #popup-minimize, #popup-close { flex: 0 0 auto; }
+  #popup-prev, #popup-next { font-size: 17px; padding: 0 4px; }
+  #popup-prev:disabled, #popup-next:disabled { opacity: .3; cursor: default; }
   #popup-body {
     padding: 11px 13px 14px;
     overflow-y: auto;
@@ -1156,6 +1160,8 @@
     <span id="popup-word"></span>
     <span class="popup-note">/dict</span>
     <span class="spacer"></span>
+    <button id="popup-prev" type="button" title="Previous looked-up word" aria-label="Previous word" disabled>‹</button>
+    <button id="popup-next" type="button" title="Next looked-up word" aria-label="Next word" disabled>›</button>
     <button id="popup-minimize" title="Minimize to the status bar">−</button>
     <button id="popup-close" title="Close (Esc)">×</button>
   </div>
@@ -1261,6 +1267,8 @@ const popupContentEl = $("#popup-content");
 const popupLoadingEl = $("#popup-loading");
 const popupRestoreEl = $("#popup-restore");
 const popupRestoreWordEl = $("#popup-restore-word");
+const popupPrevEl = $("#popup-prev");
+const popupNextEl = $("#popup-next");
 const kqedPanelEl = $("#kqed-panel");
 const kqedTitleEl = $("#kqed-title");
 const kqedMetaEl = $("#kqed-meta");
@@ -1330,8 +1338,6 @@ let historyDraft = "";
 let stickToBottom = true;
 let busy = false;
 let askController = null;
-let popupController = null;
-let popupGeneration = 0;
 let popupMinimized = false;
 let popupAnchorEl = null;
 let popupAnchorRect = null;
@@ -4841,90 +4847,186 @@ function positionPopup() {
   popupEl.style.top = `${top}px`;
 }
 
-function openDictionaryPopup(word, answerContext, anchorEl) {
-  const clean = String(word || "").trim();
-  if (!clean) return;
-  if (popupController) popupController.abort();
-  popupController = new AbortController();
-  const generation = ++popupGeneration;
+const dictionaryHistory = [];
+let dictionaryHistoryIndex = -1;
+let dictionaryRootAnswer = "";
+let dictionaryRenderTimer = null;
 
-  popupWordEl.textContent = clean;
+function activeDictionaryEntry() {
+  if (dictionaryHistoryIndex < 0) return null;
+  return dictionaryHistory[dictionaryHistoryIndex] || null;
+}
+
+function updateDictionaryNav() {
+  popupPrevEl.disabled = dictionaryHistoryIndex <= 0;
+  popupNextEl.disabled =
+    dictionaryHistoryIndex < 0 ||
+    dictionaryHistoryIndex >= dictionaryHistory.length - 1;
+}
+
+function abortDictionaryEntry(entry) {
+  if (!entry) return;
+  const controller = entry.controller;
+  entry.controller = null;
+  entry.loading = false;
+  entry.aborted = true;
+  if (controller) controller.abort();
+}
+
+function clearDictionaryHistory() {
+  for (const entry of dictionaryHistory) abortDictionaryEntry(entry);
+  dictionaryHistory.length = 0;
+  dictionaryHistoryIndex = -1;
+  dictionaryRootAnswer = "";
+  updateDictionaryNav();
+}
+
+function renderDictionaryEntry(entry) {
+  if (activeDictionaryEntry() !== entry) return;
+  popupWordEl.textContent = entry.word;
+  popupContentEl.dataset.buffer = entry.buffer;
   popupContentEl.textContent = "";
+  // Every displayed word can itself be looked up, including words in the
+  // streamed definition, so reading a definition can branch into new ones.
+  popupContentEl.appendChild(
+    renderMarkdown(formatDictionarySections(entry.buffer), true)
+  );
+  if (entry.error) {
+    const div = document.createElement("div");
+    div.className = "error-text";
+    div.textContent = entry.error;
+    popupContentEl.appendChild(div);
+  }
+  popupLoadingEl.hidden = !entry.loading;
+  if (!popupEl.hidden) {
+    positionPopup(popupAnchorEl, popupAnchorRect);
+    // Follow the stream, but leave cached definitions at the top so the
+    // history arrows are pleasant to browse.
+    if (entry.loading) popupBodyEl.scrollTop = popupBodyEl.scrollHeight;
+  }
+  updateDictionaryNav();
+}
+
+function scheduleDictionaryRender(entry) {
+  if (activeDictionaryEntry() !== entry) return;
+  if (dictionaryRenderTimer) return;
+  dictionaryRenderTimer = window.setTimeout(() => {
+    dictionaryRenderTimer = null;
+    renderDictionaryEntry(entry);
+  }, 55);
+}
+
+function ensureDictionaryEntryStream(entry) {
+  if (!entry || entry.done || entry.controller) return;
+  // A stream that was aborted (for example when the popup was closed) has
+  // only a partial definition; start it again from a clean buffer.
+  if (entry.aborted) {
+    entry.buffer = "";
+    entry.error = "";
+    entry.aborted = false;
+  }
+  entry.loading = true;
+  entry.error = "";
+  const controller = new AbortController();
+  entry.controller = controller;
+  scheduleDictionaryRender(entry);
+
+  streamSSE(
+    "/api/dict",
+    { word: entry.word, answer: entry.answerContext },
+    {
+      delta: (data) => {
+        if (entry.controller !== controller) return;
+        if (!data?.text) return;
+        entry.buffer += data.text;
+        scheduleDictionaryRender(entry);
+      },
+      error: (data) => {
+        if (entry.controller !== controller) return;
+        entry.error = data?.message || "Dictionary lookup failed.";
+        scheduleDictionaryRender(entry);
+      },
+      done: () => {
+        if (entry.controller !== controller) return;
+        entry.controller = null;
+        entry.loading = false;
+        entry.done = true;
+        scheduleDictionaryRender(entry);
+      },
+    },
+    controller.signal
+  )
+    .catch((error) => {
+      if (entry.controller !== controller) return;
+      if (error?.name !== "AbortError") {
+        entry.error = error?.message || String(error);
+        entry.loading = false;
+        entry.done = true;
+        scheduleDictionaryRender(entry);
+      }
+    })
+    .finally(() => {
+      if (entry.controller !== controller) return;
+      entry.controller = null;
+      entry.loading = false;
+      if (!entry.done) entry.done = true;
+      scheduleDictionaryRender(entry);
+    });
+}
+
+function showDictionaryEntry(entry) {
+  const index = dictionaryHistory.indexOf(entry);
+  if (index < 0) return;
+  dictionaryHistoryIndex = index;
+  popupWordEl.textContent = entry.word;
+  popupContentEl.textContent = "";
+  popupContentEl.dataset.buffer = entry.buffer;
   popupLoadingEl.hidden = false;
   popupMinimized = false;
   syncPopupRestore();
   popupEl.hidden = false;
-  popupContentEl.dataset.buffer = "";
   popupBodyEl.style.maxHeight = "";
   popupBodyEl.scrollTop = 0;
-  const anchorRect = (anchorEl || inputEl).getBoundingClientRect();
+  positionPopup(popupAnchorEl || inputEl, popupAnchorRect);
+  renderDictionaryEntry(entry);
+  ensureDictionaryEntryStream(entry);
+}
+
+function navigateDictionary(step) {
+  const next = dictionaryHistoryIndex + step;
+  if (next < 0 || next >= dictionaryHistory.length) return;
+  showDictionaryEntry(dictionaryHistory[next]);
+}
+
+function openDictionaryPopup(word, answerContext, anchorEl, options = {}) {
+  const clean = String(word || "").trim();
+  if (!clean) return;
+  const root = options.root !== false;
+  if (root) {
+    // A new lookup started from the answer is the root of a fresh history.
+    clearDictionaryHistory();
+    dictionaryRootAnswer = String(answerContext || "");
+  } else if (!dictionaryRootAnswer) {
+    dictionaryRootAnswer = String(answerContext || "");
+  }
+
   popupAnchorEl = anchorEl || inputEl;
-  popupAnchorRect = anchorRect;
-  positionPopup(popupAnchorEl, popupAnchorRect);
-
-  let buffer = "";
-  let popupError = "";
-  let pendingRender = false;
-  const renderPopup = () => {
-    popupContentEl.textContent = "";
-    popupContentEl.appendChild(
-      renderMarkdown(formatDictionarySections(buffer), false)
-    );
-    if (popupError) {
-      const div = document.createElement("div");
-      div.className = "error-text";
-      div.textContent = popupError;
-      popupContentEl.appendChild(div);
-    }
-    if (!popupEl.hidden) {
-      positionPopup(anchorEl || inputEl, anchorRect);
-      popupBodyEl.scrollTop = popupBodyEl.scrollHeight;
-    }
+  popupAnchorRect = popupAnchorEl.getBoundingClientRect();
+  const entry = {
+    word: clean,
+    answerContext: root
+      ? dictionaryRootAnswer
+      : String(answerContext || dictionaryRootAnswer || ""),
+    buffer: "",
+    error: "",
+    loading: true,
+    done: false,
+    controller: null,
+    aborted: false,
   };
-
-  const handlers = {
-    delta: (data) => {
-      if (generation !== popupGeneration) return;
-      if (!data.text) return;
-      buffer += data.text;
-      if (pendingRender) return;
-      pendingRender = true;
-      window.setTimeout(() => {
-        pendingRender = false;
-        if (generation === popupGeneration) renderPopup();
-      }, 55);
-    },
-    error: (data) => {
-      if (generation !== popupGeneration) return;
-      popupError = data.message || "Dictionary lookup failed.";
-      renderPopup();
-    },
-    done: () => {
-      if (generation !== popupGeneration) return;
-      popupLoadingEl.hidden = true;
-      renderPopup();
-    },
-  };
-
-  popupLoadingEl.hidden = false;
-  streamSSE(
-    "/api/dict",
-    { word: clean, answer: String(answerContext || "") },
-    handlers,
-    popupController.signal
-  )
-    .catch((error) => {
-      if (generation !== popupGeneration) return;
-      if (error?.name !== "AbortError") {
-        popupError = error?.message || String(error);
-        renderPopup();
-      }
-    })
-    .finally(() => {
-      if (generation !== popupGeneration) return;
-      popupLoadingEl.hidden = true;
-      if (buffer || popupError) renderPopup();
-    });
+  dictionaryHistory.push(entry);
+  dictionaryHistoryIndex = dictionaryHistory.length - 1;
+  showDictionaryEntry(entry);
 }
 
 function syncPopupRestore() {
@@ -4956,21 +5058,45 @@ function restorePopup() {
 }
 
 function closePopup() {
-  popupGeneration += 1;
-  if (popupController) {
-    popupController.abort();
-    popupController = null;
+  for (const entry of dictionaryHistory) abortDictionaryEntry(entry);
+  if (dictionaryRenderTimer) {
+    window.clearTimeout(dictionaryRenderTimer);
+    dictionaryRenderTimer = null;
   }
   popupMinimized = false;
   syncPopupRestore();
   popupEl.hidden = true;
   popupContentEl.textContent = "";
+  popupContentEl.dataset.buffer = "";
   popupLoadingEl.hidden = false;
+  updateDictionaryNav();
   inputEl.focus({ preventScroll: true });
 }
 $("#popup-close").addEventListener("click", closePopup);
 $("#popup-minimize").addEventListener("click", minimizePopup);
+popupPrevEl.addEventListener("click", () => navigateDictionary(-1));
+popupNextEl.addEventListener("click", () => navigateDictionary(1));
 popupRestoreEl.addEventListener("click", restorePopup);
+
+// Words inside the streamed definition open a nested lookup. The root
+// answer context stays the same for history reset purposes, while the
+// contextual meaning uses the definition text the word came from.
+popupContentEl.addEventListener("click", (event) => {
+  const wordEl = event.target.closest(".word");
+  if (!wordEl) return;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && String(selection).trim()) return;
+  const active = activeDictionaryEntry();
+  if (!active) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openDictionaryPopup(
+    wordEl.dataset.word || wordEl.textContent,
+    active.buffer || active.answerContext,
+    wordEl,
+    { root: false }
+  );
+});
 document.addEventListener("click", (event) => {
   if (popupEl.hidden) return;
   if (

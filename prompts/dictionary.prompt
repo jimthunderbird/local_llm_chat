@@ -1,3 +1,11 @@
+task.word_look_up_navigation (completed) {
+  - in the dictionary popup, for all the words display, make it dictionary searchable
+  - in the top right of the dictionary popup, show a left arrow and right arrow, allows me to navigate the history of words look up and its definition cache back and forth:
+    - left arrow, navigate to the previous word
+    - right arrow, navigate to the next word
+  - the history of words look up will be reset when the next word lookup from the answer (the "root" search) starts
+}
+
 task (completed) {
   in the dictionary popup, please only show the following, section by section, each section is separated by a new line:
   - the <word>
