@@ -1353,6 +1353,7 @@ const completion = {
   baseAfter: "",
   lastApplied: null,
   command: false,
+  kind: null,
 };
 
 /* ------------------------------------------------------------------ *
@@ -3343,9 +3344,14 @@ function applyState(state, loadHistory = false) {
     historyDraft = "";
   }
   $("#status-tag").textContent = state.tag || "—";
-  $("#status-scope").textContent = state.transcript
-    ? `transcript ${state.transcript}`
-    : "tag scope";
+  $("#status-scope").textContent = state.article
+    ? `article ${state.article}`
+    : state.transcript
+      ? `transcript ${state.transcript}`
+      : "tag scope";
+  $("#status-scope").title = state.article
+    ? `Only ${state.article} is used as context`
+    : "";
   $("#status-depth").textContent = state.depth_label || "—";
   $("#status-chunks").textContent = `${state.chunks ?? "?"} / ${state.videos ?? "?"} videos`;
   $("#status-conversation").textContent =
@@ -3361,8 +3367,9 @@ function applyState(state, loadHistory = false) {
       ? `Code generated while this tag is active is always ${language}`
       : "The coding model chooses the language (no tag pins one)";
   }
-  $("#top-tagline").textContent =
-    `tag ${state.tag ?? "—"} · ${state.chunks ?? "?"} trunks · ${state.models?.chat ?? "—"} · /help`;
+  $("#top-tagline").textContent = state.article
+    ? `article ${state.article_title || state.article} · ${state.chunks ?? "?"} paragraphs · ${state.models?.chat ?? "—"} · /help`
+    : `tag ${state.tag ?? "—"} · ${state.chunks ?? "?"} trunks · ${state.models?.chat ?? "—"} · /help`;
   updateModeUI();
   if (helpPanel.hidden === false) renderHelp();
 }
@@ -3857,6 +3864,7 @@ function hideCompletion() {
   completion.items = [];
   completion.index = -1;
   completion.lastApplied = null;
+  completion.kind = null;
 }
 
 function completionContext() {
@@ -3877,6 +3885,7 @@ function completionContext() {
   let kind = null;
   if (name === "/tag" || name === "/tag_gen") kind = "tags";
   else if (name === "/transcript" || name === "/search_transcript") kind = "transcripts";
+  else if (name === "/article") kind = "paths";
   else return null;
   return {
     kind,
@@ -3951,6 +3960,7 @@ async function requestCompletions() {
   completion.start = context.start;
   completion.end = context.end;
   completion.command = context.command;
+  completion.kind = context.kind;
   completion.baseBefore = base.slice(0, context.start);
   completion.baseAfter = base.slice(context.end);
   applyCompletion();
@@ -3974,6 +3984,18 @@ function applyCompletion() {
 }
 
 function cycleCompletion() {
+  // In a path, a trailing slash means the user picked a directory: refresh
+  // the list for the new directory instead of cycling its sibling entries.
+  if (
+    completion.kind === "paths" &&
+    completion.lastApplied !== null &&
+    inputEl.value === completion.lastApplied &&
+    completion.lastApplied.endsWith("/")
+  ) {
+    hideCompletion();
+    requestCompletions();
+    return;
+  }
   if (completion.lastApplied !== null && inputEl.value === completion.lastApplied) {
     completion.index = (completion.index + 1) % completion.items.length;
     const item = completion.items[completion.index];

@@ -2,10 +2,11 @@
 """HTTP API server for the browser front end in app/chat.html.
 
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
-Ollama streaming, tag/transcript scoping, history, /memory, /status,
-/sources, /benchmark, /learn, /learn_topic, /learn_playlist, /tag_gen,
-/kqed, /cnn, /wiki, /wiki_article, and /dict. The browser is a pure
-HTML/CSS/JavaScript single-page app served from ./app/chat.html.
+Ollama streaming, tag/transcript/article scoping, history, /memory,
+/status, /sources, /benchmark, /learn, /learn_topic, /learn_playlist,
+/tag_gen, /kqed, /cnn, /wiki, /wiki_article, /article, and /dict. The
+browser is a pure HTML/CSS/JavaScript single-page app served from
+./app/chat.html.
 
 Usage:
     python3 app/chat_server.py [--host 127.0.0.1] [--port 8765] [--tag japan]
@@ -14,7 +15,7 @@ Usage:
 Endpoints:
     GET  /                       app/chat.html
     GET  /api/state              current chat state + command list + history
-    GET  /api/autocomplete       ?kind=commands|tags|transcripts&q=...
+    GET  /api/autocomplete       ?kind=commands|tags|transcripts|paths&q=...
     GET  /api/wiki?word=...      JSON Wikipedia summary
     GET  /api/transcripts?q=...  ag title search results
     POST /api/ask                SSE: question or slash-command stream
@@ -48,6 +49,8 @@ from __future__ import annotations
 import argparse
 import codecs
 import gc
+import hashlib
+import html
 import io
 import json
 import math
@@ -63,6 +66,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, quote, urlparse
+from xml.sax.saxutils import escape as xml_escape
 
 try:
     import requests
@@ -77,6 +81,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import chat
+from paragraph_utils import split_paragraphs
 from doc_answer_cleanup import (
     CodeFenceRepairFilter,
     InsufficientContextFilter,
@@ -86,6 +91,7 @@ from doc_answer_cleanup import (
 
 CHAT_HTML = APP_DIR / "chat.html"
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
+PATH_COMPLETION_LIMIT = 50
 
 WEB_COMMANDS = {
     **chat.COMMANDS,
@@ -96,6 +102,7 @@ WEB_COMMANDS = {
     "/tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
     "/kqed": "list the latest KQED News stories (optionally /kqed <count>)",
     "/cnn": "list the latest CNN News stories (optionally /cnn [section] [count])",
+    "/article": "use one local article file as the only context for follow-up questions",
 }
 
 # Sections served by openrss.org for cnn_news_fetch.php.
@@ -111,6 +118,7 @@ COMMAND_ARGUMENTS = {
     "/learn_playlist",
     "/wiki",
     "/wiki_article",
+    "/article",
     "/dict",
     "/depth",
     "/benchmark",
@@ -2313,6 +2321,297 @@ def build_answer_annotations(
     return annotations
 
 
+# Articles loaded with /article are split into the same one-knowledge-piece
+# paragraphs that the transcript pipeline uses. The generated trunk files live
+# outside ./youtube_transcript so they never become tagged videos or appear in
+# transcript autocomplete.
+ARTICLE_CACHE_DIR = APP_DIR / ".article_cache"
+ARTICLE_HTML_BLOCK_RE = re.compile(
+    r"<\s*(script|style|noscript|svg|head)\b[^>]*>.*?<\s*/\s*\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+ARTICLE_HTML_BREAK_RE = re.compile(
+    r"<\s*/?\s*(?:br|p|div|li|ul|ol|h[1-6]|tr|td|th|section|article|"
+    r"blockquote|pre)\b[^>]*>",
+    re.IGNORECASE,
+)
+ARTICLE_HTML_TAG_RE = re.compile(r"<[^>]+>")
+ARTICLE_MARKDOWN_HEADING_RE = re.compile(
+    r"^\s{0,3}#{1,6}\s+(?P<title>.+?)\s*#*\s*$"
+)
+ARTICLE_HTML_HEADING_RE = re.compile(
+    r"<\s*h[1-6]\b[^>]*>(?P<heading>.*?)<\s*/\s*h[1-6]\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+ARTICLE_SUMMARY_HEADING_RE = re.compile(
+    r"^\s*(?:\d+(?:\.\d+)*[.)]?\s*)?"
+    r"(?:tl\s*;?\s*dr|summary|overview|abstract|executive summary)\b",
+    re.IGNORECASE,
+)
+ARTICLE_NUMBERED_HEADING_RE = re.compile(
+    r"^\s*\d+(?:\.\d+)*[.)]?\s+[A-Za-z]"
+)
+ARTICLE_OVERVIEW_REFERENCE_RE = re.compile(
+    r"\b(?:this|the)\s+(?:article|document|doc|file|page|report|paper)\b",
+    re.IGNORECASE,
+)
+ARTICLE_OVERVIEW_INTENT_RE = re.compile(
+    r"\b(?:about|summari[sz]e|summary|overview|tl\s*;?\s*dr|main|"
+    r"topics?|discuss(?:es|ed)?|cover(?:s|ed)?|describe(?:s|d)?|purpose|"
+    r"what is|what's|what does)\b",
+    re.IGNORECASE,
+)
+ARTICLE_OVERVIEW_OUTLINE_CHARS = 1400
+ARTICLE_OVERVIEW_SUMMARY_CHARS = 2400
+
+
+def article_overview_question(question: str) -> bool:
+    """Return True for questions about the article as a whole.
+
+    These questions need the document title, outline, and opening/summary
+    section rather than the normal BM25 paragraphs. Without this branch a
+    broad question such as "what is this article about?" matches generic
+    words ("what", "this") in unrelated paragraphs and the answer model sees
+    no useful overview.
+    """
+    return bool(
+        ARTICLE_OVERVIEW_REFERENCE_RE.search(question)
+        and ARTICLE_OVERVIEW_INTENT_RE.search(question)
+    )
+
+
+def _clean_article_heading(raw: str) -> str:
+    text = ARTICLE_HTML_TAG_RE.sub(" ", raw)
+    return " ".join(html.unescape(text).split())
+
+
+def _article_headings(raw_text: str, text: str) -> list[str]:
+    """Collect HTML or Markdown headings in document order."""
+    headings: list[str] = []
+    seen: set[str] = set()
+
+    def add(heading: str) -> None:
+        heading = " ".join(heading.split())
+        key = heading.casefold()
+        if heading and len(heading) <= 200 and key not in seen:
+            seen.add(key)
+            headings.append(heading)
+
+    heading_source = ARTICLE_HTML_BLOCK_RE.sub("\n", raw_text)
+    for raw in ARTICLE_HTML_HEADING_RE.findall(heading_source):
+        add(_clean_article_heading(raw))
+    for line in text.splitlines():
+        match = ARTICLE_MARKDOWN_HEADING_RE.match(line)
+        if match:
+            add(match.group("title"))
+    return headings
+
+
+def _article_heading_like(paragraph: str) -> bool:
+    """Return True for short, heading-shaped lines (including nav entries)."""
+    if len(paragraph) > 120:
+        return False
+    if ARTICLE_NUMBERED_HEADING_RE.match(paragraph):
+        return True
+    return (
+        len(paragraph.split()) <= 12
+        and not paragraph.endswith((".", "!", "?", ";", ","))
+    )
+
+
+def _article_summary_paragraphs(paragraphs: list[str]) -> list[str]:
+    """Return the paragraphs under a TL;DR/summary/overview heading."""
+    normalized = [" ".join(paragraph.split()) for paragraph in paragraphs]
+    matches = [
+        index
+        for index, paragraph in enumerate(normalized)
+        if len(paragraph) <= 120
+        and ARTICLE_SUMMARY_HEADING_RE.match(paragraph)
+    ]
+    if not matches:
+        return []
+    # An article often repeats "TL;DR" in its table of contents. Prefer the
+    # numbered section heading ("1. TL;DR") when one exists.
+    start = next(
+        (
+            index
+            for index in matches
+            if ARTICLE_NUMBERED_HEADING_RE.match(normalized[index])
+        ),
+        matches[0],
+    )
+
+    result: list[str] = []
+    char_count = 0
+    for paragraph in normalized[start + 1 :]:
+        if not paragraph:
+            continue
+        # Skip outline/navigation entries between a summary link and the real
+        # summary body (common in HTML pages with a table of contents).
+        if not result and _article_heading_like(paragraph):
+            continue
+        if result and _article_heading_like(paragraph):
+            break
+        result.append(paragraph)
+        char_count += len(paragraph)
+        if len(result) >= 12 or char_count >= ARTICLE_OVERVIEW_SUMMARY_CHARS:
+            break
+    return result
+
+
+def _article_opening_paragraphs(paragraphs: list[str]) -> list[str]:
+    """Fallback overview text when the article has no summary section."""
+    result: list[str] = []
+    char_count = 0
+    for paragraph in paragraphs[1:]:
+        paragraph = " ".join(paragraph.split())
+        if not paragraph:
+            continue
+        if len(paragraph) <= 120 and (
+            ARTICLE_NUMBERED_HEADING_RE.match(paragraph)
+            or (
+                len(paragraph.split()) <= 10
+                and not paragraph.endswith((".", "!", "?", ";"))
+            )
+        ):
+            continue
+        result.append(paragraph)
+        char_count += len(paragraph)
+        if len(result) >= 6 or char_count >= ARTICLE_OVERVIEW_SUMMARY_CHARS:
+            break
+    return result
+
+
+def _article_overview(
+    title: str, headings: list[str], paragraphs: list[str]
+) -> str:
+    """Build an always-in-context overview trunk for a loaded article.
+
+    It contains the title, a compact outline, and the TL;DR/summary section
+    (or the opening paragraphs when there is no explicit summary). The normal
+    paragraph trunks remain unchanged, so follow-up questions still use BM25
+    over the full article.
+    """
+    summary = _article_summary_paragraphs(paragraphs)
+    if not summary:
+        summary = _article_opening_paragraphs(paragraphs)
+
+    parts = [
+        f"Article title: {title}",
+        "Document overview: this article summarizes the main topics, "
+        "purpose, and summary of the document.",
+    ]
+    if headings:
+        outline: list[str] = []
+        outline_chars = 0
+        for heading in headings[:60]:
+            line = f"- {heading}"
+            if outline_chars + len(line) > ARTICLE_OVERVIEW_OUTLINE_CHARS:
+                break
+            outline.append(line)
+            outline_chars += len(line) + 1
+        if outline:
+            parts.append("Article outline:")
+            parts.extend(outline)
+    if summary:
+        parts.append("Article summary:")
+        parts.extend(summary)
+    return "\n".join(parts)
+
+
+def _decode_article_bytes(data: bytes) -> str:
+    """Decode a local article without assuming a single text encoding."""
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16")
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _article_title(text: str, path: Path) -> str:
+    """Return a short title for the article, falling back to its filename."""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        heading = ARTICLE_MARKDOWN_HEADING_RE.match(line)
+        if heading:
+            line = heading.group("title").strip()
+        if line:
+            return line[:200]
+    return path.stem
+
+
+def _load_article_chunks(path: Path) -> tuple[list[chat.Chunk], str]:
+    """Split one article into numbered trunk files and return its chunks.
+
+    The path is content-hashed, so reloading an unchanged article reuses the
+    generated trunks while an edited article gets a fresh cache directory.
+    ``chat.answer`` can then use the normal BM25 retrieval and prompt path
+    without any article-specific branching in chat.py.
+    """
+    data = path.read_bytes()
+    raw_text = _decode_article_bytes(data)
+    text = raw_text
+    if path.suffix.lower() in {".html", ".htm", ".xhtml"}:
+        text = ARTICLE_HTML_BLOCK_RE.sub("\n", text)
+        text = ARTICLE_HTML_BREAK_RE.sub("\n\n", text)
+        text = ARTICLE_HTML_TAG_RE.sub(" ", text)
+        text = html.unescape(text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        raise ValueError("the article is empty")
+
+    headings = _article_headings(raw_text, text)
+    title = _article_title(text, path)
+    paragraphs = split_paragraphs(text)
+    if not paragraphs:
+        raise ValueError("the article contains no readable paragraphs")
+    # Make the title part of the first paragraph so a broad question such as
+    # "what is this about?" still retrieves the article heading.
+    if title and title.casefold() not in paragraphs[0].casefold():
+        paragraphs[0] = f"{title}\n\n{paragraphs[0]}"
+
+    digest = hashlib.sha1(
+        str(path).encode("utf-8") + b"\0" + data
+    ).hexdigest()[:16]
+    video_id = f"article_{digest}"
+    cache_dir = ARTICLE_CACHE_DIR / video_id
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    for old_trunk in cache_dir.glob("*.trunk"):
+        old_trunk.unlink()
+
+    # Chunk 0 is a compact document overview (title + outline + TL;DR). It
+    # gives article-wide questions useful context even when their generic
+    # wording ("what is this article about?") has no good BM25 match among
+    # thousands of paragraphs.
+    overview = _article_overview(title, headings, paragraphs)
+    overview_trunk = (
+        f"<article><title>{xml_escape(title)}</title>"
+        f"<paragraph>{xml_escape(overview)}</paragraph></article>"
+    )
+    overview_path = cache_dir / f"{video_id}.0.trunk"
+    overview_path.write_text(overview_trunk + "\n", encoding="utf-8")
+    chunks: list[chat.Chunk] = [
+        chat.Chunk(video_id=video_id, index=0, trunk_path=overview_path)
+    ]
+
+    for index, paragraph in enumerate(paragraphs, start=1):
+        trunk = (
+            f"<article><title>{xml_escape(title)}</title>"
+            f"<paragraph>{xml_escape(paragraph)}</paragraph></article>"
+        )
+        trunk_path = cache_dir / f"{video_id}.{index}.trunk"
+        trunk_path.write_text(trunk + "\n", encoding="utf-8")
+        chunks.append(
+            chat.Chunk(video_id=video_id, index=index, trunk_path=trunk_path)
+        )
+    return chunks, title
+
+
 class ChatState:
     """The server-side equivalent of chat.py's interactive session state."""
 
@@ -2328,6 +2627,8 @@ class ChatState:
         self.progressive = progressive
         self.depth: int | None = chat.DEFAULT_DEPTH
         self.transcript: str | None = None
+        self.article_path: str | None = None
+        self.article_title: str = ""
         self.cache = chat.AnswerCache()
         self.latest_answer: str | None = None
         self.latest_sources: list[tuple[chat.Chunk, float]] = []
@@ -2397,8 +2698,21 @@ class ChatState:
         self.conversation_revision += 1
 
     # ---- state -------------------------------------------------------
-    def replace_chunks(self, chunks: list[chat.Chunk]) -> None:
+    def replace_chunks(
+        self,
+        chunks: list[chat.Chunk],
+        article_path: str | None = None,
+        article_title: str = "",
+    ) -> None:
+        """Install a new knowledge scope and drop the current conversation.
+
+        Switching tags, transcripts, or articles starts a fresh chain of
+        questions. Passing an ``article_path`` enters article mode; every
+        other caller leaves article mode.
+        """
         self.chunks = chunks
+        self.article_path = article_path
+        self.article_title = article_title
         chat.clear_bm25_cache()
         self.reset_conversation()
         gc.collect()
@@ -2408,6 +2722,8 @@ class ChatState:
         self.tag = tag
         self.chunks = chunks
         self.transcript = None
+        self.article_path = None
+        self.article_title = ""
         chat.clear_bm25_cache()
         gc.collect()
 
@@ -2490,10 +2806,16 @@ class ChatState:
             "videos": len(video_ids),
             "code_language": tag_code_language(self.tag) or "",
             "scope": (
-                f"transcript {self.transcript!r}"
-                if self.transcript is not None
-                else f"tag {self.tag!r}"
+                f"article {self.article_path!r}"
+                if self.article_path is not None
+                else (
+                    f"transcript {self.transcript!r}"
+                    if self.transcript is not None
+                    else f"tag {self.tag!r}"
+                )
             ),
+            "article": self.article_path,
+            "article_title": self.article_title,
             "models": {
                 "chat": tag_chat_model(self.tag),
                 "coding": tag_coding_model(self.tag),
@@ -2728,6 +3050,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 if tag.startswith(query)
             ]
 
+        if kind == "paths":
+            return self._path_completions(query)
+
         if kind in {"transcripts", "transcript_titles"}:
             if kind == "transcript_titles" and query:
                 matches = chat.search_transcript_titles(query)
@@ -2759,6 +3084,68 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return items
 
         return []
+
+    def _path_completions(self, query: str) -> list[dict]:
+        """Complete a local filesystem path for commands such as /article.
+
+        The typed text is treated the way a shell would read it: the part up
+        to the last slash selects the directory to list and the remainder is
+        the name prefix.  ``~`` is expanded for reading the directory while
+        the returned value keeps the user's spelling, so completing ``~/do``
+        yields ``~/documents/`` instead of an absolute path.
+        """
+        raw = query or ""
+        if raw == "~":
+            prefix, tail = "~/", ""
+        elif "/" in raw:
+            head, tail = raw.rsplit("/", 1)
+            prefix = head + "/"
+        else:
+            prefix, tail = "", raw
+
+        if prefix:
+            directory = Path(os.path.expanduser(prefix))
+        else:
+            directory = Path.cwd()
+        if not directory.is_absolute():
+            directory = Path.cwd() / directory
+
+        # Hidden entries only appear once the user starts typing a dot.
+        show_hidden = tail.startswith(".")
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            return []
+
+        directories: list[dict] = []
+        files: list[dict] = []
+        for entry in entries:
+            name = entry.name
+            if not name.startswith(tail):
+                continue
+            if name.startswith(".") and not show_hidden:
+                continue
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                is_dir = False
+            value = prefix + name + ("/" if is_dir else "")
+            if is_dir:
+                directories.append({"value": value, "description": "dir"})
+            else:
+                try:
+                    size = entry.stat().st_size
+                    description = f"{size:,} bytes"
+                except OSError:
+                    description = "file"
+                files.append({"value": value, "description": description})
+
+        def sort_key(item: dict) -> tuple[str, str]:
+            return (item["value"].rsplit("/", 1)[-1].lower(), item["value"])
+
+        directories.sort(key=sort_key)
+        files.sort(key=sort_key)
+        return (directories + files)[:PATH_COMPLETION_LIMIT]
 
     def _wiki_json(self, word: str) -> None:
         if not word:
@@ -2894,6 +3281,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
     def _run_question(self, question: str) -> None:
         state = self.state
+        article_mode = state.article_path is not None
         answer_language: str | None = None
         retrieval_question = question
         if chat.contains_simplified_chinese(question):
@@ -2924,24 +3312,61 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
                 retrieval_question = resolved_question
 
+        article_overview_mode = article_mode and (
+            article_overview_question(question)
+            or article_overview_question(retrieval_question)
+        )
+        answer_chunks = state.chunks
+        article_overview_prefix: str | None = None
+        if article_overview_mode:
+            overview_chunks = [
+                chunk for chunk in state.chunks if chunk.index == 0
+            ]
+            if overview_chunks:
+                # Keep a few paragraph trunks alongside the overview so BM25
+                # has more than one document and can assign the overview a
+                # positive IDF score. The overview outranks them for
+                # article-wide questions; there are too few candidates for
+                # the small relevance filter to run.
+                answer_chunks = overview_chunks + [
+                    chunk for chunk in state.chunks if chunk.index != 0
+                ][:3]
+                article_overview_prefix = (
+                    "### ARTICLE OVERVIEW\n"
+                    "The context below is the overview of the entire article: "
+                    "its title, outline, and TL;DR/summary section. Answer the "
+                    "user's question with a concise summary grounded in this "
+                    "overview.\n\n"
+                )
+                self._sse_text(
+                    "log",
+                    "[article: answering from the document overview "
+                    "(title, outline, and summary)]",
+                )
+
         golang_package_docs = (
-            (state.tag or "").lower() == GOLANG_TAG
+            not article_mode
+            and (state.tag or "").lower() == GOLANG_TAG
             and golang_package_docs_request(retrieval_question)
         )
         rust_crate_docs = (
-            (state.tag or "").lower() == RUST_TAG
+            not article_mode
+            and (state.tag or "").lower() == RUST_TAG
             and rust_crate_docs_request(retrieval_question)
         )
         rust_code_docs = (
-            (state.tag or "").lower() == RUST_TAG
+            not article_mode
+            and (state.tag or "").lower() == RUST_TAG
             and rust_code_docs_request(retrieval_question)
         )
         php_symbol_docs = (
-            (state.tag or "").lower() == PHP_TAG
+            not article_mode
+            and (state.tag or "").lower() == PHP_TAG
             and php_symbol_docs_request(retrieval_question)
         )
-        documentation_code = documentation_code_request(
-            state.tag, retrieval_question
+        documentation_code = (
+            not article_mode
+            and documentation_code_request(state.tag, retrieval_question)
         )
         coding_mode = (
             question_requests_coding(retrieval_question)
@@ -3119,11 +3544,17 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         original_tag = state.tag
         original_scope = (
-            f"tag {original_tag!r}"
-            if state.transcript is None
-            else f"transcript {state.transcript!r}"
+            f"article {state.article_path!r}"
+            if article_mode
+            else (
+                f"tag {original_tag!r}"
+                if state.transcript is None
+                else f"transcript {state.transcript!r}"
+            )
         )
-        documentation_tag = tag_uses_official_docs(original_tag)
+        documentation_tag = (
+            False if article_mode else tag_uses_official_docs(original_tag)
+        )
         local_model = coding_model if coding_mode else chat_model
         documentation_first_done = False
         first_response: str | None = None
@@ -3303,7 +3734,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     first_stats,
                     error,
                 ) = attempt(
-                    original_tag, state.chunks, original_scope
+                    original_tag,
+                    answer_chunks,
+                    original_scope,
+                    prompt_prefix_override=article_overview_prefix,
                 )
                 if error:
                     return
@@ -3326,7 +3760,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     ),
                 )
             first_response, first_sources, first_stats, error = attempt(
-                original_tag, state.chunks, original_scope
+                original_tag,
+                answer_chunks,
+                original_scope,
+                prompt_prefix_override=article_overview_prefix,
             )
             if error:
                 return
@@ -3383,6 +3820,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         # the official documentation above.
         elif (
             coding_mode
+            and not article_mode
             and github_code_fallback_allowed(original_tag)
             and answer_is_insufficient(first_response)
         ):
@@ -3430,6 +3868,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             chat.CROSS_TAG_FALLBACK_ENABLED
             and not coding_mode
             and not documentation_backed_tag
+            and not article_mode
             and state.transcript is None
             and local_answer_insufficient
         ):
@@ -3532,10 +3971,15 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         stats["coding_mode"] = coding_mode
         stats["model"] = coding_model if coding_mode else chat_model
         state.latest_benchmark = stats
-        self._sse(
-            "annotations",
-            {"items": build_answer_annotations(response, sources)},
-        )
+        annotations = build_answer_annotations(response, sources)
+        if article_mode:
+            # Article paragraphs have no YouTube source. Keep the paragraph
+            # mapping for the UI but suppress the video icon/link.
+            for item in annotations:
+                item["video_id"] = ""
+                item["url"] = ""
+                item["title"] = state.article_title or "article"
+        self._sse("annotations", {"items": annotations})
         state.record_turn(question, retrieval_question, response)
         if switched:
             self._sse("meta", state.snapshot())
@@ -3578,6 +4022,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_wiki(argument)
         elif name == "/wiki_article":
             self._command_wiki_article(argument)
+        elif name == "/article":
+            self._command_article(argument)
         elif name == "/dict":
             self._command_dict(argument)
         elif name == "/depth":
@@ -3590,6 +4036,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 self.state.depth,
                 self.state.max_context_tokens,
                 len(self.state.cache),
+                article=self.state.article_path,
             )
             report += (
                 f"  conversation: {len(self.state.conversation)} turn(s) "
@@ -3683,6 +4130,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
     def _command_refresh(self) -> None:
         state = self.state
+        if state.article_path is not None:
+            self._refresh_article(state.article_path)
+            return
         new_chunks, printed, error = load_chunks_captured(tag=state.tag)
         if error or new_chunks is None:
             self._sse_text(
@@ -3770,6 +4220,33 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 ],
             },
         )
+
+    def _refresh_article(self, article_path: str) -> None:
+        """Re-read the active article and rebuild its paragraph trunks."""
+        state = self.state
+        path = Path(article_path)
+        try:
+            new_chunks, title = _load_article_chunks(path)
+        except (OSError, ValueError) as exc:
+            self._sse_text(
+                "output",
+                f"\nCannot refresh article {article_path!r}: {exc}\n",
+            )
+            return
+        state.replace_chunks(
+            new_chunks,
+            article_path=article_path,
+            article_title=title,
+        )
+        state.cache.clear()
+        self._sse_text(
+            "output",
+            "\n"
+            + chat.index_memory_report(new_chunks, build_index=False)
+            + f"\nNow answering from article {article_path!r} "
+            f"({len(new_chunks)} paragraph(s)).\n",
+        )
+        self._sse("meta", state.snapshot())
 
     def _activate_transcript(self, video_id: str) -> None:
         state = self.state
@@ -4092,7 +4569,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         new_chunks = printed = error = None
         reloaded = False
-        if state.transcript is not None:
+        if state.article_path is not None:
+            self._sse_text(
+                "output",
+                f"\nStill answering from article {state.article_path!r}; "
+                "the loaded article context is unchanged.\n",
+            )
+        elif state.transcript is not None:
             if state.transcript in video_ids:
                 new_chunks, printed, error = load_chunks_captured(
                     video_ids={state.transcript}
@@ -4221,7 +4704,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             f"\n/tag_gen: finished updating tag {tag!r}.\n",
         )
 
-        if state.transcript is None and state.tag == tag:
+        if (
+            state.article_path is None
+            and state.transcript is None
+            and state.tag == tag
+        ):
             new_chunks, printed, error = load_chunks_captured(tag=tag)
             if error or new_chunks is None:
                 self._sse_text(
@@ -4382,6 +4869,59 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if response:
             self.state.latest_answer = response
             self.state.latest_sources = []
+
+    def _command_article(self, argument: str) -> None:
+        """Use one local article file as the complete context for the chat."""
+        state = self.state
+        raw_path = argument.strip()
+        if not raw_path:
+            self._sse_text(
+                "output",
+                "\nUsage: /article <path_to_an_article>\n"
+                "The file becomes the only context; follow-up questions keep "
+                "the article scope until /tag or /transcript is used.\n",
+            )
+            return
+        if (
+            len(raw_path) >= 2
+            and raw_path[0] == raw_path[-1]
+            and raw_path[0] in {"'", '"'}
+        ):
+            raw_path = raw_path[1:-1]
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = SCRIPT_DIR / path
+        path = path.resolve()
+        if not path.is_file():
+            self._sse_text(
+                "output", f"\nArticle not found: {path}\n"
+            )
+            return
+        try:
+            new_chunks, title = _load_article_chunks(path)
+        except (OSError, ValueError) as exc:
+            self._sse_text(
+                "output",
+                f"\nCannot use article {path}: {exc}\n",
+            )
+            return
+        # /article replaces the tag/transcript scope for subsequent questions.
+        state.transcript = None
+        state.replace_chunks(
+            new_chunks,
+            article_path=str(path),
+            article_title=title,
+        )
+        state.cache.clear()
+        self._sse_text(
+            "output",
+            "\n"
+            + chat.index_memory_report(new_chunks, build_index=False)
+            + f"\nNow answering from article {str(path)!r} "
+            f"({len(new_chunks)} paragraph(s)). Existing conversation "
+            "context was cleared; follow-up questions stay on this article.\n",
+        )
+        self._sse("meta", state.snapshot())
 
     def _command_dict(self, argument: str) -> None:
         word = argument.strip()

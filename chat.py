@@ -1230,10 +1230,13 @@ def chat_status_report(
     depth: int | None,
     max_context_tokens: int = MAX_CONTEXT_TOKENS,
     cache_entries: int = 0,
+    article: str | None = None,
 ) -> str:
     """Describe the chatbot's current configuration and loaded data."""
     video_ids = {chunk.video_id for chunk in chunks}
-    if transcript is not None:
+    if article is not None:
+        scope = f"single article {article!r}"
+    elif transcript is not None:
         scope = f"single transcript {transcript!r}"
     else:
         scope = f"tag {tag!r}"
@@ -1263,8 +1266,8 @@ def chat_status_report(
         "list/aggregation questions)",
         "  fallback:    "
         + (
-            "disabled (explicit transcript scope)"
-            if transcript is not None
+            "disabled (explicit article/transcript scope)"
+            if article is not None or transcript is not None
             else "all tagged videos when the active tag has nothing relevant"
         ),
         f"  answer cache: {cache_entries} entr{'y' if cache_entries == 1 else 'ies'}",

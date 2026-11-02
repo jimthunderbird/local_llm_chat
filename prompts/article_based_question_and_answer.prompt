@@ -1,0 +1,19 @@
+task.auto_complete_path (completed) {
+  as we type after /article, allow user to use tab auto completion on the article's file path
+}
+
+task (completed) {
+  bug:
+  /article ~/projects/learning_and_development/home-cms/HOME-126045-product-tag-audit/research/item_tagging_overview.html
+  question: what is this article about?
+  expect: show me a brief summary of this article
+  actual: The provided context does not contain sufficient information to answer this question.
+}
+
+task (completed) {
+  create command /article <path_to_an_article>:
+  - clear existing context
+  - use the content in <path_to_an_article> as context
+  - in the status, show me that i'm using <path_to_an_article>
+  - allow me to ask chain of questions on this article
+}

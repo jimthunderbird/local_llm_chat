@@ -1,3 +1,4 @@
 youtube_transcript/
 .chat/
 __pycache__/
+.article_cache/

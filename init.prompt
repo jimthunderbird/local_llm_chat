@@ -191,6 +191,10 @@ group app/chat.html and app/chat_server.py {
   document_backed_tags:rust, golang, php
 
   task (persistent) {
+    complete tasks in ./prompts/article_based_question_and_answer.prompt
+  }
+
+  task (persistent) {
     complete tasks in ./prompts/dictionary.prompt
   }
 
