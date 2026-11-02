@@ -4827,38 +4827,21 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 pass
 
     def _stream_dictionary(self, word: str, latest_answer: str | None) -> None:
-        self._sse_text("delta", f"Dictionary ({chat.DICT_MODEL}):\n\n")
+        # The popup shows exactly: word, IPA, part of speech, quote, and the
+        # contextual meaning. Keep the prompt and the streamed output limited
+        # to those fields (no model banner or follow-up usage section).
+        prompt = chat.DICT_POPUP_PROMPT.format(
+            word=word,
+            latest_answer=(latest_answer or "(no previous answer available)"),
+        )
         try:
             chat.stream_answer(
-                chat.DICT_PROMPT.format(word=word),
+                prompt,
                 model=chat.DICT_MODEL,
                 emit=lambda text: self._sse("delta", {"text": text}),
             )
         except RuntimeError as exc:
             self._sse("error", {"message": f"Dictionary lookup failed: {exc}"})
-            return
-
-        if not latest_answer:
-            return
-        pattern = re.compile(
-            rf"(?<![\w]){re.escape(word)}(?![\w])", re.IGNORECASE
-        )
-        if not pattern.search(latest_answer):
-            return
-        self._sse_text(
-            "delta", f"\n\nHow {word!r} is used in the latest answer:\n\n"
-        )
-        try:
-            chat.stream_answer(
-                chat.DICT_USAGE_PROMPT.format(
-                    word=word, latest_answer=latest_answer
-                ),
-                emit=lambda text: self._sse("delta", {"text": text}),
-            )
-        except RuntimeError as exc:
-            self._sse(
-                "error", {"message": f"Could not explain the latest usage: {exc}"}
-            )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

@@ -1,0 +1,8 @@
+task (completed) {
+  in the dictionary popup, please only show the following:
+  the <word>
+  - IPA (International Phonetic Alphabet)
+  - Part of Speech
+  - Quote
+  - Contextual Meaning
+}

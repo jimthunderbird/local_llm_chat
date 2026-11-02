@@ -595,6 +595,30 @@ DICT_PROMPT = """Provide a concise English dictionary entry for the word or phra
 example sentence. If the input is not a valid English word or phrase, say so
 plainly instead of inventing a meaning. Keep the answer under 120 words."""
 
+# The word-click dictionary popup shows only these five labelled fields.
+DICT_POPUP_PROMPT = """You are a concise English dictionary popup. For the word or phrase
+"{word}", answer with exactly these five labelled fields, in this order, and
+nothing else:
+
+Word: {word}
+IPA: <International Phonetic Alphabet transcription, or — if unknown>
+Part of Speech: <part of speech, or — if unknown>
+Quote: <one short sentence from the latest answer below that contains
+"{word}", copied word-for-word; if the word does not appear, use a natural
+example sentence>
+Contextual Meaning: <one or two sentences explaining what "{word}" means in
+that quote>
+
+Rules:
+- Do not add a title, preamble, conclusion, notes, or any other section.
+- Keep the whole answer under 100 words.
+- If "{word}" is not a valid English word or phrase, keep the five fields
+  and say so in Contextual Meaning.
+
+<latest_answer>
+{latest_answer}
+</latest_answer>"""
+
 QUESTION_TRANSLATION_PROMPT = """Translate the following Simplified Chinese question into natural English.
 Preserve names, titles, technical terms, and the intent of the question exactly.
 Japanese place names and proper nouns must use their standard romanized
