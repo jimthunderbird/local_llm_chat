@@ -4683,6 +4683,86 @@ outputEl.addEventListener("click", (event) => {
   );
 });
 
+/* ------------------------------------------------------------------ *
+ *  Dictionary popup formatting
+ *
+ *  The popup must show exactly five labelled sections, in this order,
+ *  with a blank line between each of them. Models occasionally wrap a
+ *  label in markdown or add a short preamble, so normalise the streamed
+ *  text instead of relying on the model's formatting alone.
+ * ------------------------------------------------------------------ */
+const DICTIONARY_SECTION_LABELS = [
+  "Word",
+  "IPA",
+  "Part of Speech",
+  "Quote",
+  "Contextual Meaning",
+];
+
+function parseDictionarySectionLine(line) {
+  let value = String(line || "").trim();
+  value = value.replace(/^#{1,6}\s*/, "");
+  value = value.replace(/^[-*+]\s+/, "");
+  value = value.replace(/\*\*|__/g, "");
+  const match = /^(Word|IPA|Part of Speech|Quote|Contextual Meaning)\s*[:\-–—]\s*(.*)$/i.exec(
+    value
+  );
+  if (!match) return null;
+  const wanted = match[1].toLowerCase();
+  const label = DICTIONARY_SECTION_LABELS.find(
+    (candidate) => candidate.toLowerCase() === wanted
+  );
+  if (!label) return null;
+  return { label, content: match[2].trim() };
+}
+
+function isPartialDictionaryLabel(line) {
+  const value = String(line || "").trim().replace(/\*\*|__/g, "");
+  if (!value || /[:\-–—]/.test(value)) return false;
+  const lower = value.toLowerCase();
+  return DICTIONARY_SECTION_LABELS.some((label) =>
+    label.toLowerCase().startsWith(lower)
+  );
+}
+
+function formatDictionarySections(text) {
+  const raw = String(text || "");
+  const lines = raw.replace(/\r\n?/g, "\n").split("\n");
+  const sections = new Map();
+  let current = null;
+
+  for (const line of lines) {
+    const parsed = parseDictionarySectionLine(line);
+    if (parsed) {
+      if (!sections.has(parsed.label)) {
+        sections.set(parsed.label, []);
+      }
+      current = sections.get(parsed.label);
+      if (parsed.content) current.push(parsed.content);
+      continue;
+    }
+    // Ignore anything before the first label (for example a model heading),
+    // and the incomplete label that can appear while a token is streaming.
+    if (!current || isPartialDictionaryLabel(line)) continue;
+    current.push(line.trim());
+  }
+
+  const formatted = DICTIONARY_SECTION_LABELS
+    .filter((label) => sections.has(label))
+    .map((label) => {
+      const content = sections
+        .get(label)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+      return `${label}: ${content || "—"}`;
+    });
+
+  // If the model returned no recognisable labels at all, keep the streamed
+  // text visible rather than showing an empty popup.
+  return formatted.length ? formatted.join("\n\n") : raw.trim();
+}
+
 function positionPopup() {
   const margin = 12;
   const width = Math.min(440, window.innerWidth - margin * 2);
@@ -4741,7 +4821,9 @@ function openDictionaryPopup(word, answerContext, anchorEl) {
   let pendingRender = false;
   const renderPopup = () => {
     popupContentEl.textContent = "";
-    popupContentEl.appendChild(renderMarkdown(buffer, false));
+    popupContentEl.appendChild(
+      renderMarkdown(formatDictionarySections(buffer), false)
+    );
     if (popupError) {
       const div = document.createElement("div");
       div.className = "error-text";

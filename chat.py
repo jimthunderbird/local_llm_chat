@@ -601,16 +601,22 @@ DICT_POPUP_PROMPT = """You are a concise English dictionary popup. For the word 
 nothing else:
 
 Word: {word}
+
 IPA: <International Phonetic Alphabet transcription, or — if unknown>
+
 Part of Speech: <part of speech, or — if unknown>
+
 Quote: <one short sentence from the latest answer below that contains
 "{word}", copied word-for-word; if the word does not appear, use a natural
 example sentence>
+
 Contextual Meaning: <one or two sentences explaining what "{word}" means in
 that quote>
 
 Rules:
+- Separate each section from the next with exactly one blank line.
 - Do not add a title, preamble, conclusion, notes, or any other section.
+- Do not wrap the labels in markdown or add bullets.
 - Keep the whole answer under 100 words.
 - If "{word}" is not a valid English word or phrase, keep the five fields
   and say so in Contextual Meaning.

@@ -1,6 +1,6 @@
 task (completed) {
-  in the dictionary popup, please only show the following:
-  the <word>
+  in the dictionary popup, please only show the following, section by section, each section is separated by a new line:
+  - the <word>
   - IPA (International Phonetic Alphabet)
   - Part of Speech
   - Quote
