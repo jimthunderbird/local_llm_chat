@@ -4342,6 +4342,7 @@ def answer(
     think: bool = False,
     cross_tag_fallback: bool = CROSS_TAG_FALLBACK_ENABLED,
     scope_label: str = "current tag",
+    use_all_chunks: bool = False,
     emit: Callable[[str], None] | None = None,
     log: Callable[[str], None] | None = None,
 ) -> tuple[str | None, list[tuple[Chunk, float]]]:
@@ -4351,6 +4352,8 @@ def answer(
     When they are omitted, output goes to stdout/stderr exactly as before.
     ``model`` overrides the default chat model and ``think`` optionally
     enables the model's reasoning mode (disabled by default).
+    ``use_all_chunks`` skips BM25 and uses every supplied chunk in order;
+    callers use it for a prebuilt synthetic context (an article digest).
     """
     def _emit(text: str) -> None:
         if emit is not None:
@@ -4484,9 +4487,21 @@ def answer(
         ]
         return merged, raw, True, False
 
-    selected, raw_selected, filter_applied, filter_empty = retrieve_for(chunks)
-    fallback_used = False
-    if cross_tag_fallback and not raw_selected:
+    if use_all_chunks:
+        # The caller has already selected/constructed the context. In
+        # particular, a single synthetic article digest cannot be scored by
+        # BM25 (one document has no positive IDF), so keep it verbatim.
+        selected = [(chunk, 0.0) for chunk in chunks]
+        raw_selected = selected
+        filter_applied = False
+        filter_empty = False
+        fallback_used = False
+    else:
+        selected, raw_selected, filter_applied, filter_empty = retrieve_for(
+            chunks
+        )
+        fallback_used = False
+    if not use_all_chunks and cross_tag_fallback and not raw_selected:
         # The active tag produced no lexical match at all. Before letting the
         # model report missing data, check every tagged transcript. This
         # prevents an out-of-scope question (for example an AI question while
@@ -4520,7 +4535,7 @@ def answer(
                 filter_empty = fallback_filter_empty
                 fallback_used = True
 
-    if not selected and raw_selected:
+    if not use_all_chunks and not selected and raw_selected:
         # The small filter can be overly strict. Keep a minimal BM25 context
         # rather than turning a borderline question into a false refusal.
         selected = raw_selected[:FILTER_FALSE_NEGATIVE_KEEP]
@@ -4544,10 +4559,16 @@ def answer(
 
     if depth is not None:
         depth_label = "default" if depth == DEFAULT_DEPTH else "explicit"
-        _log(
-            f"[using {len(selected)} of {candidate_count} BM25 trunk(s) "
-            f"(depth {depth}, {depth_label})]"
-        )
+        if use_all_chunks:
+            _log(
+                f"[using {len(selected)} prebuilt context trunk(s); "
+                "BM25 skipped]"
+            )
+        else:
+            _log(
+                f"[using {len(selected)} of {candidate_count} BM25 trunk(s) "
+                f"(depth {depth}, {depth_label})]"
+            )
     else:
         budget = (
             "disabled"

@@ -2355,14 +2355,57 @@ ARTICLE_OVERVIEW_REFERENCE_RE = re.compile(
     r"\b(?:this|the)\s+(?:article|document|doc|file|page|report|paper)\b",
     re.IGNORECASE,
 )
+# A bare deictic ("what is this about?") refers to the whole article. The
+# lookahead excludes cases where "this" is a determiner for another noun
+# ("what is this item tag about?"), which is a question about one concept.
+ARTICLE_BARE_DEICTIC_RE = re.compile(
+    r"\b(?:this|it)\b(?=\s*(?:$|[,.;:!?]|"
+    r"(?:about|all|in|with|for|on|by|to|of|and|or)\b))",
+    re.IGNORECASE,
+)
 ARTICLE_OVERVIEW_INTENT_RE = re.compile(
     r"\b(?:about|summari[sz]e|summary|overview|tl\s*;?\s*dr|main|"
     r"topics?|discuss(?:es|ed)?|cover(?:s|ed)?|describe(?:s|d)?|purpose|"
     r"what is|what's|what does)\b",
     re.IGNORECASE,
 )
+ARTICLE_BROAD_OVERVIEW_RE = re.compile(
+    r"\bwhat(?:'s|\s+is|\s+was)?\s+(?:this|it)\s+(?:all\s+)?about\b"
+    r"|\b(?:summari[sz]e|overview|tl\s*;?\s*dr)\s+(?:this|it)\b"
+    r"|\b(?:tell|show)\s+me\s+(?:about\s+)?(?:this|it)\b"
+    r"|\bdescribe\s+(?:this|it)\b",
+    re.IGNORECASE,
+)
+ARTICLE_DETAILED_OVERVIEW_RE = re.compile(
+    r"\b(?:detail(?:ed)?|in[- ]depth|comprehensive|thorough|long|extended|"
+    r"elaborate|exhaustive)\b",
+    re.IGNORECASE,
+)
+ARTICLE_WORD_COUNT_RE = re.compile(
+    r"\b(\d[\d,]*)\s*[- ]?(?:words?|word\s+answer)\b",
+    re.IGNORECASE,
+)
 ARTICLE_OVERVIEW_OUTLINE_CHARS = 1400
 ARTICLE_OVERVIEW_SUMMARY_CHARS = 2400
+ARTICLE_DIGEST_CHARS = 16000
+ARTICLE_DIGEST_MIN_SECTION_CHARS = 300
+ARTICLE_DIGEST_MAX_SECTION_CHARS = 1400
+ARTICLE_OVERVIEW_INDEX = 0
+ARTICLE_DIGEST_INDEX = -1
+ARTICLE_TOP_SECTION_RE = re.compile(r"^\s*\d+[.)]?\s+\S")
+ARTICLE_SUBSECTION_RE = re.compile(r"^\s*\d+\.\d+")
+
+
+def article_requested_word_count(question: str) -> int | None:
+    """Return the requested answer length ("in 1000 words"), if any."""
+    match = ARTICLE_WORD_COUNT_RE.search(question)
+    if not match:
+        return None
+    try:
+        words = int(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    return words if 30 <= words <= 4000 else None
 
 
 def article_overview_question(question: str) -> bool:
@@ -2373,11 +2416,19 @@ def article_overview_question(question: str) -> bool:
     broad question such as "what is this article about?" matches generic
     words ("what", "this") in unrelated paragraphs and the answer model sees
     no useful overview.
+
+    Phrasings that use a bare deictic ("what is this about, in 1000 words")
+    count as well because this helper is only consulted in article mode.
     """
-    return bool(
-        ARTICLE_OVERVIEW_REFERENCE_RE.search(question)
-        and ARTICLE_OVERVIEW_INTENT_RE.search(question)
-    )
+    if ARTICLE_BROAD_OVERVIEW_RE.search(question):
+        return True
+    if not ARTICLE_OVERVIEW_INTENT_RE.search(question):
+        return False
+    if ARTICLE_OVERVIEW_REFERENCE_RE.search(question):
+        return True
+    if ARTICLE_BARE_DEICTIC_RE.search(question):
+        return True
+    return False
 
 
 def _clean_article_heading(raw: str) -> str:
@@ -2519,6 +2570,107 @@ def _article_overview(
     return "\n".join(parts)
 
 
+def _article_digest(
+    title: str,
+    headings: list[str],
+    paragraphs: list[str],
+    max_chars: int = ARTICLE_DIGEST_CHARS,
+) -> str:
+    """Build a bounded, article-wide digest for overview questions.
+
+    The overview alone (title, outline, TL;DR) is often under ~1,000 tokens,
+    which is not enough for a request such as "what is this about, in 1000
+    words". This digest keeps the overview and adds the first substantive
+    content from every major section, spread across the whole document and
+    capped by a character budget. It is used as one synthetic trunk so BM25
+    cannot replace it with unrelated generic-word matches.
+    """
+    overview = _article_overview(title, headings, paragraphs)
+    parts = [overview]
+    used = len(overview)
+    remaining = max_chars - used
+    if remaining < 300:
+        return overview
+
+    normalized = [" ".join(paragraph.split()) for paragraph in paragraphs]
+    anchors = [
+        index
+        for index, paragraph in enumerate(normalized)
+        if ARTICLE_TOP_SECTION_RE.match(paragraph)
+        and not ARTICLE_SUBSECTION_RE.match(paragraph)
+    ]
+    if len(anchors) < 3:
+        anchors = [
+            index
+            for index, paragraph in enumerate(normalized)
+            if _article_heading_like(paragraph)
+        ]
+    anchors = sorted(set(anchors))
+
+    section_budget = ARTICLE_DIGEST_MIN_SECTION_CHARS
+    if anchors:
+        section_budget = max(
+            ARTICLE_DIGEST_MIN_SECTION_CHARS,
+            min(
+                ARTICLE_DIGEST_MAX_SECTION_CHARS,
+                remaining // len(anchors),
+            ),
+        )
+
+    for position, start in enumerate(anchors):
+        if used >= max_chars:
+            break
+        end = anchors[position + 1] if position + 1 < len(anchors) else len(
+            normalized
+        )
+        block: list[str] = []
+        block_chars = 0
+        for index in range(start, end):
+            paragraph = normalized[index]
+            if not paragraph:
+                continue
+            # Keep subsection headings as structure, but avoid tiny
+            # navigation fragments and inline code noise.
+            if len(paragraph) < 20 and index != start:
+                continue
+            if (
+                block_chars + len(paragraph) > section_budget
+                and block
+            ):
+                break
+            block.append(paragraph)
+            block_chars += len(paragraph) + 1
+            if block_chars >= section_budget:
+                break
+        if block:
+            section = "\n".join(block)
+            parts.append(section)
+            used += len(section) + 2
+
+    if not anchors:
+        # No usable headings: sample substantive paragraphs evenly across the
+        # document so the digest still represents its whole span.
+        content_indexes = [
+            index
+            for index, paragraph in enumerate(normalized)
+            if len(paragraph) >= 80 and not _article_heading_like(paragraph)
+        ]
+        if content_indexes:
+            slots = max(1, remaining // 400)
+            step = max(1, len(content_indexes) // slots)
+            for index in content_indexes[::step]:
+                paragraph = normalized[index]
+                if used + len(paragraph) + 2 > max_chars:
+                    break
+                parts.append(paragraph)
+                used += len(paragraph) + 2
+                if used >= max_chars:
+                    break
+
+    digest = "\n\n".join(parts)
+    return digest[:max_chars]
+
+
 def _decode_article_bytes(data: bytes) -> str:
     """Decode a local article without assuming a single text encoding."""
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
@@ -2598,6 +2750,20 @@ def _load_article_chunks(path: Path) -> tuple[list[chat.Chunk], str]:
     chunks: list[chat.Chunk] = [
         chat.Chunk(video_id=video_id, index=0, trunk_path=overview_path)
     ]
+
+    # Chunk -1 is a broader digest used only for article-wide questions. It
+    # is excluded from ordinary BM25 retrieval (see _run_question) so its
+    # many headings and terms cannot crowd out question-specific paragraphs.
+    digest = _article_digest(title, headings, paragraphs)
+    digest_trunk = (
+        f"<article><title>{xml_escape(title)}</title>"
+        f"<paragraph>{xml_escape(digest)}</paragraph></article>"
+    )
+    digest_path = cache_dir / f"{video_id}.-1.trunk"
+    digest_path.write_text(digest_trunk + "\n", encoding="utf-8")
+    chunks.append(
+        chat.Chunk(video_id=video_id, index=-1, trunk_path=digest_path)
+    )
 
     for index, paragraph in enumerate(paragraphs, start=1):
         trunk = (
@@ -3316,32 +3482,92 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             article_overview_question(question)
             or article_overview_question(retrieval_question)
         )
-        answer_chunks = state.chunks
-        article_overview_prefix: str | None = None
-        if article_overview_mode:
-            overview_chunks = [
-                chunk for chunk in state.chunks if chunk.index == 0
+        answer_chunks = (
+            [
+                chunk
+                for chunk in state.chunks
+                if chunk.index != ARTICLE_DIGEST_INDEX
             ]
-            if overview_chunks:
-                # Keep a few paragraph trunks alongside the overview so BM25
-                # has more than one document and can assign the overview a
-                # positive IDF score. The overview outranks them for
-                # article-wide questions; there are too few candidates for
-                # the small relevance filter to run.
-                answer_chunks = overview_chunks + [
-                    chunk for chunk in state.chunks if chunk.index != 0
-                ][:3]
+            if article_mode
+            else state.chunks
+        )
+        article_overview_prefix: str | None = None
+        article_overview_context_ready = False
+        if article_overview_mode:
+            digest_chunks = [
+                chunk
+                for chunk in state.chunks
+                if chunk.index == ARTICLE_DIGEST_INDEX
+            ]
+            overview_chunks = [
+                chunk
+                for chunk in state.chunks
+                if chunk.index == ARTICLE_OVERVIEW_INDEX
+            ]
+            requested_words = (
+                article_requested_word_count(question)
+                or article_requested_word_count(retrieval_question)
+            )
+            detailed = bool(
+                ARTICLE_DETAILED_OVERVIEW_RE.search(question)
+                or ARTICLE_DETAILED_OVERVIEW_RE.search(retrieval_question)
+            )
+            if digest_chunks and (requested_words or detailed):
+                # The digest contains the title, outline, TL;DR, and
+                # representative content from each major section. Use it as
+                # the sole candidate so BM25 cannot replace it with unrelated
+                # paragraphs that merely share generic words such as
+                # "what"/"this"/"about".
+                answer_chunks = digest_chunks[:1]
+                context_kind = "article digest"
+                context_detail = (
+                    "its title, outline, TL;DR/summary, and representative "
+                    "content from each major section"
+                )
+            elif overview_chunks:
+                # Concise overview questions only need the compact overview;
+                # the digest is reserved for long-form/detailed requests.
+                answer_chunks = overview_chunks[:1]
+                context_kind = "document overview"
+                context_detail = "its title, outline, and TL;DR/summary"
+            else:
+                context_kind = ""
+                context_detail = ""
+
+            if context_kind:
+                article_overview_context_ready = True
+                if requested_words:
+                    length_instruction = (
+                        "Target length: approximately "
+                        f"{requested_words:,} words. Write a detailed, "
+                        "well-structured answer with headings where they "
+                        "help. Develop the points supported by the context "
+                        "instead of padding with unsupported facts. "
+                    )
+                elif detailed:
+                    length_instruction = (
+                        "Write a detailed, well-structured answer with "
+                        "headings where they help. "
+                    )
+                else:
+                    length_instruction = (
+                        "Answer the user's question with a concise, "
+                        "well-organized summary. "
+                    )
                 article_overview_prefix = (
                     "### ARTICLE OVERVIEW\n"
-                    "The context below is the overview of the entire article: "
-                    "its title, outline, and TL;DR/summary section. Answer the "
-                    "user's question with a concise summary grounded in this "
-                    "overview.\n\n"
+                    f"The context below is the {context_kind} of the entire "
+                    f"article: {context_detail}. "
+                    + length_instruction
+                    + "Ground every claim in this context. If a specific "
+                    "detail is absent, omit it rather than refusing; never "
+                    "say that the context is insufficient.\n\n"
                 )
                 self._sse_text(
                     "log",
-                    "[article: answering from the document overview "
-                    "(title, outline, and summary)]",
+                    f"[article: answering from the {context_kind} "
+                    "(title, outline, summary, and representative "
+                    "sections)]",
                 )
 
         golang_package_docs = (
@@ -3453,6 +3679,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             report_errors: bool = True,
             prompt_prefix_override: str | None = None,
             cache_variant: str = "",
+            use_all_chunks: bool = False,
         ):
             """Answer once from a single tag; no union fallback inside this."""
             attempt_stats: dict = {}
@@ -3512,6 +3739,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     # successful answer also switches the active tag.
                     cross_tag_fallback=False,
                     scope_label=scope_label,
+                    use_all_chunks=use_all_chunks,
                     emit=emit_answer_delta,
                     log=lambda text: self._sse_text("log", text),
                 )
@@ -3738,6 +3966,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     answer_chunks,
                     original_scope,
                     prompt_prefix_override=article_overview_prefix,
+                    use_all_chunks=article_overview_context_ready,
                 )
                 if error:
                     return
@@ -3764,6 +3993,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 answer_chunks,
                 original_scope,
                 prompt_prefix_override=article_overview_prefix,
+                use_all_chunks=article_overview_context_ready,
             )
             if error:
                 return
@@ -4244,7 +4474,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             "\n"
             + chat.index_memory_report(new_chunks, build_index=False)
             + f"\nNow answering from article {article_path!r} "
-            f"({len(new_chunks)} paragraph(s)).\n",
+            f"({sum(1 for chunk in new_chunks if chunk.index > 0)} "
+            "paragraph(s)).\n",
         )
         self._sse("meta", state.snapshot())
 
@@ -4918,7 +5149,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             "\n"
             + chat.index_memory_report(new_chunks, build_index=False)
             + f"\nNow answering from article {str(path)!r} "
-            f"({len(new_chunks)} paragraph(s)). Existing conversation "
+            f"({sum(1 for chunk in new_chunks if chunk.index > 0)} "
+            "paragraph(s)). Existing conversation "
             "context was cleared; follow-up questions stay on this article.\n",
         )
         self._sse("meta", state.snapshot())

@@ -5,6 +5,14 @@ task.auto_complete_path (completed) {
 task (completed) {
   bug:
   /article ~/projects/learning_and_development/home-cms/HOME-126045-product-tag-audit/research/item_tagging_overview.html
+  quesition: what is this about, in 1000 words
+  expect: show me the answer in 1000 words
+  actual: The provided context does not contain sufficient information to answer this question.
+}
+
+task (completed) {
+  bug:
+  /article ~/projects/learning_and_development/home-cms/HOME-126045-product-tag-audit/research/item_tagging_overview.html
   question: what is this article about?
   expect: show me a brief summary of this article
   actual: The provided context does not contain sufficient information to answer this question.
