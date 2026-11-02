@@ -4,8 +4,8 @@
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, tag/transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /learn, /learn_topic, /learn_playlist,
-/tag_gen, /kqed, /cnn, /wiki, /wiki_article, /article, and /dict. The
-browser is a pure HTML/CSS/JavaScript single-page app served from
+/tag_gen, /kqed, /cnn, /wiki, /wiki_article, /article, /dict, and
+/ask. The browser is a pure HTML/CSS/JavaScript single-page app served from
 ./app/chat.html.
 
 Usage:
@@ -116,6 +116,7 @@ COMMAND_ARGUMENTS = {
     "/learn",
     "/learn_topic",
     "/learn_playlist",
+    "/ask",
     "/wiki",
     "/wiki_article",
     "/article",
@@ -5106,6 +5107,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_learn_topic(argument)
         elif name == "/learn_playlist":
             self._command_learn_playlist(argument)
+        elif name == "/ask":
+            self._command_ask(argument)
         elif name == "/kqed":
             self._command_kqed(argument)
         elif name == "/cnn":
@@ -5936,6 +5939,52 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._sse_text(
                 "output", f"\n{command}: no stories were found in the feed.\n"
             )
+
+    def _command_ask(self, argument: str) -> None:
+        """Answer a quick, self-contained question without retrieval."""
+        question = argument.strip()
+        if not question:
+            self._sse_text("output", "\nUsage: /ask <question>\n")
+            return
+        stats: dict = {}
+        started = time.monotonic()
+        try:
+            response = chat.answer_simple_question(
+                question,
+                metrics=stats,
+                emit=lambda text: self._sse_text("delta", text),
+            )
+        except RuntimeError as exc:
+            self._sse_text("output", f"\nQuick answer failed: {exc}\n")
+            return
+        if response:
+            self.state.latest_answer = response
+            self.state.latest_sources = []
+            stats.update(
+                {
+                    "cached": False,
+                    "model": chat.SIMPLE_ANSWER_MODEL,
+                    "retrieval": 0.0,
+                    "expansion": 0.0,
+                    "bm25": 0.0,
+                    "filter": 0.0,
+                    "candidates": 0,
+                    "trunks": 0,
+                    "context_build": 0.0,
+                    "prompt_build": 0.0,
+                    "context_tokens": 0,
+                    "prefill": stats.get("prompt_eval_duration", 0.0),
+                    "load": stats.get("load_duration", 0.0),
+                    "end_to_end_ttft": stats.get("request_ttft", 0.0),
+                    "prompt_tokens": stats.get("prompt_eval_count", 0),
+                    "prompt_tokens_cached": stats.get(
+                        "prompt_eval_cached_count", 0
+                    ),
+                    "response_tokens": stats.get("eval_count", 0),
+                    "total": time.monotonic() - started,
+                }
+            )
+            self.state.latest_benchmark = stats
 
     def _command_wiki(self, argument: str) -> None:
         question = argument.strip()

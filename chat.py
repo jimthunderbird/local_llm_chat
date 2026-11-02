@@ -137,6 +137,8 @@ CHAT_MODEL = "ornith:35b"
 # architecture) are routed to the code-generation model from
 # ./prompts/programming_language_tips.prompt, without thinking enabled.
 CODING_MODEL = "ornith:35b"
+# Local model used by /ask for quick questions that do not use retrieval.
+SIMPLE_ANSWER_MODEL = "ornith:35b"
 # Local model used to translate Simplified Chinese questions for retrieval.
 TRANSLATION_MODEL = "qwen3:1.7b"
 # Local model used by /dict to generate definitions.
@@ -676,6 +678,17 @@ translation, with no explanation or notes.
 {text}
 </text>"""
 
+SIMPLE_ANSWER_PROMPT = """Answer the question below directly and concisely from your own knowledge.
+Do not mention retrieval context, chunks, documents, or a knowledge base.
+Reply in the same language as the question. If you do not know the answer,
+say so plainly instead of inventing facts.
+
+<question>
+{question}
+</question>
+
+### RESPONSE:"""
+
 WIKI_ENTITY_PROMPT = """Identify the main English Wikipedia article topics needed to answer a question.
 
 <question>
@@ -814,6 +827,7 @@ COMMANDS = {
     "/transcript": "use one transcript by hash/URL or search titles with ag",
     "/search_transcript": "alias for /transcript <keyword> (ag title search)",
     "/learn": "learn a YouTube video (hash or URL)",
+    "/ask": "ask a quick question directly (no knowledge-base retrieval)",
     "/wiki": "answer narrow fact questions from Wikipedia article excerpts, else show entity summaries",
     "/wiki_article": "print the full Wikipedia article for each main entity of <question>",
     "/dict": "show English dictionary definitions for <word> (local Ollama) and explain its use and meaning in the latest answer",
@@ -2553,6 +2567,29 @@ def stream_answer(
             }
         )
     return "".join(chunks)
+
+
+def answer_simple_question(
+    question: str,
+    model: str = SIMPLE_ANSWER_MODEL,
+    translate_answer: bool = False,
+    metrics: dict | None = None,
+    emit: Callable[[str], None] | None = None,
+) -> str:
+    """Answer ``question`` directly with the model, without retrieval.
+
+    This backs the ``/ask`` command: it is meant for quick, self-contained
+    questions that should not be grounded in the loaded trunks or in any
+    other retrieval context. Output streams exactly like a normal answer.
+    """
+    prompt = SIMPLE_ANSWER_PROMPT.format(question=question.strip())
+    return stream_answer(
+        prompt,
+        model=model,
+        translate_answer=translate_answer,
+        metrics=metrics,
+        emit=emit,
+    )
 
 
 def _wiki_log(log: Callable[[str], None] | None, message: str) -> None:
@@ -4862,9 +4899,9 @@ def main() -> None:
     )
     print(
         "Commands: /tag [tag], /refresh, /transcript <hash|keyword>, "
-        "/learn <hash|url>, /wiki <question>, /wiki_article <question>, "
-        "/dict <word>, /depth <n|auto>, /memory, /status, /sources, "
-        "/benchmark [on|off], /exit. "
+        "/learn <hash|url>, /ask <question>, /wiki <question>, "
+        "/wiki_article <question>, /dict <word>, /depth <n|auto>, "
+        "/memory, /status, /sources, /benchmark [on|off], /exit. "
         "Tab completes them."
     )
 
@@ -4987,6 +5024,25 @@ def main() -> None:
                         f"{video_id} was not added to tag {tag!r}; "
                         "the loaded trunks are unchanged."
                     )
+            elif name == "/ask":
+                quick_question = argument.strip()
+                if not quick_question:
+                    print("Usage: /ask <question>")
+                else:
+                    print("\nAssistant: ", end="", flush=True)
+                    try:
+                        quick_answer = answer_simple_question(
+                            quick_question,
+                            translate_answer=contains_simplified_chinese(
+                                quick_question
+                            ),
+                        )
+                    except RuntimeError as exc:
+                        print(f"\nQuick answer failed: {exc}")
+                    else:
+                        latest_answer = quick_answer
+                        latest_sources = []
+                        print()
             elif name == "/wiki":
                 wiki_response = lookup_wikipedia(argument)
                 if wiki_response:
@@ -5085,7 +5141,7 @@ def main() -> None:
                 print(
                     f"Unknown command: {name}. "
                     "Try /tag [tag], /refresh, /transcript <hash|keyword>, "
-                    "/learn <hash|url>, /wiki <question>, "
+                    "/learn <hash|url>, /ask <question>, /wiki <question>, "
                     "/wiki_article <question>, /dict <word>, "
                     "/depth <n|auto>, /memory, /status, /sources, "
                     "/benchmark [on|off], /exit."
