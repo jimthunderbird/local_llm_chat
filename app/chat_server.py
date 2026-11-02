@@ -35,8 +35,8 @@ Endpoints:
                                   the "golang" tag is always Go, and code in the
                                   "php" tag is always PHP. /news streams
                                   "news" events from CNN, KQED, SFGATE, SF
-                                  Bay View, Mission Local, Richmond Review,
-                                  and Sunset Post).
+                                  Bay View, Mission Local, and Richmond
+                                  Review).
     POST /api/dict               SSE: dictionary + latest-answer usage stream
     POST /api/translate          SSE: paragraph-by-paragraph Simplified Chinese
                                   translation of an answer
@@ -102,7 +102,7 @@ WEB_COMMANDS = {
     "/learn_topic": "search YouTube for <topic> and learn the top 3 videos",
     "/learn_playlist": "learn every video in a YouTube playlist",
     "/tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
-    "/news": "list the latest news from cnn, kqed, sfgate, sfbayview, mission_local, richmond_sunset, or sunset (optionally /news [source] [count])",
+    "/news": "list the latest news from cnn, kqed, sfgate, sfbayview, mission_local, or richmond_sunset (optionally /news [source ...] [count])",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
 }
 
@@ -114,7 +114,6 @@ NEWS_SOURCES = {
     "sfbayview": "SF Bay View",
     "mission_local": "Mission Local",
     "richmond_sunset": "Richmond Review",
-    "sunset": "Sunset Post",
 }
 
 NEWS_SOURCE_USAGE = "|".join(NEWS_SOURCES)
@@ -5860,41 +5859,35 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     def _command_news(self, argument: str) -> None:
         """Stream the latest news stories to the browser.
 
-        Usage: /news [SOURCE] [number-of-stories]
-        SOURCE is one of cnn, kqed, sfgate, sfbayview, mission_local,
-        richmond_sunset, or sunset.
+        Usage: /news [SOURCE ...] [number-of-stories]
+        Each SOURCE is one of cnn, kqed, sfgate, sfbayview, mission_local,
+        or richmond_sunset. Several sources may be selected.
         Without a source, every supported source is shown as its own section.
         """
         argv: list[str] = []
-        source = None
-        for part in argument.split():
+        sources: list[str] = []
+        for part in argument.replace(",", " ").split():
             lowered = part.lower()
             if part.isdigit():
                 if int(part) < 1:
                     self._sse_text(
                         "output",
-                        f"\nUsage: /news [{NEWS_SOURCE_USAGE}] "
+                        f"\nUsage: /news [{NEWS_SOURCE_USAGE}] ... "
                         "[number-of-stories]\n",
                     )
                     return
                 argv.extend(["--limit", part])
             elif lowered in NEWS_SOURCES:
-                if source is not None:
-                    self._sse_text(
-                        "output",
-                        f"\nUsage: /news [{NEWS_SOURCE_USAGE}] "
-                        "[number-of-stories]\n",
-                    )
-                    return
-                source = lowered
+                if lowered not in sources:
+                    sources.append(lowered)
             else:
                 self._sse_text(
                     "output",
-                    f"\nUsage: /news [{NEWS_SOURCE_USAGE}] "
+                    f"\nUsage: /news [{NEWS_SOURCE_USAGE}] ... "
                     "[number-of-stories]\n",
                 )
                 return
-        if source is not None:
+        for source in sources:
             argv.extend(["--source", source])
         self._stream_news_events("news_fetch.php", "/news", argv)
 

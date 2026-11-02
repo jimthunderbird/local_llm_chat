@@ -14,21 +14,19 @@ declare(strict_types=1);
  *   sfbayview     SF Bay View WordPress REST API
  *   mission_local Mission Local WordPress REST API
  *   richmond_sunset Richmond Review / Richmond & Sunset news RSS feed
- *   sunset        Sunset Blog RSS feed
  *
  * Default output is a human-readable stream for the terminal. The web chat
  * passes --json and receives one JSON event per line (NDJSON), which
  * app/chat_server.py relays to app/chat.html as it arrives.
  *
  * Usage:
- *   ./news_fetch.php [--json] [--source SOURCE] [--limit N]
+ *   ./news_fetch.php [--json] [--source SOURCE ...] [--limit N]
  *
- * --source accepts cnn, kqed, sfgate, sfbayview, mission_local,
- * richmond_sunset, or sunset. Without
- * --source, every source is fetched and emitted as its own section. --limit
- * caps the total number of
- * stories across all selected sources (each source has its own default when
- * --limit is omitted).
+ * --source accepts cnn, kqed, sfgate, sfbayview, mission_local, or
+ * richmond_sunset and may be repeated (or given as a comma separated list).
+ * Without --source, every source is fetched and emitted as its own section.
+ * --limit caps the total number of stories across all selected sources (each
+ * source has its own default when --limit is omitted).
  */
 
 const SOURCES = [
@@ -111,17 +109,6 @@ const SOURCES = [
             'latest' => [
                 'label' => 'Latest Stories',
                 'url' => 'https://richmondsunsetnews.com/feed/',
-            ],
-        ],
-    ],
-    'sunset' => [
-        'label' => 'Sunset Post',
-        'kind' => 'rss',
-        'default_limit' => 20,
-        'feeds' => [
-            'latest' => [
-                'label' => 'Latest Stories',
-                'url' => 'https://thesunsetpost.onrender.com/rss.xml',
             ],
         ],
     ],
@@ -1163,26 +1150,47 @@ function main(array $argv): int
     $json = false;
     $limit = null;
     $section = null;
-    $sourceKeys = array_keys(SOURCES);
+    $sourceKeys = null;
+
+    $addSources = static function (string $value) use (&$sourceKeys): bool {
+        foreach (preg_split('/[\s,]+/', strtolower($value)) as $requested) {
+            if ($requested === '') {
+                continue;
+            }
+            if (!isset(SOURCES[$requested])) {
+                diag("news_fetch: unknown source: {$requested}");
+                return false;
+            }
+            if ($sourceKeys === null) {
+                $sourceKeys = [];
+            }
+            if (!in_array($requested, $sourceKeys, true)) {
+                $sourceKeys[] = $requested;
+            }
+        }
+        return true;
+    };
 
     for ($i = 1; $i < count($argv); $i++) {
         $argument = $argv[$i];
         if ($argument === '--json') {
             $json = true;
         } elseif ($argument === '--source' && isset($argv[$i + 1])) {
-            $requested = strtolower($argv[++$i]);
-            if (!isset(SOURCES[$requested])) {
-                diag("news_fetch: unknown source: {$requested}");
+            if (!$addSources($argv[++$i])) {
                 return 2;
             }
-            $sourceKeys = [$requested];
         } elseif (preg_match('/^--source=(.+)$/', $argument, $match)) {
-            $requested = strtolower($match[1]);
-            if (!isset(SOURCES[$requested])) {
-                diag("news_fetch: unknown source: {$requested}");
+            if (!$addSources($match[1])) {
                 return 2;
             }
-            $sourceKeys = [$requested];
+        } elseif ($argument === '--sources' && isset($argv[$i + 1])) {
+            if (!$addSources($argv[++$i])) {
+                return 2;
+            }
+        } elseif (preg_match('/^--sources=(.+)$/', $argument, $match)) {
+            if (!$addSources($match[1])) {
+                return 2;
+            }
         } elseif ($argument === '--limit' && isset($argv[$i + 1])) {
             $limit = max(1, (int)$argv[++$i]);
         } elseif (preg_match('/^--limit=(\d+)$/', $argument, $match)) {
@@ -1193,11 +1201,20 @@ function main(array $argv): int
             $section = strtolower($match[1]);
         } elseif ($argument === '--help' || $argument === '-h') {
             echo "Usage: news_fetch.php [--json] [--source "
-                . implode('|', array_keys(SOURCES)) . "] [--limit N]\n";
+                . implode('|', array_keys(SOURCES))
+                . " ...] [--limit N]\n";
             return 0;
         } else {
             diag("news_fetch: ignoring unknown argument: {$argument}");
         }
+    }
+
+    if ($sourceKeys === null) {
+        $sourceKeys = array_keys(SOURCES);
+    }
+    if ($sourceKeys === []) {
+        diag('news_fetch: no news sources selected');
+        return 2;
     }
 
     if ($section !== null) {

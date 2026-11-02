@@ -1,36 +1,38 @@
 source: {
   cnn: {
-    - https://openrss.org/www.cnn.com
-    - https://openrss.org/www.cnn.com/world
-    - https://openrss.org/www.cnn.com/us
-    - https://openrss.org/www.cnn.com/politics
-    - https://openrss.org/www.cnn.com/business
+    - https://openrss.org/feed/www.cnn.com
+    - https://openrss.org/feed/www.cnn.com/world
+    - https://openrss.org/feed/www.cnn.com/us
+    - https://openrss.org/feed/www.cnn.com/politics
+    - https://openrss.org/feed/www.cnn.com/business
   }
   kqed: {
     - https://ww2.kqed.org/news/feed/
   }
-  sfgate {
+  sfgate: {
     - https://www.sfgate.com/bayarea/feed/Bay-Area-News-429.php
   }
   sfbayview: {
     - https://sfbayview.com/wp-json/wp/v2/posts?per_page=10
   }
   mission_local: {
-    https://missionlocal.org/wp-json/wp/v2/posts
+    - https://missionlocal.org/wp-json/wp/v2/posts
   }
   richmond_sunset: {
-    https://richmondsunsetnews.com/feed/
+    - https://richmondsunsetnews.com/feed/
   }
-  sunset: {
-    https://thesunsetpost.onrender.com/rss.xml
-  }
+}
+
+task.select_news_sources (completed) {
+  - if typing /news and then hit tab, present a list of news sources and checkboxes, allow me to select what sources to include
+  - if typing /news and hit enter, load all sources
 }
 
 task.cover_picture (completed) {
   for every single source in the detail view, please try your best to include source images
 }
 
-task (completed) {
+task {
   update news sources {source}
 }
 
