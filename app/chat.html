@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>YouTube Local Chat</title>
+<title>Personal Chatbot</title>
 <style>
   :root {
     --bg: #0a0e13;
@@ -1109,7 +1109,7 @@
 <div id="app">
   <header id="topbar">
     <span class="dot"></span>
-    <span class="brand">YouTube Local Chat</span>
+    <span class="brand">Personal Chatbot</span>
     <span class="tagline" id="top-tagline">lexical RAG over YouTube transcript trunks</span>
     <span class="spacer"></span>
     <button id="help-btn" title="Commands and keyboard shortcuts (F1)">? help</button>
@@ -1174,7 +1174,7 @@
       </div>
       <a id="kqed-link" class="kqed-link" href="#" target="_blank" rel="noopener noreferrer">Open article ↗</a>
       <button id="kqed-translate" class="translate-btn kqed-translate" type="button" disabled
-              title="Translate this story into Simplified Chinese with ornith:35b">中文</button>
+              title="Translate this story into Simplified Chinese with the local LLM">中文</button>
       <button id="kqed-close" type="button" title="Close (Esc)">×</button>
     </div>
     <div id="kqed-body" class="kqed-body">
@@ -1205,7 +1205,7 @@
 
 <div id="help-panel" hidden>
   <div class="help-card" role="dialog" aria-modal="true" aria-label="Help">
-    <h2>YouTube Local Chat</h2>
+    <h2>Personal Chatbot</h2>
     <div id="help-commands"></div>
     <h3>Keyboard</h3>
     <div class="keys">
@@ -1285,6 +1285,24 @@ const WORD_RE = /[\p{L}\p{N}][\p{L}\p{N}'’_-]*/gu;
 const WORD_CHAR_RE = /[\p{L}\p{N}_]/u;
 const URL_TRAILING_PUNCT_RE = /[.,!?;:'"”’]+$/;
 const CLOSING_BRACKETS = { ")": "(", "]": "[", "}": "{" };
+
+/* Model names are implementation details: the chat window should not expose
+ * the specific local model (ornith:35b). Every model name and every message
+ * that may contain one goes through these helpers before it reaches the DOM. */
+const HIDDEN_MODEL_NAME = "ornith:35b";
+function displayModelName(value) {
+  const name = String(value ?? "").trim();
+  if (!name) return "—";
+  return name.includes(HIDDEN_MODEL_NAME) ? "local LLM" : name;
+}
+function scrubModelNames(text) {
+  return String(text ?? "")
+    .split(`local LLM ${HIDDEN_MODEL_NAME}`).join("local LLM")
+    .split(`via ${HIDDEN_MODEL_NAME}`).join("")
+    .split(HIDDEN_MODEL_NAME).join("local LLM")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
 
 function splitUrlToken(raw) {
   let url = raw.replace(URL_TRAILING_PUNCT_RE, "");
@@ -1733,7 +1751,7 @@ function makeCodeAskControls(codeLines, language, tag) {
   title.textContent = "Ask about this snippet";
   const modelEl = document.createElement("span");
   modelEl.className = "code-ask-model";
-  modelEl.textContent = appState?.models?.coding || "ornith:35b";
+  modelEl.textContent = displayModelName(appState?.models?.coding);
   const spacer = document.createElement("span");
   spacer.className = "code-ask-spacer";
   const closeBtn = document.createElement("button");
@@ -1851,14 +1869,14 @@ function makeCodeAskControls(codeLines, language, tag) {
     errorText = "";
     answerEl.textContent = "";
     answerEl.hidden = true;
-    loadingEl.textContent = `asking ${modelEl.textContent || "ornith:35b"}…`;
+    loadingEl.textContent = `asking ${modelEl.textContent || "the local LLM"}…`;
     loadingEl.hidden = false;
     sendButton.disabled = true;
 
     const handlers = {
       start: (data) => {
         if (whichGeneration !== generation) return;
-        if (data?.model) modelEl.textContent = data.model;
+        if (data?.model) modelEl.textContent = displayModelName(data.model);
       },
       delta: (data) => {
         if (whichGeneration !== generation) return;
@@ -1973,7 +1991,9 @@ function makeLineHelpButton(codeLines, lineIndex, language, tag) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "line-help";
-  const model = appState?.models?.line_explain || appState?.models?.coding || "ornith:35b";
+  const model = displayModelName(
+    appState?.models?.line_explain || appState?.models?.coding
+  );
   button.title = `Explain line ${lineIndex + 1} with ${model}`;
   button.setAttribute("aria-label", `Explain line ${lineIndex + 1}`);
   button.addEventListener("click", (event) => {
@@ -2324,7 +2344,7 @@ function makeEntry(kind, options = {}) {
     translateBtn.textContent = "中文";
     translateBtn.disabled = true;
     translateBtn.title =
-      "Translate this answer into Simplified Chinese with ornith:35b";
+      "Translate this answer into Simplified Chinese with the local LLM";
     translateBtn.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -2516,7 +2536,7 @@ function renderEntry(entry) {
 }
 
 function addLog(entry, text) {
-  const clean = String(text || "").replace(/\s+$/g, "");
+  const clean = scrubModelNames(text).replace(/\s+$/g, "");
   if (!clean) return;
   entry.logs.push(clean);
   scheduleRender(entry);
@@ -2530,12 +2550,13 @@ function addDelta(entry, text) {
 
 function addOutput(entry, text) {
   if (!text) return;
-  entry.output += text;
+  entry.output += scrubModelNames(text);
   scheduleRender(entry);
 }
 
 function addError(entry, text) {
-  entry.error = (entry.error ? entry.error + "\n" : "") + String(text || "");
+  const clean = scrubModelNames(text);
+  entry.error = (entry.error ? entry.error + "\n" : "") + clean;
   scheduleRender(entry);
 }
 
@@ -2665,7 +2686,7 @@ function syncNewsTitleTranslateButton(item, button) {
   }
   button.textContent = "中文";
   button.disabled = !String(item.title || "").trim();
-  button.title = "Translate this news title into Simplified Chinese with ornith:35b";
+  button.title = "Translate this news title into Simplified Chinese with the local LLM";
 }
 
 function renderNewsTitleTranslation(entry, item, container) {
@@ -2902,7 +2923,7 @@ function syncKqedTranslateButton() {
   button.textContent = "中文";
   button.disabled = !currentText;
   button.title = currentText
-    ? "Translate this story into Simplified Chinese with ornith:35b"
+    ? "Translate this story into Simplified Chinese with the local LLM"
     : "Waiting for the story text…";
 }
 
@@ -3145,9 +3166,9 @@ function renderAnswerSource(entry) {
     : data.source === "merged"
       ? "local LLM + documentation"
       : "local LLM";
-  el.textContent = data.label || fallback;
+  el.textContent = scrubModelNames(data.label || fallback);
   el.dataset.source = data.source || "";
-  el.title = data.detail || (data.url ? `Source: ${data.url}` : "");
+  el.title = scrubModelNames(data.detail || (data.url ? `Source: ${data.url}` : ""));
 }
 
 function setAnswerSource(entry, data) {
@@ -3155,8 +3176,8 @@ function setAnswerSource(entry, data) {
   renderAnswerSource(entry);
   const status = $("#status-answer-source");
   if (status) {
-    status.textContent = entry.answerSource?.label || "—";
-    status.title = entry.answerSource?.detail || "";
+    status.textContent = scrubModelNames(entry.answerSource?.label) || "—";
+    status.title = scrubModelNames(entry.answerSource?.detail || "");
   }
 }
 
@@ -3188,7 +3209,7 @@ function syncTranslateButton(entry) {
   button.textContent = "中文";
   button.disabled = !entry.complete || !entry.text.trim();
   button.title =
-    "Translate this answer into Simplified Chinese with ornith:35b";
+    "Translate this answer into Simplified Chinese with the local LLM";
 }
 
 function scheduleTranslationRender(entry) {
@@ -3252,7 +3273,7 @@ function toggleAnswerTranslation(entry) {
     start: (data) => {
       if (data?.model) {
         entry.translationLabelEl.textContent =
-          `中文翻译 · ${data.model} · streaming`;
+          `中文翻译 · ${displayModelName(data.model)} · streaming`;
       }
     },
     delta: (data) => {
@@ -3357,7 +3378,7 @@ function applyState(state, loadHistory = false) {
   $("#status-conversation").textContent =
     `${state.conversation_turns ?? 0} turn${(state.conversation_turns ?? 0) === 1 ? "" : "s"}`;
   const statusModelEl = $("#status-model");
-  statusModelEl.textContent = state.models?.chat || "—";
+  statusModelEl.textContent = displayModelName(state.models?.chat);
   statusModelEl.title = "";
   const codeLanguageEl = $("#status-code-language");
   if (codeLanguageEl) {
@@ -3367,9 +3388,10 @@ function applyState(state, loadHistory = false) {
       ? `Code generated while this tag is active is always ${language}`
       : "The coding model chooses the language (no tag pins one)";
   }
+  const modelLabel = displayModelName(state.models?.chat);
   $("#top-tagline").textContent = state.article
-    ? `article ${state.article_title || state.article} · ${state.chunks ?? "?"} paragraphs · ${state.models?.chat ?? "—"} · /help`
-    : `tag ${state.tag ?? "—"} · ${state.chunks ?? "?"} trunks · ${state.models?.chat ?? "—"} · /help`;
+    ? `article ${state.article_title || state.article} · ${state.chunks ?? "?"} paragraphs · ${modelLabel} · /help`
+    : `tag ${state.tag ?? "—"} · ${state.chunks ?? "?"} trunks · ${modelLabel} · /help`;
   updateModeUI();
   if (helpPanel.hidden === false) renderHelp();
 }
@@ -3736,10 +3758,12 @@ function submitText(text, fromChoice = false) {
       // `meta`/`done` state restores the regular chat model in the status bar.
       if (data?.model) {
         const modelEl = $("#status-model");
-        modelEl.textContent = data.model;
-        modelEl.title = data.label
-          ? `${data.label}: ${data.model}${data.think ? " (thinking)" : ""}`
-          : "";
+        modelEl.textContent = displayModelName(data.model);
+        modelEl.title = scrubModelNames(
+          data.label
+            ? `${data.label}: ${data.model}${data.think ? " (thinking)" : ""}`
+            : ""
+        );
       }
       if (data?.language) {
         const languageEl = $("#status-code-language");
@@ -4970,7 +4994,9 @@ function openLineHelp({ codeLines, lineNumber, language, tag }) {
   const source = codeLines[lineNumber - 1] ?? "";
   lineHelpTitleEl.textContent = `Line ${lineNumber}`;
   lineHelpLangEl.textContent = language || appState?.code_language || "";
-  const model = appState?.models?.line_explain || appState?.models?.coding || "ornith:35b";
+  const model = displayModelName(
+    appState?.models?.line_explain || appState?.models?.coding
+  );
   lineHelpModelEl.textContent = model;
   lineHelpLoadingEl.textContent = `asking ${model}…`;
   lineHelpSourceEl.textContent = source || "(blank line)";
@@ -5005,7 +5031,7 @@ function openLineHelp({ codeLines, lineNumber, language, tag }) {
     start: (data) => {
       if (generation !== lineHelpGeneration) return;
       if (data?.language) lineHelpLangEl.textContent = data.language;
-      if (data?.model) lineHelpModelEl.textContent = data.model;
+      if (data?.model) lineHelpModelEl.textContent = displayModelName(data.model);
     },
     delta: (data) => {
       if (generation !== lineHelpGeneration) return;
@@ -5124,10 +5150,10 @@ function renderWelcome(state) {
   const tag = state?.tag ?? "—";
   const chunks = state?.chunks ?? "?";
   const videos = state?.videos ?? "?";
-  const model = state?.models?.chat ?? "—";
+  const model = displayModelName(state?.models?.chat);
   const historyCount = state?.history_count ?? 0;
   pre.innerHTML =
-    `<span class="accent">YouTube Local Chat</span>  <span class="dim">— lexical BM25 RAG over transcript trunks</span>\n` +
+    `<span class="accent">Personal Chatbot</span>  <span class="dim">— lexical BM25 RAG over transcript trunks</span>\n` +
     `tag <span class="accent">${escapeText(tag)}</span> · ${escapeText(String(chunks))} trunks from ${escapeText(String(videos))} videos · model <span class="accent">${escapeText(model)}</span>\n` +
     `history ${escapeText(String(historyCount))} entries · depth ${escapeText(String(state?.depth_label ?? "—"))} · scope ${escapeText(state?.scope ?? "—")}\n\n` +
     `<span class="dim">Type a question and press ⌘/Ctrl+Enter (or click Send) to send. Enter adds a newline, so questions and code blocks can span several lines. Type /help for commands and vim shortcuts.\n` +

@@ -190,6 +190,14 @@ group app/chat.html and app/chat_server.py {
 
   document_backed_tags:rust, golang, php
 
+  task (completed) {
+    DO NOT display "ornith:35b" in the chat window UI
+  }
+
+  task (completed) {
+    change the chat window title from "YouTube Local Chat" to "Personal Chatbot"
+  }
+
   task (persistent) {
     complete tasks in ./prompts/article_based_question_and_answer.prompt
   }
