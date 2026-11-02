@@ -1,3 +1,39 @@
+source: {
+  cnn: {
+    - https://openrss.org/www.cnn.com
+    - https://openrss.org/www.cnn.com/world
+    - https://openrss.org/www.cnn.com/us
+    - https://openrss.org/www.cnn.com/politics
+    - https://openrss.org/www.cnn.com/business
+  }
+  kqed: {
+    - https://ww2.kqed.org/news/feed/
+  }
+  sfgate {
+    - https://www.sfgate.com/bayarea/feed/Bay-Area-News-429.php
+  }
+  sfbayview: {
+    - https://sfbayview.com/wp-json/wp/v2/posts?per_page=10
+  }
+  mission_local: {
+    https://missionlocal.org/wp-json/wp/v2/posts
+  }
+  richmond_sunset: {
+    https://richmondsunsetnews.com/feed/
+  }
+  sunset: {
+    https://thesunsetpost.onrender.com/rss.xml
+  }
+}
+
+task.cover_picture (completed) {
+  for every single source in the detail view, please try your best to include source images
+}
+
+task (completed) {
+  update news sources {source}
+}
+
 task (completed) {
   create command /news <source>:
   <source> can be the following {

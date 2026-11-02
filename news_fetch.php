@@ -5,12 +5,16 @@ declare(strict_types=1);
 
 /**
  * Fetch the latest stories from every news source supported by /news and
- * stream each story's title + paragraphs, source by source.
+ * stream each story's title + paragraphs + source images, source by source.
  *
  * Sources:
- *   cnn        CNN RSS feeds served by openrss.org (top/world/us/politics/business)
- *   kqed       KQED News RSS feed
- *   sfbayview  SF Bay View WordPress REST API
+ *   cnn           CNN RSS feeds served by openrss.org (top/world/us/politics/business)
+ *   kqed          KQED News RSS feed
+ *   sfgate        SFGATE Bay Area News RSS feed
+ *   sfbayview     SF Bay View WordPress REST API
+ *   mission_local Mission Local WordPress REST API
+ *   richmond_sunset Richmond Review / Richmond & Sunset news RSS feed
+ *   sunset        Sunset Blog RSS feed
  *
  * Default output is a human-readable stream for the terminal. The web chat
  * passes --json and receives one JSON event per line (NDJSON), which
@@ -19,8 +23,10 @@ declare(strict_types=1);
  * Usage:
  *   ./news_fetch.php [--json] [--source SOURCE] [--limit N]
  *
- * --source accepts cnn, kqed, or sfbayview. Without --source, every source is
- * fetched and emitted as its own section. --limit caps the total number of
+ * --source accepts cnn, kqed, sfgate, sfbayview, mission_local,
+ * richmond_sunset, or sunset. Without
+ * --source, every source is fetched and emitted as its own section. --limit
+ * caps the total number of
  * stories across all selected sources (each source has its own default when
  * --limit is omitted).
  */
@@ -64,6 +70,17 @@ const SOURCES = [
             ],
         ],
     ],
+    'sfgate' => [
+        'label' => 'SFGATE Bay Area News',
+        'kind' => 'rss',
+        'default_limit' => 20,
+        'feeds' => [
+            'bayarea' => [
+                'label' => 'Bay Area News',
+                'url' => 'https://www.sfgate.com/bayarea/feed/Bay-Area-News-429.php',
+            ],
+        ],
+    ],
     'sfbayview' => [
         'label' => 'SF Bay View',
         'kind' => 'wp_json',
@@ -75,6 +92,39 @@ const SOURCES = [
             ],
         ],
     ],
+    'mission_local' => [
+        'label' => 'Mission Local',
+        'kind' => 'wp_json',
+        'default_limit' => 10,
+        'feeds' => [
+            'latest' => [
+                'label' => 'Latest Stories',
+                'url' => 'https://missionlocal.org/wp-json/wp/v2/posts',
+            ],
+        ],
+    ],
+    'richmond_sunset' => [
+        'label' => 'Richmond Review',
+        'kind' => 'rss',
+        'default_limit' => 20,
+        'feeds' => [
+            'latest' => [
+                'label' => 'Latest Stories',
+                'url' => 'https://richmondsunsetnews.com/feed/',
+            ],
+        ],
+    ],
+    'sunset' => [
+        'label' => 'Sunset Post',
+        'kind' => 'rss',
+        'default_limit' => 20,
+        'feeds' => [
+            'latest' => [
+                'label' => 'Latest Stories',
+                'url' => 'https://thesunsetpost.onrender.com/rss.xml',
+            ],
+        ],
+    ],
 ];
 
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
@@ -82,6 +132,10 @@ const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
 const CONTENT_NS = 'http://purl.org/rss/1.0/modules/content/';
 const MAX_ATTEMPTS = 4;
 const MAX_WP_PER_PAGE = 100;
+const MAX_STORY_IMAGES = 6;
+const IMAGE_CACHE_TTL = 604800;       // one week for successful lookups
+const IMAGE_CACHE_FAILURE_TTL = 86400; // one day for missing/broken images
+const IMAGE_FETCH_CONCURRENCY = 6;
 
 /**
  * Print a diagnostic line to stderr without disturbing the event stream.
@@ -163,6 +217,497 @@ function cleanTitle(string $html): string
 {
     $text = normalizeText(strip_tags($html));
     return $text !== '' ? $text : '(untitled)';
+}
+
+/**
+ * Normalise an image URL and resolve relative references against a page URL.
+ */
+function normalizeImageUrl(string $url, string $baseUrl = ''): string
+{
+    $url = html_entity_decode(trim($url), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    if ($url === '' || preg_match('{^(?:data|blob|javascript|mailto):}i', $url)) {
+        return '';
+    }
+    if (str_starts_with($url, '//')) {
+        return 'https:' . $url;
+    }
+    if (!preg_match('{^https?://}i', $url)) {
+        if ($baseUrl === '') {
+            return '';
+        }
+        $parts = parse_url($baseUrl);
+        if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) {
+            return '';
+        }
+        $origin = $parts['scheme'] . '://' . $parts['host'];
+        if (isset($parts['port'])) {
+            $origin .= ':' . $parts['port'];
+        }
+        if (str_starts_with($url, '/')) {
+            return $origin . $url;
+        }
+        $path = str_replace('\\', '/', $parts['path'] ?? '/');
+        $directory = str_ends_with($path, '/')
+            ? rtrim($path, '/')
+            : rtrim(dirname($path), '/');
+        return $origin . ($directory === '' || $directory === '.' ? '' : $directory)
+            . '/' . ltrim($url, '/');
+    }
+    return $url;
+}
+
+/**
+ * Reject obvious non-image media URLs while allowing extension-less CDN URLs.
+ */
+function looksLikeImageUrl(string $url): bool
+{
+    if (preg_match('/\.(?:jpe?g|png|gif|webp|avif|bmp|svg)(?:[?#].*)?$/i', $url)) {
+        return true;
+    }
+    return !preg_match(
+        '/\.(?:mp4|m3u8|mp3|webm|mov|pdf)(?:[?#].*)?$/i',
+        $url
+    );
+}
+
+/**
+ * Pick the largest candidate from an HTML srcset attribute.
+ */
+function largestSrcsetUrl(string $srcset): string
+{
+    $best = '';
+    $bestWeight = -1;
+    foreach (explode(',', $srcset) as $candidate) {
+        $parts = preg_split('/\s+/', trim($candidate));
+        if (!$parts || $parts[0] === '') {
+            continue;
+        }
+        $weight = 0;
+        if (isset($parts[1]) && preg_match('/^(\d+)w$/', $parts[1], $match)) {
+            $weight = (int)$match[1];
+        } elseif (isset($parts[1]) && preg_match('/^([\d.]+)x$/', $parts[1], $match)) {
+            $weight = (int)((float)$match[1] * 1000);
+        }
+        if ($weight > $bestWeight) {
+            $bestWeight = $weight;
+            $best = $parts[0];
+        }
+    }
+    return $best;
+}
+
+/**
+ * Pull image URLs from a story's HTML (feed content or article body).
+ *
+ * @return list<string>
+ */
+function imageUrlsFromHtml(
+    string $html,
+    string $baseUrl = '',
+    int $limit = MAX_STORY_IMAGES
+): array {
+    if (trim($html) === '') {
+        return [];
+    }
+
+    $previous = libxml_use_internal_errors(true);
+    $document = new DOMDocument();
+    $loaded = $document->loadHTML(
+        '<?xml encoding="utf-8"?><div>' . $html . '</div>',
+        LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING
+    );
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+    if (!$loaded) {
+        return [];
+    }
+
+    $images = [];
+    $seen = [];
+    foreach ($document->getElementsByTagName('img') as $node) {
+        $width = $node->getAttribute('width');
+        $height = $node->getAttribute('height');
+        if (
+            (ctype_digit($width) && (int)$width <= 2)
+            || (ctype_digit($height) && (int)$height <= 2)
+        ) {
+            continue;
+        }
+
+        $candidates = [
+            $node->getAttribute('src'),
+            $node->getAttribute('data-src'),
+            $node->getAttribute('data-original'),
+            $node->getAttribute('data-lazy-src'),
+            $node->getAttribute('data-url'),
+        ];
+        $candidate = '';
+        foreach ($candidates as $value) {
+            if (trim($value) !== '') {
+                $candidate = $value;
+                break;
+            }
+        }
+        if ($candidate === '') {
+            $candidate = largestSrcsetUrl($node->getAttribute('srcset'));
+        }
+
+        $url = normalizeImageUrl($candidate, $baseUrl);
+        if ($url === '' || isset($seen[$url])) {
+            continue;
+        }
+        $seen[$url] = true;
+        $images[] = $url;
+        if (count($images) >= $limit) {
+            break;
+        }
+    }
+    return $images;
+}
+
+/**
+ * Pull image URLs from RSS media:content, media:thumbnail, and enclosures.
+ *
+ * @return list<string>
+ */
+function mediaImageUrls(SimpleXMLElement $item, string $baseUrl = ''): array
+{
+    $xml = $item->asXML();
+    if ($xml === false || trim($xml) === '') {
+        return [];
+    }
+
+    $previous = libxml_use_internal_errors(true);
+    $document = new DOMDocument();
+    $loaded = $document->loadXML(
+        $xml,
+        LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING
+    );
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+    if (!$loaded) {
+        return [];
+    }
+
+    $xpath = new DOMXPath($document);
+    $nodes = $xpath->query(
+        '//*[local-name()="content" or local-name()="thumbnail" '
+        . 'or local-name()="enclosure"]'
+    );
+    if ($nodes === false) {
+        return [];
+    }
+
+    $images = [];
+    $seen = [];
+    foreach ($nodes as $node) {
+        if (!$node instanceof DOMElement) {
+            continue;
+        }
+        $url = normalizeImageUrl($node->getAttribute('url'), $baseUrl);
+        if ($url === '') {
+            continue;
+        }
+        $type = strtolower(trim($node->getAttribute('type')));
+        $medium = strtolower(trim($node->getAttribute('medium')));
+        if ($type !== '' && !str_starts_with($type, 'image/')) {
+            continue;
+        }
+        if ($medium !== '' && $medium !== 'image') {
+            continue;
+        }
+        if (!looksLikeImageUrl($url) || isset($seen[$url])) {
+            continue;
+        }
+        $seen[$url] = true;
+        $images[] = $url;
+        if (count($images) >= MAX_STORY_IMAGES) {
+            break;
+        }
+    }
+    return $images;
+}
+
+/**
+ * Merge image lists, dropping duplicates and capping the result.
+ *
+ * @param list<string> ...$lists
+ * @return list<string>
+ */
+function mergeImageUrls(array ...$lists): array
+{
+    $merged = [];
+    $seen = [];
+    foreach ($lists as $list) {
+        foreach ($list as $url) {
+            $url = normalizeImageUrl((string)$url);
+            if ($url === '' || isset($seen[$url])) {
+                continue;
+            }
+            $seen[$url] = true;
+            $merged[] = $url;
+            if (count($merged) >= MAX_STORY_IMAGES) {
+                return $merged;
+            }
+        }
+    }
+    return $merged;
+}
+
+/**
+ * Find the social/hero image on an article page (og:image first, then a
+ * reasonable in-article fallback).
+ */
+function extractArticleImageFromHtml(string $html, string $pageUrl): string
+{
+    if (trim($html) === '') {
+        return '';
+    }
+
+    $previous = libxml_use_internal_errors(true);
+    $document = new DOMDocument();
+    $loaded = $document->loadHTML(
+        '<?xml encoding="utf-8"?>' . $html,
+        LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING
+    );
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+    if (!$loaded) {
+        return '';
+    }
+
+    foreach ($document->getElementsByTagName('meta') as $meta) {
+        $name = strtolower(
+            $meta->getAttribute('property') !== ''
+                ? $meta->getAttribute('property')
+                : $meta->getAttribute('name')
+        );
+        if (!in_array(
+            $name,
+            ['og:image', 'og:image:url', 'og:image:secure_url',
+             'twitter:image', 'twitter:image:src'],
+            true
+        )) {
+            continue;
+        }
+        $url = normalizeImageUrl($meta->getAttribute('content'), $pageUrl);
+        if ($url !== '' && looksLikeImageUrl($url)) {
+            return $url;
+        }
+    }
+
+    foreach ($document->getElementsByTagName('link') as $link) {
+        if (strtolower($link->getAttribute('rel')) !== 'image_src') {
+            continue;
+        }
+        $url = normalizeImageUrl($link->getAttribute('href'), $pageUrl);
+        if ($url !== '' && looksLikeImageUrl($url)) {
+            return $url;
+        }
+    }
+
+    $xpath = new DOMXPath($document);
+    foreach (['//article//img', '//main//img'] as $query) {
+        $nodes = $xpath->query($query);
+        if ($nodes === false) {
+            continue;
+        }
+        foreach ($nodes as $node) {
+            if (!$node instanceof DOMElement) {
+                continue;
+            }
+            $url = normalizeImageUrl($node->getAttribute('src'), $pageUrl);
+            if ($url !== '' && looksLikeImageUrl($url)) {
+                return $url;
+            }
+        }
+    }
+    return '';
+}
+
+/**
+ * Locate the on-disk cache of article hero images.
+ */
+function imageCacheFile(): string
+{
+    $home = getenv('HOME');
+    if ($home === false || $home === '') {
+        $home = sys_get_temp_dir();
+    }
+    $directory = rtrim($home, '/') . '/.cache/news_fetch';
+    if (!is_dir($directory)) {
+        @mkdir($directory, 0775, true);
+    }
+    return $directory . '/article_images.json';
+}
+
+/**
+ * @return array<string, array{image:string, ts:int}>
+ */
+function loadImageCache(): array
+{
+    $file = imageCacheFile();
+    if (!is_file($file)) {
+        return [];
+    }
+    $raw = @file_get_contents($file);
+    if ($raw === false || trim($raw) === '') {
+        return [];
+    }
+    $data = json_decode($raw, true);
+    return is_array($data) ? $data : [];
+}
+
+/**
+ * @param array<string, array{image:string, ts:int}> $cache
+ */
+function saveImageCache(array $cache): void
+{
+    $file = imageCacheFile();
+    @file_put_contents(
+        $file,
+        json_encode($cache, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        LOCK_EX
+    );
+}
+
+/**
+ * Fetch several article pages in parallel and extract one hero image from
+ * each. Results are keyed by the original array index.
+ *
+ * @param array<int, string> $links
+ * @return array<int, string>
+ */
+function fetchArticleImages(array $links, string $sourceKey): array
+{
+    $results = [];
+    foreach (array_chunk($links, IMAGE_FETCH_CONCURRENCY, true) as $chunk) {
+        $multi = curl_multi_init();
+        $handles = [];
+        foreach ($chunk as $index => $link) {
+            $handle = curl_init($link);
+            if ($handle === false) {
+                $results[$index] = '';
+                continue;
+            }
+            curl_setopt_array($handle, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_MAXREDIRS => 3,
+                CURLOPT_CONNECTTIMEOUT => 8,
+                CURLOPT_TIMEOUT => 15,
+                CURLOPT_USERAGENT => USER_AGENT,
+                CURLOPT_ENCODING => '',
+                CURLOPT_HTTPHEADER => [
+                    'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language: en-US,en;q=0.9',
+                ],
+            ]);
+            curl_multi_add_handle($multi, $handle);
+            $handles[$index] = $handle;
+        }
+
+        $running = null;
+        do {
+            $status = curl_multi_exec($multi, $running);
+            if ($running > 0) {
+                if (curl_multi_select($multi, 1.0) === -1) {
+                    usleep(100000);
+                }
+            }
+        } while ($running > 0 && $status === CURLM_OK);
+
+        foreach ($handles as $index => $handle) {
+            $body = curl_multi_getcontent($handle);
+            $httpCode = (int)curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
+            $error = curl_error($handle);
+            curl_multi_remove_handle($multi, $handle);
+            curl_close($handle);
+
+            if (
+                is_string($body) && $body !== ''
+                && $httpCode >= 200 && $httpCode < 400
+            ) {
+                $results[$index] = extractArticleImageFromHtml(
+                    $body,
+                    $chunk[$index]
+                );
+            } else {
+                $detail = $error !== '' ? ", {$error}" : '';
+                diag(
+                    "news_fetch ({$sourceKey}): could not load images from "
+                    . "{$chunk[$index]} (HTTP {$httpCode}{$detail})"
+                );
+                $results[$index] = '';
+            }
+        }
+        curl_multi_close($multi);
+    }
+    return $results;
+}
+
+/**
+ * Give stories without a usable feed image a source image discovered from
+ * their article page. Successful and failed lookups are cached on disk so
+ * repeated /news calls stay fast.
+ */
+function enrichStoryImages(array $stories, string $sourceKey): array
+{
+    if (!$stories) {
+        return $stories;
+    }
+
+    $cache = loadImageCache();
+    $requests = [];
+    $now = time();
+
+    foreach ($stories as $index => &$story) {
+        if (!empty($story['images'])) {
+            continue;
+        }
+        $link = trim((string)($story['link'] ?? ''));
+        if ($link === '') {
+            continue;
+        }
+
+        $entry = $cache[$link] ?? null;
+        if (is_array($entry)) {
+            $image = (string)($entry['image'] ?? '');
+            $ttl = $image !== ''
+                ? IMAGE_CACHE_TTL
+                : IMAGE_CACHE_FAILURE_TTL;
+            if ((int)($entry['ts'] ?? 0) + $ttl > $now) {
+                if ($image !== '') {
+                    $story['images'] = mergeImageUrls(
+                        $story['images'] ?? [],
+                        [$image]
+                    );
+                }
+                continue;
+            }
+        }
+        $requests[$index] = $link;
+    }
+    unset($story);
+
+    if (!$requests) {
+        return $stories;
+    }
+
+    $found = fetchArticleImages($requests, $sourceKey);
+    foreach ($requests as $index => $link) {
+        $image = (string)($found[$index] ?? '');
+        if ($image !== '' && isset($stories[$index])) {
+            $stories[$index]['images'] = mergeImageUrls(
+                $stories[$index]['images'] ?? [],
+                [$image]
+            );
+        }
+        $cache[$link] = ['image' => $image, 'ts' => $now];
+    }
+    saveImageCache($cache);
+
+    return $stories;
 }
 
 /**
@@ -277,6 +822,10 @@ function parseRssStories(
 
         $paragraphs = extractParagraphs($html);
         $summary = makeSummary($paragraphs[0] ?? $description);
+        $images = mergeImageUrls(
+            imageUrlsFromHtml($html, $link),
+            mediaImageUrls($item, $link)
+        );
 
         $stories[] = [
             'title' => $title,
@@ -289,6 +838,7 @@ function parseRssStories(
             'source' => $sourceLabel,
             'section' => $sectionLabel,
             'paragraphs' => $paragraphs,
+            'images' => $images,
         ];
     }
 
@@ -332,6 +882,10 @@ function parseWpJsonStories(
         $excerpt = normalizeText(strip_tags($excerptHtml));
         $paragraphs = extractParagraphs($contentHtml, $excerpt);
         $summary = makeSummary($excerpt !== '' ? $excerpt : ($paragraphs[0] ?? ''));
+        $images = imageUrlsFromHtml(
+            $contentHtml . "\n" . $excerptHtml,
+            $link
+        );
 
         $stories[] = [
             'title' => $title,
@@ -344,6 +898,7 @@ function parseWpJsonStories(
             'source' => $sourceLabel,
             'section' => $sectionLabel,
             'paragraphs' => $paragraphs,
+            'images' => $images,
         ];
     }
 
@@ -468,6 +1023,7 @@ function storyStream(array $sourceKeys, ?int $limit, ?string $section): Generato
                 }
             }
 
+            $selected = enrichStoryImages($selected, $sourceKey);
             yield [
                 'source_key' => $sourceKey,
                 'source_label' => $source['label'],
@@ -527,6 +1083,7 @@ function streamJson(iterable $stream, array $sourceKeys, ?int $limit): void
                 'source' => $story['source'],
                 'section' => $story['section'],
                 'summary' => $story['summary'],
+                'images' => $story['images'] ?? [],
             ]);
             foreach ($story['paragraphs'] as $paragraph) {
                 emitEvent([
@@ -581,6 +1138,9 @@ function streamHuman(iterable $stream, array $sourceKeys, ?int $limit): void
             if ($story['summary'] !== '') {
                 echo '   ' . $story['summary'] . "\n";
             }
+            foreach (($story['images'] ?? []) as $image) {
+                echo '   image: ' . $image . "\n";
+            }
             echo "\n";
             fflush(STDOUT);
 
@@ -632,8 +1192,8 @@ function main(array $argv): int
         } elseif (preg_match('/^--section=(.+)$/', $argument, $match)) {
             $section = strtolower($match[1]);
         } elseif ($argument === '--help' || $argument === '-h') {
-            echo "Usage: news_fetch.php [--json] [--source cnn|kqed|sfbayview] "
-                . "[--limit N]\n";
+            echo "Usage: news_fetch.php [--json] [--source "
+                . implode('|', array_keys(SOURCES)) . "] [--limit N]\n";
             return 0;
         } else {
             diag("news_fetch: ignoring unknown argument: {$argument}");

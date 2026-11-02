@@ -33,9 +33,10 @@ Endpoints:
                                   The tag also pins the generated language:
                                   code in the "rust" tag is always Rust, code in
                                   the "golang" tag is always Go, and code in the
-                                  "php" tag is always PHP. /news
-                                  streams "news" events from CNN, KQED, and
-                                  SF Bay View).
+                                  "php" tag is always PHP. /news streams
+                                  "news" events from CNN, KQED, SFGATE, SF
+                                  Bay View, Mission Local, Richmond Review,
+                                  and Sunset Post).
     POST /api/dict               SSE: dictionary + latest-answer usage stream
     POST /api/translate          SSE: paragraph-by-paragraph Simplified Chinese
                                   translation of an answer
@@ -101,7 +102,7 @@ WEB_COMMANDS = {
     "/learn_topic": "search YouTube for <topic> and learn the top 3 videos",
     "/learn_playlist": "learn every video in a YouTube playlist",
     "/tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
-    "/news": "list the latest news from cnn, kqed, or sfbayview (optionally /news [source] [count])",
+    "/news": "list the latest news from cnn, kqed, sfgate, sfbayview, mission_local, richmond_sunset, or sunset (optionally /news [source] [count])",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
 }
 
@@ -109,8 +110,14 @@ WEB_COMMANDS = {
 NEWS_SOURCES = {
     "cnn": "CNN News",
     "kqed": "KQED News",
+    "sfgate": "SFGATE Bay Area News",
     "sfbayview": "SF Bay View",
+    "mission_local": "Mission Local",
+    "richmond_sunset": "Richmond Review",
+    "sunset": "Sunset Post",
 }
+
+NEWS_SOURCE_USAGE = "|".join(NEWS_SOURCES)
 
 COMMAND_ARGUMENTS = {
     "/tag",
@@ -5853,7 +5860,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     def _command_news(self, argument: str) -> None:
         """Stream the latest news stories to the browser.
 
-        Usage: /news [cnn|kqed|sfbayview] [number-of-stories]
+        Usage: /news [SOURCE] [number-of-stories]
+        SOURCE is one of cnn, kqed, sfgate, sfbayview, mission_local,
+        richmond_sunset, or sunset.
         Without a source, every supported source is shown as its own section.
         """
         argv: list[str] = []
@@ -5864,7 +5873,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 if int(part) < 1:
                     self._sse_text(
                         "output",
-                        "\nUsage: /news [cnn|kqed|sfbayview] "
+                        f"\nUsage: /news [{NEWS_SOURCE_USAGE}] "
                         "[number-of-stories]\n",
                     )
                     return
@@ -5873,7 +5882,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 if source is not None:
                     self._sse_text(
                         "output",
-                        "\nUsage: /news [cnn|kqed|sfbayview] "
+                        f"\nUsage: /news [{NEWS_SOURCE_USAGE}] "
                         "[number-of-stories]\n",
                     )
                     return
@@ -5881,7 +5890,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             else:
                 self._sse_text(
                     "output",
-                    "\nUsage: /news [cnn|kqed|sfbayview] "
+                    f"\nUsage: /news [{NEWS_SOURCE_USAGE}] "
                     "[number-of-stories]\n",
                 )
                 return
