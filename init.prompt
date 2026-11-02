@@ -191,6 +191,10 @@ group app/chat.html and app/chat_server.py {
   document_backed_tags:rust, golang, php
 
   task (persistent) {
+    complete tasks in ./prompts/kqed_news.prompt
+  }
+
+  task (persistent) {
     if the current tag is in one of the {document_backed_tags} {
       complete tasks in ./prompts/programming_language_tips.prompt
     }

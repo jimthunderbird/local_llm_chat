@@ -3,7 +3,8 @@
 
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, tag/transcript scoping, history, /memory, /status,
-/sources, /benchmark, /learn, /learn_topic, /learn_playlist, /tag_gen, /wiki, /wiki_article, and /dict. The browser is a pure
+/sources, /benchmark, /learn, /learn_topic, /learn_playlist, /tag_gen,
+/kqed, /wiki, /wiki_article, and /dict. The browser is a pure
 HTML/CSS/JavaScript single-page app served from ./app/chat.html.
 
 Usage:
@@ -31,7 +32,8 @@ Endpoints:
                                   The tag also pins the generated language:
                                   code in the "rust" tag is always Rust, code in
                                   the "golang" tag is always Go, and code in the
-                                  "php" tag is always PHP)
+                                  "php" tag is always PHP. /kqed streams
+                                  "news" events from the KQED News RSS feed).
     POST /api/dict               SSE: dictionary + latest-answer usage stream
     POST /api/translate          SSE: paragraph-by-paragraph Simplified Chinese
                                   translation of an answer
@@ -92,6 +94,7 @@ WEB_COMMANDS = {
     "/learn_topic": "search YouTube for <topic> and learn the top 3 videos",
     "/learn_playlist": "learn every video in a YouTube playlist",
     "/tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
+    "/kqed": "list the latest KQED News stories (optionally /kqed <count>)",
 }
 
 COMMAND_ARGUMENTS = {
@@ -3563,6 +3566,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_learn_topic(argument)
         elif name == "/learn_playlist":
             self._command_learn_playlist(argument)
+        elif name == "/kqed":
+            self._command_kqed(argument)
         elif name == "/wiki":
             self._command_wiki(argument)
         elif name == "/wiki_article":
@@ -4234,6 +4239,79 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 f"{tag}) to pick up the new trunks.\n",
             )
         self._sse("meta", state.snapshot())
+
+    def _command_kqed(self, argument: str) -> None:
+        """Stream the latest KQED News stories to the browser.
+
+        kqed_news_fetch.php emits NDJSON events; relay each one as a `news`
+        SSE event so the title list appears story by story as it is parsed.
+        """
+        script = SCRIPT_DIR / "kqed_news_fetch.php"
+        if not script.exists():
+            self._sse_text(
+                "output", f"\n/kqed: missing {script.name}.\n"
+            )
+            return
+
+        argv = ["php", str(script), "--json"]
+        count_arg = argument.strip()
+        if count_arg:
+            if not count_arg.isdigit() or int(count_arg) < 1:
+                self._sse_text("output", "\nUsage: /kqed [number-of-stories]\n")
+                return
+            argv.extend(["--limit", count_arg])
+
+        process = None
+        item_count = 0
+        try:
+            process = subprocess.Popen(
+                argv,
+                cwd=SCRIPT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            assert process.stdout is not None
+            try:
+                for raw_line in process.stdout:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        self._sse_text("log", f"[kqed: {line}]")
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    if payload.get("type") == "item":
+                        item_count += 1
+                    self._sse("news", payload)
+                returncode = process.wait()
+            except ClientDisconnected:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                raise
+        except OSError as exc:
+            self._sse_text(
+                "output", f"\n/kqed: could not run {script.name}: {exc}\n"
+            )
+            return
+
+        if returncode != 0:
+            self._sse_text(
+                "output",
+                f"\n/kqed: {script.name} exited with code {returncode}.\n",
+            )
+        elif item_count == 0:
+            self._sse_text(
+                "output", "\n/kqed: no stories were found in the feed.\n"
+            )
 
     def _command_wiki(self, argument: str) -> None:
         question = argument.strip()

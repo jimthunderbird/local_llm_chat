@@ -763,7 +763,7 @@
 
   #popup {
     position: fixed;
-    z-index: 50;
+    z-index: 58;
     width: min(440px, calc(100vw - 24px));
     max-height: min(56vh, 520px);
     display: flex;
@@ -808,6 +808,145 @@
   #popup-body .markdown p:first-child { margin-top: 0; }
   #popup-loading { color: var(--warn); font-size: 12px; margin-bottom: 8px; }
   #popup-loading[hidden] { display: none; }
+
+  /* /kqed story list in the transcript and the details modal. */
+  .news-list { margin: 11px 0 4px; }
+  .news-list-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    color: var(--accent);
+    font-size: 12px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    margin-bottom: 7px;
+    user-select: none;
+  }
+  .news-list-head .news-list-note {
+    color: var(--dim);
+    font-size: 11px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .news-list-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .news-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 7px 10px;
+    background: #0f1821;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .news-item:hover { border-color: #33506d; background: #111d29; }
+  .news-item-main { flex: 1; min-width: 0; }
+  .news-index { color: var(--dimmer); margin-right: 6px; user-select: none; }
+  .news-title {
+    display: inline-block;
+    color: var(--accent-2);
+    font-size: 13px;
+    line-height: 1.4;
+    text-decoration: none;
+    word-break: break-word;
+  }
+  .news-title:hover { text-decoration: underline; }
+  .news-meta { color: var(--dim); font-size: 11px; margin-top: 3px; }
+  .news-details {
+    flex: 0 0 auto;
+    background: #142334;
+    color: var(--text);
+    border: 1px solid #30465d;
+    border-radius: 5px;
+    padding: 3px 9px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    cursor: pointer;
+  }
+  .news-details:hover { border-color: var(--accent-2); color: #fff; }
+
+  #kqed-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 56;
+    background: rgba(2, 6, 10, .72);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  #kqed-panel[hidden] { display: none; }
+  .kqed-card {
+    width: min(760px, 100%);
+    max-height: 82vh;
+    display: flex;
+    flex-direction: column;
+    background: #0d151e;
+    border: 1px solid #2b4056;
+    border-radius: 10px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.7);
+    overflow: hidden;
+  }
+  .kqed-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 11px 14px;
+    background: #101b26;
+    border-bottom: 1px solid #223344;
+    user-select: none;
+  }
+  .kqed-head-main { min-width: 0; flex: 1; }
+  .kqed-title { color: var(--accent); font-weight: 700; font-size: 14px; line-height: 1.35; }
+  .kqed-meta { color: var(--dim); font-size: 11px; margin-top: 4px; }
+  .kqed-link {
+    flex: 0 0 auto;
+    color: var(--accent-2);
+    font-size: 11.5px;
+    text-decoration: none;
+    border-bottom: 1px dotted #3d6b8f;
+    margin-top: 3px;
+  }
+  .kqed-link:hover { border-bottom-style: solid; }
+  .kqed-link[hidden] { display: none; }
+  #kqed-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+    user-select: none;
+  }
+  #kqed-close:hover { color: var(--text); }
+  .kqed-body {
+    padding: 14px 18px 18px;
+    overflow-y: auto;
+    font-size: 13px;
+    color: #cfdae5;
+  }
+  .kqed-body p { margin: 0 0 .9em; }
+  .kqed-body p:first-child { margin-top: 0; }
+  .kqed-body .news-loading { color: var(--warn); font-size: 12px; }
+  .kqed-body .news-summary { color: #dfeaf4; font-style: italic; }
+  .kqed-translate { flex: 0 0 auto; margin-top: 2px; }
+  #kqed-translation {
+    margin-top: 15px;
+    padding: 8px 0 0 11px;
+    border-left: 2px solid #2f4a60;
+  }
+  #kqed-translation[hidden] { display: none; }
+  #kqed-translation .translation-label { margin-bottom: 6px; }
+  #kqed-translation .markdown p:last-child { margin-bottom: 0; }
+  #kqed-translation .caret {
+    display: inline-block;
+    width: 7px;
+    height: 13px;
+    margin-left: 2px;
+    background: var(--accent-2);
+    animation: blink 1s steps(2, start) infinite;
+  }
 
   #line-help-panel {
     position: fixed;
@@ -1008,6 +1147,27 @@
   </div>
 </div>
 
+<div id="kqed-panel" hidden>
+  <div class="kqed-card" role="dialog" aria-modal="true" aria-labelledby="kqed-title">
+    <div class="kqed-head">
+      <div class="kqed-head-main">
+        <div id="kqed-title" class="kqed-title">KQED News</div>
+        <div id="kqed-meta" class="kqed-meta"></div>
+      </div>
+      <a id="kqed-link" class="kqed-link" href="#" target="_blank" rel="noopener noreferrer">Open article ↗</a>
+      <button id="kqed-translate" class="translate-btn kqed-translate" type="button" disabled
+              title="Translate this story into Simplified Chinese with ornith:35b">中文</button>
+      <button id="kqed-close" type="button" title="Close (Esc)">×</button>
+    </div>
+    <div id="kqed-body" class="kqed-body">
+      <div id="kqed-translation" hidden>
+        <div id="kqed-translation-label" class="translation-label">中文翻译</div>
+        <div id="kqed-translation-body" class="markdown"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="line-help-panel" hidden>
   <div class="line-help-card" role="dialog" aria-modal="true" aria-labelledby="line-help-title">
     <div class="line-help-head">
@@ -1048,7 +1208,8 @@
       <span class="k">Ctrl+C</span><span class="d">cancel a streaming answer (or copy a selection)</span>
       <span class="k">Ctrl+L / ⌘K</span><span class="d">clear the console</span>
       <span class="k">Drag text</span><span class="d">select output text, then Ctrl+C / ⌘C to copy</span>
-      <span class="k">Click a word</span><span class="d">open a streaming /dict popup (drag instead to select)</span>
+      <span class="k">Click a word</span><span class="d">open a streaming /dict popup (drag instead to select); also works in /kqed stories</span>
+      <span class="k">中文 in /kqed</span><span class="d">translate the open news story into Simplified Chinese</span>
       <span class="k">? in code</span><span class="d">explain that line (rust, golang, and php answers)</span>
       <span class="k">− in popup</span><span class="d">minimize the dictionary popup; click its chip at the right of the status bar to reopen</span>
     </div>
@@ -1082,6 +1243,15 @@ const popupContentEl = $("#popup-content");
 const popupLoadingEl = $("#popup-loading");
 const popupRestoreEl = $("#popup-restore");
 const popupRestoreWordEl = $("#popup-restore-word");
+const kqedPanelEl = $("#kqed-panel");
+const kqedTitleEl = $("#kqed-title");
+const kqedMetaEl = $("#kqed-meta");
+const kqedLinkEl = $("#kqed-link");
+const kqedBodyEl = $("#kqed-body");
+const kqedTranslateBtn = $("#kqed-translate");
+const kqedTranslationEl = $("#kqed-translation");
+const kqedTranslationLabelEl = $("#kqed-translation-label");
+const kqedTranslationBodyEl = $("#kqed-translation-body");
 const lineHelpPanel = $("#line-help-panel");
 const lineHelpTitleEl = $("#line-help-title");
 const lineHelpLangEl = $("#line-help-lang");
@@ -1129,6 +1299,18 @@ let popupGeneration = 0;
 let popupMinimized = false;
 let popupAnchorEl = null;
 let popupAnchorRect = null;
+let kqedItem = null;
+let kqedTranslationGeneration = 0;
+let kqedTranslationRenderPending = false;
+const kqedTranslation = {
+  text: "",
+  sourceText: "",
+  error: "",
+  busy: false,
+  done: false,
+  visible: false,
+  controller: null,
+};
 let lineHelpController = null;
 let lineHelpGeneration = 0;
 let toastTimer = null;
@@ -2094,6 +2276,11 @@ function makeEntry(kind, options = {}) {
     translationVisible: false,
     translationRenderPending: false,
     translateController: null,
+    newsItems: [],
+    newsSource: "",
+    newsFeed: "",
+    newsDone: false,
+    newsEl: document.createElement("div"),
     el: document.createElement("div"),
     logsEl: document.createElement("div"),
     outputEl: document.createElement("pre"),
@@ -2174,6 +2361,8 @@ function makeEntry(kind, options = {}) {
   entry.bodyEl.appendChild(translationEl);
 
   entry.choicesEl.className = "choices";
+  entry.newsEl.className = "news-list";
+  entry.bodyEl.appendChild(entry.newsEl);
   entry.bodyEl.appendChild(entry.choicesEl);
   entry.errorEl.className = "error-text";
   entry.bodyEl.appendChild(entry.errorEl);
@@ -2271,6 +2460,7 @@ function renderEntry(entry) {
   }
 
   entry.choicesEl.textContent = "";
+  renderNewsList(entry);
   for (const choice of entry.choices) {
     const button = document.createElement("button");
     button.className = "choice";
@@ -2329,6 +2519,433 @@ function addError(entry, text) {
   entry.error = (entry.error ? entry.error + "\n" : "") + String(text || "");
   scheduleRender(entry);
 }
+
+/* ------------------------------------------------------------------ *
+ *  /kqed news list and story-details modal
+ * ------------------------------------------------------------------ */
+function formatNewsDate(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(date);
+  } catch {
+    return date.toLocaleString();
+  }
+}
+
+function addNewsEvent(entry, data) {
+  const type = String(data.type || "");
+  if (type === "start") {
+    entry.newsSource = data.source || "KQED News";
+    entry.newsFeed = data.feed || "";
+    scheduleRender(entry);
+    return;
+  }
+  if (type === "item") {
+    entry.newsItems.push({
+      index: Number(data.index) || entry.newsItems.length + 1,
+      title: data.title || "(untitled)",
+      link: data.link || "",
+      published: data.published || "",
+      summary: data.summary || "",
+      paragraphs: [],
+      complete: false,
+    });
+    scheduleRender(entry);
+    return;
+  }
+  if (type === "paragraph") {
+    const index = Number(data.index);
+    const item = entry.newsItems.find((candidate) => candidate.index === index)
+      || entry.newsItems[entry.newsItems.length - 1];
+    if (item && data.text) {
+      item.paragraphs.push(String(data.text));
+      if (kqedItem === item) renderKqedModal(item);
+      scheduleRender(entry);
+    }
+    return;
+  }
+  if (type === "item_end") {
+    const index = Number(data.index);
+    const item = entry.newsItems.find((candidate) => candidate.index === index)
+      || entry.newsItems[entry.newsItems.length - 1];
+    if (item) {
+      item.complete = true;
+      if (kqedItem === item) renderKqedModal(item);
+      scheduleRender(entry);
+    }
+    return;
+  }
+  if (type === "done") {
+    entry.newsDone = true;
+    entry.thinking = false;
+    scheduleRender(entry);
+    return;
+  }
+  if (type === "error") {
+    addError(entry, data.message || "Could not load the KQED News feed.");
+  }
+}
+
+function renderNewsList(entry) {
+  const container = entry.newsEl;
+  if (!container) return;
+  container.textContent = "";
+  const items = Array.isArray(entry.newsItems) ? entry.newsItems : [];
+  if (!items.length) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+
+  const head = document.createElement("div");
+  head.className = "news-list-head";
+  const source = document.createElement("span");
+  source.textContent = entry.newsSource || "KQED News";
+  const note = document.createElement("span");
+  note.className = "news-list-note";
+  const storyWord = items.length === 1 ? "story" : "stories";
+  note.textContent = entry.newsDone
+    ? `${items.length} ${storyWord}`
+    : `${items.length} loaded…`;
+  head.appendChild(source);
+  head.appendChild(note);
+  container.appendChild(head);
+
+  const list = document.createElement("ol");
+  list.className = "news-list-items";
+  items.forEach((item, position) => {
+    const li = document.createElement("li");
+    li.className = "news-item";
+
+    const main = document.createElement("div");
+    main.className = "news-item-main";
+    const indexEl = document.createElement("span");
+    indexEl.className = "news-index";
+    indexEl.textContent = `${item.index || position + 1}.`;
+    main.appendChild(indexEl);
+
+    const titleEl = item.link
+      ? document.createElement("a")
+      : document.createElement("span");
+    titleEl.className = "news-title";
+    titleEl.textContent = item.title;
+    if (item.link) {
+      titleEl.href = item.link;
+      titleEl.target = "_blank";
+      titleEl.rel = "noopener noreferrer";
+      titleEl.title = "Open this story on KQED.org";
+    }
+    titleEl.addEventListener("click", (event) => event.stopPropagation());
+    main.appendChild(titleEl);
+
+    const meta = document.createElement("div");
+    meta.className = "news-meta";
+    const metaParts = [];
+    if (item.published) metaParts.push(formatNewsDate(item.published));
+    if (!item.complete) {
+      metaParts.push("fetching paragraphs…");
+    } else {
+      const count = item.paragraphs.length;
+      metaParts.push(`${count} paragraph${count === 1 ? "" : "s"}`);
+    }
+    meta.textContent = metaParts.join(" · ");
+    main.appendChild(meta);
+
+    const details = document.createElement("button");
+    details.type = "button";
+    details.className = "news-details";
+    details.textContent = "details";
+    details.title = "Read this story in a popup";
+    details.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openKqedModal(item);
+    });
+
+    li.appendChild(main);
+    li.appendChild(details);
+    list.appendChild(li);
+  });
+  container.appendChild(list);
+}
+
+function kqedArticleText(item) {
+  if (!item) return "";
+  const paragraphs = Array.isArray(item.paragraphs) ? item.paragraphs : [];
+  const summary = String(item.summary || "");
+  const parts = [];
+  if (summary && summary !== paragraphs[0]) parts.push(summary);
+  for (const text of paragraphs) {
+    const clean = String(text || "").trim();
+    if (clean) parts.push(clean);
+  }
+  return parts.join("\n\n");
+}
+
+function appendKqedParagraph(text, className) {
+  const p = document.createElement("p");
+  if (className) p.className = className;
+  // Word spans keep every news word clickable for the /dict popup, exactly
+  // like the words in a chat answer.
+  p.appendChild(wordNodes(String(text || ""), true));
+  kqedBodyEl.appendChild(p);
+}
+
+function syncKqedTranslateButton() {
+  const button = kqedTranslateBtn;
+  if (!button) return;
+  const state = kqedTranslation;
+  const currentText = kqedArticleText(kqedItem);
+  if (state.busy) {
+    button.textContent = "翻译中…";
+    button.disabled = true;
+    button.title = "Streaming Simplified Chinese translation…";
+    return;
+  }
+  if (state.done && state.text) {
+    if (currentText !== state.sourceText) {
+      button.textContent = "重新翻译";
+      button.disabled = !currentText;
+      button.title = currentText
+        ? "The story text changed; translate the latest version into Simplified Chinese"
+        : "Waiting for the story text…";
+      return;
+    }
+    button.textContent = state.visible ? "隐藏中文" : "显示中文";
+    button.disabled = false;
+    button.title = state.visible
+      ? "Hide the Simplified Chinese translation"
+      : "Show the Simplified Chinese translation";
+    return;
+  }
+  button.textContent = "中文";
+  button.disabled = !currentText;
+  button.title = currentText
+    ? "Translate this story into Simplified Chinese with ornith:35b"
+    : "Waiting for the story text…";
+}
+
+function renderKqedTranslation() {
+  if (!kqedTranslationEl) return;
+  const state = kqedTranslation;
+  const show = state.visible || state.busy;
+  kqedTranslationEl.hidden = !show;
+  // The modal body is rebuilt whenever a new paragraph streams in, so keep
+  // the translation element attached after the article paragraphs.
+  if (show && kqedTranslationEl.parentNode !== kqedBodyEl) {
+    kqedBodyEl.appendChild(kqedTranslationEl);
+  }
+  if (!show) {
+    kqedTranslationBodyEl.textContent = "";
+    syncKqedTranslateButton();
+    return;
+  }
+  kqedTranslationLabelEl.textContent = state.busy
+    ? "中文翻译 · streaming"
+    : "中文翻译";
+  kqedTranslationBodyEl.textContent = "";
+  if (state.text) {
+    kqedTranslationBodyEl.appendChild(renderMarkdown(state.text, true));
+  }
+  if (state.busy) {
+    const caret = document.createElement("span");
+    caret.className = "caret";
+    kqedTranslationBodyEl.appendChild(caret);
+  }
+  if (state.error) {
+    const error = document.createElement("div");
+    error.className = "error-text";
+    error.textContent = state.error;
+    kqedTranslationBodyEl.appendChild(error);
+  }
+  syncKqedTranslateButton();
+}
+
+function scheduleKqedTranslationRender() {
+  if (kqedTranslationRenderPending) return;
+  kqedTranslationRenderPending = true;
+  window.setTimeout(() => {
+    kqedTranslationRenderPending = false;
+    renderKqedTranslation();
+  }, 70);
+}
+
+function resetKqedTranslation() {
+  if (kqedTranslation.controller) {
+    kqedTranslation.controller.abort();
+    kqedTranslation.controller = null;
+  }
+  kqedTranslationGeneration += 1;
+  kqedTranslation.text = "";
+  kqedTranslation.sourceText = "";
+  kqedTranslation.error = "";
+  kqedTranslation.busy = false;
+  kqedTranslation.done = false;
+  kqedTranslation.visible = false;
+  if (kqedTranslationEl) kqedTranslationEl.hidden = true;
+  syncKqedTranslateButton();
+}
+
+function startKqedTranslation() {
+  const text = kqedArticleText(kqedItem);
+  if (!text || kqedTranslation.busy) return;
+  if (kqedTranslation.controller) kqedTranslation.controller.abort();
+
+  const state = kqedTranslation;
+  state.sourceText = text;
+  state.text = "";
+  state.error = "";
+  state.busy = true;
+  state.done = false;
+  state.visible = true;
+  renderKqedTranslation();
+
+  const controller = new AbortController();
+  state.controller = controller;
+  const generation = ++kqedTranslationGeneration;
+  const isCurrent = () => generation === kqedTranslationGeneration;
+  const handlers = {
+    delta: (data) => {
+      if (!isCurrent() || !data?.text) return;
+      state.text += data.text;
+      scheduleKqedTranslationRender();
+    },
+    error: (data) => {
+      if (!isCurrent()) return;
+      state.error = data?.message || "Translation failed.";
+      scheduleKqedTranslationRender();
+    },
+    done: () => {
+      if (!isCurrent()) return;
+      state.busy = false;
+      state.done = Boolean(state.text);
+      renderKqedTranslation();
+    },
+  };
+
+  streamSSE("/api/translate", { text }, handlers, controller.signal)
+    .catch((error) => {
+      if (!isCurrent()) return;
+      state.error = error?.name === "AbortError"
+        ? "Translation cancelled."
+        : (error?.message || String(error));
+    })
+    .finally(() => {
+      if (!isCurrent()) return;
+      state.busy = false;
+      state.controller = null;
+      state.done = Boolean(state.text);
+      renderKqedTranslation();
+    });
+}
+
+function toggleKqedTranslation() {
+  if (!kqedItem || kqedTranslation.busy) return;
+  const state = kqedTranslation;
+  const unchanged = state.done && state.text
+    && kqedArticleText(kqedItem) === state.sourceText;
+  if (unchanged) {
+    state.visible = !state.visible;
+    renderKqedTranslation();
+    if (state.visible) {
+      kqedTranslationEl.scrollIntoView({ block: "nearest" });
+    }
+    return;
+  }
+  startKqedTranslation();
+  kqedTranslationEl.scrollIntoView({ block: "nearest" });
+}
+
+function renderKqedModal(item) {
+  kqedTitleEl.textContent = "";
+  // Title words are dictionary-searchable too, just like the story body.
+  kqedTitleEl.appendChild(
+    wordNodes(item.title || "KQED News", true)
+  );
+  kqedMetaEl.textContent = item.published
+    ? formatNewsDate(item.published)
+    : "";
+  if (item.link) {
+    kqedLinkEl.href = item.link;
+    kqedLinkEl.hidden = false;
+  } else {
+    kqedLinkEl.removeAttribute("href");
+    kqedLinkEl.hidden = true;
+  }
+
+  kqedBodyEl.textContent = "";
+  const paragraphs = Array.isArray(item.paragraphs) ? item.paragraphs : [];
+  const summary = String(item.summary || "");
+  if (summary && summary !== paragraphs[0]) {
+    appendKqedParagraph(summary, "news-summary");
+  }
+  for (const text of paragraphs) {
+    appendKqedParagraph(text, "");
+  }
+  if (!item.complete) {
+    const loading = document.createElement("div");
+    loading.className = "news-loading";
+    loading.textContent = "loading paragraphs…";
+    kqedBodyEl.appendChild(loading);
+  } else if (!paragraphs.length && !summary) {
+    const empty = document.createElement("div");
+    empty.className = "news-loading";
+    empty.textContent = "This story has no readable paragraphs in the feed.";
+    kqedBodyEl.appendChild(empty);
+  }
+  // Keep the (possibly streaming) translation after the article body.
+  renderKqedTranslation();
+  kqedBodyEl.scrollTop = 0;
+}
+
+function openKqedModal(item) {
+  kqedItem = item;
+  resetKqedTranslation();
+  renderKqedModal(item);
+  kqedPanelEl.hidden = false;
+}
+
+function closeKqedModal() {
+  kqedItem = null;
+  resetKqedTranslation();
+  kqedPanelEl.hidden = true;
+  kqedBodyEl.textContent = "";
+  if (kqedTranslationEl.parentNode !== kqedBodyEl) {
+    kqedBodyEl.appendChild(kqedTranslationEl);
+  }
+}
+$("#kqed-close").addEventListener("click", closeKqedModal);
+kqedTranslateBtn.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  toggleKqedTranslation();
+});
+kqedPanelEl.addEventListener("click", (event) => {
+  if (event.target === kqedPanelEl) closeKqedModal();
+});
+
+/* News words (in the story body and the modal title) open the same
+ * streaming /dict popup as answer words. */
+function handleKqedWordClick(event) {
+  const wordEl = event.target.closest(".word");
+  if (!wordEl) return;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && String(selection).trim()) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openDictionaryPopup(
+    wordEl.dataset.word || wordEl.textContent,
+    kqedArticleText(kqedItem),
+    wordEl
+  );
+}
+kqedBodyEl.addEventListener("click", handleKqedWordClick);
+kqedTitleEl.addEventListener("click", handleKqedWordClick);
 
 /* ------------------------------------------------------------------ *
  *  Answer translation (中文 button)
@@ -2909,6 +3526,7 @@ function submitText(text, fromChoice = false) {
     clickable: !isCommand,
     tag: appState?.tag || "",
     wikiArticle: commandName === "wiki_article",
+    label: commandName === "kqed" ? "KQED News" : undefined,
   });
   appendEntry(entry);
   resetAnswerSourceStatus();
@@ -2994,6 +3612,7 @@ function submitText(text, fromChoice = false) {
       scheduleRender(entry);
     },
     output: (data) => addOutput(entry, data.text || ""),
+    news: (data) => addNewsEvent(entry, data || {}),
     choices: (data) => {
       entry.choices = Array.isArray(data.items) ? data.items : [];
       scheduleRender(entry);
@@ -3422,9 +4041,21 @@ function handleKeyDown(event) {
     return;
   }
 
+  if (!popupEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closePopup();
+    return;
+  }
+
   if (!lineHelpPanel.hidden && key === "Escape") {
     event.preventDefault();
     closeLineHelp();
+    return;
+  }
+
+  if (!kqedPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeKqedModal();
     return;
   }
 
@@ -3433,12 +4064,6 @@ function handleKeyDown(event) {
       event.preventDefault();
       hideHelp();
     }
-    return;
-  }
-
-  if (!popupEl.hidden && key === "Escape") {
-    event.preventDefault();
-    closePopup();
     return;
   }
 
@@ -3741,19 +4366,24 @@ document.addEventListener("keydown", (event) => {
     toggleHelp();
     return;
   }
+  if (!popupEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closePopup();
+    return;
+  }
   if (!lineHelpPanel.hidden && key === "Escape") {
     event.preventDefault();
     closeLineHelp();
     return;
   }
+  if (!kqedPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeKqedModal();
+    return;
+  }
   if (!helpPanel.hidden && key === "Escape") {
     event.preventDefault();
     hideHelp();
-    return;
-  }
-  if (!popupEl.hidden && key === "Escape") {
-    event.preventDefault();
-    closePopup();
     return;
   }
   // Keep Ctrl/⌘+Enter working when focus sits on a button instead of the
@@ -3788,7 +4418,7 @@ inputEl.addEventListener("blur", () => {
   // Do not let clicking the page accidentally leave the console unfocused,
   // but do not steal focus while the user is selecting text in the output.
   window.setTimeout(() => {
-    if (!popupEl.hidden || !helpPanel.hidden || !lineHelpPanel.hidden) return;
+    if (!popupEl.hidden || !helpPanel.hidden || !lineHelpPanel.hidden || !kqedPanelEl.hidden) return;
     if (outputPointerDown || selectionInsideOutput()) return;
     if (document.activeElement === document.body) {
       inputEl.focus({ preventScroll: true });
