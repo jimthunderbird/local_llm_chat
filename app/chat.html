@@ -809,7 +809,7 @@
   #popup-loading { color: var(--warn); font-size: 12px; margin-bottom: 8px; }
   #popup-loading[hidden] { display: none; }
 
-  /* /kqed story list in the transcript and the details modal. */
+  /* /kqed and /cnn story lists in the transcript and the details modal. */
   .news-list { margin: 11px 0 4px; }
   .news-list-head {
     display: flex;
@@ -850,6 +850,24 @@
     word-break: break-word;
   }
   .news-title:hover { text-decoration: underline; }
+  .news-title-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .news-title-translate { flex: 0 0 auto; margin-top: 1px; }
+  .news-title-translation {
+    margin-top: 5px;
+    padding-left: 9px;
+    border-left: 2px solid #2f4a60;
+    color: #cfdae5;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .news-title-translation .error-text { margin-top: 3px; }
   .news-meta { color: var(--dim); font-size: 11px; margin-top: 3px; }
   .news-details {
     flex: 0 0 auto;
@@ -1151,7 +1169,7 @@
   <div class="kqed-card" role="dialog" aria-modal="true" aria-labelledby="kqed-title">
     <div class="kqed-head">
       <div class="kqed-head-main">
-        <div id="kqed-title" class="kqed-title">KQED News</div>
+        <div id="kqed-title" class="kqed-title">News</div>
         <div id="kqed-meta" class="kqed-meta"></div>
       </div>
       <a id="kqed-link" class="kqed-link" href="#" target="_blank" rel="noopener noreferrer">Open article ↗</a>
@@ -1208,8 +1226,8 @@
       <span class="k">Ctrl+C</span><span class="d">cancel a streaming answer (or copy a selection)</span>
       <span class="k">Ctrl+L / ⌘K</span><span class="d">clear the console</span>
       <span class="k">Drag text</span><span class="d">select output text, then Ctrl+C / ⌘C to copy</span>
-      <span class="k">Click a word</span><span class="d">open a streaming /dict popup (drag instead to select); also works in /kqed stories</span>
-      <span class="k">中文 in /kqed</span><span class="d">translate the open news story into Simplified Chinese</span>
+      <span class="k">Click a word</span><span class="d">open a streaming /dict popup (drag instead to select); also works in /kqed and /cnn stories</span>
+      <span class="k">中文 in /kqed, /cnn</span><span class="d">translate a news title or the open news story into Simplified Chinese</span>
       <span class="k">? in code</span><span class="d">explain that line (rust, golang, and php answers)</span>
       <span class="k">− in popup</span><span class="d">minimize the dictionary popup; click its chip at the right of the status bar to reopen</span>
     </div>
@@ -2521,7 +2539,7 @@ function addError(entry, text) {
 }
 
 /* ------------------------------------------------------------------ *
- *  /kqed news list and story-details modal
+ *  /kqed and /cnn news lists and the story-details modal
  * ------------------------------------------------------------------ */
 function formatNewsDate(value) {
   if (!value) return "";
@@ -2540,7 +2558,7 @@ function formatNewsDate(value) {
 function addNewsEvent(entry, data) {
   const type = String(data.type || "");
   if (type === "start") {
-    entry.newsSource = data.source || "KQED News";
+    entry.newsSource = data.source || "News";
     entry.newsFeed = data.feed || "";
     scheduleRender(entry);
     return;
@@ -2551,9 +2569,20 @@ function addNewsEvent(entry, data) {
       title: data.title || "(untitled)",
       link: data.link || "",
       published: data.published || "",
+      section: data.section || "",
       summary: data.summary || "",
       paragraphs: [],
       complete: false,
+      titleTranslation: {
+        text: "",
+        sourceText: "",
+        error: "",
+        busy: false,
+        done: false,
+        visible: false,
+        controller: null,
+        generation: 0,
+      },
     });
     scheduleRender(entry);
     return;
@@ -2586,9 +2615,138 @@ function addNewsEvent(entry, data) {
     scheduleRender(entry);
     return;
   }
-  if (type === "error") {
-    addError(entry, data.message || "Could not load the KQED News feed.");
+  if (type === "warning") {
+    addLog(entry, data.message || "A news feed could not be loaded.");
+    return;
   }
+  if (type === "error") {
+    addError(entry, data.message || "Could not load the news feed.");
+  }
+}
+
+function newsTitleTranslationState(item) {
+  if (!item.titleTranslation) {
+    item.titleTranslation = {
+      text: "",
+      sourceText: "",
+      error: "",
+      busy: false,
+      done: false,
+      visible: false,
+      controller: null,
+      generation: 0,
+    };
+  }
+  return item.titleTranslation;
+}
+
+function syncNewsTitleTranslateButton(item, button) {
+  const state = newsTitleTranslationState(item);
+  if (state.busy) {
+    button.textContent = "翻译中…";
+    button.disabled = true;
+    button.title = "Streaming Simplified Chinese translation…";
+    return;
+  }
+  if (state.done && state.text) {
+    if (item.title !== state.sourceText) {
+      button.textContent = "重新翻译";
+      button.disabled = false;
+      button.title = "The title changed; translate the latest version into Simplified Chinese";
+      return;
+    }
+    button.textContent = state.visible ? "隐藏中文" : "显示中文";
+    button.disabled = false;
+    button.title = state.visible
+      ? "Hide the Simplified Chinese translation"
+      : "Show the Simplified Chinese translation";
+    return;
+  }
+  button.textContent = "中文";
+  button.disabled = !String(item.title || "").trim();
+  button.title = "Translate this news title into Simplified Chinese with ornith:35b";
+}
+
+function renderNewsTitleTranslation(entry, item, container) {
+  const state = newsTitleTranslationState(item);
+  const show = state.visible || state.busy;
+  if (!show || (!state.text && !state.error && !state.busy)) return;
+  const translation = document.createElement("div");
+  translation.className = "news-title-translation";
+  if (state.text) translation.appendChild(document.createTextNode(state.text));
+  if (state.busy) {
+    const caret = document.createElement("span");
+    caret.className = "caret";
+    translation.appendChild(caret);
+  }
+  if (state.error) {
+    const error = document.createElement("div");
+    error.className = "error-text";
+    error.textContent = state.error;
+    translation.appendChild(error);
+  }
+  container.appendChild(translation);
+}
+
+function toggleNewsTitleTranslation(entry, item) {
+  const state = newsTitleTranslationState(item);
+  if (state.busy) return;
+  const title = String(item.title || "").trim();
+  if (!title) return;
+
+  if (state.done && state.text && state.sourceText === title) {
+    state.visible = !state.visible;
+    scheduleRender(entry);
+    return;
+  }
+
+  if (state.controller) state.controller.abort();
+  const controller = new AbortController();
+  state.controller = controller;
+  const generation = ++state.generation;
+  const isCurrent = () => generation === state.generation;
+
+  state.sourceText = title;
+  state.text = "";
+  state.error = "";
+  state.busy = true;
+  state.done = false;
+  state.visible = true;
+  scheduleRender(entry);
+
+  const handlers = {
+    delta: (data) => {
+      if (!isCurrent() || !data?.text) return;
+      state.text += data.text;
+      scheduleRender(entry);
+    },
+    error: (data) => {
+      if (!isCurrent()) return;
+      state.error = data?.message || "Translation failed.";
+      scheduleRender(entry);
+    },
+    done: () => {
+      if (!isCurrent()) return;
+      state.busy = false;
+      state.done = Boolean(state.text);
+      scheduleRender(entry);
+    },
+  };
+
+  streamSSE("/api/translate", { text: title }, handlers, controller.signal)
+    .catch((error) => {
+      if (!isCurrent()) return;
+      state.error = error?.name === "AbortError"
+        ? "Translation cancelled."
+        : (error?.message || String(error));
+    })
+    .finally(() => {
+      if (!isCurrent()) return;
+      state.busy = false;
+      state.controller = null;
+      state.done = Boolean(state.text);
+      scheduleRender(entry);
+    });
 }
 
 function renderNewsList(entry) {
@@ -2605,7 +2763,7 @@ function renderNewsList(entry) {
   const head = document.createElement("div");
   head.className = "news-list-head";
   const source = document.createElement("span");
-  source.textContent = entry.newsSource || "KQED News";
+  source.textContent = entry.newsSource || "News";
   const note = document.createElement("span");
   note.className = "news-list-note";
   const storyWord = items.length === 1 ? "story" : "stories";
@@ -2638,14 +2796,31 @@ function renderNewsList(entry) {
       titleEl.href = item.link;
       titleEl.target = "_blank";
       titleEl.rel = "noopener noreferrer";
-      titleEl.title = "Open this story on KQED.org";
+      titleEl.title = `Open this story on ${entry.newsSource || "the source site"}`;
     }
     titleEl.addEventListener("click", (event) => event.stopPropagation());
-    main.appendChild(titleEl);
+
+    const titleRow = document.createElement("div");
+    titleRow.className = "news-title-row";
+    titleRow.appendChild(titleEl);
+
+    const titleTranslate = document.createElement("button");
+    titleTranslate.type = "button";
+    titleTranslate.className = "translate-btn news-title-translate";
+    syncNewsTitleTranslateButton(item, titleTranslate);
+    titleTranslate.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleNewsTitleTranslation(entry, item);
+    });
+    titleRow.appendChild(titleTranslate);
+    main.appendChild(titleRow);
+    renderNewsTitleTranslation(entry, item, main);
 
     const meta = document.createElement("div");
     meta.className = "news-meta";
     const metaParts = [];
+    if (item.section) metaParts.push(item.section);
     if (item.published) metaParts.push(formatNewsDate(item.published));
     if (!item.complete) {
       metaParts.push("fetching paragraphs…");
@@ -2865,11 +3040,11 @@ function renderKqedModal(item) {
   kqedTitleEl.textContent = "";
   // Title words are dictionary-searchable too, just like the story body.
   kqedTitleEl.appendChild(
-    wordNodes(item.title || "KQED News", true)
+    wordNodes(item.title || "News", true)
   );
-  kqedMetaEl.textContent = item.published
-    ? formatNewsDate(item.published)
-    : "";
+  kqedMetaEl.textContent = [item.section, item.published ? formatNewsDate(item.published) : ""]
+    .filter(Boolean)
+    .join(" · ");
   if (item.link) {
     kqedLinkEl.href = item.link;
     kqedLinkEl.hidden = false;
@@ -3526,7 +3701,11 @@ function submitText(text, fromChoice = false) {
     clickable: !isCommand,
     tag: appState?.tag || "",
     wikiArticle: commandName === "wiki_article",
-    label: commandName === "kqed" ? "KQED News" : undefined,
+    label: commandName === "kqed"
+      ? "KQED News"
+      : commandName === "cnn"
+        ? "CNN News"
+        : undefined,
   });
   appendEntry(entry);
   resetAnswerSourceStatus();

@@ -4,7 +4,7 @@
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, tag/transcript scoping, history, /memory, /status,
 /sources, /benchmark, /learn, /learn_topic, /learn_playlist, /tag_gen,
-/kqed, /wiki, /wiki_article, and /dict. The browser is a pure
+/kqed, /cnn, /wiki, /wiki_article, and /dict. The browser is a pure
 HTML/CSS/JavaScript single-page app served from ./app/chat.html.
 
 Usage:
@@ -32,8 +32,8 @@ Endpoints:
                                   The tag also pins the generated language:
                                   code in the "rust" tag is always Rust, code in
                                   the "golang" tag is always Go, and code in the
-                                  "php" tag is always PHP. /kqed streams
-                                  "news" events from the KQED News RSS feed).
+                                  "php" tag is always PHP. /kqed and /cnn
+                                  stream "news" events from their RSS feeds).
     POST /api/dict               SSE: dictionary + latest-answer usage stream
     POST /api/translate          SSE: paragraph-by-paragraph Simplified Chinese
                                   translation of an answer
@@ -95,7 +95,11 @@ WEB_COMMANDS = {
     "/learn_playlist": "learn every video in a YouTube playlist",
     "/tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
     "/kqed": "list the latest KQED News stories (optionally /kqed <count>)",
+    "/cnn": "list the latest CNN News stories (optionally /cnn [section] [count])",
 }
+
+# Sections served by openrss.org for cnn_news_fetch.php.
+CNN_SECTIONS = {"top", "world", "us", "politics", "business"}
 
 COMMAND_ARGUMENTS = {
     "/tag",
@@ -3568,6 +3572,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_learn_playlist(argument)
         elif name == "/kqed":
             self._command_kqed(argument)
+        elif name == "/cnn":
+            self._command_cnn(argument)
         elif name == "/wiki":
             self._command_wiki(argument)
         elif name == "/wiki_article":
@@ -4241,26 +4247,62 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         self._sse("meta", state.snapshot())
 
     def _command_kqed(self, argument: str) -> None:
-        """Stream the latest KQED News stories to the browser.
-
-        kqed_news_fetch.php emits NDJSON events; relay each one as a `news`
-        SSE event so the title list appears story by story as it is parsed.
-        """
-        script = SCRIPT_DIR / "kqed_news_fetch.php"
-        if not script.exists():
-            self._sse_text(
-                "output", f"\n/kqed: missing {script.name}.\n"
-            )
-            return
-
-        argv = ["php", str(script), "--json"]
+        """Stream the latest KQED News stories to the browser."""
+        argv: list[str] = []
         count_arg = argument.strip()
         if count_arg:
             if not count_arg.isdigit() or int(count_arg) < 1:
                 self._sse_text("output", "\nUsage: /kqed [number-of-stories]\n")
                 return
             argv.extend(["--limit", count_arg])
+        self._command_news("kqed_news_fetch.php", "/kqed", argv)
 
+    def _command_cnn(self, argument: str) -> None:
+        """Stream the latest CNN News stories to the browser.
+
+        Usage: /cnn [top|world|us|politics|business] [number-of-stories]
+        Without a section, all five openrss.org CNN feeds are merged.
+        """
+        argv: list[str] = []
+        for part in argument.split():
+            lowered = part.lower()
+            if part.isdigit():
+                if int(part) < 1:
+                    self._sse_text(
+                        "output",
+                        "\nUsage: /cnn [section] [number-of-stories]\n",
+                    )
+                    return
+                argv.extend(["--limit", part])
+            elif lowered in CNN_SECTIONS:
+                argv.extend(["--section", lowered])
+            else:
+                self._sse_text(
+                    "output",
+                    "\nUsage: /cnn [top|world|us|politics|business] "
+                    "[number-of-stories]\n",
+                )
+                return
+        self._command_news("cnn_news_fetch.php", "/cnn", argv)
+
+    def _command_news(
+        self, script_name: str, command: str, extra_argv: list[str]
+    ) -> None:
+        """Stream a news fetcher's NDJSON events as `news` SSE events.
+
+        Both kqed_news_fetch.php and cnn_news_fetch.php emit one JSON event
+        per line; relaying each one lets the title list appear story by story
+        while the feeds are still being downloaded.
+        """
+        script = SCRIPT_DIR / script_name
+        if not script.exists():
+            self._sse_text(
+                "output", f"\n{command}: missing {script.name}.\n"
+            )
+            return
+
+        argv = ["php", str(script), "--json", *extra_argv]
+        log_prefix = command.lstrip("/")
         process = None
         item_count = 0
         try:
@@ -4281,7 +4323,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     try:
                         payload = json.loads(line)
                     except json.JSONDecodeError:
-                        self._sse_text("log", f"[kqed: {line}]")
+                        self._sse_text("log", f"[{log_prefix}: {line}]")
                         continue
                     if not isinstance(payload, dict):
                         continue
@@ -4299,18 +4341,18 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 raise
         except OSError as exc:
             self._sse_text(
-                "output", f"\n/kqed: could not run {script.name}: {exc}\n"
+                "output", f"\n{command}: could not run {script.name}: {exc}\n"
             )
             return
 
         if returncode != 0:
             self._sse_text(
                 "output",
-                f"\n/kqed: {script.name} exited with code {returncode}.\n",
+                f"\n{command}: {script.name} exited with code {returncode}.\n",
             )
         elif item_count == 0:
             self._sse_text(
-                "output", "\n/kqed: no stories were found in the feed.\n"
+                "output", f"\n{command}: no stories were found in the feed.\n"
             )
 
     def _command_wiki(self, argument: str) -> None:
