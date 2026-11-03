@@ -203,6 +203,10 @@ group app/chat.html and app/chat_server.py {
   }
 
   task (persistent) {
+    complete tasks in ./prompts/medium.prompt
+  }
+
+  task (persistent) {
     complete tasks in ./prompts/article_based_question_and_answer.prompt
   }
 

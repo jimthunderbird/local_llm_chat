@@ -1,0 +1,8 @@
+task (completed) {
+  create command /medium:
+  - purpose: fetch articles from medium.com
+  - api: https://medium.com/feed/@username
+  - the username can be read from ~/.medium/username
+
+  the UI/UX should be similar to the command /news
+}

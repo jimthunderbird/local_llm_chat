@@ -16,6 +16,8 @@ declare(strict_types=1);
  *   mission_local Mission Local WordPress REST API
  *   richmond_sunset Richmond Review / Richmond & Sunset news RSS feed
  *   techcrunch    TechCrunch WordPress REST API
+ *   medium        The Medium author feed configured in ~/.medium/username
+ *                 (https://medium.com/feed/@username), used by /medium
  *
  * Default output is a human-readable stream for the terminal. The web chat
  * passes --json and receives one JSON event per line (NDJSON), which
@@ -25,9 +27,10 @@ declare(strict_types=1);
  *   ./news_fetch.php [--json] [--source SOURCE ...] [--limit N]
  *
  * --source accepts cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local,
- * richmond_sunset, or techcrunch and may be repeated (or given as a comma
- * separated list).
- * Without --source, every source is fetched and emitted as its own section.
+ * richmond_sunset, techcrunch, or medium and may be repeated (or given as a
+ * comma separated list).
+ * Without --source, every static source is fetched and emitted as its own
+ * section; medium is only used when explicitly selected.
  * --limit caps the total number of stories across all selected sources (each
  * source has its own default when --limit is omitted).
  */
@@ -141,6 +144,72 @@ const SOURCES = [
 
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
     . 'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+/**
+ * Read the Medium author handle from ~/.medium/username.
+ *
+ * A leading "@" is optional; the value is stored as-is by the user.
+ */
+function mediumUsername(): string
+{
+    $home = getenv('HOME');
+    if ($home === false || $home === '') {
+        $home = (string)($_SERVER['HOME'] ?? '');
+    }
+    if ($home === '') {
+        return '';
+    }
+    $path = rtrim($home, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR
+        . '.medium' . DIRECTORY_SEPARATOR . 'username';
+    if (!is_readable($path)) {
+        return '';
+    }
+    $username = trim((string)file_get_contents($path));
+    return ltrim($username, '@');
+}
+
+/**
+ * Build the dynamic Medium source used by /medium.
+ *
+ * Returns null when ~/.medium/username is missing or empty so that /news can
+ * keep working with only the static sources.
+ */
+function mediumSource(): ?array
+{
+    $username = mediumUsername();
+    if ($username === '') {
+        return null;
+    }
+    return [
+        'label' => 'Medium',
+        'kind' => 'rss',
+        'default_limit' => 10,
+        'feeds' => [
+            'latest' => [
+                'label' => '@' . $username,
+                'url' => 'https://medium.com/feed/@' . rawurlencode($username),
+            ],
+        ],
+    ];
+}
+
+/**
+ * Return every source available at runtime: the static feeds plus the
+ * configured Medium author feed.
+ */
+function newsSources(): array
+{
+    static $sources = null;
+    if ($sources === null) {
+        $sources = SOURCES;
+        $medium = mediumSource();
+        if ($medium !== null) {
+            $sources['medium'] = $medium;
+        }
+    }
+    return $sources;
+}
+
 const CONTENT_NS = 'http://purl.org/rss/1.0/modules/content/';
 const MAX_ATTEMPTS = 4;
 const MAX_WP_PER_PAGE = 100;
@@ -1567,8 +1636,13 @@ function storyStream(array $sourceKeys, ?int $limit, ?string $section): Generato
     $seen = [];
     $total = 0;
 
+    $sources = newsSources();
     foreach ($sourceKeys as $sourceKey) {
-        $source = SOURCES[$sourceKey];
+        if (!isset($sources[$sourceKey])) {
+            diag("news_fetch: source is not configured: {$sourceKey}");
+            continue;
+        }
+        $source = $sources[$sourceKey];
         if ($limit !== null) {
             $sourceLimit = $limit - $total;
         } else {
@@ -1675,8 +1749,9 @@ function storyStream(array $sourceKeys, ?int $limit, ?string $section): Generato
  */
 function streamJson(iterable $stream, array $sourceKeys, ?int $limit): void
 {
+    $available = newsSources();
     $sources = array_map(
-        static fn(string $key): string => SOURCES[$key]['label'],
+        static fn(string $key): string => $available[$key]['label'] ?? $key,
         $sourceKeys
     );
     emitEvent([
@@ -1787,11 +1862,17 @@ function main(array $argv): int
     $sourceKeys = null;
 
     $addSources = static function (string $value) use (&$sourceKeys): bool {
+        $available = newsSources();
         foreach (preg_split('/[\s,]+/', strtolower($value)) as $requested) {
             if ($requested === '') {
                 continue;
             }
-            if (!isset(SOURCES[$requested])) {
+            if ($requested === 'medium' && !isset($available['medium'])) {
+                diag('news_fetch: medium is not configured; write your Medium '
+                    . 'handle to ~/.medium/username');
+                return false;
+            }
+            if (!isset($available[$requested])) {
                 diag("news_fetch: unknown source: {$requested}");
                 return false;
             }
@@ -1835,7 +1916,7 @@ function main(array $argv): int
             $section = strtolower($match[1]);
         } elseif ($argument === '--help' || $argument === '-h') {
             echo "Usage: news_fetch.php [--json] [--source "
-                . implode('|', array_keys(SOURCES))
+                . implode('|', array_keys(SOURCES)) . "|medium"
                 . " ...] [--limit N]\n";
             return 0;
         } else {

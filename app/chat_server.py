@@ -4,7 +4,7 @@
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, tag/transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /learn, /learn_topic, /learn_playlist,
-/tag_gen, /news, /wiki, /wiki_article, /article, /dict, and
+/tag_gen, /news, /medium, /wiki, /wiki_article, /article, /dict, and
 /ask. The browser is a pure HTML/CSS/JavaScript single-page app served from
 ./app/chat.html.
 
@@ -103,6 +103,7 @@ WEB_COMMANDS = {
     "/learn_playlist": "learn every video in a YouTube playlist",
     "/tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
     "/news": "list the latest news from cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, or techcrunch (optionally /news [source ...] [count])",
+    "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
 }
 
@@ -120,6 +121,19 @@ NEWS_SOURCES = {
 
 NEWS_SOURCE_USAGE = "|".join(NEWS_SOURCES)
 
+# /medium reads the Medium author handle from this file and asks
+# news_fetch.php for that author's RSS feed (https://medium.com/feed/@handle).
+MEDIUM_USERNAME_PATH = Path.home() / ".medium" / "username"
+
+
+def medium_username() -> str:
+    """Return the configured Medium handle, without a leading '@'."""
+    try:
+        value = MEDIUM_USERNAME_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    return value.lstrip("@").strip()
+
 COMMAND_ARGUMENTS = {
     "/tag",
     "/tag_gen",
@@ -136,6 +150,7 @@ COMMAND_ARGUMENTS = {
     "/depth",
     "/benchmark",
     "/news",
+    "/medium",
 }
 
 # The browser's "中文" button translates a finished answer paragraph by
@@ -5138,6 +5153,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_ask(argument)
         elif name == "/news":
             self._command_news(argument)
+        elif name == "/medium":
+            self._command_medium(argument)
         elif name == "/wiki":
             self._command_wiki(argument)
         elif name == "/wiki_article":
@@ -5893,6 +5910,39 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         for source in sources:
             argv.extend(["--source", source])
         self._stream_news_events("news_fetch.php", "/news", argv)
+
+    def _command_medium(self, argument: str) -> None:
+        """Stream the latest stories from the configured Medium author.
+
+        Usage: /medium [number-of-stories]
+        The author handle is read from ~/.medium/username; news_fetch.php
+        fetches https://medium.com/feed/@<handle> and the browser reuses the
+        /news story-list and detail rendering.
+        """
+        username = medium_username()
+        if not username:
+            self._sse_text(
+                "output",
+                "\n/medium: write your Medium handle (for example "
+                "@yourname) to ~/.medium/username first.\n",
+            )
+            return
+
+        argv: list[str] = ["--source", "medium"]
+        for part in argument.replace(",", " ").split():
+            if part.isdigit():
+                if int(part) < 1:
+                    self._sse_text(
+                        "output", "\nUsage: /medium [number-of-stories]\n"
+                    )
+                    return
+                argv.extend(["--limit", part])
+            else:
+                self._sse_text(
+                    "output", "\nUsage: /medium [number-of-stories]\n"
+                )
+                return
+        self._stream_news_events("news_fetch.php", "/medium", argv)
 
     def _stream_news_events(
         self, script_name: str, command: str, extra_argv: list[str]

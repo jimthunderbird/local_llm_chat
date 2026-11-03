@@ -1377,8 +1377,8 @@
       <span class="k">Ctrl+C</span><span class="d">cancel a streaming answer (or copy a selection)</span>
       <span class="k">Ctrl+L / ⌘K</span><span class="d">clear the console</span>
       <span class="k">Drag text</span><span class="d">select output text, then Ctrl+C / ⌘C to copy</span>
-      <span class="k">Click a word</span><span class="d">open a streaming /dict popup (drag instead to select); also works in /news stories</span>
-      <span class="k">中文 in /news</span><span class="d">translate a news title or the open news story into Simplified Chinese</span>
+      <span class="k">Click a word</span><span class="d">open a streaming /dict popup (drag instead to select); also works in /news and /medium stories</span>
+      <span class="k">中文 in /news</span><span class="d">translate a news or Medium story title, or the open story, into Simplified Chinese</span>
       <span class="k">? in code</span><span class="d">explain that line (rust, golang, and php answers)</span>
       <span class="k">− in popup</span><span class="d">minimize the dictionary popup; click its chip at the right of the status bar to reopen</span>
     </div>
@@ -4447,7 +4447,11 @@ function submitText(text, fromChoice = false) {
     clickable: !isCommand,
     tag: appState?.tag || "",
     wikiArticle: commandName === "wiki_article",
-    label: commandName === "news" ? "News" : undefined,
+    label: commandName === "news"
+      ? "News"
+      : commandName === "medium"
+        ? "Medium"
+        : undefined,
   });
   appendEntry(entry);
   resetAnswerSourceStatus();
