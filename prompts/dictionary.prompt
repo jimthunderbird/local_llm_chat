@@ -1,3 +1,29 @@
+dictionary_llm: ollama local model ornith:35b with no thinking
+
+task.bug.dictionary_output_mismatching (completed) {
+  in the diciontary lookup result of the word "rollout":
+  - expect: it only show The meaning of the word, the word's IPA and the contextural meaning of the word
+  - actual: it also show the quote
+  - action: we must remove the quote
+}
+
+task.highlight_word_to_lookup (completed) {
+  in the dictionary lookup answer, highlight <word>  
+}
+
+task.custom_dictionary_lookup_prompt (completed) {
+  use the following prompt to send to {dictionary_llm} for look up of <word>:
+  You are an English Dictionary, you are given a context <context>{20 words before <word>} <word> {20 words after <word>}</context>
+  Base on <context>, show me the following only, DO NOT show me the quote!:
+  1. The meaning of <word>
+  2. The word's IPA (International Phonetic Alphabet)
+  3. Contextural Meaning of <word>
+}
+
+task.surrounding_context (completed) {
+  for the <word> in the dictionary lookup, extract 20 words before the <word> and 20 words after the <word> as context
+}
+
 task.word_look_up_navigation (completed) {
   - in the dictionary popup, for all the words display, make it dictionary searchable
   - in the top right of the dictionary popup, show a left arrow and right arrow, allows me to navigate the history of words look up and its definition cache back and forth:

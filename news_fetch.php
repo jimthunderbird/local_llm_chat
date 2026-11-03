@@ -9,11 +9,13 @@ declare(strict_types=1);
  *
  * Sources:
  *   cnn           CNN RSS feeds served by openrss.org (top/world/us/politics/business)
+ *   yahoo_finance Yahoo Finance stock market news via Google News RSS
  *   kqed          KQED News RSS feed
  *   sfgate        SFGATE Bay Area News RSS feed
  *   sfbayview     SF Bay View WordPress REST API
  *   mission_local Mission Local WordPress REST API
  *   richmond_sunset Richmond Review / Richmond & Sunset news RSS feed
+ *   techcrunch    TechCrunch WordPress REST API
  *
  * Default output is a human-readable stream for the terminal. The web chat
  * passes --json and receives one JSON event per line (NDJSON), which
@@ -22,8 +24,9 @@ declare(strict_types=1);
  * Usage:
  *   ./news_fetch.php [--json] [--source SOURCE ...] [--limit N]
  *
- * --source accepts cnn, kqed, sfgate, sfbayview, mission_local, or
- * richmond_sunset and may be repeated (or given as a comma separated list).
+ * --source accepts cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local,
+ * richmond_sunset, or techcrunch and may be repeated (or given as a comma
+ * separated list).
  * Without --source, every source is fetched and emitted as its own section.
  * --limit caps the total number of stories across all selected sources (each
  * source has its own default when --limit is omitted).
@@ -54,6 +57,17 @@ const SOURCES = [
             'business' => [
                 'label' => 'Business',
                 'url' => 'https://openrss.org/feed/www.cnn.com/business',
+            ],
+        ],
+    ],
+    'yahoo_finance' => [
+        'label' => 'Yahoo Finance',
+        'kind' => 'rss',
+        'default_limit' => 20,
+        'feeds' => [
+            'latest' => [
+                'label' => 'Stock Market',
+                'url' => 'https://news.google.com/rss/search?q=site:finance.yahoo.com+stock+market&hl=en-US&gl=US&ceid=US:en',
             ],
         ],
     ],
@@ -112,6 +126,17 @@ const SOURCES = [
             ],
         ],
     ],
+    'techcrunch' => [
+        'label' => 'TechCrunch',
+        'kind' => 'wp_json',
+        'default_limit' => 10,
+        'feeds' => [
+            'latest' => [
+                'label' => 'Latest Stories',
+                'url' => 'https://techcrunch.com/wp-json/wp/v2/posts',
+            ],
+        ],
+    ],
 ];
 
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
@@ -123,6 +148,10 @@ const MAX_STORY_IMAGES = 6;
 const IMAGE_CACHE_TTL = 604800;       // one week for successful lookups
 const IMAGE_CACHE_FAILURE_TTL = 86400; // one day for missing/broken images
 const IMAGE_FETCH_CONCURRENCY = 6;
+const ARTICLE_CACHE_TTL = 21600;       // six hours for successfully fetched articles
+const ARTICLE_CACHE_FAILURE_TTL = 3600; // one hour for articles we could not load
+const ARTICLE_FETCH_CONCURRENCY = 6;
+const MAX_ARTICLE_CACHE_ENTRIES = 500;
 
 /**
  * Print a diagnostic line to stderr without disturbing the event stream.
@@ -698,6 +727,553 @@ function enrichStoryImages(array $stories, string $sourceKey): array
 }
 
 /**
+ * Whether a story link points at a Google News redirect wrapper.
+ */
+function isGoogleNewsLink(string $url): bool
+{
+    return (bool)preg_match(
+        '{^https?://news\.google\.com/(?:rss/)?articles/}i',
+        $url
+    );
+}
+
+/**
+ * Extract the opaque article id from a Google News redirect link.
+ */
+function googleNewsArticleId(string $url): string
+{
+    $path = parse_url($url, PHP_URL_PATH);
+    if (!is_string($path)) {
+        return '';
+    }
+    if (preg_match('{/articles/([^/?#]+)}', $path, $match)) {
+        return $match[1];
+    }
+    return '';
+}
+
+/**
+ * Run a set of HTTP requests concurrently and return their responses keyed by
+ * the caller's array index.
+ *
+ * @param array<int, array{url:string, method?:string, body?:string, headers?:list<string>, accept?:string}> $requests
+ * @return array<int, array{body:string, status:int, url:string, error:string}>
+ */
+function fetchUrlsConcurrently(array $requests, string $sourceKey): array
+{
+    $results = [];
+    foreach (array_chunk($requests, ARTICLE_FETCH_CONCURRENCY, true) as $chunk) {
+        $multi = curl_multi_init();
+        $handles = [];
+        foreach ($chunk as $index => $request) {
+            $url = (string)($request['url'] ?? '');
+            $handle = curl_init($url);
+            if ($handle === false) {
+                $results[$index] = [
+                    'body' => '',
+                    'status' => 0,
+                    'url' => $url,
+                    'error' => 'could not initialize curl',
+                ];
+                continue;
+            }
+
+            $headers = [
+                'Accept: ' . ($request['accept']
+                    ?? 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'),
+                'Accept-Language: en-US,en;q=0.9',
+            ];
+            $options = [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_MAXREDIRS => 5,
+                CURLOPT_CONNECTTIMEOUT => 8,
+                CURLOPT_TIMEOUT => 20,
+                CURLOPT_USERAGENT => USER_AGENT,
+                CURLOPT_ENCODING => '',
+            ];
+            if (($request['method'] ?? 'GET') === 'POST') {
+                $options[CURLOPT_POST] = true;
+                $options[CURLOPT_POSTFIELDS] = (string)($request['body'] ?? '');
+            }
+            foreach (($request['headers'] ?? []) as $header) {
+                $headers[] = $header;
+            }
+            $options[CURLOPT_HTTPHEADER] = $headers;
+            curl_setopt_array($handle, $options);
+
+            curl_multi_add_handle($multi, $handle);
+            $handles[$index] = $handle;
+        }
+
+        $running = null;
+        do {
+            $status = curl_multi_exec($multi, $running);
+            if ($running > 0) {
+                if (curl_multi_select($multi, 1.0) === -1) {
+                    usleep(100000);
+                }
+            }
+        } while ($running > 0 && $status === CURLM_OK);
+
+        foreach ($handles as $index => $handle) {
+            $body = curl_multi_getcontent($handle);
+            $httpCode = (int)curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
+            $effectiveUrl = (string)curl_getinfo($handle, CURLINFO_EFFECTIVE_URL);
+            $error = curl_error($handle);
+            curl_multi_remove_handle($multi, $handle);
+            curl_close($handle);
+
+            $results[$index] = [
+                'body' => is_string($body) ? $body : '',
+                'status' => $httpCode,
+                'url' => $effectiveUrl,
+                'error' => $error,
+            ];
+        }
+        curl_multi_close($multi);
+    }
+
+    return $results;
+}
+
+/**
+ * Decode the publisher URL returned by Google's batchexecute endpoint.
+ */
+function parseGoogleNewsResponse(string $body): string
+{
+    if (trim($body) === '') {
+        return '';
+    }
+    if (str_starts_with($body, ")]}'")) {
+        $body = ltrim(substr($body, 4));
+    }
+    $decoded = json_decode($body, true);
+    if (!is_array($decoded)) {
+        return '';
+    }
+    foreach ($decoded as $entry) {
+        if (!is_array($entry)) {
+            continue;
+        }
+        if (($entry[0] ?? '') !== 'wrb.fr' || ($entry[1] ?? '') !== 'Fbv4je') {
+            continue;
+        }
+        $inner = json_decode((string)($entry[2] ?? ''), true);
+        if (
+            is_array($inner)
+            && ($inner[0] ?? '') === 'garturlres'
+            && is_string($inner[1] ?? null)
+        ) {
+            return $inner[1];
+        }
+    }
+    return '';
+}
+
+/**
+ * Resolve Google News redirect links to their real publisher URLs.
+ *
+ * Google News RSS hands out a news.google.com/rss/articles/... wrapper; the
+ * wrapper page exposes a timestamp + signature that must be exchanged through
+ * Google's batchexecute endpoint to obtain the underlying article URL.
+ *
+ * @param array<int, string> $links
+ * @return array<int, string>
+ */
+function resolveGoogleNewsLinks(array $links, string $sourceKey): array
+{
+    $resolved = [];
+    $ids = [];
+    foreach ($links as $index => $link) {
+        $id = googleNewsArticleId($link);
+        if ($id !== '') {
+            $ids[$index] = $id;
+        }
+    }
+    if (!$ids) {
+        return $resolved;
+    }
+
+    $requests = [];
+    foreach ($ids as $index => $id) {
+        $requests[$index] = [
+            'url' => 'https://news.google.com/rss/articles/' . $id,
+        ];
+    }
+    $pages = fetchUrlsConcurrently($requests, $sourceKey);
+
+    $posts = [];
+    foreach ($ids as $index => $id) {
+        $page = $pages[$index] ?? null;
+        if (!is_array($page) || $page['body'] === '') {
+            continue;
+        }
+        if (!preg_match('/data-n-a-ts="(\d+)"/', $page['body'], $timestampMatch)) {
+            continue;
+        }
+        if (!preg_match('/data-n-a-sg="([^"]+)"/', $page['body'], $signatureMatch)) {
+            continue;
+        }
+
+        $garturlreq = [
+            'garturlreq',
+            [
+                ['X', 'X', ['X', 'X'], null, null, 1, 1, 'US:en', null, 1,
+                 null, null, null, null, null, 0, 1],
+                'X',
+                'X',
+                1,
+                [1, 1, 1],
+                1,
+                1,
+                null,
+                0,
+                0,
+                null,
+                0,
+            ],
+            $id,
+            (int)$timestampMatch[1],
+            $signatureMatch[1],
+        ];
+        $inner = json_encode($garturlreq, JSON_UNESCAPED_SLASHES);
+        $outer = json_encode([[["Fbv4je", $inner]]], JSON_UNESCAPED_SLASHES);
+        if ($inner === false || $outer === false) {
+            continue;
+        }
+        $posts[$index] = [
+            'url' => 'https://news.google.com/_/DotsSplashUi/data/batchexecute',
+            'method' => 'POST',
+            'body' => http_build_query(['f.req' => $outer]),
+            'headers' => [
+                'Content-Type: application/x-www-form-urlencoded;charset=UTF-8',
+            ],
+            'accept' => '*/*',
+        ];
+    }
+
+    if (!$posts) {
+        return $resolved;
+    }
+
+    $responses = fetchUrlsConcurrently($posts, $sourceKey);
+    foreach ($responses as $index => $response) {
+        $url = parseGoogleNewsResponse((string)$response['body']);
+        if ($url !== '' && preg_match('{^https?://}i', $url)) {
+            $resolved[$index] = $url;
+        }
+    }
+    return $resolved;
+}
+
+/**
+ * Locate the on-disk cache of fetched article bodies.
+ */
+function articleCacheFile(): string
+{
+    $home = getenv('HOME');
+    if ($home === false || $home === '') {
+        $home = sys_get_temp_dir();
+    }
+    $directory = rtrim($home, '/') . '/.cache/news_fetch';
+    if (!is_dir($directory)) {
+        @mkdir($directory, 0775, true);
+    }
+    return $directory . '/article_content.json';
+}
+
+/**
+ * @return array<string, array{link:string, paragraphs:list<string>, image:string, ts:int}>
+ */
+function loadArticleCache(): array
+{
+    $file = articleCacheFile();
+    if (!is_file($file)) {
+        return [];
+    }
+    $raw = @file_get_contents($file);
+    if ($raw === false || trim($raw) === '') {
+        return [];
+    }
+    $data = json_decode($raw, true);
+    return is_array($data) ? $data : [];
+}
+
+/**
+ * @param array<string, array{link:string, paragraphs:list<string>, image:string, ts:int}> $cache
+ */
+function saveArticleCache(array $cache): void
+{
+    if (count($cache) > MAX_ARTICLE_CACHE_ENTRIES) {
+        uasort(
+            $cache,
+            static fn(array $a, array $b): int =>
+                (int)($b['ts'] ?? 0) <=> (int)($a['ts'] ?? 0)
+        );
+        $cache = array_slice($cache, 0, MAX_ARTICLE_CACHE_ENTRIES, true);
+    }
+    @file_put_contents(
+        articleCacheFile(),
+        json_encode($cache, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        LOCK_EX
+    );
+}
+
+/**
+ * Boilerplate lines that appear on full article pages rather than in feed
+ * snippets. Kept separate so feed extraction stays untouched.
+ */
+function isArticleBoilerplate(string $text): bool
+{
+    if (isBoilerplate($text)) {
+        return true;
+    }
+    return (bool)preg_match(
+        '/^(?:skip to|sign in|log in|subscribe|advertisement|ad feedback|'
+        . 'we use cookies|this site uses cookies|cookie policy|'
+        . 'by continuing|terms of service|privacy policy|follow us|'
+        . 'download (?:the|our) app|get the app|enable javascript|'
+        . 'javascript is (?:disabled|not)|share this|related:|'
+        . 'recommended|most popular|click here|watch:|image:|'
+        . 'caption:|photo:|all rights reserved|©)/iu',
+        $text
+    );
+}
+
+/**
+ * Collect readable paragraphs from a DOMNodeList, preserving page order.
+ *
+ * @return list<string>
+ */
+function collectParagraphNodes(iterable $nodes): array
+{
+    $paragraphs = [];
+    $seen = [];
+    foreach ($nodes as $node) {
+        $text = normalizeText($node->textContent);
+        if ($text === '' || mb_strlen($text) < 25) {
+            continue;
+        }
+        if (isArticleBoilerplate($text) || isset($seen[$text])) {
+            continue;
+        }
+        $seen[$text] = true;
+        $paragraphs[] = $text;
+    }
+    return $paragraphs;
+}
+
+/**
+ * Extract the readable body paragraphs from a full article page.
+ *
+ * Prefer semantic article containers and fall back to every paragraph when
+ * the page does not expose one. This covers Yahoo Finance (article-body) as
+ * well as the other publishers used by /news.
+ *
+ * @return list<string>
+ */
+function extractArticleParagraphs(string $html, string $pageUrl = ''): array
+{
+    if (trim($html) === '') {
+        return [];
+    }
+
+    $previous = libxml_use_internal_errors(true);
+    $document = new DOMDocument();
+    $loaded = $document->loadHTML(
+        '<?xml encoding="utf-8"?>' . $html,
+        LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING
+    );
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+    if (!$loaded) {
+        return [];
+    }
+
+    $xpath = new DOMXPath($document);
+    $queries = [
+        '//*[@itemprop="articleBody"]//p',
+        '//*[@data-testid="article-body"]//p',
+        '//article//p',
+        '//*[contains(concat(" ", normalize-space(@class), " "), " article-body ")]//p',
+        '//*[contains(concat(" ", normalize-space(@class), " "), " article-content ")]//p',
+        '//*[contains(concat(" ", normalize-space(@class), " "), " post-content ")]//p',
+        '//main//p',
+    ];
+
+    $fallback = [];
+    foreach ($queries as $query) {
+        $nodes = $xpath->query($query);
+        if ($nodes === false) {
+            continue;
+        }
+        $candidate = collectParagraphNodes($nodes);
+        if (count($candidate) >= 2) {
+            return $candidate;
+        }
+        if (!$fallback && $candidate) {
+            $fallback = $candidate;
+        }
+    }
+
+    if ($fallback) {
+        return $fallback;
+    }
+
+    $nodes = $xpath->query('//p');
+    return $nodes === false ? [] : collectParagraphNodes($nodes);
+}
+
+/**
+ * A feed story needs a page fetch when it carries no usable body text.
+ */
+function storyNeedsArticleContent(array $story): bool
+{
+    foreach (($story['paragraphs'] ?? []) as $paragraph) {
+        if (trim((string)$paragraph) !== '') {
+            return false;
+        }
+    }
+    return trim((string)($story['link'] ?? '')) !== '';
+}
+
+/**
+ * Apply a cached article body to a story in place.
+ */
+function applyArticleContent(array &$story, array $entry): void
+{
+    $link = trim((string)($entry['link'] ?? ''));
+    if ($link !== '') {
+        $story['link'] = $link;
+    }
+
+    $paragraphs = [];
+    foreach (($entry['paragraphs'] ?? []) as $paragraph) {
+        $text = trim((string)$paragraph);
+        if ($text !== '') {
+            $paragraphs[] = $text;
+        }
+    }
+    if ($paragraphs) {
+        $story['paragraphs'] = $paragraphs;
+        $story['summary'] = makeSummary($paragraphs[0]);
+    }
+
+    $image = trim((string)($entry['image'] ?? ''));
+    if ($image !== '') {
+        $story['images'] = mergeImageUrls([$image], $story['images'] ?? []);
+    }
+}
+
+/**
+ * Give stories that only contain a feed headline/summary a real article body.
+ *
+ * Google News feeds are the main case: their <item> has no content and its
+ * link is a redirect wrapper. Resolving the link and fetching the publisher
+ * page makes the "details" popup show the actual story instead of an empty
+ * body. Successful pages are cached on disk to keep repeated /news calls fast.
+ */
+function enrichStoryContent(array $stories, string $sourceKey): array
+{
+    if (!$stories) {
+        return $stories;
+    }
+
+    $cache = loadArticleCache();
+    $now = time();
+    $requests = [];
+    $googleLinks = [];
+    $originals = [];
+
+    foreach ($stories as $index => &$story) {
+        if (!storyNeedsArticleContent($story)) {
+            continue;
+        }
+        $link = trim((string)($story['link'] ?? ''));
+        if ($link === '') {
+            continue;
+        }
+
+        $entry = $cache[$link] ?? null;
+        if (is_array($entry)) {
+            $paragraphs = $entry['paragraphs'] ?? [];
+            $ttl = $paragraphs ? ARTICLE_CACHE_TTL : ARTICLE_CACHE_FAILURE_TTL;
+            if ((int)($entry['ts'] ?? 0) + $ttl > $now) {
+                applyArticleContent($story, $entry);
+                continue;
+            }
+        }
+
+        $originals[$index] = $link;
+        $requests[$index] = $link;
+        if (isGoogleNewsLink($link)) {
+            $googleLinks[$index] = $link;
+        }
+    }
+    unset($story);
+
+    if (!$requests) {
+        return $stories;
+    }
+
+    $resolved = $googleLinks
+        ? resolveGoogleNewsLinks($googleLinks, $sourceKey)
+        : [];
+
+    $pageRequests = [];
+    foreach ($requests as $index => $link) {
+        $fetchLink = $resolved[$index] ?? $link;
+        // An unresolved Google News wrapper has no readable article body.
+        if (isGoogleNewsLink($fetchLink)) {
+            continue;
+        }
+        $pageRequests[$index] = ['url' => $fetchLink];
+    }
+
+    $pages = $pageRequests
+        ? fetchUrlsConcurrently($pageRequests, $sourceKey)
+        : [];
+
+    foreach ($originals as $index => $originalLink) {
+        $finalLink = $resolved[$index] ?? $originalLink;
+        $page = $pages[$index] ?? null;
+        $entry = [
+            'link' => $finalLink,
+            'paragraphs' => [],
+            'image' => '',
+            'ts' => $now,
+        ];
+
+        if (is_array($page) && $page['body'] !== '') {
+            if ($page['status'] < 200 || $page['status'] >= 400) {
+                diag(
+                    "news_fetch ({$sourceKey}): could not load article "
+                    . "{$finalLink} (HTTP {$page['status']})"
+                );
+            } else {
+                $entry['paragraphs'] = extractArticleParagraphs(
+                    $page['body'],
+                    $finalLink
+                );
+                $entry['image'] = extractArticleImageFromHtml(
+                    $page['body'],
+                    $finalLink
+                );
+            }
+        }
+
+        $cache[$originalLink] = $entry;
+        if (isset($stories[$index])) {
+            applyArticleContent($stories[$index], $entry);
+        }
+    }
+
+    saveArticleCache($cache);
+    return $stories;
+}
+
+/**
  * Boilerplate lines that show up inside article bodies.
  */
 function isBoilerplate(string $text): bool
@@ -799,7 +1375,7 @@ function parseRssStories(
         }
         $timestamp = $published !== '' ? strtotime($published) : false;
 
-        $description = normalizeText((string)$item->description);
+        $description = normalizeText(strip_tags((string)$item->description));
         $content = $item->children(CONTENT_NS);
         $html = isset($content->encoded) ? (string)$content->encoded : '';
         if (trim($html) === '') {
@@ -869,9 +1445,9 @@ function parseWpJsonStories(
         $excerpt = normalizeText(strip_tags($excerptHtml));
         $paragraphs = extractParagraphs($contentHtml, $excerpt);
         $summary = makeSummary($excerpt !== '' ? $excerpt : ($paragraphs[0] ?? ''));
-        $images = imageUrlsFromHtml(
-            $contentHtml . "\n" . $excerptHtml,
-            $link
+        $images = mergeImageUrls(
+            wpFeaturedImageUrls($post, $link),
+            imageUrlsFromHtml($contentHtml . "\n" . $excerptHtml, $link)
         );
 
         $stories[] = [
@@ -914,6 +1490,63 @@ function publicStory(array $story): array
 {
     unset($story['sort']);
     return $story;
+}
+
+/**
+ * Collect featured images exposed by WordPress REST API responses.
+ *
+ * Plugins such as Jetpack expose a ready-made URL, Yoast embeds an Open
+ * Graph image, and the core API can inline the media object in _embedded.
+ * Using all three keeps image coverage high across WordPress sources.
+ *
+ * @return list<string>
+ */
+function wpFeaturedImageUrls(array $post, string $baseUrl = ''): array
+{
+    $urls = [];
+
+    $jetpack = $post['jetpack_featured_media_url'] ?? '';
+    if (is_string($jetpack) && $jetpack !== '') {
+        $urls[] = $jetpack;
+    }
+
+    $ogImages = $post['yoast_head_json']['og_image'] ?? [];
+    if (is_array($ogImages)) {
+        foreach ($ogImages as $image) {
+            if (is_array($image) && isset($image['url'])) {
+                $urls[] = (string)$image['url'];
+            }
+        }
+    }
+
+    $embedded = $post['_embedded']['wp:featuredmedia'] ?? [];
+    if (is_array($embedded)) {
+        foreach ($embedded as $media) {
+            if (!is_array($media)) {
+                continue;
+            }
+            if (isset($media['source_url'])) {
+                $urls[] = (string)$media['source_url'];
+            }
+            $sizes = $media['media_details']['sizes'] ?? [];
+            if (is_array($sizes)) {
+                foreach ($sizes as $size) {
+                    if (is_array($size) && isset($size['source_url'])) {
+                        $urls[] = (string)$size['source_url'];
+                    }
+                }
+            }
+        }
+    }
+
+    $normalized = [];
+    foreach ($urls as $url) {
+        $url = normalizeImageUrl($url, $baseUrl);
+        if ($url !== '' && looksLikeImageUrl($url)) {
+            $normalized[] = $url;
+        }
+    }
+    return mergeImageUrls($normalized);
 }
 
 /**
@@ -1010,6 +1643,7 @@ function storyStream(array $sourceKeys, ?int $limit, ?string $section): Generato
                 }
             }
 
+            $selected = enrichStoryContent($selected, $sourceKey);
             $selected = enrichStoryImages($selected, $sourceKey);
             yield [
                 'source_key' => $sourceKey,

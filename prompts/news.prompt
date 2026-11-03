@@ -6,6 +6,9 @@ source: {
     - https://openrss.org/feed/www.cnn.com/politics
     - https://openrss.org/feed/www.cnn.com/business
   }
+  yahoo_finance: {
+    - https://news.google.com/rss/search?q=site:finance.yahoo.com+stock+market&hl=en-US&gl=US&ceid=US:en
+  }
   kqed: {
     - https://ww2.kqed.org/news/feed/
   }
@@ -20,6 +23,17 @@ source: {
   }
   richmond_sunset: {
     - https://richmondsunsetnews.com/feed/
+  }
+  techcrunch {
+    - https://techcrunch.com/wp-json/wp/v2/posts
+  }
+}
+
+task.bug.yahoo_finance (completed) {
+  bug:
+  in /news yahoo_finance {
+    expect: clicking details will show me full article
+    actual: full article is not showed
   }
 }
 

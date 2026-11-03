@@ -34,9 +34,9 @@ Endpoints:
                                   code in the "rust" tag is always Rust, code in
                                   the "golang" tag is always Go, and code in the
                                   "php" tag is always PHP. /news streams
-                                  "news" events from CNN, KQED, SFGATE, SF
-                                  Bay View, Mission Local, and Richmond
-                                  Review).
+                                  "news" events from CNN, Yahoo Finance,
+                                  KQED, SFGATE, SF Bay View, Mission Local,
+                                  Richmond Review, and TechCrunch).
     POST /api/dict               SSE: dictionary + latest-answer usage stream
     POST /api/translate          SSE: paragraph-by-paragraph Simplified Chinese
                                   translation of an answer
@@ -102,18 +102,20 @@ WEB_COMMANDS = {
     "/learn_topic": "search YouTube for <topic> and learn the top 3 videos",
     "/learn_playlist": "learn every video in a YouTube playlist",
     "/tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
-    "/news": "list the latest news from cnn, kqed, sfgate, sfbayview, mission_local, or richmond_sunset (optionally /news [source ...] [count])",
+    "/news": "list the latest news from cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, or techcrunch (optionally /news [source ...] [count])",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
 }
 
 # News sources accepted by /news and completed by news_fetch.php.
 NEWS_SOURCES = {
     "cnn": "CNN News",
+    "yahoo_finance": "Yahoo Finance",
     "kqed": "KQED News",
     "sfgate": "SFGATE Bay Area News",
     "sfbayview": "SF Bay View",
     "mission_local": "Mission Local",
     "richmond_sunset": "Richmond Review",
+    "techcrunch": "TechCrunch",
 }
 
 NEWS_SOURCE_USAGE = "|".join(NEWS_SOURCES)
@@ -5860,8 +5862,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         """Stream the latest news stories to the browser.
 
         Usage: /news [SOURCE ...] [number-of-stories]
-        Each SOURCE is one of cnn, kqed, sfgate, sfbayview, mission_local,
-        or richmond_sunset. Several sources may be selected.
+        Each SOURCE is one of cnn, yahoo_finance, kqed, sfgate, sfbayview,
+        mission_local, richmond_sunset, or techcrunch. Several sources may be
+        selected.
         Without a source, every supported source is shown as its own section.
         """
         argv: list[str] = []
@@ -6564,12 +6567,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 pass
 
     def _stream_dictionary(self, word: str, latest_answer: str | None) -> None:
-        # The popup shows exactly: word, IPA, part of speech, quote, and the
+        # The popup shows exactly: word, IPA, part of speech, and the
         # contextual meaning. Keep the prompt and the streamed output limited
-        # to those fields (no model banner or follow-up usage section).
+        # to those fields (no quote, model banner, or follow-up usage section).
+        context = chat.dictionary_surrounding_context(word, latest_answer)
         prompt = chat.DICT_POPUP_PROMPT.format(
             word=word,
-            latest_answer=(latest_answer or "(no previous answer available)"),
+            context=(context or "(no previous answer available)"),
         )
         try:
             chat.stream_answer(
