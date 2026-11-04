@@ -16,6 +16,7 @@ declare(strict_types=1);
  *   mission_local Mission Local WordPress REST API
  *   richmond_sunset Richmond Review / Richmond & Sunset news RSS feed
  *   techcrunch    TechCrunch WordPress REST API
+ *   krasia        KrASIA RSS feed (Asian tech and startup news)
  *   medium        The Medium author feed configured in ~/.medium/username
  *                 (https://medium.com/feed/@username), used by /medium
  *
@@ -27,7 +28,7 @@ declare(strict_types=1);
  *   ./news_fetch.php [--json] [--source SOURCE ...] [--limit N]
  *
  * --source accepts cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local,
- * richmond_sunset, techcrunch, or medium and may be repeated (or given as a
+ * richmond_sunset, techcrunch, krasia, or medium and may be repeated (or given as a
  * comma separated list).
  * Without --source, every static source is fetched and emitted as its own
  * section; medium is only used when explicitly selected.
@@ -137,6 +138,20 @@ const SOURCES = [
             'latest' => [
                 'label' => 'Latest Stories',
                 'url' => 'https://techcrunch.com/wp-json/wp/v2/posts',
+            ],
+        ],
+    ],
+    'krasia' => [
+        'label' => 'KrASIA',
+        'kind' => 'rss',
+        // KrASIA's feed only carries a shortened excerpt, so always fetch the
+        // article page for the detail view instead of trusting feed content.
+        'full_article' => true,
+        'default_limit' => 20,
+        'feeds' => [
+            'latest' => [
+                'label' => 'Latest Stories',
+                'url' => 'https://console.kr-asia.com/feed',
             ],
         ],
     ],
@@ -1167,6 +1182,7 @@ function extractArticleParagraphs(string $html, string $pageUrl = ''): array
         '//article//p',
         '//*[contains(concat(" ", normalize-space(@class), " "), " article-body ")]//p',
         '//*[contains(concat(" ", normalize-space(@class), " "), " article-content ")]//p',
+        '//*[contains(concat(" ", normalize-space(@class), " "), " entry-content ")]//p',
         '//*[contains(concat(" ", normalize-space(@class), " "), " post-content ")]//p',
         '//main//p',
     ];
@@ -1195,16 +1211,25 @@ function extractArticleParagraphs(string $html, string $pageUrl = ''): array
 }
 
 /**
- * A feed story needs a page fetch when it carries no usable body text.
+ * A feed story needs a page fetch when it carries no usable body text, or
+ * when its source explicitly asks for the complete article page.
  */
-function storyNeedsArticleContent(array $story): bool
-{
+function storyNeedsArticleContent(
+    array $story,
+    bool $forceFullArticle = false
+): bool {
+    if (trim((string)($story['link'] ?? '')) === '') {
+        return false;
+    }
+    if ($forceFullArticle) {
+        return true;
+    }
     foreach (($story['paragraphs'] ?? []) as $paragraph) {
         if (trim((string)$paragraph) !== '') {
             return false;
         }
     }
-    return trim((string)($story['link'] ?? '')) !== '';
+    return true;
 }
 
 /**
@@ -1226,7 +1251,11 @@ function applyArticleContent(array &$story, array $entry): void
     }
     if ($paragraphs) {
         $story['paragraphs'] = $paragraphs;
-        $story['summary'] = makeSummary($paragraphs[0]);
+        // Keep the feed's concise list summary when it has one; the fetched
+        // article body is for the detail view and may start with a byline.
+        if (trim((string)($story['summary'] ?? '')) === '') {
+            $story['summary'] = makeSummary($paragraphs[0]);
+        }
     }
 
     $image = trim((string)($entry['image'] ?? ''));
@@ -1249,6 +1278,8 @@ function enrichStoryContent(array $stories, string $sourceKey): array
         return $stories;
     }
 
+    $sources = newsSources();
+    $forceFullArticle = !empty($sources[$sourceKey]['full_article']);
     $cache = loadArticleCache();
     $now = time();
     $requests = [];
@@ -1256,7 +1287,7 @@ function enrichStoryContent(array $stories, string $sourceKey): array
     $originals = [];
 
     foreach ($stories as $index => &$story) {
-        if (!storyNeedsArticleContent($story)) {
+        if (!storyNeedsArticleContent($story, $forceFullArticle)) {
             continue;
         }
         $link = trim((string)($story['link'] ?? ''));
@@ -1268,7 +1299,11 @@ function enrichStoryContent(array $stories, string $sourceKey): array
         if (is_array($entry)) {
             $paragraphs = $entry['paragraphs'] ?? [];
             $ttl = $paragraphs ? ARTICLE_CACHE_TTL : ARTICLE_CACHE_FAILURE_TTL;
-            if ((int)($entry['ts'] ?? 0) + $ttl > $now) {
+            // Do not reuse a feed-excerpt entry when the source requires the
+            // full article body; let it be fetched once and cached again.
+            $cacheIsUsable = !$forceFullArticle
+                || !empty($entry['full_article']);
+            if ($cacheIsUsable && (int)($entry['ts'] ?? 0) + $ttl > $now) {
                 applyArticleContent($story, $entry);
                 continue;
             }
@@ -1311,6 +1346,7 @@ function enrichStoryContent(array $stories, string $sourceKey): array
             'link' => $finalLink,
             'paragraphs' => [],
             'image' => '',
+            'full_article' => $forceFullArticle,
             'ts' => $now,
         ];
 

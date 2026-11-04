@@ -27,6 +27,15 @@ source: {
   techcrunch {
     - https://techcrunch.com/wp-json/wp/v2/posts
   }
+  krasia {
+    - https://console.kr-asia.com/feed
+  }
+}
+
+task.bug.krasia (completed) {
+  bug:
+  in /news krasia, each article detail seems to be only fetching the summary of the news
+  please make it load the entire article in the detail
 }
 
 task.bug.yahoo_finance (completed) {

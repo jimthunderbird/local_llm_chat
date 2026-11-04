@@ -107,7 +107,7 @@ WEB_COMMANDS = {
     "/new": "start a fresh conversation (clears follow-up context)",
     "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
     "learn_playlist <playlist> | search <keyword> | tag_gen <tag>",
-    "/news": "list the latest news from cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, or techcrunch (optionally /news [source ...] [count])",
+    "/news": "list the latest news from cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, or krasia (optionally /news [source ...] [count])",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
 }
@@ -122,6 +122,7 @@ NEWS_SOURCES = {
     "mission_local": "Mission Local",
     "richmond_sunset": "Richmond Review",
     "techcrunch": "TechCrunch",
+    "krasia": "KrASIA",
 }
 
 NEWS_SOURCE_USAGE = "|".join(NEWS_SOURCES)
@@ -6605,8 +6606,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         Usage: /news [SOURCE ...] [number-of-stories]
         Each SOURCE is one of cnn, yahoo_finance, kqed, sfgate, sfbayview,
-        mission_local, richmond_sunset, or techcrunch. Several sources may be
-        selected.
+        mission_local, richmond_sunset, techcrunch, or krasia. Several sources
+        may be selected.
         Without a source, every supported source is shown as its own section.
         """
         argv: list[str] = []
