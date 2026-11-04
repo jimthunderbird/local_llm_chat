@@ -3,9 +3,8 @@
 
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, tag/transcript/article scoping, history, /memory,
-/status, /sources, /benchmark, /learn, /learn_topic, /learn_playlist,
-/tag_gen, /news, /medium, /wiki, /wiki_article, /article, /dict, and
-/ask. The browser is a pure HTML/CSS/JavaScript single-page app served from
+/status, /sources, /benchmark, /youtube, /news, /medium, /wiki,
+/wiki_article, /article, /dict, and /ask. The browser is a pure HTML/CSS/JavaScript single-page app served from
 ./app/chat.html.
 
 Usage:
@@ -99,9 +98,8 @@ WEB_COMMANDS = {
     **chat.COMMANDS,
     "/help": "show commands and keyboard shortcuts",
     "/new": "start a fresh conversation (clears follow-up context)",
-    "/learn_topic": "search YouTube for <topic> and learn the top 3 videos",
-    "/learn_playlist": "learn every video in a YouTube playlist",
-    "/tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
+    "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
+    "learn_playlist <playlist> | tag_gen <tag>",
     "/news": "list the latest news from cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, or techcrunch (optionally /news [source ...] [count])",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
@@ -136,12 +134,11 @@ def medium_username() -> str:
 
 COMMAND_ARGUMENTS = {
     "/tag",
+    # Backwards-compatible alias for /youtube tag_gen.
     "/tag_gen",
     "/transcript",
     "/search_transcript",
-    "/learn",
-    "/learn_topic",
-    "/learn_playlist",
+    "/youtube",
     "/ask",
     "/wiki",
     "/wiki_article",
@@ -151,6 +148,15 @@ COMMAND_ARGUMENTS = {
     "/benchmark",
     "/news",
     "/medium",
+}
+
+# Subcommands grouped under /youtube. Kept in display order for Tab
+# completion and the /help panel.
+YOUTUBE_SUBCOMMANDS = {
+    "learn": "fetch, rewrite, chunk, embed, and tag one video",
+    "learn_topic": "search YouTube for <topic> and learn the top 3 videos",
+    "learn_playlist": "learn every video in a YouTube playlist",
+    "tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
 }
 
 # The browser's "中文" button translates a finished answer paragraph by
@@ -2442,6 +2448,23 @@ ARTICLE_ITERATIVE_EVIDENCE_TOKENS = 16000
 ARTICLE_ITERATIVE_BATCH = 4
 ARTICLE_ITERATIVE_CANDIDATES = 50
 ARTICLE_ROUTER_MODEL = chat.FILTER_MODEL
+# Normal tag questions reuse the /article iterative evidence loop. YouTube
+# transcripts are shorter per paragraph but a tag can span many videos, so the
+# same bounded-round design applies. Enumeration questions need wider coverage.
+YOUTUBE_ITERATIVE_MAX_ROUNDS = 4
+YOUTUBE_ITERATIVE_ENUMERATIVE_ROUNDS = 6
+YOUTUBE_ITERATIVE_EVIDENCE_TOKENS = 16000
+YOUTUBE_ITERATIVE_BATCH = 4
+YOUTUBE_ITERATIVE_ENUMERATIVE_BATCH = 6
+YOUTUBE_ITERATIVE_CANDIDATES = 50
+YOUTUBE_ITERATIVE_PROMPT_PREFIX = """### RETRIEVED EVIDENCE
+The context below was gathered in several retrieval rounds from the knowledge
+base and is sufficient for the complete question. Answer every part of the
+question, including lists, comparisons, and enumerations, using this evidence.
+Do not say that the context is insufficient; if a detail is genuinely absent,
+answer the supported parts and omit the unsupported detail.
+
+"""
 ARTICLE_ENUMERATIVE_RE = re.compile(
     r"\b(?:list|all|every|each|enumerate|compare|comparison|across\s+the\s+"
     r"(?:article|document)|types?|kinds?|levels?|categories)\b",
@@ -3227,27 +3250,36 @@ def _article_sufficiency_check(
     return {"sufficient": sufficient, "missing": missing[:300]}
 
 
-def _article_iterative_evidence(
+def _iterative_evidence(
     question: str,
     chunks: list[chat.Chunk],
-    structure: dict | None,
     budget: int,
     log: Callable[[str], None],
+    *,
+    label: str,
+    structure: dict | None = None,
+    max_rounds: int = 4,
+    batch: int = 4,
+    candidate_limit: int = 50,
+    require_sufficient: bool = False,
+    apply_filter: bool = True,
 ) -> list[tuple[chat.Chunk, float]]:
     """Gather evidence in small rounds, stopping when it is sufficient.
 
     This is the local analogue of ``chat_gradual_context.py``'s loop: retrieve
     a few new paragraphs, ask the small model whether they answer the question,
     and search again with the missing terms. It is capped by both the number of
-    rounds and a hard evidence-token budget.
+    rounds and a hard evidence-token budget. ``/article`` adds section summaries
+    through ``structure``; YouTube tag questions call it without a structure.
     """
-    seen: set[int] = set()
+    seen: set[tuple[str, int]] = set()
     evidence: list[tuple[chat.Chunk, float]] = []
     used = 0
     search_question = question
+    sufficient = False
     paragraph_chunks = [chunk for chunk in chunks if chunk.index > 0]
 
-    for round_number in range(1, ARTICLE_ITERATIVE_MAX_ROUNDS + 1):
+    for round_number in range(1, max_rounds + 1):
         if used >= budget:
             break
         try:
@@ -3257,14 +3289,18 @@ def _article_iterative_evidence(
         ranked = chat.top_chunks(
             search_question,
             paragraph_chunks,
-            limit=ARTICLE_ITERATIVE_CANDIDATES,
+            limit=candidate_limit,
             expansion=expansion,
         )
-        candidates = [item for item in ranked if item[0].index not in seen]
+        candidates = [
+            item
+            for item in ranked
+            if (item[0].video_id, item[0].index) not in seen
+        ]
         if not candidates:
             break
 
-        if len(candidates) >= chat.FILTER_MIN_CANDIDATES:
+        if apply_filter and len(candidates) >= chat.FILTER_MIN_CANDIDATES:
             filtered = chat.filter_candidates(
                 search_question, candidates[: chat.FILTER_MAX_CANDIDATES]
             )
@@ -3277,32 +3313,42 @@ def _article_iterative_evidence(
 
         added = 0
         for chunk, score in candidates:
-            if chunk.index in seen:
+            key = (chunk.video_id, chunk.index)
+            if key in seen:
                 continue
             tokens = chat.estimate_tokens(chat.paragraph_text(chunk)) + 16
             if evidence and used + tokens > budget:
                 continue
             evidence.append((chunk, score))
-            seen.add(chunk.index)
+            seen.add(key)
             used += tokens
             added += 1
-            if added >= ARTICLE_ITERATIVE_BATCH:
+            if added >= batch:
                 break
         if not added:
             break
         log(
-            f"[article iterative: round {round_number}/"
-            f"{ARTICLE_ITERATIVE_MAX_ROUNDS}, added {added} paragraph(s), "
-            f"evidence ~{used:,} token(s)]"
+            f"[{label} iterative: round {round_number}/{max_rounds}, "
+            f"added {added} paragraph(s), evidence ~{used:,} token(s)]"
         )
-        if used >= budget:
-            break
         verdict = _article_sufficiency_check(question, evidence)
         if verdict["sufficient"]:
-            log("[article iterative: evidence is sufficient; stopping]")
+            sufficient = True
+            log(f"[{label} iterative: evidence is sufficient; stopping]")
             break
         if verdict["missing"]:
             search_question = f"{question} {verdict['missing']}"
+
+    if require_sufficient and not sufficient:
+        # The gathered paragraphs never answered the question. Fall back to
+        # the normal retrieval path, which still applies its own filter and
+        # cross-tag fallback rules, instead of forcing unrelated evidence into
+        # the prompt.
+        log(
+            f"[{label} iterative: evidence stayed insufficient after "
+            f"{max_rounds} round(s); using normal retrieval]"
+        )
+        return []
 
     if not evidence or not structure:
         return evidence
@@ -3332,6 +3378,76 @@ def _article_iterative_evidence(
         limited.append((chunk, score))
         total += tokens
     return limited
+
+
+def _article_iterative_evidence(
+    question: str,
+    chunks: list[chat.Chunk],
+    structure: dict | None,
+    budget: int,
+    log: Callable[[str], None],
+) -> list[tuple[chat.Chunk, float]]:
+    """Run iterative evidence gathering for the active article."""
+    return _iterative_evidence(
+        question,
+        chunks,
+        budget,
+        log,
+        label="article",
+        structure=structure,
+        max_rounds=ARTICLE_ITERATIVE_MAX_ROUNDS,
+        batch=ARTICLE_ITERATIVE_BATCH,
+        candidate_limit=ARTICLE_ITERATIVE_CANDIDATES,
+    )
+
+
+def _youtube_iterative_evidence(
+    question: str,
+    chunks: list[chat.Chunk],
+    budget: int,
+    log: Callable[[str], None],
+    depth: int | None = None,
+) -> list[tuple[chat.Chunk, float]]:
+    """Iteratively gather YouTube transcript evidence for a normal question.
+
+    ``/article`` already answers by retrieving a few paragraphs at a time and
+    asking the small model whether the evidence is sufficient. Questions asked
+    against a tag use the same loop here: the YouTube knowledge base is searched
+    in rounds, and retrieval stops as soon as the gathered paragraphs can answer
+    the whole question. List/enumeration questions get more rounds and a larger
+    budget because they need broader coverage.
+    """
+    enumerative = bool(chat.LIST_QUERY_PATTERN.search(question))
+    effective_budget = budget
+    if effective_budget <= 0:
+        effective_budget = YOUTUBE_ITERATIVE_EVIDENCE_TOKENS
+    if enumerative:
+        effective_budget = max(effective_budget, chat.LIST_CONTEXT_TOKENS)
+    candidate_limit = (
+        depth if depth is not None and depth > 0 else YOUTUBE_ITERATIVE_CANDIDATES
+    )
+    return _iterative_evidence(
+        question,
+        chunks,
+        effective_budget,
+        log,
+        label="youtube",
+        max_rounds=(
+            YOUTUBE_ITERATIVE_ENUMERATIVE_ROUNDS
+            if enumerative
+            else YOUTUBE_ITERATIVE_MAX_ROUNDS
+        ),
+        batch=(
+            YOUTUBE_ITERATIVE_ENUMERATIVE_BATCH
+            if enumerative
+            else YOUTUBE_ITERATIVE_BATCH
+        ),
+        candidate_limit=candidate_limit,
+        require_sufficient=True,
+        # List-style questions need broad coverage; the normal answer path
+        # already skips the small relevance filter for them.
+        apply_filter=not enumerative,
+    )
 
 
 def _decode_article_bytes(data: bytes) -> str:
@@ -3938,6 +4054,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 if name.startswith(query or "/"):
                     items.append({"value": name, "description": description})
             return items
+
+        if kind == "youtube_subcommands":
+            lowered = query.lower()
+            return [
+                {"value": name, "description": description}
+                for name, description in YOUTUBE_SUBCOMMANDS.items()
+                if name.startswith(lowered)
+            ]
 
         if kind == "tags":
             return [
@@ -4558,6 +4682,60 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     else tag_coding_directive(tag)
                 )
             )
+            # /article gathers evidence in small rounds and stops as soon as
+            # the small model says the gathered paragraphs are sufficient.
+            # Apply the same loop to normal tag questions. Article mode
+            # already did this above; coding questions keep their
+            # documentation-first path. A cached iterative answer is reused
+            # without repeating the retrieval rounds.
+            iterative_eligible = (
+                not article_mode and not use_all_chunks and not coding_mode
+            )
+            if iterative_eligible:
+                iterative_variant = (
+                    f"{cache_variant}+youtube-iterative"
+                    if cache_variant
+                    else "youtube-iterative"
+                )
+                iterative_cached = state.cache.get(
+                    state.cache_key(
+                        retrieval_question,
+                        answer_language,
+                        conversation_revision=(
+                            state.conversation_revision
+                            if context_sensitive
+                            else None
+                        ),
+                        tag=tag,
+                        coding_mode=coding_mode,
+                        prompt_variant=iterative_variant,
+                    )
+                ) is not None
+                if iterative_cached:
+                    cache_variant = iterative_variant
+                else:
+                    evidence = _youtube_iterative_evidence(
+                        retrieval_question,
+                        chunks,
+                        (
+                            max_context_tokens_override
+                            if max_context_tokens_override is not None
+                            else state.max_context_tokens
+                        ),
+                        lambda text: self._sse_text("log", text),
+                        depth=(
+                            depth_override
+                            if depth_override is not None
+                            else state.depth
+                        ),
+                    )
+                    if evidence:
+                        chunks = [chunk for chunk, _score in evidence]
+                        use_all_chunks = True
+                        cache_variant = iterative_variant
+                        prompt_prefix = (
+                            YOUTUBE_ITERATIVE_PROMPT_PREFIX + prompt_prefix
+                        )
             emit_delta = lambda text: self._sse("delta", {"text": text})
             docs_backed = tag_uses_official_docs(tag)
             answer_filter = InsufficientContextFilter(enabled=docs_backed)
@@ -5143,12 +5321,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_transcript(argument, direct=False)
         elif name == "/search_transcript":
             self._command_transcript(argument, direct=False, title_only=True)
-        elif name == "/learn":
-            self._command_learn(argument)
-        elif name == "/learn_topic":
-            self._command_learn_topic(argument)
-        elif name == "/learn_playlist":
-            self._command_learn_playlist(argument)
+        elif name == "/youtube":
+            self._command_youtube(argument)
         elif name == "/ask":
             self._command_ask(argument)
         elif name == "/news":
@@ -5296,7 +5470,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if not available:
             self._sse_text(
                 "output",
-                f"\nNo transcripts found in {chat.OUTPUT_DIR}. Use /learn first.\n",
+                f"\nNo transcripts found in {chat.OUTPUT_DIR}. Use /youtube learn first.\n",
             )
             return
         if not argument:
@@ -5313,7 +5487,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 self._sse_text(
                     "output",
                     f"\nNo trunk files for transcript {video_id!r}. "
-                    "Use /learn first.\n",
+                    "Use /youtube learn first.\n",
                 )
                 return
             self._activate_transcript(video_id)
@@ -5326,7 +5500,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 self._sse_text(
                     "output",
                     f"\nFound {len(matches)} title match(es) for "
-                    f"{argument!r}, but none have trunks. Use /learn first.\n",
+                    f"{argument!r}, but none have trunks. Use /youtube learn first.\n",
                 )
             else:
                 self._sse_text(
@@ -5410,40 +5584,70 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         )
         self._sse("meta", state.snapshot())
 
+    def _command_youtube(self, argument: str) -> None:
+        """Dispatch /youtube <subcommand> [argument]."""
+        subcommand, _, rest = argument.partition(" ")
+        subcommand = subcommand.strip().lower()
+        rest = rest.strip()
+        if not subcommand:
+            lines = [
+                "\nUsage: /youtube <subcommand> ...",
+                "",
+            ]
+            for name, description in YOUTUBE_SUBCOMMANDS.items():
+                lines.append(f"  /youtube {name:<14} {description}")
+            self._sse_text("output", "\n".join(lines) + "\n")
+            return
+        if subcommand == "learn":
+            self._command_learn(rest)
+        elif subcommand == "learn_topic":
+            self._command_learn_topic(rest)
+        elif subcommand == "learn_playlist":
+            self._command_learn_playlist(rest)
+        elif subcommand == "tag_gen":
+            self._command_tag_gen(rest)
+        else:
+            self._sse_text(
+                "output",
+                f"\nUnknown /youtube subcommand: {subcommand!r}. "
+                "Use /youtube to see the available subcommands.\n",
+            )
+
     def _command_learn(self, argument: str) -> None:
         if not argument:
             self._sse_text(
-                "output", "\nUsage: /learn <youtube_video_hash|url>\n"
+                "output", "\nUsage: /youtube learn <youtube_video_hash|url>\n"
             )
             return
         try:
-            import learn
+            import youtube_video_learn as learn
         except ImportError as exc:
             self._sse_text(
-                "output", f"\n/learn is unavailable: cannot import learn.py ({exc})\n"
+                "output", f"\n/youtube learn is unavailable: cannot import "
+                f"youtube_video_learn.py ({exc})\n"
             )
             return
         try:
             video_id = learn.extract_video_hash(argument)
         except ValueError as exc:
-            self._sse_text("output", f"\n/learn: {exc}\n")
+            self._sse_text("output", f"\n/youtube learn: {exc}\n")
             return
 
-        self._sse_text("output", f"\n/learn: {video_id}\n")
-        if not self._learn_video(video_id, label="/learn"):
+        self._sse_text("output", f"\n/youtube learn: {video_id}\n")
+        if not self._learn_video(video_id, label="/youtube learn"):
             return
-        self._finish_learn([video_id], label="/learn")
+        self._finish_learn([video_id], label="/youtube learn")
 
     def _command_learn_topic(self, argument: str) -> None:
         topic = argument.strip()
         if not topic:
             self._sse_text(
-                "output", "\nUsage: /learn_topic <topic>\n"
+                "output", "\nUsage: /youtube learn_topic <topic>\n"
             )
             return
 
         self._sse_text(
-            "output", f"\n/learn_topic: searching YouTube for {topic!r}...\n"
+            "output", f"\n/youtube learn_topic: searching YouTube for {topic!r}...\n"
         )
         try:
             result = subprocess.run(
@@ -5464,12 +5668,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
         except subprocess.TimeoutExpired:
             self._sse_text(
-                "output", "\n/learn_topic: YouTube search timed out.\n"
+                "output", "\n/youtube learn_topic: YouTube search timed out.\n"
             )
             return
         except OSError as exc:
             self._sse_text(
-                "output", f"\n/learn_topic: could not run search_youtube.py: {exc}\n"
+                "output", f"\n/youtube learn_topic: could not run search_youtube.py: {exc}\n"
             )
             return
 
@@ -5481,7 +5685,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if result.returncode != 0:
             self._sse_text(
                 "output",
-                f"\n/learn_topic: search_youtube.py failed with exit code "
+                f"\n/youtube learn_topic: search_youtube.py failed with exit code "
                 f"{result.returncode}.\n",
             )
             return
@@ -5499,34 +5703,34 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if not video_ids:
             self._sse_text(
                 "output",
-                "\n/learn_topic: no videos with an English transcript were "
+                "\n/youtube learn_topic: no videos with an English transcript were "
                 "found for this topic.\n",
             )
             return
 
         self._sse_text(
             "output",
-            f"\n/learn_topic: learning {len(video_ids)} video(s): "
+            f"\n/youtube learn_topic: learning {len(video_ids)} video(s): "
             f"{', '.join(video_ids)}\n",
         )
         learned = []
         for video_id in video_ids:
-            self._sse_text("output", f"\n/learn_topic: {video_id}\n")
-            if self._learn_video(video_id, label="/learn_topic"):
+            self._sse_text("output", f"\n/youtube learn_topic: {video_id}\n")
+            if self._learn_video(video_id, label="/youtube learn_topic"):
                 learned.append(video_id)
             else:
                 self._sse_text(
                     "output",
-                    f"\n/learn_topic: could not learn {video_id}; continuing "
+                    f"\n/youtube learn_topic: could not learn {video_id}; continuing "
                     "with any remaining videos.\n",
                 )
 
         if not learned:
             self._sse_text(
-                "output", "\n/learn_topic: no videos could be learned.\n"
+                "output", "\n/youtube learn_topic: no videos could be learned.\n"
             )
             return
-        self._finish_learn(learned, label="/learn_topic")
+        self._finish_learn(learned, label="/youtube learn_topic")
 
     def _command_learn_playlist(self, argument: str) -> None:
         """Learn every video in a YouTube playlist."""
@@ -5534,13 +5738,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if not playlist:
             self._sse_text(
                 "output",
-                "\nUsage: /learn_playlist <youtube_playlist_id|url>\n",
+                "\nUsage: /youtube learn_playlist <youtube_playlist_id|url>\n",
             )
             return
 
         self._sse_text(
             "output",
-            f"\n/learn_playlist: fetching videos from {playlist!r}...\n",
+            f"\n/youtube learn_playlist: fetching videos from {playlist!r}...\n",
         )
         try:
             result = subprocess.run(
@@ -5559,13 +5763,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         except subprocess.TimeoutExpired:
             self._sse_text(
                 "output",
-                "\n/learn_playlist: playlist fetch timed out.\n",
+                "\n/youtube learn_playlist: playlist fetch timed out.\n",
             )
             return
         except OSError as exc:
             self._sse_text(
                 "output",
-                "\n/learn_playlist: could not run "
+                "\n/youtube learn_playlist: could not run "
                 f"get_videos_in_playlist.py: {exc}\n",
             )
             return
@@ -5580,7 +5784,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if result.returncode != 0:
             self._sse_text(
                 "output",
-                "\n/learn_playlist: get_videos_in_playlist.py failed with "
+                "\n/youtube learn_playlist: get_videos_in_playlist.py failed with "
                 f"exit code {result.returncode}.\n",
             )
             return
@@ -5597,47 +5801,48 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if not video_ids:
             self._sse_text(
                 "output",
-                "\n/learn_playlist: the playlist contains no videos.\n",
+                "\n/youtube learn_playlist: the playlist contains no videos.\n",
             )
             return
 
         total = len(video_ids)
         self._sse_text(
             "output",
-            f"\n/learn_playlist: learning {total} video(s) from the "
+            f"\n/youtube learn_playlist: learning {total} video(s) from the "
             "playlist.\n",
         )
         learned = []
         for index, video_id in enumerate(video_ids, start=1):
             self._sse_text(
                 "output",
-                f"\n/learn_playlist: [{index}/{total}] {video_id}\n",
+                f"\n/youtube learn_playlist: [{index}/{total}] {video_id}\n",
             )
-            if self._learn_video(video_id, label="/learn_playlist"):
+            if self._learn_video(video_id, label="/youtube learn_playlist"):
                 learned.append(video_id)
             else:
                 self._sse_text(
                     "output",
-                    f"\n/learn_playlist: could not learn {video_id}; "
+                    f"\n/youtube learn_playlist: could not learn {video_id}; "
                     "continuing with any remaining videos.\n",
                 )
 
         if not learned:
             self._sse_text(
                 "output",
-                "\n/learn_playlist: no videos could be learned.\n",
+                "\n/youtube learn_playlist: no videos could be learned.\n",
             )
             return
-        self._finish_learn(learned, label="/learn_playlist")
+        self._finish_learn(learned, label="/youtube learn_playlist")
 
-    def _learn_video(self, video_id: str, label: str = "/learn") -> bool:
-        """Run the learn.py pipeline for one video, streaming its output."""
+    def _learn_video(self, video_id: str, label: str = "/youtube learn") -> bool:
+        """Run the youtube_video_learn.py pipeline for one video."""
         try:
-            import learn
+            import youtube_video_learn as learn
         except ImportError as exc:
             self._sse_text(
                 "output",
-                f"\n{label} is unavailable: cannot import learn.py ({exc})\n",
+                f"\n{label} is unavailable: cannot import "
+                f"youtube_video_learn.py ({exc})\n",
             )
             return False
 
@@ -5648,7 +5853,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         return True
 
     def _run_learn_step(
-        self, script: str, argv: list[str], label: str = "/learn"
+        self, script: str, argv: list[str], label: str = "/youtube learn"
     ) -> bool:
         """Run one learn pipeline step, streaming its output."""
         self._sse_text(
@@ -5698,7 +5903,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _finish_learn(self, video_ids: list[str], label: str = "/learn") -> None:
+    def _finish_learn(self, video_ids: list[str], label: str = "/youtube learn") -> None:
         """Invalidate tag caches and reload the active scope after learning."""
         state = self.state
         chat.invalidate_all_tagged_chunks()
@@ -5767,7 +5972,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if not tag:
             self._sse_text(
                 "output",
-                "\nUsage: /tag_gen <tag_name> "
+                "\nUsage: /youtube tag_gen <tag_name> "
                 "(creates the tag if new; Tab completes existing names)\n",
             )
             return
@@ -5779,19 +5984,19 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if tag not in tags:
-            # generate_tags.py creates missing tags itself; don't reject the
+            # youtube_video_tag_gen.py creates missing tags itself; don't reject the
             # request just because ./tags does not contain it yet.
             self._sse_text(
                 "output",
-                f"\n/tag_gen: tag {tag!r} does not exist yet; it will be "
+                f"\n/youtube tag_gen: tag {tag!r} does not exist yet; it will be "
                 "created by the classifier.\n",
             )
 
-        script = "generate_tags.py"
+        script = "youtube_video_tag_gen.py"
         argv = ["--tag", tag]
         self._sse_text(
             "output",
-            f"\n/tag_gen: classifying untagged videos against tag {tag!r}.\n"
+            f"\n/youtube tag_gen: classifying untagged videos against tag {tag!r}.\n"
             f"\n=== {script} {' '.join(argv)} ===\n",
         )
         process = None
@@ -5825,13 +6030,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 raise
         except OSError as exc:
             self._sse_text(
-                "output", f"\n/tag_gen: could not run {script}: {exc}\n"
+                "output", f"\n/youtube tag_gen: could not run {script}: {exc}\n"
             )
             return
         if returncode != 0:
             self._sse_text(
                 "output",
-                f"\n/tag_gen: {script} exited with code {returncode}; "
+                f"\n/youtube tag_gen: {script} exited with code {returncode}; "
                 "reloading from whatever was written so far.\n",
             )
 
@@ -5843,7 +6048,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         state.cache.clear()
         self._sse_text(
             "output",
-            f"\n/tag_gen: finished updating tag {tag!r}.\n",
+            f"\n/youtube tag_gen: finished updating tag {tag!r}.\n",
         )
 
         if (
@@ -5855,7 +6060,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             if error or new_chunks is None:
                 self._sse_text(
                     "output",
-                    f"\n/tag_gen: could not reload tag {tag!r}: {error}\n",
+                    f"\n/youtube tag_gen: could not reload tag {tag!r}: {error}\n",
                 )
             else:
                 state.replace_chunks(new_chunks)

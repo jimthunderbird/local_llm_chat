@@ -2,16 +2,16 @@
 """Ingest a YouTube video into the RAG knowledge base.
 
 Usage:
-    python3 learn.py <youtube_video_hash>
-    python3 learn.py https://www.youtube.com/watch?v=T594Cg4sTq4
-    python3 learn.py https://youtu.be/T594Cg4sTq4?t=227
+    python3 youtube_video_learn.py <youtube_video_hash>
+    python3 youtube_video_learn.py https://www.youtube.com/watch?v=T594Cg4sTq4
+    python3 youtube_video_learn.py https://youtu.be/T594Cg4sTq4?t=227
 
 Runs, in order:
     1. fetch_youtube_transcript.py
     2. rewrite.py
     3. create_trunks.py
     4. create_embeddings.py
-    5. generate_tags.py --youtube_video_hash
+    5. youtube_video_tag_gen.py --youtube_video_hash
 """
 
 import argparse
@@ -84,7 +84,7 @@ STEPS = [
     ("rewrite.py", ["<hash>"]),
     ("create_trunks.py", ["<hash>"]),
     ("create_embeddings.py", ["<hash>"]),
-    ("generate_tags.py", ["--youtube_video_hash=<hash>"]),
+    ("youtube_video_tag_gen.py", ["--youtube_video_hash=<hash>"]),
 ]
 
 

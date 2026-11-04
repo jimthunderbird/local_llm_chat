@@ -199,6 +199,10 @@ group app/chat.html and app/chat_server.py {
   }
 
   task (persistent) {
+    complete tasks in ./prompts/youtube.prompt
+  }
+
+  task (persistent) {
     complete tasks in ./prompts/ask_command.prompt
   }
 

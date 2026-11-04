@@ -5,7 +5,8 @@ Usage:
     python3 chat_lowcontext.py [--tag <tag>]
 
 This is a drop-in clone of chat.py: it supports the same CLI flag, commands,
-history file, vi key bindings, tag/transcript scoping, /learn, /wiki, /dict,
+history file, vi key bindings, tag/transcript scoping, /youtube learn,
+/wiki, /dict,
 /depth, /status, /sources, and Simplified Chinese question/answer translation.
 
 The difference is the answer architecture. Instead of packing every matching
@@ -68,7 +69,8 @@ Commands:
                        a hinting list of <hash> <title> matches to pick from.
     /search_transcript <keyword>
                        Alias for /transcript <keyword>.
-    /learn <hash|url>  Fetch, rewrite, chunk, embed, and tag a video.
+    /youtube learn <hash|url>
+                       Fetch, rewrite, chunk, embed, and tag a video.
     /wiki <word>       Look up a Wikipedia summary for <word>.
     /dict <word>       Show English dictionary definitions for <word> from a
                        local Ollama model, plus an explanation of its use and
@@ -1268,7 +1270,8 @@ def main() -> None:
     )
     print(
         "Commands: /tag [tag], /refresh, /transcript <hash|keyword>, "
-        "/learn <hash|url>, /wiki <word>, /dict <word>, /depth <n|auto>, "
+        "/youtube learn <hash|url>, /wiki <word>, /dict <word>, "
+        "/depth <n|auto>, "
         "/memory, /status, /sources, /exit. Tab completes them."
     )
 
@@ -1316,8 +1319,15 @@ def main() -> None:
                     print(
                         f"Now answering only from transcript {transcript!r}."
                     )
-            elif name == "/learn":
-                value = argument.strip()
+            elif name == "/youtube":
+                subcommand, _, subargument = argument.partition(" ")
+                subcommand = subcommand.strip().lower()
+                value = subargument.strip()
+                if subcommand != "learn":
+                    print(
+                        "Usage: /youtube learn <youtube_video_hash|url>"
+                    )
+                    continue
                 if not value:
                     try:
                         value = session.prompt("Video hash or URL: ").strip()
@@ -1325,7 +1335,10 @@ def main() -> None:
                         print()
                         continue
                     if not value:
-                        print("Usage: /learn <youtube_video_hash|url>")
+                        print(
+                            "Usage: /youtube learn "
+                            "<youtube_video_hash|url>"
+                        )
                         continue
 
                 video_id = base.learn_video(value)
@@ -1419,7 +1432,8 @@ def main() -> None:
                 print(
                     f"Unknown command: {name}. "
                     "Try /tag [tag], /refresh, /transcript <hash|keyword>, "
-                    "/learn <hash|url>, /wiki <word>, /dict <word>, "
+                    "/youtube learn <hash|url>, /wiki <word>, "
+                    "/dict <word>, "
                     "/depth <n|auto>, /memory, /status, /sources, /exit."
                 )
             continue

@@ -59,7 +59,8 @@ Commands:
                        a hinting list of <hash> <title> matches to pick from.
     /search_transcript <keyword>
                        Alias for /transcript <keyword>.
-    /learn <hash|url>  Fetch, rewrite, chunk, embed, and tag a video.
+    /youtube learn <hash|url>
+                       Fetch, rewrite, chunk, embed, and tag a video.
     /wiki <question>   For a narrow fact question, search the full Wikipedia
                        article excerpts with ag and answer directly. Otherwise
                        output the summary for each main entity.
@@ -825,7 +826,7 @@ COMMANDS = {
     "/refresh": "reload all trunks for the current tag",
     "/transcript": "use one transcript by hash/URL or search titles with ag",
     "/search_transcript": "alias for /transcript <keyword> (ag title search)",
-    "/learn": "learn a YouTube video (hash or URL)",
+    "/youtube": "YouTube video commands: /youtube learn <hash|url>",
     "/ask": "ask a quick question directly (no knowledge-base retrieval)",
     "/wiki": "answer narrow fact questions from Wikipedia article excerpts, else show entity summaries",
     "/wiki_article": "print the full Wikipedia article for each main entity of <question>",
@@ -837,6 +838,11 @@ COMMANDS = {
     "/exit": "leave the chatbot",
     "/quit": "leave the chatbot",
     "/q": "leave the chatbot",
+}
+
+# Subcommands grouped under /youtube.
+YOUTUBE_SUBCOMMANDS = {
+    "learn": "fetch, rewrite, chunk, embed, and tag one video",
 }
 
 
@@ -1097,7 +1103,7 @@ def load_chunks(
     if not chunks:
         sys.exit(
             f"No trunk files found for {scope} in {OUTPUT_DIR}\n"
-            "Run: python3 learn.py <youtube_video_hash>"
+            "Run: python3 youtube_video_learn.py <youtube_video_hash>"
         )
 
     details = []
@@ -1320,6 +1326,15 @@ class CommandCompleter(Completer):
                 for video_id in available_video_ids():
                     if video_id.startswith(prefix):
                         yield Completion(video_id, start_position=-len(prefix))
+            elif name.lower() == "/youtube":
+                for subcommand, description in YOUTUBE_SUBCOMMANDS.items():
+                    if subcommand.startswith(prefix):
+                        yield Completion(
+                            subcommand,
+                            start_position=-len(prefix),
+                            display=subcommand,
+                            display_meta=description,
+                        )
             return
         for command in sorted(COMMANDS):
             if command.startswith(text):
@@ -1419,7 +1434,7 @@ def prompt_for_video_id() -> str:
             return video_id
         print(
             f"Unknown transcript: {video_id!r}. "
-            "Type a video id with trunks, or use /learn first."
+            "Type a video id with trunks, or use /youtube learn first."
         )
 
 
@@ -1563,7 +1578,8 @@ def make_prompt_session(
             "/tag",
             "/transcript",
             "/search_transcript",
-            "/learn",
+            "/youtube",
+            "/youtube learn",
             "/wiki",
             "/wiki_article",
             "/dict",
@@ -3998,15 +4014,16 @@ def run_learn_step(script: str, argv: list[str]) -> bool:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-        print("\n/learn interrupted.", file=sys.stderr)
+        print("\n/youtube learn interrupted.", file=sys.stderr)
         return False
     except OSError as exc:
-        print(f"/learn: could not run {script}: {exc}", file=sys.stderr)
+        print(f"/youtube learn: could not run {script}: {exc}", file=sys.stderr)
         return False
 
     if returncode != 0:
         print(
-            f"/learn aborted: {script} failed with exit code {returncode}",
+            f"/youtube learn aborted: {script} failed with exit code "
+            f"{returncode}",
             file=sys.stderr,
         )
         return False
@@ -4014,16 +4031,17 @@ def run_learn_step(script: str, argv: list[str]) -> bool:
 
 
 def learn_video(value: str) -> str | None:
-    """Run the learn.py pipeline for a video hash/URL, streaming its output.
+    """Run the youtube_video_learn.py pipeline for a video hash/URL.
 
     Returns the normalized video id on success, or None when the input is
     invalid or a pipeline step fails.
     """
     try:
-        import learn
-    except ImportError as exc:  # pragma: no cover - learn.py ships alongside
+        import youtube_video_learn as learn
+    except ImportError as exc:  # pragma: no cover - ships alongside
         print(
-            f"/learn is unavailable: cannot import learn.py ({exc})",
+            f"/youtube learn is unavailable: cannot import "
+            f"youtube_video_learn.py ({exc})",
             file=sys.stderr,
         )
         return None
@@ -4031,17 +4049,17 @@ def learn_video(value: str) -> str | None:
     try:
         video_id = learn.extract_video_hash(value)
     except ValueError as exc:
-        print(f"/learn: {exc}", file=sys.stderr)
+        print(f"/youtube learn: {exc}", file=sys.stderr)
         return None
 
-    print(f"/learn: {video_id}")
+    print(f"/youtube learn: {video_id}")
     for script, script_args in learn.STEPS:
         argv = [arg.replace("<hash>", video_id) for arg in script_args]
         print(f"\n=== {script} {' '.join(argv)} ===", flush=True)
         if not run_learn_step(script, argv):
             return None
 
-    print(f"\n/learn: {video_id} added to the knowledge base.")
+    print(f"\n/youtube learn: {video_id} added to the knowledge base.")
     return video_id
 
 
@@ -4122,11 +4140,11 @@ def extract_transcript_video_id(value: str) -> str | None:
     """Accept a bare video id or YouTube URL and return the video id."""
     value = value.strip()
     try:
-        import learn
+        import youtube_video_learn as learn
 
         return learn.extract_video_hash(value)
     except (ImportError, ValueError):
-        # learn.py may be unavailable; still accept a bare 11-character id.
+        # youtube_video_learn.py may be unavailable; still accept a bare id.
         return value if re.fullmatch(r"[A-Za-z0-9_-]{11}", value) else None
 
 
@@ -4181,7 +4199,7 @@ def switch_transcript(
             if video_id not in video_ids:
                 print(
                     f"No trunk files for transcript {video_id!r}. "
-                    "Use /learn first."
+                    "Use /youtube learn first."
                 )
                 return None
             return activate_transcript(video_id, current_chunks)
@@ -4332,7 +4350,7 @@ def search_and_switch_transcript(
     if not usable:
         print(
             f"Found {len(matches)} title match(es) for {keyword!r}, but none "
-            "have trunks. Use /learn first."
+            "have trunks. Use /youtube learn first."
         )
         return None
     if skipped:
@@ -4511,25 +4529,32 @@ def answer(
 
     started = time.monotonic()
     search_question = question
-    if contains_simplified_chinese(question):
-        try:
-            search_question = translate_to_english(question)
-        except RuntimeError as exc:
-            _warn(
-                f"Warning: could not translate the question for BM25 "
-                f"retrieval: {exc}"
-            )
+    expansion = ""
+    expansion_started = started
+    expansion_done = started
+    if not use_all_chunks:
+        # The caller already selected the evidence, so there is no BM25 query
+        # to translate or expand. Skipping both avoids needless small-model
+        # calls before streaming an iterative or prebuilt context.
+        if contains_simplified_chinese(question):
+            try:
+                search_question = translate_to_english(question)
+            except RuntimeError as exc:
+                _warn(
+                    f"Warning: could not translate the question for BM25 "
+                    f"retrieval: {exc}"
+                )
 
-    expansion_started = time.monotonic()
-    try:
-        expansion = expand_query(search_question)
-    except RuntimeError as exc:
-        expansion = ""
-        _warn(
-            f"Warning: query expansion failed; searching with the original "
-            f"question only: {exc}"
-        )
-    expansion_done = time.monotonic()
+        expansion_started = time.monotonic()
+        try:
+            expansion = expand_query(search_question)
+        except RuntimeError as exc:
+            expansion = ""
+            _warn(
+                f"Warning: query expansion failed; searching with the original "
+                f"question only: {exc}"
+            )
+        expansion_done = time.monotonic()
 
     effective_budget = max_context_tokens
     if (
@@ -4954,7 +4979,7 @@ def main() -> None:
     )
     print(
         "Commands: /tag [tag], /refresh, /transcript <hash|keyword>, "
-        "/learn <hash|url>, /ask <question>, /wiki <question>, "
+        "/youtube learn <hash|url>, /ask <question>, /wiki <question>, "
         "/wiki_article <question>, /dict <word>, /depth <n|auto>, "
         "/memory, /status, /sources, /benchmark [on|off], /exit. "
         "Tab completes them."
@@ -5008,8 +5033,15 @@ def main() -> None:
                     print(
                         f"Now answering only from transcript {transcript!r}."
                     )
-            elif name == "/learn":
-                value = argument.strip()
+            elif name == "/youtube":
+                subcommand, _, subargument = argument.partition(" ")
+                subcommand = subcommand.strip().lower()
+                value = subargument.strip()
+                if subcommand != "learn":
+                    print(
+                        "Usage: /youtube learn <youtube_video_hash|url>"
+                    )
+                    continue
                 if not value:
                     try:
                         value = session.prompt("Video hash or URL: ").strip()
@@ -5017,7 +5049,10 @@ def main() -> None:
                         print()
                         continue
                     if not value:
-                        print("Usage: /learn <youtube_video_hash|url>")
+                        print(
+                            "Usage: /youtube learn "
+                            "<youtube_video_hash|url>"
+                        )
                         continue
 
                 video_id = learn_video(value)
@@ -5195,7 +5230,7 @@ def main() -> None:
                 print(
                     f"Unknown command: {name}. "
                     "Try /tag [tag], /refresh, /transcript <hash|keyword>, "
-                    "/learn <hash|url>, /ask <question>, /wiki <question>, "
+                    "/youtube learn <hash|url>, /ask <question>, /wiki <question>, "
                     "/wiki_article <question>, /dict <word>, "
                     "/depth <n|auto>, /memory, /status, /sources, "
                     "/benchmark [on|off], /exit."

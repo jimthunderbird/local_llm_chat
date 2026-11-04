@@ -236,7 +236,7 @@
 <pre><code>(tag, transcript, depth, max_context_tokens,
  answer_language, progressive, normalize_question(question))</code></pre>
 <p><code>AnswerCache</code> <span class="pill">chat.py:411</span> is a 32-entry LRU of complete answers, each with its source list and estimated context size. On a hit, the cached answer is reprinted, sources are restored, and benchmark stats are filled with zeroes plus <code>cached=True</code>. No retrieval, expansion, filter, or model call occurs.</p>
-<p>The cache is cleared by <code>/tag</code>, <code>/refresh</code>, <code>/transcript</code>, <code>/learn</code>, and every <code>/depth</code> change.</p>
+<p>The cache is cleared by <code>/tag</code>, <code>/refresh</code>, <code>/transcript</code>, <code>/youtube learn</code>, and every <code>/depth</code> change.</p>
 
 <h3>3.4 Query expansion</h3>
 <p><code>expand_query()</code> <span class="pill">chat.py:1346</span> sends the (possibly translated) question to <code>qwen3:1.7b</code>:</p>
@@ -366,7 +366,7 @@ tokenized_documents.append(tokenize(document))</code></pre>
 <ul>
   <li>unions the video ids from every <code>./tags/*</code> file;</li>
   <li>loads the corresponding trunks with the normal loader, suppressing its progress output;</li>
-  <li>caches the union and invalidates it when any tag file’s mtime changes or after <code>/learn</code>;</li>
+  <li>caches the union and invalidates it when any tag file’s mtime changes or after <code>/youtube learn</code>;</li>
   <li>re-runs the same expansion + BM25 + filter pipeline over the larger corpus.</li>
 </ul>
 <p>If fallback finds chunks, the chatbot prints a note such as:</p>
@@ -511,7 +511,7 @@ tokenized_documents.append(tokenize(document))</code></pre>
   <tr><td><code>/transcript &lt;hash|url&gt;</code></td><td>Switch to one video; disable cross-tag fallback.</td><td>Yes (one video)</td><td>Yes</td></tr>
   <tr><td><code>/transcript &lt;keyword&gt;</code></td><td>Search <code>*.title</code> with <code>ag</code>, then choose from a hint list.</td><td>Yes (one video)</td><td>Yes</td></tr>
   <tr><td><code>/search_transcript …</code></td><td>Alias for the keyword form.</td><td>Yes (one video)</td><td>Yes</td></tr>
-  <tr><td><code>/learn &lt;hash|url&gt;</code></td><td>Fetch → rewrite → chunk → embed → tag. Reloads only if the video belongs to the current scope.</td><td>Conditionally</td><td>Yes</td></tr>
+  <tr><td><code>/youtube learn &lt;hash|url&gt;</code></td><td>Fetch → rewrite → chunk → embed → tag. Reloads only if the video belongs to the current scope.</td><td>Conditionally</td><td>Yes</td></tr>
   <tr><td><code>/wiki &lt;word&gt;</code></td><td>Wikipedia REST summary.</td><td>No</td><td>No</td></tr>
   <tr><td><code>/dict &lt;word&gt;</code></td><td>Local-model dictionary entry; also explains the word’s use in the latest answer when present.</td><td>No</td><td>No</td></tr>
   <tr><td><code>/depth &lt;n|auto|default&gt;</code></td><td>Fixed top-N BM25 or adaptive selection.</td><td>No</td><td>Yes</td></tr>
@@ -530,7 +530,7 @@ tokenized_documents.append(tokenize(document))</code></pre>
   <li><strong>Query expansion failure:</strong> warning; retrieval uses the original question only.</li>
   <li><strong>Filter failure / unparseable output:</strong> keep unfiltered BM25 candidates.</li>
   <li><strong>Filter returns <code>NONE</code>:</strong> try cross-tag fallback unless in transcript scope; if still empty, keep the top 3 BM25 candidates rather than refuse.</li>
-  <li><strong>No trunks in scope:</strong> <code>load_chunks()</code> exits with a hint to run <code>learn.py</code>.</li>
+  <li><strong>No trunks in scope:</strong> <code>load_chunks()</code> exits with a hint to run <code>youtube_video_learn.py</code>.</li>
   <li><strong>Trunk read failure during context build:</strong> that chunk is skipped; if no text remains, <code>answer()</code> reports that it could not read matching contents.</li>
   <li><strong>Model leaks chunk citations or a Supporting Evidence section:</strong> streaming filters and a final post-pass remove them.</li>
   <li><strong>Stale cached answer:</strong> the cache key includes tag, transcript, depth, token budget, language, progressive flag, and normalized question, so configuration or scope changes cannot reuse an old answer.</li>
@@ -576,7 +576,7 @@ Pick a tag:           python3 chat.py --tag
 Adaptive retrieval:   /depth auto
 Fixed depth:          /depth 40
 Single transcript:    /transcript &lt;hash|url|keyword&gt;
-Learn a video:        /learn &lt;hash|url&gt;   (or python3 learn.py ...)
+Learn a video:        /youtube learn &lt;hash|url&gt;   (or python3 youtube_video_learn.py ...)
 Source list:          /sources
 Metrics:              /benchmark [on|off]
 Memory report:        /memory</code></pre>

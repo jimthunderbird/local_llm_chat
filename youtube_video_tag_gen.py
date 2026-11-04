@@ -2,9 +2,9 @@
 """Tag YouTube knowledge videos with Ollama.
 
 Usage:
-    python3 generate_tags.py
-    python3 generate_tags.py --youtube_video_hash <youtube_video_hash>
-    python3 generate_tags.py --tag <tag_name>
+    python3 youtube_video_tag_gen.py
+    python3 youtube_video_tag_gen.py --youtube_video_hash <youtube_video_hash>
+    python3 youtube_video_tag_gen.py --tag <tag_name>
 
 Logic:
     - Read every tag from ./tags (one tag per file).
@@ -188,7 +188,7 @@ def load_title_for_hash(video_hash):
     if not title_path.is_file():
         sys.exit(
             f"Title file not found: {title_path}\n"
-            "Run learn.py for this video first so its title is available."
+            "Run youtube_video_learn.py for this video first so its title is available."
         )
 
     try:

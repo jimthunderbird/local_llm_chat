@@ -120,7 +120,7 @@ make_cache_key() includes:
 AnswerCache is a 32-entry LRU. On a hit the cached answer and source list are
 returned without retrieval or model calls; benchmark stats are filled with
 zeroes and cached=True. The cache is cleared by /tag, /refresh, /transcript,
-/learn, and /depth changes.
+/youtube learn, and /depth changes.
 
 3.4 Query expansion
 -------------------
@@ -369,7 +369,8 @@ History
 /transcript <hash|url>  Use one video's trunks (explicit scope, no fallback).
 /transcript <keyword>   Search *.title with ag, then choose from a hint list.
 /search_transcript ...  Alias for the keyword form.
-/learn <hash|url>       Run fetch -> rewrite -> chunk -> embed -> tag; reload
+/youtube learn <hash|url>
+                       Run fetch -> rewrite -> chunk -> embed -> tag; reload
                         the new video if it belongs to the current scope.
 /wiki <word>            Wikipedia REST summary.
 /dict <word>            Local-model dictionary entry; also explains the word's
@@ -449,7 +450,7 @@ Rules of thumb
 
 The fallback index is built only when a question finds nothing in the active
 tag; after that it stays cached until a tag file changes. /tag, /refresh,
-/transcript, and /learn clear the old chunk list, the BM25 cache, and run
+/transcript, and /youtube learn clear the old chunk list, the BM25 cache, and run
 gc.collect(), but the paragraph/title LRU caches persist, so switching tags
 does not immediately return all text memory to the OS.
 
@@ -473,7 +474,7 @@ Why memory stays moderate
     - Filter failure/unparseable output: keep unfiltered BM25 candidates.
     - Filter returns NONE: try cross-tag fallback (unless in transcript scope);
       if still empty, keep the top 3 BM25 candidates rather than refuse.
-    - No trunks in scope: load_chunks exits with a hint to run learn.py.
+    - No trunks in scope: load_chunks exits with a hint to run youtube_video_learn.py.
     - Trunk read failure in context build: that chunk is skipped; if no text
       remains, answer() reports that it could not read matching contents.
     - Model leaks chunk citations or a Supporting Evidence section: streaming
@@ -491,7 +492,7 @@ Why memory stays moderate
     Adaptive retrieval:   /depth auto
     Fixed depth:          /depth 40
     Single transcript:    /transcript <hash|url|keyword>
-    Learn a video:        /learn <hash|url>   (or python3 learn.py ...)
+    Learn a video:        /youtube learn <hash|url>   (or python3 youtube_video_learn.py ...)
     Source list:          /sources
     Metrics:              /benchmark [on|off]
     Memory report:        /memory

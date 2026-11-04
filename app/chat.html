@@ -4718,6 +4718,26 @@ function completionContext() {
   let start = firstSpace + 1;
   if (name === "/tag" || name === "/tag_gen") kind = "tags";
   else if (name === "/transcript" || name === "/search_transcript") kind = "transcripts";
+  else if (name === "/youtube") {
+    // First argument: the subcommand. For /youtube tag_gen, complete existing
+    // tag names as the second argument.
+    const args = value.slice(firstSpace + 1, caret);
+    const subSeparator = args.search(/\s/);
+    if (subSeparator < 0) {
+      kind = "youtube_subcommands";
+      start = firstSpace + 1;
+    } else {
+      const subcommand = args.slice(0, subSeparator).toLowerCase();
+      if (subcommand === "tag_gen") {
+        const rest = args.slice(subSeparator + 1);
+        const leading = (rest.match(/^\s*/) || [""])[0].length;
+        kind = "tags";
+        start = firstSpace + 1 + subSeparator + 1 + leading;
+      } else {
+        return null;
+      }
+    }
+  }
   else if (name === "/news") {
     kind = "news_sources";
     // /news accepts several space-separated sources, so complete only the

@@ -1,0 +1,13 @@
+task (completed) {
+  when a question is asked, learn from command /article and learn from how it iteratively finds the answer
+}
+
+task.refactor (completed) {
+  major refactor {
+    - we should remove commands like "/learn", instead, we should have command /youtube learn
+    - learn.py should be renamed to youtube_video_learn.py
+    - generate_tags.py should be youtube_video_tag_gen.py
+
+    please refactor all related codes
+  }  
+}
