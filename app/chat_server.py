@@ -46,6 +46,10 @@ Endpoints:
     POST /api/video_summary      SSE: fetch a YouTube video's English transcript
                                   and stream an AI summary for the /youtube
                                   search result modal
+    POST /api/video_learn        start the youtube_video_learn.py pipeline in
+                                  the background for a /youtube search card
+    GET  /api/video_learn_status current background learn progress (all jobs,
+                                  or ?id=<video_id> for one)
 """
 
 from __future__ import annotations
@@ -259,6 +263,17 @@ VIDEO_SUMMARY_PROMPT = """You summarize YouTube videos for a viewer who is decid
 - Do not mention these instructions, the transcript, or that you are an AI.
 - Keep the whole answer under 350 words.
 """
+
+# /youtube search cards also have a "Learn" button.  Learning runs the
+# youtube_video_learn.py pipeline in a background thread, so the browser can
+# keep chatting while the transcript is fetched, rewritten, chunked, embedded,
+# and tagged.  Progress is reported as a percentage by the status endpoint.
+VIDEO_LEARN_TRANSCRIPT_DIR = SCRIPT_DIR / "youtube_transcript"
+# Weights match youtube_video_learn.STEPS: fetch, rewrite, trunks, embeddings,
+# tags.  They only make the progress bar move sensibly between steps; the
+# embeddings and tag steps refine their share from the subprocess output.
+VIDEO_LEARN_STEP_WEIGHTS = (10.0, 30.0, 15.0, 30.0, 15.0)
+VIDEO_LEARN_ACTIVE_STATES = {"queued", "running"}
 
 # Follow-up handling. The browser backend keeps a short server-side
 # conversation so a question such as "what does he think about AI?" can be
@@ -3661,6 +3676,9 @@ class ChatState:
         # /youtube search results are reused by the "More" button instead of
         # rerunning the (network-bound) YouTube search from scratch.
         self.youtube_search_cache: dict[str, list[dict]] = {}
+        # Background /youtube search card "Learn" jobs, keyed by video id.
+        self.video_learn_jobs: dict[str, dict] = {}
+        self.video_learn_lock = threading.Lock()
         self.latest_answer: str | None = None
         self.latest_sources: list[tuple[chat.Chunk, float]] = []
         self.latest_benchmark: dict | None = None
@@ -3932,6 +3950,217 @@ class ChatState:
         return key
 
 
+def video_is_learned(video_id: str) -> bool:
+    """A video counts as learned once its transcript and rewrite exist."""
+    return (
+        (VIDEO_LEARN_TRANSCRIPT_DIR / f"{video_id}.transcript").is_file()
+        and (VIDEO_LEARN_TRANSCRIPT_DIR / f"{video_id}.rewrite").is_file()
+    )
+
+
+def _video_learn_jobs_snapshot(
+    state: ChatState, video_id: str | None = None
+) -> list[dict] | dict | None:
+    """Return a thread-safe copy of one job or every known job."""
+    with state.video_learn_lock:
+        if video_id is not None:
+            job = state.video_learn_jobs.get(video_id)
+            return dict(job) if job is not None else None
+        return [dict(job) for job in state.video_learn_jobs.values()]
+
+
+def _update_video_learn_job(
+    state: ChatState, video_id: str, **fields
+) -> None:
+    with state.video_learn_lock:
+        job = state.video_learn_jobs.get(video_id)
+        if job is not None:
+            job.update(fields)
+
+
+def start_video_learn_job(
+    state: ChatState, video_id: str, title: str = ""
+) -> tuple[str, dict | None]:
+    """Start a background learn job, or report that one already exists."""
+    if video_is_learned(video_id):
+        return "learned", None
+
+    with state.video_learn_lock:
+        existing = state.video_learn_jobs.get(video_id)
+        if existing is not None and existing.get("status") in VIDEO_LEARN_ACTIVE_STATES:
+            return "running", dict(existing)
+        job = {
+            "id": video_id,
+            "title": title,
+            "status": "queued",
+            "progress": 0.0,
+            "step": "queued",
+            "message": "Queued for learning",
+            "error": "",
+            "learned": False,
+            "started_at": time.time(),
+            "finished_at": None,
+        }
+        state.video_learn_jobs[video_id] = job
+        snapshot = dict(job)
+
+    threading.Thread(
+        target=_run_video_learn_job,
+        args=(state, video_id),
+        name=f"video-learn-{video_id}",
+        daemon=True,
+    ).start()
+    return "started", snapshot
+
+
+def _run_video_learn_job(state: ChatState, video_id: str) -> None:
+    """Run youtube_video_learn.STEPS and publish progress to the UI."""
+    _update_video_learn_job(
+        state,
+        video_id,
+        status="running",
+        progress=0.0,
+        step="starting",
+        message="Starting learn pipeline",
+    )
+    try:
+        import youtube_video_learn as learn
+
+        steps = list(learn.STEPS)
+        if len(steps) == len(VIDEO_LEARN_STEP_WEIGHTS):
+            weights = list(VIDEO_LEARN_STEP_WEIGHTS)
+        else:
+            weights = [100.0 / len(steps)] * len(steps) if steps else []
+
+        progress = 0.0
+        for index, (script, script_args) in enumerate(steps):
+            start = progress
+            end = min(100.0, start + weights[index])
+            trunk_total = 0
+            tag_total = 0
+            if script == "create_embeddings.py":
+                trunk_total = len(
+                    list(VIDEO_LEARN_TRANSCRIPT_DIR.glob(f"{video_id}.*.trunk"))
+                )
+            _update_video_learn_job(
+                state,
+                video_id,
+                step=script,
+                progress=round(start, 1),
+                message=f"Running {script}",
+            )
+
+            argv = [arg.replace("<hash>", video_id) for arg in script_args]
+            process = subprocess.Popen(
+                [sys.executable, "-u", str(SCRIPT_DIR / script), *argv],
+                cwd=SCRIPT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            assert process.stdout is not None
+            try:
+                for line in process.stdout:
+                    clean = line.strip()
+                    if not clean:
+                        continue
+
+                    if script == "create_embeddings.py":
+                        match = re.match(r"\[(\d+)\]\s+Saved\s", clean)
+                        if match and trunk_total > 0:
+                            saved = min(int(match.group(1)), trunk_total)
+                            ratio = saved / trunk_total
+                            _update_video_learn_job(
+                                state,
+                                video_id,
+                                progress=round(start + (end - start) * ratio, 1),
+                                message=(
+                                    f"Embedding {saved}/{trunk_total} trunk(s)"
+                                ),
+                            )
+                            continue
+                    elif script == "youtube_video_tag_gen.py":
+                        match = re.search(r"against\s+(\d+)\s+tag\(s\)", clean)
+                        if match:
+                            tag_total = int(match.group(1))
+                        match = re.match(r"\[(\d+)\]", clean)
+                        if match and tag_total > 0:
+                            checked = min(int(match.group(1)), tag_total)
+                            ratio = checked / tag_total
+                            _update_video_learn_job(
+                                state,
+                                video_id,
+                                progress=round(start + (end - start) * ratio, 1),
+                                message=(
+                                    f"Tagging {checked}/{tag_total} tag(s)"
+                                ),
+                            )
+                            continue
+
+                    _update_video_learn_job(
+                        state, video_id, message=clean[:200]
+                    )
+                returncode = process.wait()
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+
+            if returncode != 0:
+                raise RuntimeError(
+                    f"{script} failed with exit code {returncode}"
+                )
+            progress = end
+            _update_video_learn_job(
+                state,
+                video_id,
+                progress=round(progress, 1),
+                message=f"Finished {script}",
+            )
+
+        _update_video_learn_job(
+            state,
+            video_id,
+            status="done",
+            progress=100.0,
+            step="done",
+            message="Video learned",
+            learned=True,
+            finished_at=time.time(),
+        )
+        _refresh_knowledge_after_learn(state, video_id)
+    except Exception as exc:
+        _update_video_learn_job(
+            state,
+            video_id,
+            status="error",
+            message="Learn failed",
+            error=str(exc),
+            finished_at=time.time(),
+        )
+
+
+def _refresh_knowledge_after_learn(state: ChatState, video_id: str) -> None:
+    """Make a newly learned video available without restarting the server."""
+    try:
+        with state.lock:
+            chat.invalidate_all_tagged_chunks()
+            state.cache.clear()
+            if state.article_path is not None or state.transcript is not None:
+                return
+            if not chat.video_is_tagged(video_id, state.tag):
+                return
+            chunks, _printed, error = load_chunks_captured(tag=state.tag)
+            if error or chunks is None:
+                return
+            state.replace_chunks(chunks)
+    except Exception:
+        # A failed cache refresh must not turn a successful learn into an
+        # error; /refresh and the next server start can retry it.
+        pass
+
+
 class ChatRequestHandler(BaseHTTPRequestHandler):
     """One HTTP handler per request; SSE responses stream from Ollama."""
 
@@ -4053,6 +4282,31 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/state":
             with self.state.lock:
                 self._send_json(self.state.snapshot(include_history=True))
+            return
+        if path == "/api/video_learn_status":
+            params = parse_qs(parsed.query)
+            video_id = (params.get("id") or [""])[0].strip()
+            if video_id and not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                self._send_error_json("Invalid YouTube video id", 400)
+                return
+            if video_id:
+                job = _video_learn_jobs_snapshot(self.state, video_id)
+                if job is not None:
+                    self._send_json(job)
+                    return
+                learned = video_is_learned(video_id)
+                self._send_json(
+                    {
+                        "id": video_id,
+                        "status": "learned" if learned else "idle",
+                        "progress": 100.0 if learned else 0.0,
+                        "learned": learned,
+                    }
+                )
+                return
+            self._send_json(
+                {"jobs": _video_learn_jobs_snapshot(self.state) or []}
+            )
             return
         if path == "/api/autocomplete":
             params = parse_qs(parsed.query)
@@ -4314,6 +4568,25 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             self._handle_snippet_question(payload)
+            return
+        if parsed.path == "/api/video_learn":
+            payload = self._read_json()
+            if payload is None:
+                return
+            video_id = str(payload.get("id") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                self._send_error_json("Missing or invalid YouTube video id", 400)
+                return
+            title = str(payload.get("title") or "").strip()
+            status, job = start_video_learn_job(
+                self.state, video_id, title=title
+            )
+            response = {"id": video_id, "status": status}
+            if status == "learned":
+                response.update(progress=100.0, learned=True)
+            else:
+                response["job"] = job
+            self._send_json(response)
             return
         if parsed.path == "/api/video_summary":
             payload = self._read_json()

@@ -1175,7 +1175,9 @@
   }
   .video-actions {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
+    gap: 6px;
     margin-top: 7px;
   }
   .video-summary-btn {
@@ -1188,7 +1190,33 @@
     font-size: 11px;
     cursor: pointer;
   }
-  .video-summary-btn:hover { border-color: var(--accent-2); color: #fff; }
+  .video-summary-btn:hover:not(:disabled) { border-color: var(--accent-2); color: #fff; }
+  .video-summary-btn:disabled { opacity: .65; cursor: wait; }
+  .video-learn-progress { margin-top: 7px; }
+  .video-learn-progress[hidden] { display: none; }
+  .video-learn-track {
+    height: 6px;
+    background: #0a121a;
+    border: 1px solid #30465d;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .video-learn-fill {
+    width: 0%;
+    height: 100%;
+    background: var(--accent-2);
+    transition: width .25s ease;
+  }
+  .video-learn-label {
+    margin-top: 3px;
+    color: var(--dim);
+    font-size: 10.5px;
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .video-learn-label.is-error { color: var(--warn); }
   .video-more-row {
     display: flex;
     justify-content: center;
@@ -1313,6 +1341,62 @@
   #video-summary-error { margin-bottom: 8px; }
   #video-summary-error[hidden] { display: none; }
   .video-summary .markdown p:first-child { margin-top: 0; }
+
+  /* Small centered modal used when a /youtube search video is already learned. */
+  #learn-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 59;
+    background: rgba(2, 6, 10, .78);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  #learn-panel[hidden] { display: none; }
+  .learn-modal-card {
+    width: min(480px, 100%);
+    background: #0d151e;
+    border: 1px solid #2b4056;
+    border-radius: 10px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.7);
+    overflow: hidden;
+  }
+  .learn-modal-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 14px;
+    background: #101b26;
+    border-bottom: 1px solid #223344;
+    user-select: none;
+  }
+  .learn-modal-title {
+    flex: 1;
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 14px;
+    line-height: 1.35;
+  }
+  .learn-modal-body {
+    padding: 16px 18px 18px;
+    color: #cfdae5;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .learn-modal-body p { margin: 0; }
+  #learn-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+    user-select: none;
+  }
+  #learn-close:hover { color: var(--text); }
   .news-translate { flex: 0 0 auto; margin-top: 2px; }
   #news-translation {
     margin-top: 15px;
@@ -1593,6 +1677,18 @@
   </div>
 </div>
 
+<div id="learn-panel" hidden>
+  <div class="learn-modal-card" role="dialog" aria-modal="true" aria-labelledby="learn-modal-title">
+    <div class="learn-modal-head">
+      <div id="learn-modal-title" class="learn-modal-title">Video already learned</div>
+      <button id="learn-close" type="button" title="Close (Esc)">×</button>
+    </div>
+    <div class="learn-modal-body">
+      <p id="learn-message"></p>
+    </div>
+  </div>
+</div>
+
 <div id="line-help-panel" hidden>
   <div class="line-help-card" role="dialog" aria-modal="true" aria-labelledby="line-help-title">
     <div class="line-help-head">
@@ -1697,6 +1793,8 @@ const videoSummaryEl = $("#video-summary");
 const videoSummaryLoadingEl = $("#video-summary-loading");
 const videoSummaryErrorEl = $("#video-summary-error");
 const videoSummaryContentEl = $("#video-summary-content");
+const learnPanelEl = $("#learn-panel");
+const learnMessageEl = $("#learn-message");
 const lineHelpPanel = $("#line-help-panel");
 const lineHelpTitleEl = $("#line-help-title");
 const lineHelpLangEl = $("#line-help-lang");
@@ -3877,6 +3975,12 @@ function videoEmbedUrl(videoId, autoplay) {
 
 const YOUTUBE_SEARCH_PAGE_SIZE = 6;
 
+// Background "Learn" jobs for /youtube search cards, keyed by video id.  The
+// server owns the actual pipeline; this map only keeps the latest progress so
+// cards can be rebuilt (for example by the More button) without losing it.
+const videoLearnState = new Map();
+let videoLearnPollTimer = null;
+
 function normalizeVideoItems(rawItems) {
   return (Array.isArray(rawItems) ? rawItems : [])
     .map((item) => ({
@@ -4041,7 +4145,39 @@ function renderVideoResults(entry) {
       openVideoModal(item, "summary");
     });
     actions.appendChild(summaryBtn);
+
+    const learnBtn = document.createElement("button");
+    learnBtn.type = "button";
+    learnBtn.className = "video-summary-btn video-learn-btn";
+    learnBtn.textContent = "Learn";
+    learnBtn.title = "Learn this video in the background";
+    learnBtn.dataset.videoLearnId = item.id;
+    learnBtn.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+    });
+    learnBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      startVideoLearn(item);
+    });
+    updateVideoLearnButton(learnBtn, videoLearnState.get(item.id));
+    actions.appendChild(learnBtn);
     meta.appendChild(actions);
+
+    const learnProgress = document.createElement("div");
+    learnProgress.className = "video-learn-progress";
+    learnProgress.dataset.videoLearnId = item.id;
+    const learnTrack = document.createElement("div");
+    learnTrack.className = "video-learn-track";
+    const learnFill = document.createElement("div");
+    learnFill.className = "video-learn-fill";
+    learnTrack.appendChild(learnFill);
+    const learnLabel = document.createElement("div");
+    learnLabel.className = "video-learn-label";
+    learnProgress.appendChild(learnTrack);
+    learnProgress.appendChild(learnLabel);
+    applyVideoLearnUi(learnProgress, videoLearnState.get(item.id));
+    meta.appendChild(learnProgress);
 
     card.appendChild(thumb);
     card.appendChild(meta);
@@ -4073,6 +4209,180 @@ function renderVideoResults(entry) {
     container.appendChild(errorEl);
   }
 }
+
+function updateVideoLearnButton(button, state) {
+  if (!button) return;
+  const status = state?.status;
+  if (status === "running" || status === "queued") {
+    button.disabled = true;
+    button.textContent = "Learning…";
+    return;
+  }
+  button.disabled = false;
+  if (status === "error") button.textContent = "Retry";
+  else if (status === "done" || status === "learned") button.textContent = "Learned";
+  else button.textContent = "Learn";
+}
+
+function videoLearnPercent(state) {
+  if (state?.status === "done" || state?.status === "learned") return 100;
+  const value = Number(state?.progress);
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
+}
+
+function applyVideoLearnUi(container, state) {
+  if (!container) return;
+  const fill = container.querySelector(".video-learn-fill");
+  const label = container.querySelector(".video-learn-label");
+  if (!fill || !label) return;
+  if (!state || state.status === "idle" || state.status === "learned") {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+  const percent = videoLearnPercent(state);
+  fill.style.width = `${percent}%`;
+
+  let text;
+  if (state.status === "done") {
+    text = "Learned · 100%";
+  } else if (state.status === "error") {
+    text = state.error ? `Learn failed: ${state.error}` : "Learn failed";
+  } else if (state.status === "queued") {
+    text = "Queued for learning · 0%";
+  } else {
+    const step = String(state.step || "Learning")
+      .replace(/\.py$/i, "")
+      .replace(/_/g, " ");
+    text = `${step} · ${Math.round(percent)}%`;
+  }
+  label.textContent = text;
+  label.title = text;
+  label.classList.toggle("is-error", state.status === "error");
+}
+
+function refreshVideoLearnUi(videoId) {
+  const state = videoLearnState.get(videoId);
+  for (const node of document.querySelectorAll(
+    `.video-learn-progress[data-video-learn-id="${videoId}"]`
+  )) {
+    applyVideoLearnUi(node, state);
+  }
+  for (const button of document.querySelectorAll(
+    `.video-learn-btn[data-video-learn-id="${videoId}"]`
+  )) {
+    updateVideoLearnButton(button, state);
+  }
+}
+
+function ensureVideoLearnPolling(delay = 600) {
+  if (videoLearnPollTimer) return;
+  videoLearnPollTimer = window.setTimeout(pollVideoLearnJobs, delay);
+}
+
+async function pollVideoLearnJobs() {
+  videoLearnPollTimer = null;
+  let active = false;
+  try {
+    const response = await fetch("/api/video_learn_status");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    const jobs = Array.isArray(data?.jobs) ? data.jobs : [];
+    for (const job of jobs) {
+      if (!job?.id) continue;
+      videoLearnState.set(job.id, job);
+      refreshVideoLearnUi(job.id);
+    }
+    active = jobs.some(
+      (job) => job?.status === "running" || job?.status === "queued"
+    );
+  } catch {
+    active = [...videoLearnState.values()].some(
+      (state) => state?.status === "running" || state?.status === "queued"
+    );
+  }
+  if (active) videoLearnPollTimer = window.setTimeout(pollVideoLearnJobs, 1000);
+}
+
+async function startVideoLearn(item) {
+  if (!item?.id) return;
+  const existing = videoLearnState.get(item.id);
+  if (existing?.status === "running" || existing?.status === "queued") return;
+
+  videoLearnState.set(item.id, {
+    id: item.id,
+    status: "queued",
+    progress: 0,
+    step: "checking",
+  });
+  refreshVideoLearnUi(item.id);
+
+  try {
+    const response = await fetch("/api/video_learn", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: item.id, title: item.title || "" }),
+    });
+    let data = null;
+    try {
+      data = await response.json();
+    } catch { /* handled below */ }
+    if (!response.ok) {
+      throw new Error(data?.error || `HTTP ${response.status}`);
+    }
+
+    if (data?.status === "learned") {
+      videoLearnState.set(item.id, {
+        id: item.id,
+        status: "learned",
+        progress: 100,
+        learned: true,
+        step: "done",
+      });
+      refreshVideoLearnUi(item.id);
+      showVideoLearnedModal(item);
+      return;
+    }
+
+    const job = data?.job || {
+      id: item.id,
+      status: data?.status || "queued",
+      progress: Number(data?.progress) || 0,
+      step: "queued",
+    };
+    videoLearnState.set(item.id, job);
+    refreshVideoLearnUi(item.id);
+    ensureVideoLearnPolling();
+  } catch (error) {
+    videoLearnState.set(item.id, {
+      id: item.id,
+      status: "error",
+      progress: 0,
+      error: error?.message || String(error),
+    });
+    refreshVideoLearnUi(item.id);
+    toast(`Could not start learning: ${error?.message || error}`);
+  }
+}
+
+function showVideoLearnedModal(item) {
+  if (!learnPanelEl) return;
+  const title = item?.title || item?.id || "This video";
+  learnMessageEl.textContent =
+    `“${title}” has already been learned, so its transcript, rewrite, ` +
+    "trunks, and embeddings are ready to use.";
+  learnPanelEl.hidden = false;
+}
+
+function closeVideoLearnedModal() {
+  if (learnPanelEl) learnPanelEl.hidden = true;
+}
+
+$("#learn-close").addEventListener("click", closeVideoLearnedModal);
+learnPanelEl.addEventListener("click", (event) => {
+  if (event.target === learnPanelEl) closeVideoLearnedModal();
+});
 
 /* ------------------------------------------------------------------ *
  *  /youtube search player + AI summary modal
@@ -5832,6 +6142,12 @@ function handleKeyDown(event) {
     return;
   }
 
+  if (!learnPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeVideoLearnedModal();
+    return;
+  }
+
   if (!newsSourcePicker.hidden && key === "Escape") {
     event.preventDefault();
     closeNewsSourcePicker();
@@ -6176,6 +6492,11 @@ document.addEventListener("keydown", (event) => {
   if (!videoPanelEl.hidden && key === "Escape") {
     event.preventDefault();
     closeVideoModal();
+    return;
+  }
+  if (!learnPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeVideoLearnedModal();
     return;
   }
   if (!newsSourcePicker.hidden && key === "Escape") {

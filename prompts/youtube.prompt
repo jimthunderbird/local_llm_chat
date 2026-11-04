@@ -1,3 +1,17 @@
+task.research.avoid_ip_blocking (completed) {
+  research only, save the research result to {directory_of_this_prompt}/../research/youtube/avoid_ip_blocking.html {
+    currently the youtube transcript fetching is blocked by youtube since the ip is from a cloud provider, how can we work around this issue
+  }
+}
+
+task.learn_video_button (completed) {
+  next to the "Summary" button of the video, add a new button "Learn", when click {
+    - perform the same action as ./youtube_video_learn.py, but run it in the background
+    - show a 0% to 100% progress bar on learning
+    - if the youtube video is already "learned" (meaning the related .rewrite file and .transcript file already exist), pop up a modal saying this video has been learned
+  }
+}
+
 task.more_videos_in_search (completed) {
   reference task.search_youtube_videos_details, underneath the list of 6 videos, add a button "More", when click {
     load another 6 videos

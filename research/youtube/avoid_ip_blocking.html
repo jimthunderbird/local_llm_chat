@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Working around YouTube transcript blocks on cloud IPs</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --ink: #e7e9ee;
+    --muted: #a4abb8;
+    --accent: #6aa6ff;
+    --accent-2: #7ee0b8;
+    --warn: #ffb454;
+    --bad: #ff6b6b;
+    --border: #2a2f3a;
+    --code: #0b0d11;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 48px 24px 96px; }
+  h1 { font-size: 2.1rem; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.02em; }
+  h2 { font-size: 1.45rem; margin: 56px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); letter-spacing: -0.01em; }
+  h3 { font-size: 1.12rem; margin: 32px 0 10px; color: var(--accent-2); }
+  p { margin: 12px 0; }
+  .sub { color: var(--muted); font-size: 0.95rem; margin: 0 0 28px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 0.88em; }
+  pre {
+    background: var(--code);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-size: 0.86rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; margin: 20px 0; }
+  .callout { border-left: 3px solid var(--accent); background: var(--panel); padding: 14px 18px; border-radius: 0 8px 8px 0; margin: 20px 0; }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.bad { border-left-color: var(--bad); }
+  .callout.good { border-left-color: var(--accent-2); }
+  table { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 0.92rem; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  tbody tr:hover { background: rgba(255,255,255,0.02); }
+  .tag { display: inline-block; font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+  .tag.free { color: var(--accent-2); border-color: rgba(126,224,184,0.35); }
+  .tag.paid { color: var(--warn); border-color: rgba(255,180,84,0.35); }
+  .tag.risky { color: var(--bad); border-color: rgba(255,107,107,0.35); }
+  .tag.recommended { color: var(--accent); border-color: rgba(106,166,255,0.4); }
+  .toc { columns: 2; column-gap: 32px; font-size: 0.92rem; }
+  .toc a { display: block; padding: 3px 0; color: var(--muted); }
+  .toc a:hover { color: var(--accent); }
+  ul, ol { padding-left: 24px; }
+  li { margin: 6px 0; }
+  .muted { color: var(--muted); }
+  .small { font-size: 0.85rem; }
+  .kbd { font-family: ui-monospace, Menlo, monospace; font-size: 0.82em; background: var(--panel-2); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 1px 6px; }
+  hr { border: 0; border-top: 1px solid var(--border); margin: 40px 0; }
+  @media (max-width: 720px) { .toc { columns: 1; } main { padding: 28px 16px 64px; } }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Working around YouTube transcript blocks on cloud IPs</h1>
+<p class="sub">Research note for <code>local_llm_chat</code> · 2026-11-04 · applies to <code>fetch_youtube_transcript.py</code>, <code>fetch_youtube_transcript.php</code>, <code>youtube_video_learn.py</code> and the <code>/youtube learn</code> flow.</p>
+
+<div class="callout">
+<strong>Question.</strong> Transcript fetching works from a laptop but fails from the cloud with
+<code>RequestBlocked</code>, <code>IpBlocked</code>, HTTP 429, or <code>Sign in to confirm you're not a bot</code>.
+What are the practical ways around it, and which one should this repository adopt?
+</div>
+
+<h2 id="tldr">1. TL;DR</h2>
+<p>
+YouTube decides whether to serve captions <em>per egress IP</em> (plus session/client fingerprint). It blocks most
+IP ranges whose owner is a cloud provider, and it rate-limits the <code>timedtext</code> endpoint hard. No amount of
+retrying from the same address fixes an address-level block, and changing libraries (python API → yt-dlp → PHP port)
+does not either, because they all leave from the same IP.
+</p>
+
+<table>
+<thead>
+<tr><th>Option</th><th>Fixes IP block?</th><th>Cost / effort</th><th>Fit for this repo</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td><strong>Run the fetch on a residential connection you already own</strong> (home Mac, Tailscale exit node, SSH tunnel)</td>
+  <td>Yes — it becomes a home IP</td>
+  <td><span class="tag free">free</span> low effort</td>
+  <td><span class="tag recommended">recommended first move</span></td>
+</tr>
+<tr>
+  <td><strong>Rotating residential proxy</strong> (Webshare residential, or any provider's rotating gateway)</td>
+  <td>Yes, per request — the only reliable scalable answer</td>
+  <td><span class="tag paid">~$5–10 / GB</span> medium</td>
+  <td><span class="tag recommended">recommended for unattended/cloud runs</span></td>
+</tr>
+<tr>
+  <td><strong>Hosted transcript API</strong> (Scavio, TranscriptFetch, Supadata, Apify actors…)</td>
+  <td>Yes — the vendor fetches from its own network</td>
+  <td><span class="tag paid">~$1–10 per 1k</span> low effort</td>
+  <td>Good fallback / one-off backfills</td>
+</tr>
+<tr>
+  <td><strong>yt-dlp + <code>curl_cffi</code> + JS runtime + PO token</strong>, optionally behind a proxy</td>
+  <td>Only with a residential exit; the extras fix <em>other</em> failures</td>
+  <td><span class="tag free">free</span> medium–high</td>
+  <td>Valuable second implementation, not a cure by itself</td>
+</tr>
+<tr>
+  <td><strong>Invidious / Piped public instances</strong></td>
+  <td>Sometimes; instances are themselves blocked or dead</td>
+  <td><span class="tag free">free</span> low</td>
+  <td>Opportunistic only</td>
+</tr>
+<tr>
+  <td><strong>Cookies from a signed-in account</strong></td>
+  <td>Temporarily; account will eventually be banned</td>
+  <td><span class="tag risky">account risk</span></td>
+  <td>Not recommended</td>
+</tr>
+<tr>
+  <td><strong>Download audio → local Whisper</strong></td>
+  <td>Fixes missing captions, not the IP block (audio download is blocked too)</td>
+  <td><span class="tag paid">compute</span> + proxy</td>
+  <td>Only for videos with no captions at all</td>
+</tr>
+<tr>
+  <td><strong>Official YouTube Data API v3 <code>captions.download</code></strong></td>
+  <td>N/A — only works for videos you own</td>
+  <td><span class="tag free">free</span></td>
+  <td>Not a workaround</td>
+</tr>
+</tbody>
+</table>
+
+<div class="callout good">
+<strong>Bottom line.</strong> Change <em>where the request exits from</em>, not <em>which library makes it</em>.
+For this repo: keep the existing Python/PHP fetchers, add (a) a residential egress path, (b) an env-var-driven
+proxy path with correct retry behaviour, (c) pacing + caching so we do not get rate-limited in the first place,
+and (d) a yt-dlp fallback. Do not make cookies or free proxies part of the design.
+</div>
+
+<h2 id="toc">Contents</h2>
+<nav class="toc">
+  <a href="#tldr">1. TL;DR</a>
+  <a href="#what-blocks">2. What is actually blocking us</a>
+  <a href="#diagnose">3. Diagnose in five minutes</a>
+  <a href="#options">4. The options in detail</a>
+  <a href="#repo">5. Concrete changes for this repo</a>
+  <a href="#code">6. Code snippets</a>
+  <a href="#cost">7. Cost and volume math</a>
+  <a href="#avoid">8. Things that look like fixes but are not</a>
+  <a href="#sources">9. Sources</a>
+</nav>
+
+<h2 id="what-blocks">2. What is actually blocking us</h2>
+
+<p>
+The transcript API is not a public, documented endpoint. It reads the video watch page / InnerTube player response,
+finds the caption tracks, and then downloads a signed <code>https://www.youtube.com/api/timedtext</code> URL. Each
+of those steps is independently gated, which is why the same error message can mean different things.
+</p>
+
+<h3>Error taxonomy</h3>
+<table>
+<thead><tr><th>Symptom</th><th>Real cause</th><th>What fixes it</th></tr></thead>
+<tbody>
+<tr>
+  <td><code>IpBlocked</code> / <code>RequestBlocked</code> / HTTP 429 on <code>timedtext</code></td>
+  <td>The egress IP has hit YouTube's rate limit or is on a cloud/datacenter range</td>
+  <td>Different egress IP (residential), slower pace, caching</td>
+</tr>
+<tr>
+  <td><code>Sign in to confirm you're not a bot</code> / <code>LOGIN_REQUIRED</code> / reCAPTCHA page</td>
+  <td>Bot wall on the watch/player request; strongly correlated with datacenter and burned IPs</td>
+  <td>Residential egress, valid client context/session; cookies only as a last resort</td>
+</tr>
+<tr>
+  <td><code>TranscriptsDisabled</code> / empty caption list from a datacenter IP</td>
+  <td>YouTube serves a 200 bot-check/consent page with no <code>captionTracks</code>; libraries misreport it as "disabled"</td>
+  <td>Check <code>playabilityStatus</code>, not just the caption list; change egress</td>
+</tr>
+<tr>
+  <td>Metadata works, caption body is 0 bytes</td>
+  <td>Missing browser TLS fingerprint / PO token; not an IP problem</td>
+  <td><code>curl_cffi</code>, JS runtime, correct player client (yt-dlp), or the Android/iOS InnerTube clients</td>
+</tr>
+<tr>
+  <td>429 that never clears after hours of idle</td>
+  <td>Hard block on that IP, not a short window</td>
+  <td>Rotate the IP; waiting does not help</td>
+</tr>
+<tr>
+  <td>Works for a few videos, then everything fails</td>
+  <td>Per-IP volume limit (guest sessions are roughly a few hundred requests/hour)</td>
+  <td>Pacing + jitter + spread over exits</td>
+</tr>
+</tbody>
+</table>
+
+<h3>Why a laptop works and a server does not</h3>
+<ul>
+  <li>Hosting networks publish their address blocks; classifying them costs YouTube nothing. Consumer ISP addresses look like ordinary viewers.</li>
+  <li>A fresh VM has no cookies, no viewing history, and often no PO token provider — extra bot signals even before the IP is considered.</li>
+  <li>YouTube has tightened <code>timedtext</code> rate limits; one residential IP can also get blocked after a short burst.</li>
+</ul>
+
+<h2 id="diagnose">3. Diagnose in five minutes</h2>
+
+<p>Run the same video from the failing host and from a residential connection. If it works at home, stop looking at the code — it is the address.</p>
+
+<pre><code># 1. Which address does the failing host actually use?
+curl -s https://api.ipify.org; echo
+curl -s https://ipinfo.io/org
+
+# 2. Minimal repro (Python library)
+python -c "from youtube_transcript_api import YouTubeTranscriptApi as A; print(A().fetch('jNQXAC9IVRw')[:2])"
+
+# 3. Same video through the PHP port
+php fetch_youtube_transcript.php jNQXAC9IVRw
+
+# 4. Is it the player response or the caption download?
+#    A 200 watch page with no captionTracks = bot/consent page, not "captions disabled".
+curl -s "https://www.youtube.com/watch?v=jNQXAC9IVRw&amp;hl=en&amp;gl=US" \
+  | grep -o '"playabilityStatus":{"status":"[A-Z_]*"' | head -1
+
+# 5. Does the residential IP work for the exact same video?
+#    (run step 2 on the laptop / home machine)
+</code></pre>
+
+<p class="small muted">
+Test video <code>jNQXAC9IVRw</code> ("Me at the zoo") is public, short, and has captions — a good canary.
+Pin a canary and run it after every change; a silent regression in the fetcher is otherwise indistinguishable from a block.
+</p>
+
+<h2 id="options">4. The options in detail</h2>
+
+<h3>4.1 Use a residential egress you already own <span class="tag free">free</span> <span class="tag recommended">best fit here</span></h3>
+<p>
+This project is a personal, local-first RAG tool. The simplest fix is to move the <em>fetch step</em> onto the same
+machine that already has a home connection — this working copy is on a Mac that is periodically online anyway.
+Two ways to expose it to a remote box:
+</p>
+<ul>
+  <li><strong>Tailscale exit node / subnet router:</strong> join the cloud box and the home Mac to the same tailnet, then route only the fetcher through the Mac. Per-process, no global VPN needed.</li>
+  <li><strong>SSH SOCKS tunnel:</strong> <code>ssh -N -D 1080 home-mac</code>, then point the fetcher at <code>socks5h://127.0.0.1:1080</code>. Easy to script, dies with the connection.</li>
+  <li><strong>Fetch at home, sync the artifacts:</strong> run <code>fetch_youtube_transcript.py</code> on the Mac and copy <code>youtube_transcript/&lt;id&gt;.transcript</code> and <code>.title</code> to the worker. The downstream steps (rewrite, trunks, embeddings) can run anywhere because they only call Ollama.</li>
+</ul>
+<p>
+Limit: a home IP gets rate-limited too if a playlist backfill fires hundreds of requests. Pace it (section 5.4).
+</p>
+
+<h3>4.2 Rotating residential proxies <span class="tag paid">paid</span> <span class="tag recommended">recommended for cloud/bulk</span></h3>
+<p>
+The upstream library's own recommendation. The important details:
+</p>
+<ul>
+  <li><strong>Residential, not "Static Residential" or "Proxy Server".</strong> Datacenter and static-residential exits get blocked just like the cloud host; the free Webshare tier uses Proxy Server and does not work.</li>
+  <li><strong>Rotation per attempt, not per connection kept alive.</strong> A pooled connection pinned to one IP defeats rotation. Webshare's config sets <code>prevent_keeping_connections_alive</code> for this reason.</li>
+  <li><strong>Retry actually matters.</strong> <code>WebshareProxyConfig</code> defaults to 10 retries when blocked. <code>GenericProxyConfig</code> defaults to 0 and keeps connections alive, so with another provider you must retry yourself and build a new client (new connection) per attempt.</li>
+  <li><strong>Known bug:</strong> in youtube-transcript-api 1.2.4, <code>Retry</code> does not include <code>POST</code> in <code>allowed_methods</code>, so a 429 on the InnerTube player POST is not retried/rotated even with the Webshare config; only the GET paths benefit. A manual retry loop around <code>fetch()</code> covers this.</li>
+  <li><strong>Bandwidth:</strong> residential proxies bill per GB. The player/watch pages cost roughly 0.3–0.4&nbsp;MB compressed per video; caption payloads are small. If you later download audio, that dominates.</li>
+  <li><strong>IPv4 vs IPv6:</strong> a whole IPv6 /64 is often treated as one reputation unit. Prefer IPv4 exits unless you know they are clean.</li>
+</ul>
+<p>
+Recommended shape for this repo: read credentials from the environment (<code>YT_PROXY_URL</code> or
+<code>WEBSHARE_PROXY_USERNAME</code>/<code>WEBSHARE_PROXY_PASSWORD</code>), leave it unset by default so local runs stay direct,
+and layer a retry loop with jitter on top.
+</p>
+
+<h3>4.3 Hosted transcript APIs <span class="tag paid">paid</span></h3>
+<p>
+The vendor fetches from its own network, so our IP never reaches YouTube. Typical pricing is $1–$10 per 1,000
+transcripts, with free tiers of 50–100 credits. This is the lowest-effort option and a good escape hatch when the
+proxy path breaks during a YouTube change, but it adds an API key, a rate limit, and a dependency on someone else's
+scraper. Reasonable as an explicit <em>fallback</em>, not the primary.
+</p>
+
+<h3>4.4 yt-dlp + browser impersonation + PO tokens <span class="tag free">free</span></h3>
+<p>
+yt-dlp is a strong second implementation because it exposes the player-client and subtitle machinery directly:
+</p>
+<ul>
+  <li><code>--skip-download --write-subs --write-auto-subs --sub-langs en --sub-format vtt</code> grabs only the captions.</li>
+  <li>Datacenter IPs hit the same bot wall. A proxy is still required on a server.</li>
+  <li><code>curl_cffi</code> gives a browser TLS fingerprint. Without it <code>timedtext</code> can return 0 bytes / 429 even through a working residential proxy — an easy misdiagnosis.</li>
+  <li>A JavaScript runtime (Deno by default, or Node via <code>--js-runtimes node</code>) is required by current builds and widens the usable client list.</li>
+  <li>A PO token provider (e.g. <code>bgutil-ytdlp-pot-provider</code>) helps <code>web</code>/<code>mweb</code> clients, but its own docs say a token <em>does not</em> bypass IP-based login restrictions; on datacenter IPs you still need a different exit.</li>
+  <li>Keep one IP per video (sticky sessions) or the media/caption URL can 403 mid-download.</li>
+  <li>Pacing presets: <code>--sleep-requests 0.75 --sleep-subtitles 5 --sleep-interval 10 --max-sleep-interval 20</code>.</li>
+</ul>
+
+<h3>4.5 Invidious / Piped public instances <span class="tag free">free</span></h3>
+<p>
+Public instances expose <code>/api/v1/captions/&lt;id&gt;</code> and similar endpoints, but they are themselves scrapers:
+instances get blocked, go down, or rate-limit. Treat them as opportunistic best-effort, never as the only path.
+Self-hosting an instance does not help — it still exits from the same blocked IP unless it is behind a residential
+connection or proxy.
+</p>
+
+<h3>4.6 Cookies <span class="tag risky">account risk</span></h3>
+<p>
+Authenticating with an account's cookies works for a while but YouTube eventually bans the account, and rotating
+residential IPs under a signed-in session is itself a bot signal. Use a throwaway account if you must, never a real
+one. Not a sensible default for a personal knowledge pipeline.
+</p>
+
+<h3>4.7 Audio + local speech-to-text</h3>
+<p>
+Robust to missing captions, but the <em>audio download</em> is subject to the same IP wall, so it does not replace a
+proxy. Cost is local compute (Whisper-class model) and the audio bandwidth through the proxy. Worth keeping as a
+last resort for videos where no caption track exists at all.
+</p>
+
+<div class="callout warn">
+<strong>Not a workaround:</strong> the official YouTube Data API v3 <code>captions.download</code> endpoint only works
+for videos the authenticated channel owns or can edit. It cannot fetch arbitrary public captions.
+</div>
+
+<h2 id="repo">5. Concrete changes for this repo</h2>
+
+<h3>5.1 One fetcher, a chain of providers</h3>
+<p>
+Today <code>fetch_youtube_transcript.py</code> calls <code>YouTubeTranscriptApi()</code> directly and the PHP port
+tries watch page → Android/iOS/WEB InnerTube → watch-page fallback. Wrap that in a single module with an ordered
+chain so behaviour is explicit and testable:
+</p>
+<ol>
+  <li><strong>Direct</strong> — current behaviour, for home/residential runs.</li>
+  <li><strong>Configured proxy</strong> — <code>WebshareProxyConfig</code> if Webshare env vars are set, otherwise <code>GenericProxyConfig</code> with our own retry loop.</li>
+  <li><strong>yt-dlp</strong> — only if installed and the first two raise a block/429; same proxy env var.</li>
+  <li><strong>Hosted API</strong> — only if <code>TRANSCRIPT_API_KEY</code> is set (explicit opt-in).</li>
+</ol>
+<p>
+Make the chain skip a provider whose prerequisite is missing, log which provider answered, and keep the same
+<code>.transcript</code> / <code>.title</code> output contract so <code>youtube_video_learn.py</code> needs no changes.
+</p>
+
+<h3>5.2 Classify errors before retrying</h3>
+<p>
+Retrying a hard IP block is pure latency. Branch on the exception type/message:
+</p>
+<pre><code>BLOCK_HINTS = ("blocking requests from your ip", "too many requests", "http 429",
+               "not a bot", "login_required", "captcha")
+
+def classify(exc: Exception) -&gt; str:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if "no english transcript" in text or "transcriptsdisabled" in text:
+        return "no_transcript"      # retry elsewhere, do not rotate
+    if any(h in text for h in BLOCK_HINTS):
+        return "blocked"            # rotate egress / back off hard
+    return "transient"              # maybe retry once</code></pre>
+
+<h3>5.3 PHP port: proxy + client ladder + pacing</h3>
+<p>
+<code>fetch_youtube_transcript.php</code> already rotates ANDROID → IOS → WEB player contexts, which is the right idea.
+Add:
+</p>
+<ul>
+  <li><code>CURLOPT_PROXY</code> / <code>CURLOPT_PROXYUSERPWD</code> from <code>YT_PROXY_URL</code>.</li>
+  <li>Detect <code>playabilityStatus.status</code> and the bot-wall text instead of treating "no caption tracks" as "disabled".</li>
+  <li>A jittered sleep between attempts; do not hammer the same endpoint.</li>
+  <li>Reuse the same proxy exit for the watch-page request and the caption download of a given video (sticky), or the signed caption URL can fail.</li>
+</ul>
+
+<h3>5.4 Pacing, caching, and batching</h3>
+<ul>
+  <li><strong>Cache first:</strong> if <code>youtube_transcript/&lt;id&gt;.transcript</code> exists, return it. <code>get_videos_in_playlist.py</code> already skips existing transcripts; mirror that check inside the fetchers so <code>/youtube learn</code> and retries are idempotent.</li>
+  <li><strong>Negative cache:</strong> remember videos that genuinely have no English captions so a playlist backfill does not retry them forever.</li>
+  <li><strong>Jitter:</strong> sleep 5–20&nbsp;s between videos in <code>learn_playlist</code>; randomise per request.</li>
+  <li><strong>Batch size:</strong> guest sessions are roughly a few hundred requests/hour per IP. A 50-video playlist should be spread over time, not fired at once.</li>
+  <li><strong>Single-flight:</strong> the UI's "Learn" button can be clicked twice; a per-video lock (file or in-process) prevents duplicate fetch/rewrite work.</li>
+</ul>
+
+<h3>5.5 Observability</h3>
+<p>
+Log one line per attempt: video id, provider, proxy label (never credentials), attempt number, elapsed time, error class.
+Add the canary from section 3 to the learn pipeline's health check. Without this, "YouTube changed something" and
+"our IP is blocked" look identical in the logs.
+</p>
+
+<h2 id="code">6. Code snippets</h2>
+
+<h3>6.1 Python: proxy config + manual retry (works for any provider)</h3>
+<pre><code>import os, random, time
+from youtube_transcript_api import YouTubeTranscriptApi, RequestBlocked
+from youtube_transcript_api.proxies import WebshareProxyConfig, GenericProxyConfig
+
+def make_api():
+    user = os.environ.get("WEBSHARE_PROXY_USERNAME")
+    pwd  = os.environ.get("WEBSHARE_PROXY_PASSWORD")
+    if user and pwd:
+        return YouTubeTranscriptApi(
+            proxy_config=WebshareProxyConfig(proxy_username=user, proxy_password=pwd)
+        )
+    url = os.environ.get("YT_PROXY_URL")          # http://user:pass@host:port
+    if url:
+        return YouTubeTranscriptApi(
+            proxy_config=GenericProxyConfig(http_url=url, https_url=url)
+        )
+    return YouTubeTranscriptApi()
+
+def fetch(video_id: str, tries: int = 5):
+    last = None
+    for attempt in range(tries):
+        api = make_api()          # a new client opens a new connection
+        try:
+            return api.fetch(video_id, languages=["en", "en-US", "en-GB"])
+        except RequestBlocked as exc:   # IpBlocked is a subclass
+            last = exc
+            time.sleep(min(30, 2 ** attempt) + random.uniform(0, 2))
+    raise last</code></pre>
+
+<div class="callout warn">
+<strong>Why a new client per attempt:</strong> with a rotating proxy, a kept-alive connection keeps its IP.
+<code>GenericProxyConfig</code> does not disable keep-alive and has <code>retries_when_blocked=0</code>, so the loop above
+is what actually rotates the exit. If you switch to Webshare, the built-in retry covers GETs; keep the loop anyway
+to work around the POST/429 issue described in section 4.2.
+</div>
+
+<h3>6.2 Python: residential egress through an SSH SOCKS tunnel</h3>
+<pre><code># On the cloud/worker host:
+#   ssh -N -D 127.0.0.1:1080 home-mac
+# Then:
+export YT_PROXY_URL="socks5h://127.0.0.1:1080"
+python3 youtube_video_learn.py &lt;video-id&gt;</code></pre>
+
+<h3>6.3 yt-dlp fallback</h3>
+<pre><code>pip install -U "yt-dlp[default,curl-cffi]"      # curl_cffi fixes empty caption bodies
+# Deno or Node must be on PATH for the JS runtime.
+
+yt-dlp --skip-download --write-subs --write-auto-subs \
+  --sub-langs "en.*" --sub-format vtt \
+  --js-runtimes node \
+  --proxy "$YT_PROXY_URL" \
+  --sleep-requests 0.75 --sleep-subtitles 5 \
+  -o "youtube_transcript/%(id)s.%(ext)s" \
+  "https://www.youtube.com/watch?v=&lt;video-id&gt;"
+</code></pre>
+
+<h3>6.4 PHP: proxy wiring for the existing fetcher</h3>
+<pre><code>$proxy = getenv('YT_PROXY_URL') ?: '';
+if ($proxy !== '') {
+    curl_setopt($curl, CURLOPT_PROXY, $proxy);
+    // curl accepts credentials inline in the URL; alternatively:
+    // curl_setopt($curl, CURLOPT_PROXYUSERPWD, "$user:$pass");
+}
+// Keep the same exit for the watch page and the caption download.
+// Add a small jitter between client attempts:
+usleep(random_int(300_000, 1_200_000));</code></pre>
+
+<h3>6.5 Detecting a bot page instead of "captions disabled"</h3>
+<pre><code>function playabilityStatus(string $htmlBody): string {
+    if (preg_match('/"playabilityStatus":\{"status":"([A-Z_]+)"/', $htmlBody, $m)) {
+        return $m[1];             // OK, LOGIN_REQUIRED, ERROR, ...
+    }
+    return 'UNKNOWN';
+}
+// Treat LOGIN_REQUIRED / "confirm you" / a captcha page as BLOCKED, not as a video without captions.</code></pre>
+
+<h2 id="cost">7. Cost and volume math</h2>
+<table>
+<thead><tr><th>Path</th><th>Marginal cost</th><th>Throughput</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>Residential egress you own</td><td>$0, but the home IP can be rate-limited</td><td>Hundreds/hour, conservatively</td><td>Best for incremental learning</td></tr>
+<tr><td>Rotating residential proxy</td><td>~$5–10/GB; ~0.3–0.4&nbsp;MB of pages per video → well under $0.01/video, plus caption bytes</td><td>Depends on pool</td><td>Failed attempts also cost bandwidth</td></tr>
+<tr><td>Hosted API</td><td>~$1–10 per 1,000 transcripts</td><td>Vendor-limited</td><td>Simplest; no proxy maintenance</td></tr>
+<tr><td>Audio + local Whisper</td><td>Proxy bandwidth for audio (tens to hundreds of MB/video) + compute</td><td>Hours per video on CPU</td><td>Only when captions do not exist</td></tr>
+</tbody>
+</table>
+<p class="small muted">
+Numbers are order-of-magnitude estimates from vendor pages and issue reports; measure on the actual proxy before
+committing to a plan.
+</p>
+
+<h2 id="avoid">8. Things that look like fixes but are not</h2>
+<ul>
+  <li><strong>Retrying harder from the same IP.</strong> A hard block does not expire in minutes, and a 429 on <code>timedtext</code> can persist for hours.</li>
+  <li><strong>Switching library.</strong> Python API → yt-dlp → PHP port all exit from the same address. Only the client fingerprint changes.</li>
+  <li><strong>Free proxies / Tor / most VPNs.</strong> Their exits are already flagged; Tor is slow and widely blocked.</li>
+  <li><strong>Datacenter proxy pools.</strong> They move you off one burned range into another; useful for spreading rate limits, not for the bot wall.</li>
+  <li><strong>Static residential.</strong> Same problem as datacenter in practice; the library explicitly warns against it.</li>
+  <li><strong>Fake geo headers.</strong> <code>--xff</code> / <code>--geo-bypass</code> are ignored for YouTube; only the actual exit IP matters.</li>
+  <li><strong>Cookies on a real account.</strong> Works briefly, risks a permanent ban.</li>
+  <li><strong>IPv6 "millions of IPs" offers.</strong> One /64 is one reputation unit.</li>
+  <li><strong>PO tokens alone.</strong> Per the provider's own docs, a PO token does not bypass IP-based login restrictions.</li>
+</ul>
+
+<h2 id="sources">9. Sources</h2>
+<ul class="small">
+  <li><a href="https://github.com/jdepoix/youtube-transcript-api">jdepoix/youtube-transcript-api</a> — README sections "Working around IP bans", "Using Webshare", "Using other Proxy solutions", "Cookie Authentication" (fetched 2026-11-04).</li>
+  <li><a href="https://github.com/jdepoix/youtube-transcript-api/issues/467">Issue #467</a> — <code>timedtext</code> 429s, "use Rotating Residential Proxies"; <code>IpBlocked</code> added in 1.1.1.</li>
+  <li><a href="https://github.com/jdepoix/youtube-transcript-api/issues/612">Issue #612</a> — urllib3 <code>Retry</code> excludes POST, so InnerTube 429s do not rotate (1.2.4).</li>
+  <li><a href="https://github.com/jdepoix/youtube-transcript-api/issues/379">Issue #379</a> and <a href="https://github.com/jdepoix/youtube-transcript-api/issues/504">#504</a> — HTTPS proxy required; proxy alone is not always sufficient.</li>
+  <li><a href="https://github.com/Kakulukian/youtube-transcript/issues/43">Kakulukian/youtube-transcript #43</a> — works locally, blocked on Vercel/Render/DO; residential vs cloud IP.</li>
+  <li><a href="https://www.evanlin.com/youtube-transcript-proxy/">evanlin.com: GCP + Webshare</a> — free Webshare tier is Proxy Server and does not work; residential required.</li>
+  <li><a href="https://shekhargulati.com/2025/01/05/using-a-tor-proxy-to-bypass-ip-restrictions/">Shekhar Gulati: Tor proxy</a> — Tor as a free fallback; expectations of reliability are low.</li>
+  <li><a href="https://dev.to/heyitsgautham/youtube-transcript-api-requestblocked-and-ipblocked-on-cloud-servers-and-what-actually-fixes-it-41da">DEV: RequestBlocked/IpBlocked measured</a> — home 10/10, datacenter 6/10, residential 9/10; <code>GenericProxyConfig</code> does not retry.</li>
+  <li><a href="https://transcriptfetch.com/youtube-transcript-api/errors/request-blocked">TranscriptFetch: error guide</a> — error meanings, HTTPS proxy, hosted API alternative.</li>
+  <li><a href="https://scavio.dev/blog/stable-way-to-pull-youtube-transcripts-in-production">Scavio: hosted API</a> — cloud-IP rationale, pricing comparison, null-content language handling.</li>
+  <li><a href="https://www.sparkproxy.io/blog/youtube-sign-in-to-confirm-not-a-bot-proxy">SparkProxy: yt-dlp bot wall</a> and <a href="https://prepublish.ai/guides/yt-dlp-captions-blocked-datacenter-ip">prepublish.ai</a> — PO tokens do not bypass IP restrictions; <code>curl_cffi</code> needed for non-empty captions; JS runtime; pacing.</li>
+  <li><a href="https://vidkraken.com/blog/yt-dlp-proxy">Vid Kraken: yt-dlp proxy</a> and <a href="https://tunelio.dev/blog/yt-dlp-proxy/">Tunelio</a> — sticky sessions, IPv4 vs IPv6 /64, proxy error table.</li>
+</ul>
+
+<hr>
+<p class="small muted">
+Verification status: this note is desk research. The two concrete experiments worth running before implementing are
+(1) the same video from the home Mac vs the cloud host, and (2) one residential-proxy attempt against a 10-video
+sample, logging bandwidth per video and the failure class.
+</p>
+
+</main>
+</body>
+</html>
