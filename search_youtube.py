@@ -5,7 +5,7 @@ Usage:
     python3 search_youtube.py <keyword> [--limit N]
     python3 search_youtube.py <keyword> --json [--limit N] \\
         [--min-duration SECONDS] [--max-duration SECONDS] \\
-        [--any-date] [--no-transcript-check]
+        [--any-date] [--no-transcript-check] [--sort-recent]
 
 Outputs one video hash per line, e.g.:
     FTwxtyOEGyM
@@ -13,8 +13,14 @@ Outputs one video hash per line, e.g.:
     ...
 
 With ``--json`` it prints one JSON object per line instead, including the
-title, duration, channel, thumbnail, and watch URL.  That mode powers
-``/youtube search``.
+title, duration, channel, thumbnail, watch URL, and (with ``--sort-recent``)
+the upload date.  That mode powers ``/youtube search``.
+
+``--sort-recent`` returns the newest matching videos first.  Candidates are
+enriched with upload dates, then checked (in parallel batches) for an English
+transcript until ``--limit`` videos are found.  This keeps the
+transcript-verification cost bounded while guaranteeing that every returned
+video has English captions.
 
 By default only videos published within the last year, at most 20 minutes
 long, and with an English transcript are returned.
@@ -35,6 +41,8 @@ import json
 import re
 import sys
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 try:
     import yt_dlp
@@ -54,6 +62,13 @@ MAX_DURATION_SECONDS = 20 * 60
 # larger candidate pool so we can still fill ``limit`` short videos.
 CANDIDATE_MULTIPLIER = 10
 MIN_CANDIDATES = 100
+
+# Flat search results do not include upload dates.  When the caller asks for
+# the most recent videos, enrich the best duration-eligible candidates with a
+# lightweight metadata lookup and then sort by upload time.  The cap keeps the
+# extra requests bounded while leaving plenty of candidates to choose from.
+DATE_ENRICH_LIMIT = 40
+DATE_ENRICH_WORKERS = 8
 
 # YouTube search ``sp`` parameter.
 #
@@ -112,6 +127,102 @@ def has_english_transcript(video_id, api=None):
         return False
 
 
+def _upload_date_from_info(info):
+    """Return ``(upload_date, timestamp, published)`` from yt-dlp metadata."""
+    timestamp = info.get("timestamp")
+    if not isinstance(timestamp, (int, float)):
+        timestamp = info.get("release_timestamp")
+    if not isinstance(timestamp, (int, float)):
+        timestamp = None
+
+    upload_date = str(info.get("upload_date") or "").strip()
+    if not re.fullmatch(r"\d{8}", upload_date):
+        upload_date = ""
+
+    published = ""
+    if upload_date:
+        published = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}"
+    elif timestamp is not None:
+        published = datetime.fromtimestamp(
+            timestamp, tz=timezone.utc
+        ).strftime("%Y-%m-%d")
+        upload_date = published.replace("-", "")
+
+    return upload_date, int(timestamp) if timestamp is not None else None, published
+
+
+def _fetch_upload_date(video_id):
+    """Look up one video's upload date without downloading it."""
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(
+                f"https://www.youtube.com/watch?v={video_id}", download=False
+            )
+        return video_id, _upload_date_from_info(info or {})
+    except Exception:
+        # A missing date should not discard an otherwise valid search result.
+        return video_id, ("", None, "")
+
+
+def _enrich_upload_dates(videos, limit=DATE_ENRICH_LIMIT):
+    """Attach upload dates to the first `limit` videos, in parallel."""
+    targets = videos[:limit]
+    if not targets:
+        return
+
+    dates = {}
+    workers = min(DATE_ENRICH_WORKERS, len(targets))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_fetch_upload_date, video["id"]) for video in targets]
+        for future in as_completed(futures):
+            video_id, value = future.result()
+            dates[video_id] = value
+
+    for video in targets:
+        upload_date, timestamp, published = dates.get(
+            video["id"], ("", None, "")
+        )
+        video["upload_date"] = upload_date
+        video["timestamp"] = timestamp
+        video["published"] = published
+
+
+def _with_english_transcripts(videos, limit):
+    """Return the first `limit` videos that have an English transcript.
+
+    Transcript lookups are network-bound and can fail slowly, so they are
+    checked in parallel batches.  Processing newest-first means we normally
+    only inspect a handful of candidates before the result list is full.
+    """
+    if not videos or limit <= 0:
+        return []
+
+    kept = []
+    batch_size = max(limit * 2, 12)
+    for start in range(0, len(videos), batch_size):
+        batch = videos[start : start + batch_size]
+        workers = min(DATE_ENRICH_WORKERS, len(batch))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(
+                pool.map(
+                    lambda video: has_english_transcript(video["id"]),
+                    batch,
+                )
+            )
+        for video, has_transcript in zip(batch, results):
+            if has_transcript:
+                kept.append(video)
+                if len(kept) >= limit:
+                    return kept
+    return kept
+
+
 def search_videos(
     keyword,
     limit=DEFAULT_LIMIT,
@@ -120,13 +231,19 @@ def search_videos(
     max_duration=MAX_DURATION_SECONDS,
     require_english_transcript=True,
     within_year=True,
+    sort_recent=False,
 ):
     """Return up to `limit` video metadata dicts matching `keyword`.
 
     Durations are given in seconds.  By default results are restricted to
     videos published within the last year, at most 20 minutes long, and with
     an English transcript available.  ``/youtube search`` relaxes the date
-    and transcript restrictions and uses a 5-30 minute duration window.
+    restriction and uses a 5-40 minute duration window; it still requires
+    English captions for every returned video.
+
+    With ``sort_recent`` the results are enriched with upload dates and
+    ordered newest first.  When an English transcript is required, the newest
+    candidates are transcript-checked before the final list is returned.
     """
     candidate_limit = max(limit * CANDIDATE_MULTIPLIER, MIN_CANDIDATES)
     options = {
@@ -161,10 +278,14 @@ def search_videos(
             or duration > max_duration
         ):
             continue
-        # Only return videos whose English transcript we can actually fetch
-        # later in the learn pipeline.
-        if require_english_transcript and not has_english_transcript(
-            video_id, transcript_api
+        # Recent-mode transcript checks happen after the candidates are
+        # ordered newest-first, so only the results we actually need are
+        # verified.  The normal relevance-ordered path checks as it goes and
+        # can stop as soon as it has enough videos.
+        if (
+            require_english_transcript
+            and not sort_recent
+            and not has_english_transcript(video_id, transcript_api)
         ):
             continue
         seen.add(video_id)
@@ -180,9 +301,25 @@ def search_videos(
                 "url": f"https://www.youtube.com/watch?v={video_id}",
             }
         )
-        if len(videos) >= limit:
+        if len(videos) >= limit and not sort_recent:
             break
-    return videos
+
+    if sort_recent:
+        if videos:
+            _enrich_upload_dates(videos)
+            # Newest first; keep original relevance order as the tie-breaker
+            # and leave videos with unknown dates at the end.
+            indexed = list(enumerate(videos))
+            indexed.sort(
+                key=lambda pair: (pair[1].get("timestamp") or 0, -pair[0]),
+                reverse=True,
+            )
+            videos = [video for _, video in indexed]
+        if require_english_transcript:
+            videos = _with_english_transcripts(videos, limit)
+        return videos[:limit]
+
+    return videos[:limit]
 
 
 def search(keyword, limit=DEFAULT_LIMIT):
@@ -252,6 +389,14 @@ def main(argv=None):
         action="store_true",
         help="skip the English-transcript availability check",
     )
+    parser.add_argument(
+        "--sort-recent",
+        action="store_true",
+        help=(
+            "include upload dates and return the most recently published "
+            "videos first"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.limit < 1:
@@ -269,6 +414,7 @@ def main(argv=None):
             max_duration=args.max_duration,
             require_english_transcript=not args.no_transcript_check,
             within_year=not args.any_date,
+            sort_recent=args.sort_recent,
         )
     except Exception as exc:
         sys.exit(f"YouTube search failed: {exc}")

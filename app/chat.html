@@ -1113,10 +1113,19 @@
     background: #0a1118;
     color: inherit;
     text-decoration: none;
+    width: 100%;
+    padding: 0;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
   }
   .video-card:hover {
     border-color: #3d6b8f;
     background: #0d1822;
+  }
+  .video-card:focus-visible {
+    outline: 2px solid var(--accent-2);
+    outline-offset: 2px;
   }
   .video-thumb {
     position: relative;
@@ -1159,6 +1168,122 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .video-date {
+    margin-top: 2px;
+    color: var(--dim);
+    font-size: 10.5px;
+  }
+  .video-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 7px;
+  }
+  .video-summary-btn {
+    background: #142334;
+    color: var(--text);
+    border: 1px solid #30465d;
+    border-radius: 5px;
+    padding: 3px 9px;
+    font-family: var(--mono);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .video-summary-btn:hover { border-color: var(--accent-2); color: #fff; }
+
+  /* Centered player/summary modal opened from /youtube search cards. */
+  #video-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 58;
+    background: rgba(2, 6, 10, .78);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  #video-panel[hidden] { display: none; }
+  .video-modal-card {
+    width: min(900px, 100%);
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+    background: #0d151e;
+    border: 1px solid #2b4056;
+    border-radius: 10px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.7);
+    overflow: hidden;
+  }
+  .video-modal-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 11px 14px;
+    background: #101b26;
+    border-bottom: 1px solid #223344;
+    user-select: none;
+  }
+  .video-modal-head-main { min-width: 0; flex: 1; }
+  .video-modal-title { color: var(--accent); font-weight: 700; font-size: 14px; line-height: 1.35; }
+  .video-modal-meta { color: var(--dim); font-size: 11px; margin-top: 4px; }
+  .video-link {
+    flex: 0 0 auto;
+    color: var(--accent-2);
+    font-size: 11.5px;
+    text-decoration: none;
+    border-bottom: 1px dotted #3d6b8f;
+    margin-top: 3px;
+  }
+  .video-link:hover { border-bottom-style: solid; }
+  #video-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+    user-select: none;
+  }
+  #video-close:hover { color: var(--text); }
+  .video-modal-body {
+    padding: 14px 18px 18px;
+    overflow-y: auto;
+    font-size: 13px;
+    color: #cfdae5;
+  }
+  .video-player {
+    position: relative;
+    width: 100%;
+    height: min(48vh, 460px);
+    margin: 0 0 14px;
+    background: #060a0e;
+    border: 1px solid #223344;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .video-player[hidden] { display: none; }
+  .video-player iframe {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+  }
+  .video-summary[hidden] { display: none; }
+  .video-summary-label {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    margin-bottom: 7px;
+  }
+  #video-summary-loading { color: var(--warn); font-size: 12px; margin-bottom: 8px; }
+  #video-summary-loading[hidden] { display: none; }
+  #video-summary-error { margin-bottom: 8px; }
+  #video-summary-error[hidden] { display: none; }
+  .video-summary .markdown p:first-child { margin-top: 0; }
   .news-translate { flex: 0 0 auto; margin-top: 2px; }
   #news-translation {
     margin-top: 15px;
@@ -1413,6 +1538,32 @@
   </div>
 </div>
 
+<div id="video-panel" hidden>
+  <div class="video-modal-card" role="dialog" aria-modal="true" aria-labelledby="video-modal-title">
+    <div class="video-modal-head">
+      <div class="video-modal-head-main">
+        <div id="video-modal-title" class="video-modal-title">YouTube video</div>
+        <div id="video-modal-meta" class="video-modal-meta"></div>
+      </div>
+      <a id="video-link" class="video-link" href="#" target="_blank" rel="noopener noreferrer">Open on YouTube ↗</a>
+      <button id="video-close" type="button" title="Close (Esc)">×</button>
+    </div>
+    <div class="video-modal-body">
+      <div id="video-player" class="video-player" hidden>
+        <iframe id="video-iframe" title="YouTube video player"
+                allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+                allowfullscreen loading="lazy"></iframe>
+      </div>
+      <div id="video-summary" class="video-summary" hidden>
+        <div class="video-summary-label">Summary</div>
+        <div id="video-summary-loading" hidden>summarizing this video…</div>
+        <div id="video-summary-error" class="error-text" hidden></div>
+        <div id="video-summary-content" class="markdown"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="line-help-panel" hidden>
   <div class="line-help-card" role="dialog" aria-modal="true" aria-labelledby="line-help-title">
     <div class="line-help-head">
@@ -1454,7 +1605,8 @@
       <span class="k">Ctrl+C</span><span class="d">cancel a streaming answer (or copy a selection)</span>
       <span class="k">Ctrl+L / ⌘K</span><span class="d">clear the console</span>
       <span class="k">Drag text</span><span class="d">select output text, then Ctrl+C / ⌘C to copy</span>
-      <span class="k">Click a word</span><span class="d">open a streaming /dict popup (drag instead to select); also works in /news and /medium stories</span>
+      <span class="k">Click a word</span><span class="d">open a streaming /dict popup (drag instead to select); also works in /news, /medium, and video summaries</span>
+      <span class="k">Click a video</span><span class="d">play it in a centered modal; the Summary button streams an AI overview of the video</span>
       <span class="k">中文 in /news</span><span class="d">translate a news or Medium story title, or the open story, into Simplified Chinese</span>
       <span class="k">? in code</span><span class="d">explain that line (rust, golang, and php answers)</span>
       <span class="k">− in popup</span><span class="d">minimize the dictionary popup; click its chip at the right of the status bar to reopen</span>
@@ -1506,6 +1658,16 @@ const newsTranslateBtn = $("#news-translate");
 const newsTranslationEl = $("#news-translation");
 const newsTranslationLabelEl = $("#news-translation-label");
 const newsTranslationBodyEl = $("#news-translation-body");
+const videoPanelEl = $("#video-panel");
+const videoModalTitleEl = $("#video-modal-title");
+const videoModalMetaEl = $("#video-modal-meta");
+const videoLinkEl = $("#video-link");
+const videoPlayerEl = $("#video-player");
+const videoIframeEl = $("#video-iframe");
+const videoSummaryEl = $("#video-summary");
+const videoSummaryLoadingEl = $("#video-summary-loading");
+const videoSummaryErrorEl = $("#video-summary-error");
+const videoSummaryContentEl = $("#video-summary-content");
 const lineHelpPanel = $("#line-help-panel");
 const lineHelpTitleEl = $("#line-help-title");
 const lineHelpLangEl = $("#line-help-lang");
@@ -3651,6 +3813,35 @@ function formatVideoDuration(totalSeconds) {
   return `${minutes}:${String(rest).padStart(2, "0")}`;
 }
 
+function formatVideoDate(value) {
+  let raw = String(value || "").trim();
+  if (!raw) return "";
+  // yt-dlp also exposes dates as YYYYMMDD; normalize before parsing.
+  if (/^\d{8}$/.test(raw)) {
+    raw = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6)}`;
+  }
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return String(value);
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium",
+      timeZone: "UTC",
+    }).format(date);
+  } catch {
+    return date.toLocaleDateString();
+  }
+}
+
+function videoEmbedUrl(videoId, autoplay) {
+  const params = new URLSearchParams({
+    rel: "0",
+    modestbranding: "1",
+    playsinline: "1",
+  });
+  if (autoplay) params.set("autoplay", "1");
+  return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}?${params.toString()}`;
+}
+
 function renderVideoResults(entry) {
   const container = entry.videosEl;
   if (!container) return;
@@ -3668,7 +3859,7 @@ function renderVideoResults(entry) {
   label.textContent = "YouTube videos";
   const note = document.createElement("span");
   note.className = "video-list-note";
-  note.textContent = `${items.length} result${items.length === 1 ? "" : "s"} · 5–30 min`;
+  note.textContent = `${items.length} result${items.length === 1 ? "" : "s"} · 5–40 min · English captions`;
   head.appendChild(label);
   head.appendChild(note);
   container.appendChild(head);
@@ -3676,14 +3867,20 @@ function renderVideoResults(entry) {
   const cards = document.createElement("div");
   cards.className = "video-cards";
   for (const item of items) {
-    const card = document.createElement("a");
+    const card = document.createElement("div");
     card.className = "video-card";
-    card.href = item.url;
-    card.target = "_blank";
-    card.rel = "noopener noreferrer";
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
     card.title = item.channel
       ? `${item.title || item.id} · ${item.channel}`
       : (item.title || item.id);
+    const openPlayer = () => openVideoModal(item, "play");
+    card.addEventListener("click", openPlayer);
+    card.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      openPlayer();
+    });
 
     const thumb = document.createElement("div");
     thumb.className = "video-thumb";
@@ -3722,6 +3919,35 @@ function renderVideoResults(entry) {
       channel.textContent = item.channel;
       meta.appendChild(channel);
     }
+    const dateValue = item.published || item.uploadDate;
+    const published = document.createElement("div");
+    published.className = "video-date";
+    published.textContent = dateValue
+      ? `Published ${formatVideoDate(dateValue)}`
+      : "Release date unavailable";
+    if (item.duration > 0) {
+      published.textContent += ` · ${formatVideoDuration(item.duration)}`;
+    }
+    meta.appendChild(published);
+
+    const actions = document.createElement("div");
+    actions.className = "video-actions";
+    const summaryBtn = document.createElement("button");
+    summaryBtn.type = "button";
+    summaryBtn.className = "video-summary-btn";
+    summaryBtn.textContent = "Summary";
+    summaryBtn.title = "Summarize this video with the local LLM";
+    summaryBtn.addEventListener("keydown", (event) => {
+      // Keep Enter/Space on the Summary button from also activating the card.
+      event.stopPropagation();
+    });
+    summaryBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openVideoModal(item, "summary");
+    });
+    actions.appendChild(summaryBtn);
+    meta.appendChild(actions);
 
     card.appendChild(thumb);
     card.appendChild(meta);
@@ -3729,6 +3955,180 @@ function renderVideoResults(entry) {
   }
   container.appendChild(cards);
 }
+
+/* ------------------------------------------------------------------ *
+ *  /youtube search player + AI summary modal
+ * ------------------------------------------------------------------ */
+let videoItem = null;
+let videoSummaryController = null;
+let videoSummaryGeneration = 0;
+let videoSummaryText = "";
+let videoSummaryBusy = false;
+let videoSummaryError = "";
+let videoSummaryRenderPending = false;
+const videoSummaryCache = new Map();
+
+function scheduleVideoSummaryRender() {
+  if (videoSummaryRenderPending) return;
+  videoSummaryRenderPending = true;
+  window.setTimeout(() => {
+    videoSummaryRenderPending = false;
+    renderVideoSummary();
+  }, 55);
+}
+
+function renderVideoSummary() {
+  videoSummaryContentEl.textContent = "";
+  if (videoSummaryText) {
+    videoSummaryContentEl.appendChild(renderMarkdown(videoSummaryText, true));
+  }
+  videoSummaryLoadingEl.hidden = !videoSummaryBusy;
+  videoSummaryErrorEl.textContent = videoSummaryError;
+  videoSummaryErrorEl.hidden = !videoSummaryError;
+}
+
+function resetVideoSummary() {
+  videoSummaryGeneration += 1;
+  if (videoSummaryController) {
+    videoSummaryController.abort();
+    videoSummaryController = null;
+  }
+  videoSummaryText = "";
+  videoSummaryBusy = false;
+  videoSummaryError = "";
+  if (videoSummaryContentEl) videoSummaryContentEl.textContent = "";
+  if (videoSummaryLoadingEl) videoSummaryLoadingEl.hidden = true;
+  if (videoSummaryErrorEl) {
+    videoSummaryErrorEl.textContent = "";
+    videoSummaryErrorEl.hidden = true;
+  }
+}
+
+function startVideoSummary(item) {
+  if (!item?.id) return;
+  const cached = videoSummaryCache.get(item.id);
+  if (cached) {
+    videoSummaryText = cached;
+    videoSummaryBusy = false;
+    videoSummaryError = "";
+    renderVideoSummary();
+    return;
+  }
+
+  const generation = ++videoSummaryGeneration;
+  const controller = new AbortController();
+  videoSummaryController = controller;
+  videoSummaryText = "";
+  videoSummaryBusy = true;
+  videoSummaryError = "";
+  renderVideoSummary();
+
+  const isCurrent = () =>
+    generation === videoSummaryGeneration && videoItem?.id === item.id;
+  const handlers = {
+    delta: (data) => {
+      if (!isCurrent() || !data?.text) return;
+      videoSummaryText += data.text;
+      scheduleVideoSummaryRender();
+    },
+    error: (data) => {
+      if (!isCurrent()) return;
+      videoSummaryError = data?.message || "Summary failed.";
+      videoSummaryBusy = false;
+      scheduleVideoSummaryRender();
+    },
+    done: () => {
+      if (!isCurrent()) return;
+      videoSummaryBusy = false;
+      if (videoSummaryText.trim()) {
+        videoSummaryCache.set(item.id, videoSummaryText);
+      } else if (!videoSummaryError) {
+        videoSummaryError = "The model returned an empty summary.";
+      }
+      renderVideoSummary();
+    },
+  };
+
+  streamSSE(
+    "/api/video_summary",
+    {
+      id: item.id,
+      title: item.title || "",
+      channel: item.channel || "",
+      duration: item.duration || 0,
+      published: item.published || item.uploadDate || "",
+      url: item.url || "",
+    },
+    handlers,
+    controller.signal
+  )
+    .catch((error) => {
+      if (!isCurrent()) return;
+      videoSummaryError = error?.name === "AbortError"
+        ? "Summary cancelled."
+        : (error?.message || String(error));
+    })
+    .finally(() => {
+      if (!isCurrent()) return;
+      videoSummaryBusy = false;
+      videoSummaryController = null;
+      renderVideoSummary();
+    });
+}
+
+function openVideoModal(item, mode = "play") {
+  if (!item?.id) return;
+  resetVideoSummary();
+  videoItem = item;
+  videoModalTitleEl.textContent = item.title || item.id;
+  const metaParts = [];
+  if (item.channel) metaParts.push(item.channel);
+  const dateValue = item.published || item.uploadDate;
+  metaParts.push(
+    dateValue ? `Published ${formatVideoDate(dateValue)}` : "Release date unavailable"
+  );
+  if (item.duration > 0) metaParts.push(formatVideoDuration(item.duration));
+  metaParts.push("English captions");
+  videoModalMetaEl.textContent = metaParts.join(" · ");
+  videoLinkEl.href = item.url || `https://www.youtube.com/watch?v=${item.id}`;
+  videoPlayerEl.hidden = false;
+  // A click on the card is a user gesture, so the embedded player can start
+  // immediately. The Summary button opens the same modal without autoplay.
+  videoIframeEl.src = videoEmbedUrl(item.id, mode === "play");
+  if (mode === "summary") {
+    videoSummaryEl.hidden = false;
+    startVideoSummary(item);
+  } else {
+    videoSummaryEl.hidden = true;
+  }
+  videoPanelEl.hidden = false;
+}
+
+function closeVideoModal() {
+  resetVideoSummary();
+  videoItem = null;
+  videoPanelEl.hidden = true;
+  videoIframeEl.src = "about:blank";
+  videoSummaryEl.hidden = true;
+}
+
+$("#video-close").addEventListener("click", closeVideoModal);
+videoPanelEl.addEventListener("click", (event) => {
+  if (event.target === videoPanelEl) closeVideoModal();
+});
+videoSummaryContentEl.addEventListener("click", (event) => {
+  const wordEl = event.target.closest(".word");
+  if (!wordEl) return;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && String(selection).trim()) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openDictionaryPopup(
+    wordEl.dataset.word || wordEl.textContent,
+    videoSummaryText,
+    wordEl
+  );
+});
 
 function newsArticleText(item) {
   if (!item) return "";
@@ -4722,6 +5122,9 @@ function submitText(text, fromChoice = false) {
           duration: Number(item?.duration) || 0,
           channel: String(item?.channel || "").trim(),
           thumbnail: String(item?.thumbnail || "").trim(),
+          uploadDate: String(item?.upload_date || "").trim(),
+          published: String(item?.published || "").trim(),
+          timestamp: Number(item?.timestamp) || 0,
           url: String(item?.url || "").trim(),
         }))
         .filter((item) => item.id && item.url);
@@ -5312,6 +5715,12 @@ function handleKeyDown(event) {
     return;
   }
 
+  if (!videoPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeVideoModal();
+    return;
+  }
+
   if (!newsSourcePicker.hidden && key === "Escape") {
     event.preventDefault();
     closeNewsSourcePicker();
@@ -5653,6 +6062,11 @@ document.addEventListener("keydown", (event) => {
     closeNewsModal();
     return;
   }
+  if (!videoPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeVideoModal();
+    return;
+  }
   if (!newsSourcePicker.hidden && key === "Escape") {
     event.preventDefault();
     closeNewsSourcePicker();
@@ -5695,7 +6109,13 @@ inputEl.addEventListener("blur", () => {
   // Do not let clicking the page accidentally leave the console unfocused,
   // but do not steal focus while the user is selecting text in the output.
   window.setTimeout(() => {
-    if (!popupEl.hidden || !helpPanel.hidden || !lineHelpPanel.hidden || !newsPanelEl.hidden) return;
+    if (
+      !popupEl.hidden ||
+      !helpPanel.hidden ||
+      !lineHelpPanel.hidden ||
+      !newsPanelEl.hidden ||
+      !videoPanelEl.hidden
+    ) return;
     if (outputPointerDown || selectionInsideOutput()) return;
     if (document.activeElement === document.body) {
       inputEl.focus({ preventScroll: true });

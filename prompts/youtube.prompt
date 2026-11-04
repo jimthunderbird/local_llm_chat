@@ -1,4 +1,13 @@
 task (completed) {
+  in task.search_youtube_videos {
+    - for each video, show the video release date and duration
+    - we should return a list of 6 related and most recent videos ranging from 5 minutes to 40 minutes, and they all should have en captions
+    - under each video, show a button summary, when click, it will show a modal about this video
+    - when click on the video, open a modal to auto play the video inside the modal, the modal should be centered on the screen
+  }
+}
+
+task.search_youtube_videos (completed) {
   add new option to /youtube command:
   /youtube search "<keyword>"
   - it should return a list of 5 related youtube videos ranging from 5 minutes to 30 minutes

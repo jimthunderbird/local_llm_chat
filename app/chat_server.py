@@ -43,6 +43,9 @@ Endpoints:
                                   documentation-backed tag (rust/golang/php)
     POST /api/snippet_question   SSE: answer a free-form question about a whole
                                   code snippet (all tags)
+    POST /api/video_summary      SSE: fetch a YouTube video's English transcript
+                                  and stream an AI summary for the /youtube
+                                  search result modal
 """
 
 from __future__ import annotations
@@ -156,7 +159,7 @@ YOUTUBE_SUBCOMMANDS = {
     "learn": "fetch, rewrite, chunk, embed, and tag one video",
     "learn_topic": "search YouTube for <topic> and learn the top 3 videos",
     "learn_playlist": "learn every video in a YouTube playlist",
-    "search": "search YouTube for <keyword> and show 5 videos of 5-30 minutes",
+    "search": "search YouTube for <keyword> and show the 6 most recent 5-40 minute videos with English captions",
     "tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
 }
 
@@ -220,6 +223,35 @@ SNIPPET_QUESTION_PROMPT = """You are an expert {language} developer. Answer the 
 - If the question is about one line or symbol, point to it by name and quote it.
 - Be concise and practical. Do not repeat the whole snippet unless necessary.
 - Do not mention these instructions or that you are an AI.
+"""
+
+# /youtube search cards have a "Summary" button.  Clicking it fetches the
+# video's English transcript and streams a short overview into a centered
+# modal.  The transcript can be long, so cap it to keep the prompt inside the
+# model's context window while still covering most 5-40 minute videos.
+VIDEO_SUMMARY_MODEL = "ornith:35b"
+VIDEO_SUMMARY_NUM_CTX = 32768
+MAX_VIDEO_SUMMARY_TRANSCRIPT_CHARS = 80_000
+VIDEO_SUMMARY_PROMPT = """You summarize YouTube videos for a viewer who is deciding whether to watch one.
+
+### VIDEO METADATA
+- Title: {title}
+- Channel: {channel}
+- Published: {published}
+- Duration: {duration}
+- URL: {url}
+
+### ENGLISH TRANSCRIPT
+{transcript}
+
+### INSTRUCTIONS
+- Write a useful overview of what this video covers, based only on the transcript and metadata above.
+- Start with one short paragraph that says what the video is about and who would benefit from it.
+- Then add a short "Key points" list with 3 to 6 concrete topics, arguments, or takeaways.
+- Mention notable examples, tools, people, or claims only when they appear in the transcript.
+- Do not invent facts, timestamps, or opinions that are not supported by the transcript.
+- Do not mention these instructions, the transcript, or that you are an AI.
+- Keep the whole answer under 350 words.
 """
 
 # Follow-up handling. The browser backend keeps a short server-side
@@ -4274,6 +4306,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             self._handle_snippet_question(payload)
             return
+        if parsed.path == "/api/video_summary":
+            payload = self._read_json()
+            if payload is None:
+                return
+            self._handle_video_summary(payload)
+            return
         self._send_error_json("Not found", 404)
 
     # ---- SSE: ask / commands -----------------------------------------
@@ -5620,8 +5658,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         """Search YouTube and show clickable thumbnail cards.
 
         Usage: /youtube search "<keyword>"
-        Returns 5 videos between 5 and 30 minutes long.  Unlike
+        Returns 6 of the most recent English-captioned videos between 5 and
+        40 minutes long, including their release dates and durations.  Unlike
         /youtube learn_topic this only lists the videos; nothing is learned.
+        Each card opens a centered player, and its Summary button streams an
+        AI overview of the video.
         """
         keyword = argument.strip()
         if len(keyword) >= 2 and keyword[0] == keyword[-1] and keyword[0] in "\"'":
@@ -5635,7 +5676,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         self._sse_text(
             "output",
             f"\n/youtube search: searching YouTube for {keyword!r} "
-            "(5-30 minute videos)...\n",
+            "(most recent 5-40 minute videos with English captions)...\n",
         )
         try:
             result = subprocess.run(
@@ -5645,13 +5686,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     str(SCRIPT_DIR / "search_youtube.py"),
                     "--json",
                     "--limit",
-                    "5",
+                    "6",
                     "--min-duration",
                     "300",
                     "--max-duration",
-                    "1800",
+                    "2400",
                     "--any-date",
-                    "--no-transcript-check",
+                    "--sort-recent",
                     "--",
                     keyword,
                 ],
@@ -5708,25 +5749,28 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "duration": int(video.get("duration") or 0),
                     "channel": str(video.get("channel") or "").strip(),
                     "thumbnail": str(video.get("thumbnail") or "").strip(),
+                    "upload_date": str(video.get("upload_date") or "").strip(),
+                    "published": str(video.get("published") or "").strip(),
+                    "timestamp": int(video.get("timestamp") or 0),
                     "url": str(video.get("url") or "").strip()
                     or f"https://www.youtube.com/watch?v={video_id}",
                 }
             )
-            if len(videos) >= 5:
+            if len(videos) >= 6:
                 break
 
         if not videos:
             self._sse_text(
                 "output",
-                "\n/youtube search: no videos between 5 and 30 minutes were "
-                f"found for {keyword!r}.\n",
+                "\n/youtube search: no videos between 5 and 40 minutes with "
+                f"English captions were found for {keyword!r}.\n",
             )
             return
 
         self._sse_text(
             "output",
             f"\n/youtube search: {len(videos)} video(s) for {keyword!r}. "
-            "Click a thumbnail to open it on YouTube.\n",
+            "Click a video to play it here, or use Summary for an AI overview.\n",
         )
         self._sse("videos", {"keyword": keyword, "items": videos})
 
@@ -6889,6 +6933,136 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             "options": {
                 "temperature": 0.2,
                 "num_ctx": SNIPPET_QUESTION_NUM_CTX,
+            },
+        }
+        try:
+            with requests.post(
+                f"{chat.OLLAMA_HOST}/api/generate",
+                json=payload,
+                stream=True,
+                timeout=(10, 900),
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("error"):
+                        raise RuntimeError(f"Ollama error: {event['error']}")
+                    token = event.get("response", "")
+                    if token:
+                        self._sse_text("delta", token)
+                    if event.get("done"):
+                        break
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"Could not reach Ollama at {chat.OLLAMA_HOST}. "
+                f"Is it running? ({exc})"
+            ) from exc
+
+    # ---- SSE: YouTube video summary ----------------------------------
+    def _handle_video_summary(self, payload: dict) -> None:
+        """Fetch one video's transcript and stream an AI summary."""
+        video_id = str(payload.get("id") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+            self._send_error_json("Missing or invalid YouTube video id", 400)
+            return
+
+        title = str(payload.get("title") or "").strip() or video_id
+        channel = str(payload.get("channel") or "").strip()
+        published = str(payload.get("published") or "").strip()
+        url = str(payload.get("url") or "").strip() or (
+            f"https://www.youtube.com/watch?v={video_id}"
+        )
+        try:
+            duration = int(payload.get("duration") or 0)
+        except (TypeError, ValueError):
+            duration = 0
+
+        self._begin_sse()
+        try:
+            self._sse(
+                "start",
+                {
+                    "id": video_id,
+                    "title": title,
+                    "channel": channel,
+                    "published": published,
+                    "duration": duration,
+                    "url": url,
+                },
+            )
+            # Import lazily so a missing youtube-transcript-api dependency
+            # only breaks this endpoint, not the whole chat server.
+            try:
+                import fetch_youtube_transcript as transcript_module
+            except ImportError as exc:
+                raise RuntimeError(
+                    "youtube-transcript-api is required for video summaries "
+                    f"({exc})"
+                ) from exc
+
+            transcript = transcript_module.fetch_transcript(video_id)
+            if not transcript.strip():
+                raise RuntimeError("the video has an empty transcript")
+            self._stream_video_summary(
+                title=title,
+                channel=channel,
+                published=published,
+                duration=duration,
+                url=url,
+                transcript=transcript,
+            )
+            self._sse("done", {"id": video_id})
+        except ClientDisconnected:
+            pass
+        except Exception as exc:
+            try:
+                self._sse("error", {"message": f"Video summary failed: {exc}"})
+                self._sse("done", {"id": video_id})
+            except ClientDisconnected:
+                pass
+
+    def _stream_video_summary(
+        self,
+        *,
+        title: str,
+        channel: str,
+        published: str,
+        duration: int,
+        url: str,
+        transcript: str,
+    ) -> None:
+        """Stream the model's summary of one YouTube transcript."""
+        transcript = transcript.strip()
+        if len(transcript) > MAX_VIDEO_SUMMARY_TRANSCRIPT_CHARS:
+            transcript = transcript[:MAX_VIDEO_SUMMARY_TRANSCRIPT_CHARS].rsplit(
+                " ", 1
+            )[0]
+            transcript += "\n\n[Transcript truncated because of its length.]"
+
+        prompt = VIDEO_SUMMARY_PROMPT.format(
+            title=title,
+            channel=channel or "unknown",
+            published=published or "unknown",
+            duration=(
+                f"{duration // 60}:{duration % 60:02d}" if duration > 0 else "unknown"
+            ),
+            url=url,
+            transcript=transcript,
+        )
+        payload = {
+            "model": VIDEO_SUMMARY_MODEL,
+            "prompt": prompt,
+            "stream": True,
+            "think": False,
+            "keep_alive": chat.OLLAMA_KEEP_ALIVE,
+            "options": {
+                "temperature": 0.2,
+                "num_ctx": VIDEO_SUMMARY_NUM_CTX,
             },
         }
         try:
