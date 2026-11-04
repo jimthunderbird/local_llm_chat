@@ -1,4 +1,11 @@
 task (completed) {
+  add new option to /youtube command:
+  /youtube search "<keyword>"
+  - it should return a list of 5 related youtube videos ranging from 5 minutes to 30 minutes
+  - the related youtube videos should have image thumbnail displayed in the chat and allow me to click open the video in a new browser tab 
+}
+
+task (completed) {
   when a question is asked, learn from command /article and learn from how it iteratively finds the answer
 }
 

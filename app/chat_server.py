@@ -99,7 +99,7 @@ WEB_COMMANDS = {
     "/help": "show commands and keyboard shortcuts",
     "/new": "start a fresh conversation (clears follow-up context)",
     "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
-    "learn_playlist <playlist> | tag_gen <tag>",
+    "learn_playlist <playlist> | search <keyword> | tag_gen <tag>",
     "/news": "list the latest news from cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, or techcrunch (optionally /news [source ...] [count])",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
@@ -156,6 +156,7 @@ YOUTUBE_SUBCOMMANDS = {
     "learn": "fetch, rewrite, chunk, embed, and tag one video",
     "learn_topic": "search YouTube for <topic> and learn the top 3 videos",
     "learn_playlist": "learn every video in a YouTube playlist",
+    "search": "search YouTube for <keyword> and show 5 videos of 5-30 minutes",
     "tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
 }
 
@@ -5604,6 +5605,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_learn_topic(rest)
         elif subcommand == "learn_playlist":
             self._command_learn_playlist(rest)
+        elif subcommand == "search":
+            self._command_youtube_search(rest)
         elif subcommand == "tag_gen":
             self._command_tag_gen(rest)
         else:
@@ -5612,6 +5615,120 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 f"\nUnknown /youtube subcommand: {subcommand!r}. "
                 "Use /youtube to see the available subcommands.\n",
             )
+
+    def _command_youtube_search(self, argument: str) -> None:
+        """Search YouTube and show clickable thumbnail cards.
+
+        Usage: /youtube search "<keyword>"
+        Returns 5 videos between 5 and 30 minutes long.  Unlike
+        /youtube learn_topic this only lists the videos; nothing is learned.
+        """
+        keyword = argument.strip()
+        if len(keyword) >= 2 and keyword[0] == keyword[-1] and keyword[0] in "\"'":
+            keyword = keyword[1:-1].strip()
+        if not keyword:
+            self._sse_text(
+                "output", '\nUsage: /youtube search "<keyword>"\n'
+            )
+            return
+
+        self._sse_text(
+            "output",
+            f"\n/youtube search: searching YouTube for {keyword!r} "
+            "(5-30 minute videos)...\n",
+        )
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-u",
+                    str(SCRIPT_DIR / "search_youtube.py"),
+                    "--json",
+                    "--limit",
+                    "5",
+                    "--min-duration",
+                    "300",
+                    "--max-duration",
+                    "1800",
+                    "--any-date",
+                    "--no-transcript-check",
+                    "--",
+                    keyword,
+                ],
+                cwd=SCRIPT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            self._sse_text(
+                "output", "\n/youtube search: YouTube search timed out.\n"
+            )
+            return
+        except OSError as exc:
+            self._sse_text(
+                "output",
+                f"\n/youtube search: could not run search_youtube.py: {exc}\n",
+            )
+            return
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            self._sse_text(
+                "output",
+                "\n/youtube search: YouTube search failed"
+                + (f": {detail}\n" if detail else ".\n"),
+            )
+            return
+
+        videos = []
+        seen = set()
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                video = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(video, dict):
+                continue
+            video_id = str(video.get("id") or "")
+            if (
+                not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id)
+                or video_id in seen
+            ):
+                continue
+            seen.add(video_id)
+            videos.append(
+                {
+                    "id": video_id,
+                    "title": str(video.get("title") or "").strip(),
+                    "duration": int(video.get("duration") or 0),
+                    "channel": str(video.get("channel") or "").strip(),
+                    "thumbnail": str(video.get("thumbnail") or "").strip(),
+                    "url": str(video.get("url") or "").strip()
+                    or f"https://www.youtube.com/watch?v={video_id}",
+                }
+            )
+            if len(videos) >= 5:
+                break
+
+        if not videos:
+            self._sse_text(
+                "output",
+                "\n/youtube search: no videos between 5 and 30 minutes were "
+                f"found for {keyword!r}.\n",
+            )
+            return
+
+        self._sse_text(
+            "output",
+            f"\n/youtube search: {len(videos)} video(s) for {keyword!r}. "
+            "Click a thumbnail to open it on YouTube.\n",
+        )
+        self._sse("videos", {"keyword": keyword, "items": videos})
 
     def _command_learn(self, argument: str) -> None:
         if not argument:

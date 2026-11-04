@@ -3,14 +3,21 @@
 
 Usage:
     python3 search_youtube.py <keyword> [--limit N]
+    python3 search_youtube.py <keyword> --json [--limit N] \\
+        [--min-duration SECONDS] [--max-duration SECONDS] \\
+        [--any-date] [--no-transcript-check]
 
 Outputs one video hash per line, e.g.:
     FTwxtyOEGyM
     T594Cg4sTq4
     ...
 
-Only videos published within the last year, at most 20 minutes long, and
-with an English transcript are returned.
+With ``--json`` it prints one JSON object per line instead, including the
+title, duration, channel, thumbnail, and watch URL.  That mode powers
+``/youtube search``.
+
+By default only videos published within the last year, at most 20 minutes
+long, and with an English transcript are returned.
 
 Searching uses yt-dlp instead of ``youtube-search-python``: its
 ``VideosSearch`` API currently breaks on modern YouTube responses, while
@@ -24,6 +31,7 @@ year window, which is exactly the requirement here.
 """
 
 import argparse
+import json
 import re
 import sys
 import urllib.parse
@@ -60,11 +68,28 @@ SEARCH_PARAMS = "EgQIBRAB"
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
-def _search_url(keyword):
-    query = urllib.parse.urlencode(
-        {"search_query": keyword, "sp": SEARCH_PARAMS}
-    )
+def _search_url(keyword, within_year=True):
+    params = {"search_query": keyword}
+    if within_year:
+        params["sp"] = SEARCH_PARAMS
+    query = urllib.parse.urlencode(params)
     return f"https://www.youtube.com/results?{query}"
+
+
+def _thumbnail_url(entry, video_id):
+    """Pick the largest thumbnail yt-dlp reported, with a stable fallback."""
+    best_url = ""
+    best_width = -1
+    for thumbnail in entry.get("thumbnails") or []:
+        url = str(thumbnail.get("url") or "").strip()
+        if not url:
+            continue
+        width = thumbnail.get("width")
+        width = width if isinstance(width, (int, float)) else 0
+        if width > best_width:
+            best_url = url
+            best_width = width
+    return best_url or f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
 
 
 def has_english_transcript(video_id, api=None):
@@ -87,11 +112,21 @@ def has_english_transcript(video_id, api=None):
         return False
 
 
-def search(keyword, limit=DEFAULT_LIMIT):
-    """Return up to `limit` YouTube video hashes matching `keyword`.
+def search_videos(
+    keyword,
+    limit=DEFAULT_LIMIT,
+    *,
+    min_duration=0,
+    max_duration=MAX_DURATION_SECONDS,
+    require_english_transcript=True,
+    within_year=True,
+):
+    """Return up to `limit` video metadata dicts matching `keyword`.
 
-    Results are restricted to videos published within the last year, at most
-    20 minutes long, and with an English transcript available.
+    Durations are given in seconds.  By default results are restricted to
+    videos published within the last year, at most 20 minutes long, and with
+    an English transcript available.  ``/youtube search`` relaxes the date
+    and transcript restrictions and uses a 5-30 minute duration window.
     """
     candidate_limit = max(limit * CANDIDATE_MULTIPLIER, MIN_CANDIDATES)
     options = {
@@ -102,43 +137,78 @@ def search(keyword, limit=DEFAULT_LIMIT):
         "playlistend": candidate_limit,
     }
     with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(_search_url(keyword), download=False)
+        info = ydl.extract_info(
+            _search_url(keyword, within_year=within_year), download=False
+        )
 
-    hashes = []
+    videos = []
     seen = set()
-    transcript_api = YouTubeTranscriptApi()
+    transcript_api = YouTubeTranscriptApi() if require_english_transcript else None
     for entry in (info or {}).get("entries") or []:
-        video_hash = entry.get("id")
+        video_id = entry.get("id")
         duration = entry.get("duration")
         if (
-            not video_hash
-            or video_hash in seen
-            or not VIDEO_ID_RE.match(video_hash)
+            not video_id
+            or video_id in seen
+            or not VIDEO_ID_RE.match(video_id)
             # Skip anything that is not a plain video result (channels,
             # playlists, etc.).
             or entry.get("ie_key") != "Youtube"
-            # Require a known duration; never return a video we cannot
-            # verify is at most 20 minutes long.
+            # Require a known duration; never return a video we cannot verify
+            # is inside the requested window.
             or duration is None
-            or duration > MAX_DURATION_SECONDS
+            or duration < min_duration
+            or duration > max_duration
         ):
             continue
         # Only return videos whose English transcript we can actually fetch
         # later in the learn pipeline.
-        if not has_english_transcript(video_hash, transcript_api):
+        if require_english_transcript and not has_english_transcript(
+            video_id, transcript_api
+        ):
             continue
-        seen.add(video_hash)
-        hashes.append(video_hash)
-        if len(hashes) >= limit:
+        seen.add(video_id)
+        videos.append(
+            {
+                "id": video_id,
+                "title": str(entry.get("title") or "").strip(),
+                "duration": int(duration),
+                "channel": str(
+                    entry.get("channel") or entry.get("uploader") or ""
+                ).strip(),
+                "thumbnail": _thumbnail_url(entry, video_id),
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+            }
+        )
+        if len(videos) >= limit:
             break
-    return hashes
+    return videos
+
+
+def search(keyword, limit=DEFAULT_LIMIT):
+    """Return up to `limit` YouTube video hashes matching `keyword`.
+
+    Results are restricted to videos published within the last year, at most
+    20 minutes long, and with an English transcript available.
+    """
+    return [
+        video["id"]
+        for video in search_videos(
+            keyword,
+            limit,
+            min_duration=0,
+            max_duration=MAX_DURATION_SECONDS,
+            require_english_transcript=True,
+            within_year=True,
+        )
+    ]
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description=(
             "Search YouTube and print the matching video hashes. "
-            "Only videos published within the last year, at most "
+            "By default only videos published within the last year, at most "
             "20 minutes long, and with an English transcript are returned."
         )
     )
@@ -150,18 +220,65 @@ def main(argv=None):
         default=DEFAULT_LIMIT,
         help=f"number of results to return (default: {DEFAULT_LIMIT})",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print one JSON object per video instead of only the video hash",
+    )
+    parser.add_argument(
+        "--min-duration",
+        type=int,
+        default=0,
+        metavar="SECONDS",
+        help="minimum video duration in seconds (default: 0)",
+    )
+    parser.add_argument(
+        "--max-duration",
+        type=int,
+        default=MAX_DURATION_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "maximum video duration in seconds "
+            f"(default: {MAX_DURATION_SECONDS})"
+        ),
+    )
+    parser.add_argument(
+        "--any-date",
+        action="store_true",
+        help="do not restrict results to the last year",
+    )
+    parser.add_argument(
+        "--no-transcript-check",
+        action="store_true",
+        help="skip the English-transcript availability check",
+    )
     args = parser.parse_args(argv)
 
     if args.limit < 1:
         parser.error("--limit must be at least 1")
+    if args.min_duration < 0:
+        parser.error("--min-duration cannot be negative")
+    if args.max_duration < args.min_duration:
+        parser.error("--max-duration must be greater than or equal to --min-duration")
 
     try:
-        hashes = search(args.keyword, args.limit)
+        videos = search_videos(
+            args.keyword,
+            args.limit,
+            min_duration=args.min_duration,
+            max_duration=args.max_duration,
+            require_english_transcript=not args.no_transcript_check,
+            within_year=not args.any_date,
+        )
     except Exception as exc:
         sys.exit(f"YouTube search failed: {exc}")
 
-    for video_hash in hashes:
-        print(video_hash)
+    if args.json:
+        for video in videos:
+            print(json.dumps(video, ensure_ascii=False))
+    else:
+        for video in videos:
+            print(video["id"])
 
 
 if __name__ == "__main__":

@@ -1082,6 +1082,83 @@
   }
   .news-body .news-loading { color: var(--warn); font-size: 12px; }
   .news-body .news-summary { color: #dfeaf4; font-style: italic; }
+  .video-results {
+    margin: 10px 0 4px;
+    padding: 10px 0 2px;
+    border-top: 1px solid #223344;
+  }
+  .video-results[hidden] { display: none; }
+  .video-list-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .video-list-note { color: var(--dim); font-size: 11px; font-weight: 400; }
+  .video-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 10px;
+  }
+  .video-card {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid #223344;
+    border-radius: 7px;
+    background: #0a1118;
+    color: inherit;
+    text-decoration: none;
+  }
+  .video-card:hover {
+    border-color: #3d6b8f;
+    background: #0d1822;
+  }
+  .video-thumb {
+    position: relative;
+    background: #060a0e;
+  }
+  .video-thumb img {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+  }
+  .video-duration {
+    position: absolute;
+    right: 5px;
+    bottom: 5px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(2, 6, 10, .86);
+    color: #dfeaf4;
+    font-size: 10.5px;
+  }
+  .video-meta {
+    padding: 7px 8px 8px;
+    min-width: 0;
+  }
+  .video-title {
+    color: #d7e5f2;
+    font-size: 12px;
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .video-channel {
+    margin-top: 4px;
+    color: var(--dim);
+    font-size: 10.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .news-translate { flex: 0 0 auto; margin-top: 2px; }
   #news-translation {
     margin-top: 15px;
@@ -2969,6 +3046,7 @@ function makeEntry(kind, options = {}) {
     newsFeed: "",
     newsSources: [],
     newsDone: false,
+    videos: [],
     newsEl: document.createElement("div"),
     el: document.createElement("div"),
     logsEl: document.createElement("div"),
@@ -3051,7 +3129,11 @@ function makeEntry(kind, options = {}) {
 
   entry.choicesEl.className = "choices";
   entry.newsEl.className = "news-list";
+  entry.videosEl = document.createElement("div");
+  entry.videosEl.className = "video-results";
+  entry.videosEl.hidden = true;
   entry.bodyEl.appendChild(entry.newsEl);
+  entry.bodyEl.appendChild(entry.videosEl);
   entry.bodyEl.appendChild(entry.choicesEl);
   entry.errorEl.className = "error-text";
   entry.bodyEl.appendChild(entry.errorEl);
@@ -3150,6 +3232,7 @@ function renderEntry(entry) {
 
   entry.choicesEl.textContent = "";
   renderNewsList(entry);
+  renderVideoResults(entry);
   for (const choice of entry.choices) {
     const button = document.createElement("button");
     button.className = "choice";
@@ -3555,6 +3638,96 @@ function renderNewsList(entry) {
     });
     container.appendChild(list);
   }
+}
+
+function formatVideoDuration(totalSeconds) {
+  const seconds = Math.max(0, Math.round(Number(totalSeconds) || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  if (hours) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(rest).padStart(2, "0")}`;
+}
+
+function renderVideoResults(entry) {
+  const container = entry.videosEl;
+  if (!container) return;
+  container.textContent = "";
+  const items = Array.isArray(entry.videos) ? entry.videos : [];
+  if (!items.length) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+
+  const head = document.createElement("div");
+  head.className = "video-list-head";
+  const label = document.createElement("span");
+  label.textContent = "YouTube videos";
+  const note = document.createElement("span");
+  note.className = "video-list-note";
+  note.textContent = `${items.length} result${items.length === 1 ? "" : "s"} · 5–30 min`;
+  head.appendChild(label);
+  head.appendChild(note);
+  container.appendChild(head);
+
+  const cards = document.createElement("div");
+  cards.className = "video-cards";
+  for (const item of items) {
+    const card = document.createElement("a");
+    card.className = "video-card";
+    card.href = item.url;
+    card.target = "_blank";
+    card.rel = "noopener noreferrer";
+    card.title = item.channel
+      ? `${item.title || item.id} · ${item.channel}`
+      : (item.title || item.id);
+
+    const thumb = document.createElement("div");
+    thumb.className = "video-thumb";
+    const image = document.createElement("img");
+    image.alt = item.title || "YouTube video thumbnail";
+    image.loading = "lazy";
+    image.referrerPolicy = "no-referrer";
+    const fallback = `https://i.ytimg.com/vi/${encodeURIComponent(item.id)}/mqdefault.jpg`;
+    image.src = item.thumbnail || fallback;
+    image.addEventListener("error", () => {
+      if (image.dataset.fallback === "1") {
+        image.hidden = true;
+        return;
+      }
+      image.dataset.fallback = "1";
+      image.src = fallback;
+    });
+    thumb.appendChild(image);
+
+    if (item.duration > 0) {
+      const duration = document.createElement("span");
+      duration.className = "video-duration";
+      duration.textContent = formatVideoDuration(item.duration);
+      thumb.appendChild(duration);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "video-meta";
+    const title = document.createElement("div");
+    title.className = "video-title";
+    title.textContent = item.title || item.id;
+    meta.appendChild(title);
+    if (item.channel) {
+      const channel = document.createElement("div");
+      channel.className = "video-channel";
+      channel.textContent = item.channel;
+      meta.appendChild(channel);
+    }
+
+    card.appendChild(thumb);
+    card.appendChild(meta);
+    cards.appendChild(card);
+  }
+  container.appendChild(cards);
 }
 
 function newsArticleText(item) {
@@ -4540,6 +4713,20 @@ function submitText(text, fromChoice = false) {
     },
     output: (data) => addOutput(entry, data.text || ""),
     news: (data) => addNewsEvent(entry, data || {}),
+    videos: (data) => {
+      const items = Array.isArray(data?.items) ? data.items : [];
+      entry.videos = items
+        .map((item) => ({
+          id: String(item?.id || ""),
+          title: String(item?.title || "").trim(),
+          duration: Number(item?.duration) || 0,
+          channel: String(item?.channel || "").trim(),
+          thumbnail: String(item?.thumbnail || "").trim(),
+          url: String(item?.url || "").trim(),
+        }))
+        .filter((item) => item.id && item.url);
+      scheduleRender(entry);
+    },
     choices: (data) => {
       entry.choices = Array.isArray(data.items) ? data.items : [];
       scheduleRender(entry);
