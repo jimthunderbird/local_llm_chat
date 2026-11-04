@@ -163,6 +163,12 @@ YOUTUBE_SUBCOMMANDS = {
     "tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
 }
 
+# /youtube search shows six cards at a time. The "More" button below the
+# cards asks /api/youtube_more for the next six from the same cached search.
+YOUTUBE_SEARCH_PAGE_SIZE = 6
+# Cache at most this many results per keyword, even after many "More" clicks.
+YOUTUBE_SEARCH_MAX_RESULTS = 200
+
 # The browser's "中文" button translates a finished answer paragraph by
 # paragraph. The larger chat model preserves technical terminology and names
 # better than the small question-translation model used by chat.py.
@@ -3652,6 +3658,9 @@ class ChatState:
         self.article_structure: dict | None = None
         self.article_iterative = False
         self.cache = chat.AnswerCache()
+        # /youtube search results are reused by the "More" button instead of
+        # rerunning the (network-bound) YouTube search from scratch.
+        self.youtube_search_cache: dict[str, list[dict]] = {}
         self.latest_answer: str | None = None
         self.latest_sources: list[tuple[chat.Chunk, float]] = []
         self.latest_benchmark: dict | None = None
@@ -4311,6 +4320,19 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             self._handle_video_summary(payload)
+            return
+        if parsed.path == "/api/youtube_more":
+            payload = self._read_json()
+            if payload is None:
+                return
+            keyword = str(payload.get("keyword") or "").strip()
+            raw_exclude = payload.get("exclude")
+            exclude = (
+                {str(value) for value in raw_exclude}
+                if isinstance(raw_exclude, list)
+                else set()
+            )
+            self._handle_youtube_more(keyword, exclude)
             return
         self._send_error_json("Not found", 404)
 
@@ -5678,6 +5700,41 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             f"\n/youtube search: searching YouTube for {keyword!r} "
             "(most recent 5-40 minute videos with English captions)...\n",
         )
+        # Fetch one extra result so the UI knows whether a "More" button is
+        # useful without making a second search just to find out.
+        try:
+            results = self._cached_youtube_search(
+                keyword, YOUTUBE_SEARCH_PAGE_SIZE + 1
+            )
+        except RuntimeError as exc:
+            self._sse_text("output", f"\n/youtube search: {exc}\n")
+            return
+
+        videos = results[:YOUTUBE_SEARCH_PAGE_SIZE]
+        if not videos:
+            self._sse_text(
+                "output",
+                "\n/youtube search: no videos between 5 and 40 minutes with "
+                f"English captions were found for {keyword!r}.\n",
+            )
+            return
+
+        self._sse_text(
+            "output",
+            f"\n/youtube search: {len(videos)} video(s) for {keyword!r}. "
+            "Click a video to play it here, or use Summary for an AI overview.\n",
+        )
+        self._sse(
+            "videos",
+            {
+                "keyword": keyword,
+                "items": videos,
+                "has_more": len(results) > YOUTUBE_SEARCH_PAGE_SIZE,
+            },
+        )
+
+    def _run_youtube_search(self, keyword: str, limit: int) -> list[dict]:
+        """Run search_youtube.py and return normalized video metadata."""
         try:
             result = subprocess.run(
                 [
@@ -5686,7 +5743,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     str(SCRIPT_DIR / "search_youtube.py"),
                     "--json",
                     "--limit",
-                    "6",
+                    str(limit),
                     "--min-duration",
                     "300",
                     "--max-duration",
@@ -5702,26 +5759,18 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 text=True,
                 timeout=180,
             )
-        except subprocess.TimeoutExpired:
-            self._sse_text(
-                "output", "\n/youtube search: YouTube search timed out.\n"
-            )
-            return
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("YouTube search timed out.") from exc
         except OSError as exc:
-            self._sse_text(
-                "output",
-                f"\n/youtube search: could not run search_youtube.py: {exc}\n",
-            )
-            return
+            raise RuntimeError(
+                f"could not run search_youtube.py: {exc}"
+            ) from exc
 
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
-            self._sse_text(
-                "output",
-                "\n/youtube search: YouTube search failed"
-                + (f": {detail}\n" if detail else ".\n"),
+            raise RuntimeError(
+                "YouTube search failed" + (f": {detail}" if detail else ".")
             )
-            return
 
         videos = []
         seen = set()
@@ -5756,23 +5805,60 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     or f"https://www.youtube.com/watch?v={video_id}",
                 }
             )
-            if len(videos) >= 6:
+            if len(videos) >= limit:
                 break
+        return videos
 
-        if not videos:
-            self._sse_text(
-                "output",
-                "\n/youtube search: no videos between 5 and 40 minutes with "
-                f"English captions were found for {keyword!r}.\n",
-            )
+    def _cached_youtube_search(self, keyword: str, limit: int) -> list[dict]:
+        """Return up to `limit` results, growing a per-keyword cache on demand.
+
+        YouTube's recent-first ordering is stable, so asking for a larger
+        limit returns the earlier page unchanged followed by new videos. The
+        cache therefore lets the "More" button fetch just one larger result
+        set and append the unseen tail.
+        """
+        limit = max(1, min(limit, YOUTUBE_SEARCH_MAX_RESULTS))
+        with self.state.lock:
+            cached = self.state.youtube_search_cache.get(keyword)
+            if cached is not None and len(cached) >= limit:
+                return list(cached[:limit])
+
+        videos = self._run_youtube_search(keyword, limit)
+        with self.state.lock:
+            existing = self.state.youtube_search_cache.get(keyword)
+            if existing is not None and len(existing) >= len(videos):
+                videos = existing
+            else:
+                self.state.youtube_search_cache[keyword] = videos
+        return list(videos[:limit])
+
+    def _handle_youtube_more(self, keyword: str, exclude: set[str]) -> None:
+        """Return the next page of a previous /youtube search as JSON."""
+        if not keyword:
+            self._send_error_json('Usage: /youtube search "<keyword>"', 400)
             return
 
-        self._sse_text(
-            "output",
-            f"\n/youtube search: {len(videos)} video(s) for {keyword!r}. "
-            "Click a video to play it here, or use Summary for an AI overview.\n",
+        page_size = YOUTUBE_SEARCH_PAGE_SIZE
+        # Ask for one extra unseen result so `has_more` can be exact.
+        requested = min(
+            len(exclude) + page_size + 1,
+            YOUTUBE_SEARCH_MAX_RESULTS,
         )
-        self._sse("videos", {"keyword": keyword, "items": videos})
+        try:
+            results = self._cached_youtube_search(keyword, requested)
+        except RuntimeError as exc:
+            self._send_error_json(f"/youtube search: {exc}", 502)
+            return
+
+        unseen = [video for video in results if video["id"] not in exclude]
+        items = unseen[:page_size]
+        self._send_json(
+            {
+                "keyword": keyword,
+                "items": items,
+                "has_more": len(unseen) > page_size,
+            }
+        )
 
     def _command_learn(self, argument: str) -> None:
         if not argument:

@@ -1189,6 +1189,35 @@
     cursor: pointer;
   }
   .video-summary-btn:hover { border-color: var(--accent-2); color: #fff; }
+  .video-more-row {
+    display: flex;
+    justify-content: center;
+    margin-top: 10px;
+  }
+  .video-more-btn {
+    background: #142334;
+    color: var(--text);
+    border: 1px solid #30465d;
+    border-radius: 6px;
+    padding: 5px 22px;
+    font-family: var(--mono);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .video-more-btn:hover:not(:disabled) {
+    border-color: var(--accent-2);
+    color: #fff;
+  }
+  .video-more-btn:disabled {
+    opacity: .65;
+    cursor: wait;
+  }
+  .video-more-error {
+    margin-top: 6px;
+    color: var(--warn);
+    font-size: 11px;
+    text-align: center;
+  }
 
   /* Centered player/summary modal opened from /youtube search cards. */
   #video-panel {
@@ -3209,6 +3238,10 @@ function makeEntry(kind, options = {}) {
     newsSources: [],
     newsDone: false,
     videos: [],
+    videosKeyword: "",
+    videosHasMore: false,
+    videosLoading: false,
+    videosError: "",
     newsEl: document.createElement("div"),
     el: document.createElement("div"),
     logsEl: document.createElement("div"),
@@ -3842,6 +3875,67 @@ function videoEmbedUrl(videoId, autoplay) {
   return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}?${params.toString()}`;
 }
 
+const YOUTUBE_SEARCH_PAGE_SIZE = 6;
+
+function normalizeVideoItems(rawItems) {
+  return (Array.isArray(rawItems) ? rawItems : [])
+    .map((item) => ({
+      id: String(item?.id || ""),
+      title: String(item?.title || "").trim(),
+      duration: Number(item?.duration) || 0,
+      channel: String(item?.channel || "").trim(),
+      thumbnail: String(item?.thumbnail || "").trim(),
+      uploadDate: String(item?.upload_date || "").trim(),
+      published: String(item?.published || "").trim(),
+      timestamp: Number(item?.timestamp) || 0,
+      url: String(item?.url || "").trim(),
+    }))
+    .filter((item) => item.id && item.url);
+}
+
+async function loadMoreVideos(entry) {
+  if (!entry.videosKeyword || entry.videosLoading) return;
+  entry.videosLoading = true;
+  entry.videosError = "";
+  scheduleRender(entry);
+  try {
+    const seen = new Set((entry.videos || []).map((item) => item.id));
+    const response = await fetch("/api/youtube_more", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        keyword: entry.videosKeyword,
+        exclude: [...seen],
+      }),
+    });
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try {
+        const text = await response.text();
+        if (text) {
+          try {
+            detail = JSON.parse(text).error || detail;
+          } catch {
+            detail = text.slice(0, 300);
+          }
+        }
+      } catch { /* ignore */ }
+      throw new Error(detail);
+    }
+    const data = await response.json();
+    const items = normalizeVideoItems(data?.items).filter(
+      (item) => !seen.has(item.id)
+    );
+    if (items.length) entry.videos = (entry.videos || []).concat(items);
+    entry.videosHasMore = Boolean(data?.has_more);
+  } catch (error) {
+    entry.videosError = error?.message || String(error);
+  } finally {
+    entry.videosLoading = false;
+    scheduleRender(entry);
+  }
+}
+
 function renderVideoResults(entry) {
   const container = entry.videosEl;
   if (!container) return;
@@ -3954,6 +4048,30 @@ function renderVideoResults(entry) {
     cards.appendChild(card);
   }
   container.appendChild(cards);
+
+  if (entry.videosHasMore || entry.videosLoading) {
+    const moreRow = document.createElement("div");
+    moreRow.className = "video-more-row";
+    const moreBtn = document.createElement("button");
+    moreBtn.type = "button";
+    moreBtn.className = "video-more-btn";
+    moreBtn.textContent = entry.videosLoading ? "Loading..." : "More";
+    moreBtn.disabled = Boolean(entry.videosLoading);
+    moreBtn.title = "Load another 6 videos";
+    moreBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      loadMoreVideos(entry);
+    });
+    moreRow.appendChild(moreBtn);
+    container.appendChild(moreRow);
+  }
+  if (entry.videosError) {
+    const errorEl = document.createElement("div");
+    errorEl.className = "video-more-error";
+    errorEl.textContent = entry.videosError;
+    container.appendChild(errorEl);
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -5114,20 +5232,13 @@ function submitText(text, fromChoice = false) {
     output: (data) => addOutput(entry, data.text || ""),
     news: (data) => addNewsEvent(entry, data || {}),
     videos: (data) => {
-      const items = Array.isArray(data?.items) ? data.items : [];
-      entry.videos = items
-        .map((item) => ({
-          id: String(item?.id || ""),
-          title: String(item?.title || "").trim(),
-          duration: Number(item?.duration) || 0,
-          channel: String(item?.channel || "").trim(),
-          thumbnail: String(item?.thumbnail || "").trim(),
-          uploadDate: String(item?.upload_date || "").trim(),
-          published: String(item?.published || "").trim(),
-          timestamp: Number(item?.timestamp) || 0,
-          url: String(item?.url || "").trim(),
-        }))
-        .filter((item) => item.id && item.url);
+      entry.videos = normalizeVideoItems(data?.items);
+      entry.videosKeyword = String(data?.keyword || "").trim();
+      entry.videosHasMore = data?.has_more !== undefined
+        ? Boolean(data.has_more)
+        : entry.videos.length >= YOUTUBE_SEARCH_PAGE_SIZE;
+      entry.videosLoading = false;
+      entry.videosError = "";
       scheduleRender(entry);
     },
     choices: (data) => {

@@ -1,4 +1,10 @@
-task (completed) {
+task.more_videos_in_search (completed) {
+  reference task.search_youtube_videos_details, underneath the list of 6 videos, add a button "More", when click {
+    load another 6 videos
+  }
+}
+
+task.search_youtube_videos_details (completed) {
   in task.search_youtube_videos {
     - for each video, show the video release date and duration
     - we should return a list of 6 related and most recent videos ranging from 5 minutes to 40 minutes, and they all should have en captions
