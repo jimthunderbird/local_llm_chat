@@ -153,7 +153,7 @@ LIST_PATTERN = re.compile(
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = Path.cwd() / "youtube_transcript"
-TAG_DIR = Path.cwd() / "tags"
+TAGS_PATH = Path.cwd() / "tags.json"
 DEFAULT_TAG = "japan"
 # Sentinel used by --tag with no value: ask for the tag interactively.
 INTERACTIVE_TAG = "\0__interactive_tag__"
@@ -331,20 +331,15 @@ class TranscriptMatch:
 
 
 def load_tag_video_ids(tag: str) -> set[str]:
-    """Read the video ids listed in ./tags/<tag>."""
-    tag_path = TAG_DIR / tag
-    if not tag_path.is_file():
-        sys.exit(f"Tag file not found: {tag_path}")
+    """Validate a soft tag and return every learned video id.
 
-    try:
-        lines = tag_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError as exc:
-        sys.exit(f"Cannot read tag file {tag_path}: {exc}")
-
-    video_ids = {line.strip() for line in lines if line.strip()}
-    if not video_ids:
-        sys.exit(f"Tag file is empty: {tag_path}")
-    return video_ids
+    This legacy gradual-context clone keeps its embedding-based retrieval, but
+    tags are now soft query-time scopes from ./tags.json rather than physical
+    membership files.
+    """
+    if tag not in available_tags():
+        sys.exit(f"Unknown tag: {tag!r}. Choose one of: {', '.join(available_tags())}")
+    return set(available_video_ids())
 
 
 def load_embeddings(
@@ -563,15 +558,14 @@ class CommandCompleter(Completer):
 
 
 def available_tags() -> list[str]:
-    """Return the tag names (files) available in ./tags."""
+    """Return the tag names defined in ./tags.json."""
     try:
-        return sorted(
-            entry.name
-            for entry in TAG_DIR.iterdir()
-            if entry.is_file() and not entry.name.startswith(".")
-        )
-    except OSError:
+        raw = json.loads(TAGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return []
+    if not isinstance(raw, dict):
+        return []
+    return sorted(str(name) for name in raw)
 
 
 def available_video_ids() -> list[str]:
@@ -655,10 +649,10 @@ def prompt_for_video_id() -> str:
 
 
 def prompt_for_tag() -> str:
-    """Prompt for a tag, tab-completing the files in ./tags."""
+    """Prompt for a tag, tab-completing the names in ./tags.json."""
     tags = available_tags()
     if not tags:
-        sys.exit(f"No tag files found in {TAG_DIR}")
+        sys.exit(f"No tags found in {TAGS_PATH}")
 
     print(f"Available tags: {', '.join(tags)}")
     session = PromptSession(
@@ -675,7 +669,7 @@ def prompt_for_tag() -> str:
             sys.exit("No tag selected.")
         if not tag:
             continue
-        if (TAG_DIR / tag).is_file():
+        if tag in tags:
             return tag
         print(
             f"Unknown tag: {tag!r}. "
@@ -1437,14 +1431,8 @@ def learn_video(value: str) -> str | None:
 
 
 def video_is_tagged(video_id: str, tag: str) -> bool:
-    """Return whether ``video_id`` is recorded in ./tags/<tag>."""
-    try:
-        lines = (TAG_DIR / tag).read_text(
-            encoding="utf-8", errors="replace"
-        ).splitlines()
-    except OSError:
-        return False
-    return video_id in {line.strip() for line in lines if line.strip()}
+    """Compatibility helper for soft tags: every learned video fits a tag."""
+    return tag in available_tags() and video_id in set(available_video_ids())
 
 
 def switch_tag(
@@ -1457,7 +1445,7 @@ def switch_tag(
     """
     tags = available_tags()
     if not tags:
-        print(f"No tag files found in {TAG_DIR}.", file=sys.stderr)
+        print(f"No tags found in {TAGS_PATH}.", file=sys.stderr)
         return None
 
     new_tag = argument.strip()
@@ -1885,7 +1873,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="?",
         const=INTERACTIVE_TAG,
         default=DEFAULT_TAG,
-        help="load only embeddings for video ids in ./tags/<tag> "
+        help="soft tag context from ./tags.json "
         f"(default: {DEFAULT_TAG}); omit the value to pick a tag "
         "interactively with tab completion",
     )

@@ -1,0 +1,974 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soft Tags: Replacing Physical Tag Files with a tags.json Context Registry</title>
+<style>
+  :root {
+    --fg: #1b1f23;
+    --muted: #57606a;
+    --line: #d0d7de;
+    --bg: #ffffff;
+    --soft: #f6f8fa;
+    --accent: #0969da;
+    --warn: #9a6700;
+    --good: #1a7f37;
+    --bad: #cf222e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto;
+    max-width: 1080px;
+    padding: 40px 28px 90px;
+    color: var(--fg);
+    background: var(--bg);
+    font: 16px/1.62 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  h1, h2, h3, h4 { line-height: 1.25; margin-top: 2em; }
+  h1 { margin-top: 0; font-size: 2rem; border-bottom: 1px solid var(--line); padding-bottom: .35em; }
+  h2 { font-size: 1.42rem; border-bottom: 1px solid var(--line); padding-bottom: .25em; }
+  h3 { font-size: 1.14rem; }
+  h4 { font-size: 1rem; }
+  p, li { max-width: 86ch; }
+  a { color: var(--accent); }
+  code {
+    font: .88em/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--soft);
+    border: 1px solid #eaeef2;
+    border-radius: 4px;
+    padding: .1em .3em;
+  }
+  pre {
+    background: #0d1117;
+    color: #e6edf3;
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font: .84rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre code { background: none; border: 0; padding: 0; color: inherit; }
+  table { border-collapse: collapse; width: 100%; margin: 1.1em 0; font-size: .93rem; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; vertical-align: top; text-align: left; }
+  th { background: var(--soft); }
+  .muted { color: var(--muted); }
+  .callout {
+    border-left: 4px solid var(--accent);
+    background: #f0f6ff;
+    padding: 12px 16px;
+    margin: 1.2em 0;
+    border-radius: 0 6px 6px 0;
+  }
+  .callout.warn { border-left-color: var(--warn); background: #fff8e5; }
+  .callout.good { border-left-color: var(--good); background: #eefbf1; }
+  .callout.bad { border-left-color: var(--bad); background: #fff0f0; }
+  .pill {
+    display: inline-block;
+    font-size: .75rem;
+    font-weight: 600;
+    letter-spacing: .02em;
+    padding: .14em .55em;
+    border-radius: 999px;
+    background: var(--soft);
+    border: 1px solid var(--line);
+    color: var(--muted);
+    vertical-align: middle;
+  }
+  .pill.good { background: #eefbf1; border-color: #b7e4c7; color: var(--good); }
+  .pill.warn { background: #fff8e5; border-color: #f0d58c; color: var(--warn); }
+  .toc { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 14px 20px; }
+  .toc ol { margin: .4em 0; }
+  .num { font-variant-numeric: tabular-nums; }
+  .small { font-size: .9rem; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 2.4em 0; }
+  .meta { color: var(--muted); font-size: .92rem; margin-bottom: 1.6em; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 760px) { .two-col { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<h1>Soft Tags: Replacing Physical Tag Files with a <code>tags.json</code> Context Registry</h1>
+<p class="meta">
+  Research report for <code>prompts/tags.prompt</code> &middot; 2026-11-05 &middot;
+  Scope: <code>app/chat.html</code>, <code>app/chat_server.py</code>, and the
+  <code>chat.py</code> retrieval library &middot;
+  <span class="pill">research only</span> no application code was changed
+</p>
+
+<div class="callout">
+<strong>Read this first.</strong> The tag system should become a <em>soft,
+query-time context</em> backed by one registry file (<code>tags.json</code>),
+not a set of physical membership files under <code>./tags</code>. Retrieval
+should start from the question over one global trunk corpus, then apply the
+tag context as a second, soft relevance signal. Video ingestion should not run
+a 35B classification call per tag. The recommended design keeps the existing
+BM25, query expansion, small-model filter, streaming, and prompt pipeline; it
+changes where tag metadata comes from and how tag relevance is computed.
+</div>
+
+<div class="toc">
+<strong>Contents</strong>
+<ol>
+  <li><a href="#summary">Executive summary</a></li>
+  <li><a href="#baseline">What the current tag system does, and what it costs</a></li>
+  <li><a href="#why">Why the physical tag files hurt</a></li>
+  <li><a href="#requirements">Requirements and meaning of &ldquo;soft tag&rdquo;</a></li>
+  <li><a href="#options">Design options</a></li>
+  <li><a href="#recommended">Recommended architecture</a></li>
+  <li><a href="#migration">Migration plan</a></li>
+  <li><a href="#measurements">Measured performance and memory</a></li>
+  <li><a href="#evaluation">Evaluation plan</a></li>
+  <li><a href="#risks">Risks and failure modes</a></li>
+  <li><a href="#decisions">Open decisions</a></li>
+  <li><a href="#appendix">Appendix: code touchpoints, proposed registry, experiments</a></li>
+</ol>
+</div>
+
+<h2 id="summary">1. Executive summary</h2>
+<p>
+The current tag feature is a hard partition. <code>./tags/&lt;tag&gt;</code>
+contains YouTube video ids; <code>chat.load_chunks(tag)</code> loads only those
+videos; <code>/tag</code> rebuilds the in-memory trunk list; the cross-tag
+fallback loads the union of every tag file and tries other tags one at a time.
+Learning a video ends with <code>youtube_video_tag_gen.py</code>, which asks
+<code>ornith:35b</code> one yes/no question for every tag. On this machine one
+such classification took <strong>11.8 s</strong> for a single video/tag pair.
+With the current 13 tags that is roughly <strong>2.5 minutes of tagging added to
+every new video</strong>, and a full reclassification would be thousands of
+35B calls.
+</p>
+<p>
+The repository already has 497 learned videos and 10,660 trunk files. A single
+global BM25 index over all of them is practical: measured index build time was
+<strong>1.34 s</strong> and the index used about <strong>61 MB</strong> of
+Python memory (tracemalloc), on top of the process. That makes the hard tag
+partition unnecessary as a memory-saving device.
+</p>
+<p>
+<strong>Recommendation.</strong> Make <code>tags.json</code> the only tag
+registry. Each tag has a description (and optionally a small keyword list).
+Learning stops at transcript, rewrite, trunks, and embeddings. At query time:
+</p>
+<ol>
+  <li>Retrieve question candidates from the global trunk corpus with the
+      existing BM25/expansion/fuzzy-entity machinery.</li>
+  <li>Apply a tag-aware relevance step over those candidates. Use the existing
+      <code>qwen3:1.7b</code> filter with the tag description added to its
+      prompt (measured 0.2&ndash;2.7 s), and keep a lexical tag-profile re-rank
+      as the cheap fallback.</li>
+  <li>Put the tag name and description into the answer prompt as <em>scope
+      instructions, never as evidence</em>.</li>
+  <li>If no candidate satisfies the tag context, route to the best other tag
+      in one small-model call (or a lexical tag ranking), instead of running a
+      35B answer attempt for every tag.</li>
+</ol>
+<p>
+This preserves the user-visible meaning of <code>/tag</code> (&ldquo;answer
+within this topic&rdquo;) while removing per-video tagging latency, duplicate
+membership data, and the stale hard partition.
+</p>
+
+<h2 id="baseline">2. What the current tag system does, and what it costs</h2>
+
+<h3>2.1 Current flow</h3>
+<table>
+  <thead>
+    <tr><th>Stage</th><th>Current behaviour</th><th>Primary code</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Registry</td>
+      <td>Tag names are filenames in <code>./tags</code>. Each file lists video ids, one per line. Descriptions are optional in <code>tag_descriptions.json</code>.</td>
+      <td><code>chat.TAG_DIR</code>, <code>chat.available_tags()</code>, <code>chat.load_tag_video_ids()</code></td>
+    </tr>
+    <tr>
+      <td>Startup</td>
+      <td><code>--tag japan</code> reads <code>./tags/japan</code> and loads only those videos' trunks.</td>
+      <td><code>chat.load_chunks(tag=...)</code>, <code>ChatState.__init__</code> in <code>app/chat_server.py</code></td>
+    </tr>
+    <tr>
+      <td>Switch</td>
+      <td><code>/tag &lt;name&gt;</code> validates the file, reloads the chunk list, clears the BM25 cache, drops the conversation, and runs GC.</td>
+      <td><code>chat.switch_tag()</code>, <code>ChatState.replace_chunks()</code>, <code>_command_tag()</code></td>
+    </tr>
+    <tr>
+      <td>Retrieval</td>
+      <td>BM25 only over the active tag's trunks. Query expansion and fuzzy entity correction are unchanged.</td>
+      <td><code>chat.top_chunks()</code>, <code>chat.answer()</code></td>
+    </tr>
+    <tr>
+      <td>Out-of-tag fallback</td>
+      <td>If the active tag has no lexical match (or the answer model says it is insufficient), the server ranks other tags from the union of all tagged chunks and tries them one by one, generating an answer per tag.</td>
+      <td><code>chat.load_all_tagged_chunks()</code>, <code>ChatState.fallback_tag_order()</code>, <code>app/chat_server.py:5513&ndash;5570</code></td>
+    </tr>
+    <tr>
+      <td>Learning</td>
+      <td><code>youtube_video_learn.py</code> runs five steps; the last step is <code>youtube_video_tag_gen.py --youtube_video_hash</code>, which classifies the new video against every tag file.</td>
+      <td><code>youtube_video_learn.STEPS</code>, <code>youtube_video_tag_gen.py</code></td>
+    </tr>
+    <tr>
+      <td>Refresh after learning</td>
+      <td>Only reloads the active tag if <code>video_is_tagged(video_id, tag)</code> is true. Untagged new videos stay invisible until a later tag generation run.</td>
+      <td><code>_refresh_knowledge_after_learn()</code>, <code>_finish_learn()</code>, <code>chat.video_is_tagged()</code></td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>2.2 Corpus and tag-file facts</h3>
+<div class="two-col">
+<div>
+<table>
+  <thead><tr><th>Metric</th><th class="num">Value</th></tr></thead>
+  <tbody>
+    <tr><td>Learned videos (<code>*.title</code>)</td><td class="num">497</td></tr>
+    <tr><td>Trunk files</td><td class="num">10,660</td></tr>
+    <tr><td>Transcript store</td><td class="num">305 MB</td></tr>
+    <tr><td>Legacy tag files</td><td class="num">13</td></tr>
+    <tr><td>Legacy membership lines</td><td class="num">1,137</td></tr>
+    <tr><td>Unique tagged videos</td><td class="num">470</td></tr>
+    <tr><td>Untagged videos</td><td class="num">27</td></tr>
+    <tr><td>Average memberships per video</td><td class="num">2.42</td></tr>
+  </tbody>
+</table>
+</div>
+<div>
+<table>
+  <thead><tr><th>Legacy tag</th><th class="num">Videos</th></tr></thead>
+  <tbody>
+    <tr><td><code>ai_and_coding</code></td><td class="num">246</td></tr>
+    <tr><td><code>artificial_intelligence</code></td><td class="num">202</td></tr>
+    <tr><td><code>ai_math_coding</code></td><td class="num">199</td></tr>
+    <tr><td><code>programming_software</code></td><td class="num">157</td></tr>
+    <tr><td><code>japan</code></td><td class="num">139</td></tr>
+    <tr><td><code>golang</code></td><td class="num">115</td></tr>
+    <tr><td><code>math</code></td><td class="num">44</td></tr>
+    <tr><td><code>retire</code></td><td class="num">17</td></tr>
+    <tr><td><code>rust</code></td><td class="num">8</td></tr>
+    <tr><td><code>trade_school_job_program_bubble</code></td><td class="num">6</td></tr>
+    <tr><td><code>home_inspector_california</code></td><td class="num">2</td></tr>
+    <tr><td><code>php</code></td><td class="num">2</td></tr>
+  </tbody>
+</table>
+</div>
+</div>
+
+<div class="callout warn">
+<strong>Important migration finding.</strong> The repository has 13 legacy tags,
+but <code>tag_descriptions.json</code> currently describes only
+<code>ai_and_coding</code>, <code>artificial_intelligence</code>, and
+<code>japan</code>. If <code>tags.json</code> becomes the sole registry and only
+those three keys are copied over, then <code>/tag golang</code>,
+<code>/tag rust</code>, <code>/tag php</code>, <code>/tag math</code>, and the
+other seven tags become invalid. That would break the documentation-backed tag
+behaviour (<code>DOCUMENT_BACKED_TAGS = {golang, rust, php}</code>) and many
+existing prompts. The migration must seed descriptions for <em>all</em> tags
+that should remain valid, or explicitly retire tags and update every dependent
+feature. The appendix proposes descriptions for all 13.
+</div>
+
+<h2 id="why">3. Why the physical tag files hurt</h2>
+
+<h3>3.1 Learning latency is dominated by classification</h3>
+<p>
+The tag classifier loads up to 2,500 characters of title/rewrite/transcript for
+each video and asks <code>ornith:35b</code> one yes/no question per tag. On this
+machine a single call took <strong>11.8 s</strong> in a controlled experiment.
+The current pipeline therefore adds roughly:
+</p>
+<table>
+  <thead><tr><th>Scenario</th><th class="num">Calls</th><th class="num">Approx. time at 11.8 s/call</th></tr></thead>
+  <tbody>
+    <tr><td>One new video, 13 tags</td><td class="num">13</td><td class="num">~2.5 minutes</td></tr>
+    <tr><td>Full re-tag of 497 videos, 13 tags</td><td class="num">6,461</td><td class="num">~21 hours (gross)</td></tr>
+    <tr><td>Full re-tag minus 1,137 recorded positives</td><td class="num">5,324</td><td class="num">~17.5 hours (sequential)</td></tr>
+  </tbody>
+</table>
+<p class="small">
+These are order-of-magnitude numbers, not a benchmark of every machine. They
+show why removing per-video tagging matters: the cost scales with
+<code>videos &times; tags</code>, and every new tag multiplies the backfill.
+</p>
+
+<h3>3.2 The hard partition is duplicated, stale, and lossy</h3>
+<ul>
+  <li><strong>Duplication:</strong> 1,137 membership lines for 470 unique videos.
+      A video about AI coding can be stored in four or five files.</li>
+  <li><strong>Staleness:</strong> a tag file records a yes/no decision made from
+      a 2,500-character excerpt. Re-learning a video does not automatically
+      remove old memberships or add new ones beyond the classifier pass.</li>
+  <li><strong>Lossy boundaries:</strong> tag membership is binary. A video that
+      touches Japan for one segment but is mostly about AI cannot be partially
+      relevant; it is either in or out.</li>
+  <li><strong>Invisible untagged videos:</strong> 27 learned videos are not in
+      any tag. Under hard tags, they can never answer a query; under soft tags
+      they are natural candidates.</li>
+</ul>
+
+<h3>3.3 Cross-tag fallback is expensive and indirect</h3>
+<p>
+The current fallback first builds/loads the union of every tagged video, ranks
+tags by BM25 evidence, then calls the 35B answer model once per attempted tag.
+With soft tags there is one global corpus and one candidate set; tag routing can
+be a single small-model decision. This removes both the union-index rebuild and
+the repeated 35B attempts.
+</p>
+
+<h2 id="requirements">4. Requirements and meaning of &ldquo;soft tag&rdquo;</h2>
+<p>
+&ldquo;Soft&rdquo; should mean: <em>the tag is resolved at query time from
+metadata, not from a precomputed list of video files</em>. It should not mean
+&ldquo;the tag is only a cosmetic label.&rdquo; The intended behaviour is a
+conjunction of two relevance conditions:
+</p>
+<div class="callout">
+<strong>Scope condition.</strong> A context trunk qualifies only when it is
+relevant to <em>both</em> the active tag context (name + description) and the
+user's question. The tag condition is evaluated when the question is asked,
+not when the video is learned.
+</div>
+<p>Concrete requirements derived from the prompt and the existing product:</p>
+<table>
+  <thead><tr><th>ID</th><th>Requirement</th></tr></thead>
+  <tbody>
+    <tr><td>R1</td><td><code>tags.json</code> is the single source of truth for valid tags and descriptions.</td></tr>
+    <tr><td>R2</td><td>A tag absent from <code>tags.json</code> is invalid: <code>/tag</code>, CLI <code>--tag</code>, and completion must reject it.</td></tr>
+    <tr><td>R3</td><td>Learning a video must not depend on tags: fetch transcript, rewrite, create trunks, create embeddings, done.</td></tr>
+    <tr><td>R4</td><td><code>/tag &lt;name&gt;</code> sets a global tag context; it must not rebuild a hard video subset.</td></tr>
+    <tr><td>R5</td><td>For a question, context selection combines tag-context relevance and question relevance.</td></tr>
+    <tr><td>R6</td><td>The tag description participates in retrieval and/or answer construction; it is not merely displayed.</td></tr>
+    <tr><td>R7</td><td>Out-of-tag questions should not silently use unrelated content without a visible explanation; preserve or improve the current auto-switch behaviour.</td></tr>
+    <tr><td>R8</td><td>Existing coding/documentation tags (<code>golang</code>, <code>rust</code>, <code>php</code>) must keep working.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="options">5. Design options</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Option</th><th>How the tag is applied</th><th>Pros</th>
+      <th>Cons</th><th>Verdict</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>A. Prompt-only tag context</strong></td>
+      <td>Retrieval is global question BM25. The tag name/description is prepended to the answer prompt.</td>
+      <td>Simplest; no new model calls; no false retrieval negatives.</td>
+      <td>Does not satisfy &ldquo;fetch trunks related to the tag&rdquo;; a model may ignore the scope or answer from unrelated chunks.</td>
+      <td>Insufficient alone</td>
+    </tr>
+    <tr>
+      <td><strong>B. Description-weighted BM25</strong></td>
+      <td>Add tag-description terms to the query, or score chunks by description BM25 and combine with question BM25.</td>
+      <td>Cheap, deterministic, no extra model; easy to cache.</td>
+      <td>Descriptions contain common words. Measured: 10,652 of 10,660 chunks had a positive BM25 score for the <code>ai_and_coding</code> description. Requires stopword removal, keywords, and calibration.</td>
+      <td>Useful as a prior, not as a hard gate</td>
+    </tr>
+    <tr>
+      <td><strong>C. Two-stage soft-AND filter</strong></td>
+      <td>Retrieve top question candidates globally, then ask a small model to keep only candidates that are both question-relevant and tag-relevant.</td>
+      <td>Directly implements the requirement; measured 0.2&ndash;2.7 s; reuses the existing <code>qwen3:1.7b</code> filter infrastructure; no embeddings.</td>
+      <td>Small model can be wrong; must define <code>NONE</code>/error behaviour; adds TTFT unless parallelised.</td>
+      <td><span class="pill good">Recommended primary</span></td>
+    </tr>
+    <tr>
+      <td><strong>D. Lazy LLM tag classification per video</strong></td>
+      <td>Classify video/tag pairs on demand and cache the result in a derived index.</td>
+      <td>Good accuracy; no per-chunk ambiguity.</td>
+      <td>Reintroduces the expensive classifier, only later; cache invalidation and cold-start cost; violates the spirit of removing tag generation.</td>
+      <td>Reject as default</td>
+    </tr>
+    <tr>
+      <td><strong>E. Strict lexical prefilter</strong></td>
+      <td>Only videos above a tag-profile lexical threshold enter the candidate set.</td>
+      <td>Fastest and most deterministic.</td>
+      <td>Severe false negatives. Example: the Nijo Market video ranks 189/497 against the Japan profile because its rewrite mentions &ldquo;Japan&rdquo; only once; keyword expansion improves it to 42/497, but lexical matching alone is not reliable.</td>
+      <td>Optional strict mode only</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="recommended">6. Recommended architecture</h2>
+<p>
+Use <strong>C as the primary tag gate</strong>, with <strong>B as a cheap
+prior/fallback</strong> and <strong>A as the prompt-context layer</strong>. Keep
+one global trunk corpus and one BM25 index. The tag is metadata on the query,
+not a partition of the corpus.
+</p>
+
+<h3>6.1 Registry: <code>tags.json</code></h3>
+<p>
+Keep the existing description-map shape for the minimum migration:
+</p>
+<pre><code>{
+  "japan": "Japan, Japanese culture, society, economy, history, language, travel, and people or organizations from Japan.",
+  "golang": "The Go programming language: syntax, concurrency with goroutines and channels, the standard library, tooling, performance, backend services, and Go ecosystem practices."
+}</code></pre>
+<p>
+For better retrieval, allow a backward-compatible object form with optional
+keywords. A loader can accept both strings and objects and normalize them:
+</p>
+<pre><code>{
+  "japan": {
+    "description": "Japan, Japanese culture, society, economy, history, language, travel, and people or organizations from Japan.",
+    "keywords": ["Sapporo", "Hokkaido", "Tokyo", "Kyoto", "Osaka", "Fukuoka", "Okinawa", "ramen", "sushi", "wagyu"]
+  }
+}</code></pre>
+<p>
+Keywords are <em>static tag metadata</em>, not per-video classifications. They
+are the cheapest way to repair the lexical profile when a description uses
+generic words. In the experiment, adding a small Japan keyword list moved the
+Nijo Market video from rank 189/497 to rank 42/497 and the wagyu video from
+rank 51/497 to rank 41/497 against the video-level profile.
+</p>
+<p>
+Validation rules for the registry:
+</p>
+<ul>
+  <li>File missing, invalid JSON, non-object root, empty object, or a
+      non-string/non-object value: fail fast with a short, actionable error.</li>
+  <li>Detect duplicate keys (for example with
+      <code>json.load(..., object_pairs_hook=...)</code>) instead of silently
+      accepting the last one.</li>
+  <li>Tag names must be non-empty, must not contain <code>/</code>,
+      <code>\</code>, <code>.</code> or <code>..</code>, and should follow the
+      existing lowercase <code>snake_case</code> convention. Reject path-like
+      names even though they are no longer filenames.</li>
+  <li>Descriptions must be non-empty after whitespace normalization.</li>
+  <li>Expose a stable <code>tags_version</code> (mtime + size, or a content
+      hash) for answer-cache invalidation and hot reload.</li>
+</ul>
+
+<h3>6.2 Ingestion: remove tagging from the learning pipeline</h3>
+<p>
+<code>youtube_video_learn.STEPS</code> should become four steps:
+</p>
+<pre><code>STEPS = [
+    ("fetch_youtube_transcript.py", ["&lt;hash&gt;"]),
+    ("rewrite.py", ["&lt;hash&gt;"]),
+    ("create_trunks.py", ["&lt;hash&gt;"]),
+    ("create_embeddings.py", ["&lt;hash&gt;"]),
+]</code></pre>
+<p>
+Update the docstring, the help text, and the progress weights in
+<code>app/chat_server.py</code> (<code>VIDEO_LEARN_STEP_WEIGHTS</code> currently
+has five entries matching the five steps). Remove the
+<code>youtube_video_tag_gen.py</code> progress branch. Archive or delete
+<code>youtube_video_tag_gen.py</code> after the migration; leaving it runnable
+would encourage the old model. The completed prompt item that renamed
+<code>generate_tags.py</code> to <code>youtube_video_tag_gen.py</code> remains
+historically true, but this refactor supersedes its role.
+</p>
+
+<h3>6.3 Startup and <code>/tag</code></h3>
+<ul>
+  <li>Load <code>tags.json</code> once at startup and cache the normalized
+      profiles. If the default tag is absent, fail with the valid tag list
+      (do not silently create it).</li>
+  <li>Load the global chunk list once:
+      <code>load_chunks(video_ids=set(available_video_ids()))</code>. Add a
+      dedicated <code>load_all_chunks()</code> wrapper so the loader prints
+      &ldquo;10,660 trunks from 497 videos&rdquo; instead of a huge
+      transcript-id list.</li>
+  <li><code>/tag &lt;name&gt;</code> validates against the registry and changes
+      only <code>state.tag</code> and <code>state.tag_description</code>. If the
+      current scope is a transcript or an article, restore the global corpus
+      first; otherwise no chunk reload and no BM25 rebuild are needed.</li>
+  <li><code>/tag</code> should clear the answer cache because the prompt/scope
+      changed. Whether it resets the conversation is a product decision (today
+      it does; consider keeping conversation for a metadata-only switch).</li>
+  <li>Completion, CLI <code>--tag</code> (including the interactive
+      &ldquo;no value&rdquo; form), and <code>/status</code> read the registry
+      keys. The status payload should include the description or a short
+      &ldquo;soft tag&rdquo; label so the UI can explain the scope.</li>
+  <li>Remove <code>/tag_gen</code> and <code>/youtube tag_gen</code> from the
+      command tables and completion paths. If backwards compatibility is
+      required for one release, make them print a deprecation notice and point
+      to <code>tags.json</code>; do not keep writing tag files.</li>
+</ul>
+
+<h3>6.4 Retrieval: global question retrieval, then tag-aware soft-AND</h3>
+<ol>
+  <li><strong>Question retrieval.</strong> Run the existing
+      <code>top_chunks()</code> over the global chunk list. This already
+      includes query expansion, fuzzy spelling correction, entity focus, score
+      elbow, per-video caps, and the small-LLM question filter. It returns a
+      question-relevant candidate set (default depth 20).</li>
+  <li><strong>Tag-aware filter.</strong> Add a separate function,
+      <code>tag_filter_candidates(question, candidates, profile)</code>, using
+      the existing <code>FILTER_MODEL</code> (<code>qwen3:1.7b</code>). Its
+      prompt contains the tag name, description, optional keywords, the
+      question, and numbered 700-character candidate snippets. It must return
+      the numbers that satisfy <em>both</em> conditions, or <code>NONE</code>.</li>
+  <li><strong>Do not reuse the question filter's safety nets.</strong> The
+      current <code>filter_candidates()</code> deliberately keeps the top
+      <code>FILTER_ALWAYS_KEEP</code> candidates and, when the model says NONE,
+      keeps <code>FILTER_FALSE_NEGATIVE_KEEP</code> top BM25 candidates. Those
+      are correct for question relevance but would defeat a strict tag gate.
+      Give the tag filter its own return status:
+      <code>ok</code>, <code>none</code>, <code>skipped</code>,
+      <code>error</code>. Only <code>ok</code> candidates answer the question.
+      On <code>none</code>, route to another tag or report the scope miss. On
+      <code>error</code>, fall back to the lexical tag prior and log.</li>
+  <li><strong>Lexical prior / fallback.</strong> Build a tag profile from
+      description + keywords and compute BM25 scores over the candidate chunks
+      or over a small per-video profile index. Normalize the tag score within
+      the candidate set and use it to (a) pre-rank tags for the router and
+      (b) re-rank candidates when the small-model filter is unavailable. Keep
+      the question score dominant:
+      <code>score = s_question * (1 + alpha * normalized_tag_score)</code> with
+      <code>alpha</code> around 0.25&ndash;0.5. A strict mode may additionally
+      require <code>tag_score &gt; threshold</code>.</li>
+  <li><strong>List questions.</strong> The current question filter is skipped
+      for list/aggregation queries. Do not skip tag scoping there. Run the tag
+      filter in batches of at most 20 candidates (or use the lexical prior) so
+      &ldquo;list all X in this tag&rdquo; still gets broad, scoped context.</li>
+</ol>
+
+<div class="callout warn">
+<strong>Why not rely on description BM25 alone?</strong> A direct BM25 query
+using the unmodified <code>ai_and_coding</code> description scored positively on
+10,652 of 10,660 chunks; the <code>japan</code> description scored positively on
+10,389. Removing stopwords reduced the positive counts to 3,813 and 3,152, but
+the scores still need per-tag normalization. A description is a topic summary,
+not a boolean classifier. Use it as a prior, or hand the decision to the small
+model that can read the candidate.
+</div>
+
+<h3>6.5 Tag context in the answer prompt</h3>
+<p>
+Add a compact scope block through the existing <code>prompt_prefix</code>
+mechanism. It must be clearly labelled as instructions, not as evidence, so the
+prompt's grounding rule still applies:
+</p>
+<pre><code>&lt;tag_context&gt;
+Tag: japan
+Description: Japan, Japanese culture, society, economy, history, language, travel, and people or organizations from Japan.
+&lt;/tag_context&gt;
+The user is currently exploring this tag. Prefer context that fits this topic.
+Do not use this tag description as a source of facts, and do not answer from
+outside the provided chunks. If the provided chunks are all outside this topic,
+say so plainly.
+</code></pre>
+<p>
+Combine this with the existing <code>coding_prompt_prefix(tag)</code> when the
+tag is a documentation-backed language tag. Keep the tag block short: it is
+repeated on every answer and should not crowd out the retrieved context.
+</p>
+
+<h3>6.6 Cross-tag fallback without hard tag files</h3>
+<p>
+Replace <code>fallback_tag_order()</code> and the repeated 35B attempts with a
+tag router over the same candidate set:
+</p>
+<ol>
+  <li>Run the tag-aware filter for the active profile. If it returns candidates,
+      answer normally.</li>
+  <li>If it returns <code>NONE</code>, rank the other registry tags. Cheap
+      first pass: mean/median normalized lexical tag score over the top question
+      candidates. If the best tag is clearly ahead, select it. Otherwise make
+      one <code>qwen3:1.7b</code> routing call with the question, candidate
+      snippets, and the tag names/descriptions, asking for the single best tag
+      or <code>NONE</code>.</li>
+  <li>Re-run the tag filter once with the selected profile. If it succeeds,
+      update <code>state.tag</code>/description (keeping the conversation, as
+      <code>adopt_tag()</code> does today) and stream the answer.</li>
+  <li>If no tag fits, either answer with a clear scope message or, if product
+      policy prefers the current always-answer behaviour, answer from the
+      top question candidates and log that no tag matched. Do not silently
+      pretend the active tag covered it.</li>
+</ol>
+<p>
+This reduces fallback from &ldquo;N answer-model attempts&rdquo; to one router
+call plus one answer. It also eliminates <code>load_all_tagged_chunks()</code>
+and <code>tags_containing_video()</code>.
+</p>
+
+<h3>6.7 Learning refresh</h3>
+<p>
+After a successful learn, invalidate the global knowledge signature and the
+answer cache. If the active scope is an article or a single transcript, leave
+it unchanged, as today. Otherwise, make the new video available without a
+restart: either append its chunks to the in-memory list or reload the global
+chunk list (chunk-list loading is cheap; the BM25 index is rebuilt lazily on the
+next question). Remove the <code>video_is_tagged</code> gate entirely.
+</p>
+
+<h3>6.8 Cache, status, and UI</h3>
+<ul>
+  <li>Include <code>tags_version</code> (or the profile hash) in the answer
+      cache key; editing a description must invalidate cached answers.</li>
+  <li>Hot-reload <code>tags.json</code> when its mtime/size changes. Clear the
+      answer cache when the version changes; do not rebuild the BM25 index
+      unless the retrieval implementation embeds tag metadata into it.</li>
+  <li>The status bar currently shows the tag and trunk/video counts. With a
+      global corpus, label the scope honestly, for example
+      &ldquo;soft tag: japan &middot; global 10,660 trunks / 497 videos&rdquo;,
+      and expose the description in <code>/status</code> or a tooltip.</li>
+  <li>Update help text, <code>WEB_COMMANDS</code>,
+      <code>YOUTUBE_SUBCOMMANDS</code>, and the HTML completion logic that
+      currently special-cases <code>/tag</code> and <code>/tag_gen</code>.</li>
+</ul>
+
+<h3>6.9 Proposed retrieval pseudocode</h3>
+<pre><code>def answer_in_tag(question, state, registry):
+    candidates = top_chunks(question, state.all_chunks, limit=state.depth)
+    if not candidates:
+        return no_evidence()
+
+    profile = registry[state.tag]
+    decision = tag_filter_candidates(question, candidates, profile)
+
+    if decision.status == "ok" and decision.kept:
+        return generate_answer(question, decision.kept, profile)
+
+    if decision.status == "error":
+        kept = lexical_tag_rerank(question, candidates, profile)
+        return generate_answer(question, kept, profile)
+
+    # status == "none" (or no kept candidates)
+    routed = route_tag(question, candidates, registry, exclude=state.tag)
+    if routed is not None:
+        state.tag = routed
+        profile = registry[routed]
+        decision = tag_filter_candidates(question, candidates, profile)
+        if decision.status == "ok" and decision.kept:
+            return generate_answer(question, decision.kept, profile)
+
+    return scope_miss(state.tag, routed)  # or explicit global fallback
+</code></pre>
+
+<h2 id="migration">7. Migration plan</h2>
+<table>
+  <thead><tr><th>Phase</th><th>Work</th><th>Exit criterion</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>0. Freeze and back up</td>
+      <td>Keep the legacy <code>./tags</code> files in git history; do not delete them until the new path has passed the retrieval regression set. Record the current tag membership counts and a question/source baseline.</td>
+      <td>Rollback is possible from git.</td>
+    </tr>
+    <tr>
+      <td>1. Create the registry</td>
+      <td>Create <code>tags.json</code> with all tags that must remain valid. Seed the three existing descriptions verbatim, add descriptions for the other ten, and add a small keyword list for high-value tags. Validate the file.</td>
+      <td><code>/tag</code> can list every expected tag; <code>golang</code>, <code>rust</code>, <code>php</code>, <code>japan</code> remain valid.</td>
+    </tr>
+    <tr>
+      <td>2. Registry plumbing</td>
+      <td>Add <code>TagProfile</code>, <code>load_tags()</code>, <code>get_tag()</code>, <code>available_tags()</code>, <code>tags_version()</code>, completion, CLI validation, and <code>--tag</code> interactive selection. Keep old <code>load_tag_video_ids()</code> temporarily for compatibility.</td>
+      <td>Unknown tags are rejected by both server and CLI; completion reads <code>tags.json</code>.</td>
+    </tr>
+    <tr>
+      <td>3. Global corpus</td>
+      <td>Add <code>load_all_chunks()</code>; switch startup, <code>/refresh</code>, and learning refresh to the global list. <code>/tag</code> becomes a metadata switch. Update memory/status labels.</td>
+      <td>Switching tags does not rebuild the corpus; the first question still answers correctly.</td>
+    </tr>
+    <tr>
+      <td>4. Tag-aware retrieval</td>
+      <td>Add the tag filter with its own status semantics, lexical tag prior, and tag router. Put the tag context in the answer prompt. Remove the old sequential fallback.</td>
+      <td>Nijo Market, wagyu, Japan visa, Tao/AI, transformer, and coding questions meet the regression set; out-of-tag questions either switch or explain.</td>
+    </tr>
+    <tr>
+      <td>5. Ingestion cleanup</td>
+      <td>Remove step 5 from <code>youtube_video_learn.py</code>; adjust progress weights; remove <code>/tag_gen</code>/<code>/youtube tag_gen</code>; retire <code>youtube_video_tag_gen.py</code>; remove <code>video_is_tagged()</code>, <code>tags_containing_video()</code>, <code>load_all_tagged_chunks()</code>, and the tag-file signature.</td>
+      <td>A new video becomes answerable without a classification pass and without a restart.</td>
+    </tr>
+    <tr>
+      <td>6. Documentation and cleanup</td>
+      <td>Update <code>documents/chat.py</code>, <code>documents/chat.py.html</code>, research scripts that read <code>./tags</code>, and help text. Delete <code>./tags</code> only after the regression run passes.</td>
+      <td>No runtime or documentation path still says tag = a file of video ids.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout good">
+<strong>Rollout safety.</strong> During phases 2&ndash;4, run the old and new
+tag selection in shadow mode and log differences. Compare the retrieved source
+videos, not just the generated prose. The most useful regression questions are
+the ones already recorded in <code>init.prompt</code>: Nijo Market location and
+hours, wagyu levels, the 90-day visa fee, Terence Tao and AI, and a Rust/Go code
+request.
+</div>
+
+<h2 id="measurements">8. Measured performance and memory</h2>
+<p>
+All measurements used <code>python3.11</code> on the development machine, with
+<code>rank_bm25</code> and the repository's own <code>chat.py</code> functions.
+The index figures are from <code>tracemalloc</code> around
+<code>build_bm25_index()</code>; process RSS is naturally higher.
+</p>
+<table>
+  <thead>
+    <tr><th>Scope</th><th class="num">Videos</th><th class="num">Trunks</th>
+    <th class="num">Tokenized terms</th><th class="num">Index build</th>
+    <th class="num">Index memory (tracemalloc)</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>japan</code> legacy tag</td><td class="num">139</td><td class="num">3,294</td><td class="num">192,070</td><td class="num">0.51 s</td><td class="num">18.6 MB</td></tr>
+    <tr><td><code>ai_and_coding</code> legacy tag</td><td class="num">246</td><td class="num">5,261</td><td class="num">326,947</td><td class="num">0.81 s</td><td class="num">31.2 MB</td></tr>
+    <tr><td>Global corpus</td><td class="num">497</td><td class="num">10,660</td><td class="num">646,300</td><td class="num">1.34 s</td><td class="num">60.9 MB</td></tr>
+  </tbody>
+</table>
+<p>
+Global BM25 query latency after the index is built was 13&ndash;74 ms for the
+sample questions (one first query took 1.54 s because it paid for the index
+build). Tag-description BM25 scoring over the global index took 13&ndash;28 ms
+per tag, so a lexical prior over all 13 tags is cheap.
+</p>
+<table>
+  <thead>
+    <tr><th>Tag-aware filter experiment (<code>qwen3:1.7b</code>)</th><th class="num">Latency</th><th>Kept from top 20 question candidates</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>&ldquo;how do transformers work&rdquo; + tag <code>japan</code></td><td class="num">2.7 s</td><td>0/20 (<code>NONE</code>) &mdash; correctly rejects the out-of-tag set</td></tr>
+    <tr><td>&ldquo;where is nijo market&rdquo; + tag <code>japan</code></td><td class="num">1.4 s</td><td>14/20 &mdash; keeps the Nijo/Sapporo chunks</td></tr>
+    <tr><td>&ldquo;what are all levels of wagyu&rdquo; + tag <code>japan</code></td><td class="num">1.0 s</td><td>5/20 &mdash; keeps the useful wagyu chunks</td></tr>
+    <tr><td>&ldquo;what is the best ramen in tokyo&rdquo; + tag <code>japan</code></td><td class="num">1.1 s</td><td>4/20 &mdash; keeps Tokyo/Sapporo food chunks</td></tr>
+    <tr><td>&ldquo;what does terence tao think about ai&rdquo; + tag <code>japan</code></td><td class="num">0.2 s</td><td>2/3 &mdash; false positive; the model accepted AI chunks under the Japan tag</td></tr>
+    <tr><td>&ldquo;how do transformers work&rdquo; + tag <code>artificial_intelligence</code></td><td class="num">1.0 s</td><td>4/20 &mdash; keeps AI-adjacent chunks</td></tr>
+  </tbody>
+</table>
+<p class="small">
+The false-positive row is the reason the design must not treat the small model
+as infallible. Keep the tag context in the answer prompt, route ambiguous cases,
+and make the scope decision visible in the UI/log. The filter is a strong soft
+signal, not a cryptographic gate.
+</p>
+
+<h2 id="evaluation">9. Evaluation plan</h2>
+<h3>9.1 Retrieval regression set</h3>
+<table>
+  <thead><tr><th>Question</th><th>Active tag</th><th>Expected source / behaviour</th></tr></thead>
+  <tbody>
+    <tr><td>where is nijo market</td><td><code>japan</code></td><td>Sapporo/Nijo Market videos; no Toyosu or other-market drift.</td></tr>
+    <tr><td>what time does nijo market open</td><td><code>japan</code></td><td>Same Nijo/Sapporo source; answer only the requested hours.</td></tr>
+    <tr><td>what are all levels of wagyu</td><td><code>japan</code></td><td>Wagyu-specific chunks from the wagyu videos, not generic food tours.</td></tr>
+    <tr><td>90-day long-stay visa requirements/fee</td><td><code>japan</code></td><td>The corrected visa-fee answer, not the 30-million-yen hallucination.</td></tr>
+    <tr><td>what does terence tao think about ai</td><td><code>japan</code></td><td>Either route to an AI tag (and say so) or report that Japan does not cover it; never silently cite Japan food videos.</td></tr>
+    <tr><td>how do transformers work</td><td><code>artificial_intelligence</code></td><td>AI chunks; if the corpus lacks a direct explanation, the answer must say so.</td></tr>
+    <tr><td>write a cli in rust that prints a greeting</td><td><code>rust</code></td><td>Documentation-backed Rust path still works; no GitHub fallback.</td></tr>
+    <tr><td>show me a Go iterator over map keys</td><td><code>golang</code></td><td>Documentation-backed Go path still works; streamed answer.</td></tr>
+  </tbody>
+</table>
+
+<h3>9.2 Unit and integration checks</h3>
+<ul>
+  <li><strong>Registry:</strong> missing file, malformed JSON, duplicate keys,
+      empty registry, invalid tag names, string and object forms, hot reload.</li>
+  <li><strong>Commands:</strong> <code>/tag</code> valid/invalid/no-argument;
+      CLI <code>--tag</code> valid/invalid/interactive; completion; status
+      payload; <code>/tag_gen</code> deprecation or removal.</li>
+  <li><strong>Retrieval:</strong> tag filter returns ok/none/error; list queries
+      still get tag scoping; the top question candidates are always inspected
+      before a tag miss is declared.</li>
+  <li><strong>Learning:</strong> new video becomes available without a tag
+      pass; article/transcript scopes are unchanged; progress weights sum to
+      100.</li>
+  <li><strong>Cache:</strong> editing <code>tags.json</code> invalidates
+      answers whose prompt used the old description; switching tags does not
+      reuse the previous tag's answer.</li>
+  <li><strong>Performance:</strong> global index build under 2 s on this
+      corpus; subsequent retrieval under 200 ms; tag switch under 50 ms when
+      already in global scope; memory well under the current process budget.</li>
+</ul>
+
+<h3>9.3 Quality metric</h3>
+<p>
+For each regression question, record the set of source video ids retrieved
+before and after the refactor. Report precision@k and recall@k of the expected
+videos, plus whether the tag filter changed the set. Do not evaluate only the
+final prose: the answer model can hide a retrieval regression by writing a
+plausible paragraph from the wrong sources.
+</p>
+
+<h2 id="risks">10. Risks and failure modes</h2>
+<table>
+  <thead><tr><th>Risk</th><th>Likelihood</th><th>Impact</th><th>Mitigation</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Small-model tag filter false positives (Tao/AI accepted under <code>japan</code>)</td>
+      <td>Medium</td>
+      <td>Answer drifts outside the tag</td>
+      <td>Keep the tag context in the answer prompt; log the filter decision; add a lexical prior agreement check; allow the router to reconsider on a low-confidence answer.</td>
+    </tr>
+    <tr>
+      <td>Small-model tag filter false negatives</td>
+      <td>Medium</td>
+      <td>Valid chunks are dropped; answer says &ldquo;not found&rdquo;</td>
+      <td>Always inspect top question candidates; on <code>NONE</code>, try the lexical prior and the tag router before refusing; never apply the question filter's always-keep rule to the tag gate.</td>
+    </tr>
+    <tr>
+      <td>Descriptions are too generic</td>
+      <td>High</td>
+      <td>Tag prior is noisy; every chunk looks relevant</td>
+      <td>Add optional keywords/aliases; remove stopwords; normalize per tag; prefer the small-model filter over raw BM25.</td>
+    </tr>
+    <tr>
+      <td>Registry drifts or is mistyped</td>
+      <td>Medium</td>
+      <td>Invalid default tag, broken completion, cache confusion</td>
+      <td>Fail fast on validation; hot reload by mtime; include a version in cache keys; unit tests for every error path.</td>
+    </tr>
+    <tr>
+      <td>Removing <code>golang</code>/<code>rust</code>/<code>php</code> from the registry</td>
+      <td>Medium if the three-entry file is copied blindly</td>
+      <td>Documentation-backed coding paths stop working</td>
+      <td>Seed all 13 legacy tags, especially the documentation-backed three, before enforcing the registry.</td>
+    </tr>
+    <tr>
+      <td>Global index memory or latency</td>
+      <td>Low on the current corpus</td>
+      <td>Slower first question; more RSS</td>
+      <td>Measured 1.34 s and ~61 MB for the index; build lazily; keep the existing BM25 cache; if the corpus grows by an order of magnitude, revisit a lazy prefilter.</td>
+    </tr>
+    <tr>
+      <td>Out-of-tag questions no longer get the old automatic answer</td>
+      <td>Medium</td>
+      <td>Behaviour change</td>
+      <td>Decide the policy explicitly (auto-switch vs scope message); implement the router so auto-switch remains one small call; surface the switch in the UI.</td>
+    </tr>
+    <tr>
+      <td>Tag context pollutes the answer model</td>
+      <td>Low</td>
+      <td>Model treats the description as evidence</td>
+      <td>Label it &ldquo;scope instructions only&rdquo;; keep the prompt's grounding rule; keep the description short.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="decisions">11. Open decisions</h2>
+<ol>
+  <li><strong>Strictness.</strong> Should a question outside the active tag
+      auto-switch to another tag (today's behaviour), or return a scope
+      message? Recommendation: auto-switch first; if no tag fits, explain the
+      scope instead of silently answering from unrelated chunks.</li>
+  <li><strong>Registry schema.</strong> Keep a pure string map, or allow the
+      object form with keywords? Recommendation: accept both; strings are the
+      minimum migration, objects are the quality path.</li>
+  <li><strong><code>/tag</code> conversation reset.</strong> Today
+      <code>/tag</code> drops the conversation. A metadata-only tag switch could
+      keep it. Recommendation: keep the current reset for predictability, or
+      make it a small option.</li>
+  <li><strong><code>/tag_gen</code>.</strong> Remove it, or repurpose it as a
+      read-only validator/explainer for the registry? Recommendation: remove
+      the classifier semantics and the command; keep a separate maintenance
+      script if editing tags from the CLI is desired.</li>
+  <li><strong>Default tag.</strong> Keep <code>japan</code> as the default (it is
+      embedded in prompts and tests) and require it in the registry.</li>
+  <li><strong>Embeddings.</strong> Do not reintroduce embeddings for tag
+      affinity. The current architecture deliberately removed them; the small
+      model filter and lexical profile are sufficient and cheaper.</li>
+</ol>
+
+<h2 id="appendix">12. Appendix</h2>
+
+<h3>12.1 Exact code touchpoints</h3>
+<table>
+  <thead><tr><th>Touchpoint</th><th>Current role</th><th>Required change</th></tr></thead>
+  <tbody>
+    <tr><td><code>chat.py: TAG_DIR / DEFAULT_TAG</code></td><td>Legacy tag directory and default.</td><td>Replace with <code>TAGS_PATH = Path.cwd() / "tags.json"</code>; keep <code>DEFAULT_TAG</code>.</td></tr>
+    <tr><td><code>chat.py: load_tag_video_ids()</code></td><td>Reads <code>./tags/&lt;tag&gt;</code>.</td><td>Remove or keep only in a temporary legacy migration module.</td></tr>
+    <tr><td><code>chat.py: available_tags()</code></td><td>Lists files in <code>./tags</code>.</td><td>Return validated keys from <code>tags.json</code>; cache and hot-reload.</td></tr>
+    <tr><td><code>chat.py: load_chunks()</code></td><td>Loads a tag or explicit video ids.</td><td>Add <code>load_all_chunks()</code>; keep explicit video ids for <code>/transcript</code>.</td></tr>
+    <tr><td><code>chat.py: load_all_tagged_chunks()</code>, <code>_tag_corpus_signature()</code>, <code>tags_containing_video()</code>, <code>invalidate_all_tagged_chunks()</code></td><td>Cross-tag union index and tag membership helpers.</td><td>Replace with global corpus cache/signature; delete membership helpers.</td></tr>
+    <tr><td><code>chat.py: video_is_tagged()</code>, <code>switch_tag()</code>, <code>refresh_tag()</code></td><td>Legacy tag-file operations.</td><td>Replace with registry validation and metadata switching.</td></tr>
+    <tr><td><code>chat.py: filter_candidates()</code></td><td>Question-only small-model filter with always-keep safeguards.</td><td>Keep for question relevance; add a separate tag filter with distinct status semantics.</td></tr>
+    <tr><td><code>chat.py: answer()</code> / <code>build_prompt()</code> / <code>make_cache_key()</code></td><td>Retrieval, prompt, cache.</td><td>Pass tag profile into retrieval/prompt; add <code>tags_version</code> to the cache key.</td></tr>
+    <tr><td><code>app/chat_server.py: ChatState</code></td><td>Holds tag, chunks, cache, fallback.</td><td>Hold <code>TagProfile</code>; chunks become global; add tag-aware routing.</td></tr>
+    <tr><td><code>app/chat_server.py: _command_tag()</code></td><td>Validates tag files and reloads chunks.</td><td>Validate registry; switch metadata only; clear cache.</td></tr>
+    <tr><td><code>app/chat_server.py: _command_tag_gen()</code>, <code>YOUTUBE_SUBCOMMANDS["tag_gen"]</code></td><td>Runs the classifier.</td><td>Remove/deprecate.</td></tr>
+    <tr><td><code>app/chat_server.py: fallback_tag_order()</code>, fallback loop</td><td>Ranks hard tags and retries with 35B.</td><td>Replace with lexical tag ranking + one router call + one tag filter.</td></tr>
+    <tr><td><code>app/chat_server.py: VIDEO_LEARN_STEP_WEIGHTS</code>, <code>_run_video_learn_job()</code></td><td>Five-step progress including tag generation.</td><td>Four weights; remove tag-gen progress branch.</td></tr>
+    <tr><td><code>app/chat_server.py: _refresh_knowledge_after_learn()</code>, <code>_finish_learn()</code></td><td>Reload tag only if new video is tagged.</td><td>Always make new video available in global scope; remove <code>video_is_tagged</code> gate.</td></tr>
+    <tr><td><code>app/chat.html</code></td><td>Completion special-cases <code>/tag</code>/<code>/tag_gen</code>; status shows tag.</td><td>Read registry tags; remove tag_gen completion; label soft/global scope.</td></tr>
+    <tr><td><code>youtube_video_learn.py</code></td><td>Five-step pipeline.</td><td>Four-step pipeline; update docstring/help.</td></tr>
+    <tr><td><code>youtube_video_tag_gen.py</code></td><td>Per-video/tag classifier.</td><td>Retire after migration.</td></tr>
+    <tr><td><code>research/pack_embeddings.py</code>, <code>research/migrate_paragraph_embeddings.py</code></td><td>Research scripts that read <code>./tags</code>.</td><td>Update or mark legacy; they are not runtime paths.</td></tr>
+    <tr><td><code>documents/chat.py</code>, <code>documents/chat.py.html</code></td><td>Describe the hard tag partition.</td><td>Rewrite the tag/scope sections.</td></tr>
+  </tbody>
+</table>
+
+<h3>12.2 Proposed <code>tags.json</code> (string form, all legacy tags)</h3>
+<pre><code>{
+  "ai_and_coding": "Artificial intelligence, AI companies and labs, AI models and tools, large language models, software engineering, programming, coding, and the effects of AI on software development and technical work.",
+  "ai_math_coding": "Artificial intelligence, mathematics, and coding: machine learning theory, mathematical reasoning, algorithms, proofs, quantitative methods, and AI-assisted programming.",
+  "artificial_intelligence": "Artificial intelligence, AI companies and labs, large language models, machine learning, AI capabilities, AI safety, and the societal or economic impact of AI.",
+  "golang": "The Go programming language: syntax, concurrency with goroutines and channels, the standard library, tooling, performance, backend services, and Go ecosystem practices.",
+  "home_inspector_california": "California home inspection: property condition, construction defects, inspection reports, building systems, and residential real-estate due diligence in California.",
+  "japan": "Japan, Japanese culture, society, economy, history, language, travel, and people or organizations from Japan.",
+  "math": "Mathematics: algebra, calculus, geometry, number theory, probability, statistics, proofs, and mathematical problem solving.",
+  "php": "The PHP programming language: syntax, web development, Composer, frameworks such as Laravel and Symfony, and PHP tooling and practices.",
+  "programming_software": "Software engineering and programming: languages, architecture, testing, developer tools, DevOps, careers, and engineering practice.",
+  "retire": "Retirement planning: pensions, savings, withdrawal strategies, early retirement, cost of living, healthcare, and retirement visas.",
+  "rust": "The Rust programming language: ownership, borrowing, lifetimes, the borrow checker, Cargo, crates, systems programming, and safe concurrency.",
+  "trade_school_job_program_bubble": "Trade schools, vocational training, job programs, labor-market bubbles, career switching, and the value of non-degree credentials."
+}
+</code></pre>
+<p class="small">
+Add <code>ai_math_coding</code>, <code>home_inspector_california</code>,
+<code>math</code>, <code>programming_software</code>, <code>retire</code>, and
+<code>trade_school_job_program_bubble</code> only if those topics should remain
+selectable. If the product intent is to intentionally reduce the registry to
+three broad tags, then update <code>DOCUMENT_BACKED_TAGS</code>, the coding
+prompts, and the existing tests in the same change; do not leave the registry
+and the feature flags inconsistent.
+</p>
+
+<h3>12.3 Optional keyword form (recommended quality path)</h3>
+<pre><code>{
+  "japan": {
+    "description": "Japan, Japanese culture, society, economy, history, language, travel, and people or organizations from Japan.",
+    "keywords": ["Sapporo", "Hokkaido", "Tokyo", "Kyoto", "Osaka", "Nagoya", "Fukuoka", "Hiroshima", "Okinawa", "ramen", "sushi", "wagyu"]
+  },
+  "golang": {
+    "description": "The Go programming language: syntax, concurrency with goroutines and channels, the standard library, tooling, performance, backend services, and Go ecosystem practices.",
+    "keywords": ["Go", "golang", "goroutine", "channel", "net/http", "cobra", "go.mod", "generics"]
+  }
+}
+</code></pre>
+<p class="small">
+Keep keyword lists short and high precision. They are a lexical aid, not a
+replacement for the tag-aware small-model filter. The loader should accept the
+string form for every tag even when one tag uses the object form.
+</p>
+
+<h3>12.4 Reproduction commands</h3>
+<pre><code># Corpus size
+find youtube_transcript -name '*.trunk' | wc -l
+find youtube_transcript -name '*.title' | wc -l
+
+# Legacy tag counts (from git history)
+git ls-tree --name-only HEAD tags/
+for t in $(git ls-tree --name-only HEAD tags/ | sed 's#tags/##'); do
+  printf '%s: ' "$t"; git show "HEAD:tags/$t" | grep -c .
+done
+
+# Global BM25 index measurement (no generation, no writes)
+python3.11 - &lt;&lt;'PY'
+import chat, time, tracemalloc
+ids = set(chat.available_video_ids())
+chunks = chat.load_chunks(video_ids=ids)
+tracemalloc.start()
+t = time.monotonic()
+index = chat.build_bm25_index(chunks)
+dt = time.monotonic() - t
+cur, _peak = tracemalloc.get_traced_memory()
+print(len(chunks), "trunks;", round(dt, 2), "s;",
+      round(cur / 1024 / 1024, 1), "MB")
+PY
+
+# One 35B tag-classification call (measured 11.8 s on the dev machine)
+# Use youtube_video_tag_gen.py --youtube_video_hash HASH --tag japan --dry-run
+# in a temporary working directory if you do not want to create a tag file.</code></pre>
+
+<hr>
+<p class="small muted">
+This document is the research deliverable for
+<code>task.research_tags_refactor</code> in <code>prompts/tags.prompt</code>.
+It intentionally contains no application-code edits. Implementation should be
+tracked as follow-up tasks after the registry and strictness decisions in
+section 11 are made.
+</p>
+
+</body>
+</html>

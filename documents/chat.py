@@ -22,8 +22,9 @@ The pipeline is:
       -> query expansion with qwen3:1.7b (one short line of synonyms)
       -> BM25 over the loaded trunks (original terms weighted 2x + expansion)
       -> top-N by depth, or adaptive selection in "auto" mode
-      -> optional small-LLM relevance filter (qwen3:1.7b)
-      -> optional cross-tag fallback if the active tag has no relevant trunk
+      -> optional small-LLM question filter (qwen3:1.7b)
+      -> soft tag scope: keep candidates relevant to tag + question
+      -> optional tag routing if no candidate fits the active tag
       -> numbered <chunk> context blocks
       -> prompt from research/100_trunks_prompt.txt
       -> streaming answer from ornith:35b over Ollama
@@ -32,12 +33,14 @@ The pipeline is:
 
 There are two distinct data scopes:
 
-    tag scope        trunks of every video id listed in ./tags/<tag>
+    tag scope        one global corpus, scoped at query time by ./tags.json
     transcript scope trunks of one video only, selected by /transcript
+    article scope    paragraphs of one local article, selected by /article
 
-The default tag is "japan" (124 videos / 2,916 trunks in the current corpus).
-./tags is a plain-text index: one YouTube video id per line. No embeddings are
-loaded at any point.
+The default tag is "japan". ./tags.json is the tag registry: each tag has a
+description and optional keywords. Tags do not partition the corpus and are
+never assigned to videos during ingestion. No embeddings are loaded at any
+point.
 
 ================================================================================
 2. STARTUP PATH
@@ -55,14 +58,14 @@ main() in ./chat.py:
    qwen3:1.7b and ornith:35b with keep_alive="30m". This moves model loading
    off the critical path. Failure is ignored.
 
-3. load_chunks(tag):
-     - reads ./tags/<tag> into a set of video ids
+3. load_all_chunks():
      - globs ./youtube_transcript/*.trunk
-     - keeps only files named <video_id>.<index>.trunk whose video id is in
-       the tag (or in an explicit /transcript video set)
+     - keeps every <video_id>.<index>.trunk file (or only an explicit
+       /transcript video set when that scope is active)
      - builds Chunk(video_id, index, trunk_path) objects and sorts them by
        (video_id, index)
      - no text is read and no BM25 index is built yet
+     - /tag changes only the soft tag context; it does not reload the corpus
 
    Chunk.label is "<video_id>.<index>". Text is read lazily, and cached:
 
@@ -135,8 +138,8 @@ non-fatal; retrieval then uses the original question only.
 ------------------
 
 The BM25 index is built lazily on the first question and cached in _BM25_CACHE
-(two entries, keyed by id(chunks)) so the active-tag index and the cross-tag
-fallback index can coexist.
+(two entries, keyed by id(chunks)) so the global corpus index and an explicit
+transcript/article index can coexist.
 
 build_bm25_index():
 
@@ -189,9 +192,10 @@ The filter is applied only when:
 The filter prompt shows each candidate number plus a snippet capped at 700
 characters. qwen3:1.7b must return a comma-separated list of useful candidate
 numbers, or NONE. The model gets at most 96 output tokens and temperature 0.
-If it returns NONE, the candidate set is considered empty and cross-tag
-fallback may run. If its output cannot be parsed or the request fails, the
-filter is treated as skipped and the BM25 candidates are kept.
+If it returns NONE, the candidate set is considered empty and soft-tag routing
+may run. If its output cannot be parsed or the request fails, the question
+filter is treated as skipped and the BM25 candidates are kept; the tag scope
+has its own separate status and lexical fallback.
 
 List questions (list/all/every/each/compare/details/types/levels/options/...)
 skip the filter because exhaustive answers need broad coverage.
@@ -199,19 +203,14 @@ skip the filter because exhaustive answers need broad coverage.
 3.7 Cross-tag fallback
 ----------------------
 
-If the active tag yields no selected chunk, or the filter returns NONE,
-answer() loads the union of all videos in every ./tags file
-(load_all_tagged_chunks(), cached until a tag file's mtime changes) and runs
-the same expansion + BM25 + filter pipeline over it. If that produces chunks,
-a note such as
-
-    [out-of-scope question: tag 'japan' had no BM25 match; using all tagged
-     knowledge in tag 'ai_and_coding']
-
-is printed and the fallback chunks are used. This prevents a false
-"insufficient information" answer when the question is outside the default
-tag. Fallback is disabled for an explicit /transcript scope, and it costs
-memory only when it is actually needed.
+The active tag is a soft scope over the one global corpus. After the question
+candidates are retrieved, tag_filter_candidates() asks qwen3:1.7b to keep only
+candidates relevant to both the tag description/keywords and the question. If
+the model returns NONE, the CLI/server ranks the other registry tags from the
+same candidate set (lexical tag profiles) and re-runs retrieval for the best
+tag(s), switching only after a scoped answer succeeds. If no tag fits, the UI
+says so instead of silently citing unrelated chunks. Fallback is disabled for
+an explicit /transcript or /article scope.
 
 If the filter was too strict but BM25 did return candidates, the code keeps
 the best FILTER_MIN_KEEP = 3 unfiltered candidates instead of refusing.
@@ -340,7 +339,7 @@ BM25Index
     bm25: BM25Okapi
 
 _BM25_CACHE
-    OrderedDict with at most 2 indexes: active scope and cross-tag fallback.
+    OrderedDict with at most 2 indexes: global corpus and an explicit scope.
     Keyed by id(chunks), with an identity check to avoid stale id reuse.
 
 Paragraph/title caches
@@ -352,9 +351,8 @@ Paragraph/title caches
 AnswerCache
     At most 32 complete answers, with sources and context token counts.
 
-_ALL_TAGGED_CHUNKS
-    Lazily built union of all tagged videos; invalidated when a tag file
-    changes or after /learn.
+_ALL_TAGGED_CHUNKS / load_all_tagged_chunks()
+    Compatibility aliases; the tagged union is now simply the global corpus.
 
 History
     Plain-text file, no in-memory index.
@@ -446,13 +444,12 @@ Rules of thumb
     default tag japan (2,916 chunks):             ~75-100 MiB total process
     all 4,959 tagged chunks:                      ~110-130 MiB total process
     answer cache (32 answers + sources):          usually < 1-3 MiB
-    cross-tag fallback index:                     roughly +25-40 MiB when used
+    global corpus index (10,660 chunks):          ~60 MiB index + text caches
 
-The fallback index is built only when a question finds nothing in the active
-tag; after that it stays cached until a tag file changes. /tag, /refresh,
-/transcript, and /youtube learn clear the old chunk list, the BM25 cache, and run
-gc.collect(), but the paragraph/title LRU caches persist, so switching tags
-does not immediately return all text memory to the OS.
+The global corpus is loaded once. /tag changes only the soft tag metadata;
+/refresh and /youtube learn reload the corpus and clear the BM25 cache, but the
+paragraph/title LRU caches persist, so a refresh does not immediately return
+all text memory to the OS.
 
 Why memory stays moderate
 -------------------------
@@ -472,8 +469,8 @@ Why memory stays moderate
       "Error: ..." and keeps the session alive.
     - Query expansion failure: warning, retrieval uses the original question.
     - Filter failure/unparseable output: keep unfiltered BM25 candidates.
-    - Filter returns NONE: try cross-tag fallback (unless in transcript scope);
-      if still empty, keep the top 3 BM25 candidates rather than refuse.
+    - Tag scope returns NONE: route to the best other tag from tags.json
+      (unless in transcript/article scope); if no tag fits, explain the scope.
     - No trunks in scope: load_chunks exits with a hint to run youtube_video_learn.py.
     - Trunk read failure in context build: that chunk is skipped; if no text
       remains, answer() reports that it could not read matching contents.

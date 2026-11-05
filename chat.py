@@ -4,12 +4,14 @@
 Usage:
     python3 chat.py [--tag <tag>]
 
-If --tag is given without a value, the available tags in ./tags are listed
-and can be tab-completed at the interactive "Tag:" prompt.
+If --tag is given without a value, the available tags in ./tags.json are
+listed and can be tab-completed at the interactive "Tag:" prompt.
 
-At startup, the video ids listed in ./tags/<tag> (default: japan) are read,
-and their ./youtube_transcript/<youtube_video_hash>.<index>.trunk files are
-loaded into memory. No embedding files and no cosine similarity are used.
+At startup every ./youtube_transcript/<youtube_video_hash>.<index>.trunk file
+is loaded into one global in-memory corpus. Tags are soft query-time scopes:
+--tag (default: japan) selects a tag from ./tags.json, and retrieval keeps
+trunks that are relevant to both the question and that tag's description. No
+embedding files and no cosine similarity are used.
 
 For each question:
     1. Expand the question with Ollama model qwen3:1.7b into a short list of
@@ -19,11 +21,13 @@ For each question:
     3. Keep the top 20 BM25 candidates by default. `/depth <n>` changes that
        count; `/depth auto` enables adaptive selection (BM25 score elbow,
        per-video cap, near-duplicate removal, and a token budget).
-    4. Filter the candidate chunks with the small qwen3:1.7b relevance filter
+    4. Filter the candidate chunks with the small qwen3:1.7b question filter
        before synthesis (skipped for list/aggregation questions, which need
-       broad coverage). If the active tag yields nothing relevant, retrieval
-       falls back to all tagged transcripts; an explicit `/transcript` scope
-       never falls back.
+       broad coverage). Then apply the soft tag scope: the tag name,
+       description, and keywords are sent to the same small model, which keeps
+       only candidates relevant to both the tag context and the question. If
+       no candidate fits, routing may switch to another tag from tags.json.
+       An explicit `/transcript` scope never falls back.
     5. Wrap every selected trunk in a numbered <chunk id="N"> block and build
        the answer prompt from ./research/100_trunks_prompt.txt, so the model
        stays grounded in the retrieved passages without exposing chunk ids.
@@ -51,8 +55,8 @@ and reloaded on every start, so Up/Down can walk the full chat history
 
 Commands:
     /memory            Show memory used by the BM25 index.
-    /tag [tag]         Switch to another tag (reloads trunks).
-    /refresh           Reload all trunks for the current tag.
+    /tag [tag]         Switch the soft tag context (does not reload trunks).
+    /refresh           Reload the global trunk corpus.
     /transcript <hash|keyword>
                        Use one video's transcript (reloads trunks).
                        A keyword searches the .title files with ag and shows
@@ -60,7 +64,7 @@ Commands:
     /search_transcript <keyword>
                        Alias for /transcript <keyword>.
     /youtube learn <hash|url>
-                       Fetch, rewrite, chunk, embed, and tag a video.
+                       Fetch, rewrite, chunk, and embed a video.
     /wiki <question>   For a narrow fact question, search the full Wikipedia
                        article excerpts with ag and answer directly. Otherwise
                        output the summary for each main entity.
@@ -239,17 +243,17 @@ PROGRESSIVE_FIRST_PASS = 10
 CHARS_PER_TOKEN = 4
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = Path.cwd() / "youtube_transcript"
-TAG_DIR = Path.cwd() / "tags"
+TAGS_PATH = Path.cwd() / "tags.json"
 DEFAULT_TAG = "japan"
+# A tag context is a soft query-time scope, not a partition of the corpus.
+# These guards validate the registry before it is used.
+TAG_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_]*$")
+TAG_SCOPE_WEIGHT = 0.35
+TAG_ROUTE_CANDIDATES = 40
 # Sentinel used by --tag with no value: ask for the tag interactively.
 INTERACTIVE_TAG = "\0__interactive_tag__"
 CHAT_DIR = Path.cwd() / ".chat"
 HISTORY_FILE = CHAT_DIR / "question_history.txt"
-# Lazily loaded union of all ./tags/* video ids, used only for cross-tag
-# fallback. Keeping it lazy avoids paying the memory cost for the common case
-# where the active tag already has relevant chunks.
-_ALL_TAGGED_CHUNKS: list["Chunk"] | None = None
-_ALL_TAGGED_SIGNATURE: tuple | None = None
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 if not OLLAMA_HOST.startswith(("http://", "https://")):
@@ -662,6 +666,30 @@ question. Do not use outside knowledge.
 Return ONLY a comma-separated list of candidate numbers, for example: 1, 3, 7
 If none are useful, return exactly: NONE"""
 
+TAG_SCOPE_FILTER_PROMPT = """You are a soft tag scope filter for a retrieval system.
+
+Tag:
+<tag>
+{tag}
+</tag>
+
+Candidate excerpts come from a global knowledge base. Keep a candidate only
+when it is relevant to BOTH the tag context above AND the user's question.
+Do not keep a candidate merely because it matches the question but is outside
+the tag, and do not keep one merely because it matches the tag but does not
+help answer the question. Do not use outside knowledge.
+
+Question:
+<question>
+{question}
+</question>
+
+Candidates:
+{candidates}
+
+Return ONLY a comma-separated list of candidate numbers, for example: 1, 3, 7
+If no candidate satisfies both conditions, return exactly: NONE"""
+
 ANSWER_TRANSLATION_PROMPT = """Translate the following English text into Simplified Chinese.
 Translate every ordinary English word, but leave proper nouns in their original
 Latin spelling. Never transliterate place names or invent Chinese names.
@@ -822,8 +850,8 @@ LIST_PREFIX = re.compile(r"^(\s*(?:\d+[.)]|[-*+]))\s+")
 # Every chatbot command, with the help text shown next to its completion.
 COMMANDS = {
     "/memory": "show memory used by the BM25 index",
-    "/tag": "switch to another tag (reloads trunks)",
-    "/refresh": "reload all trunks for the current tag",
+    "/tag": "switch the soft tag context (does not reload trunks)",
+    "/refresh": "reload the global trunk corpus",
     "/transcript": "use one transcript by hash/URL or search titles with ag",
     "/search_transcript": "alias for /transcript <keyword> (ag title search)",
     "/youtube": "YouTube video commands: /youtube learn <hash|url>",
@@ -842,7 +870,7 @@ COMMANDS = {
 
 # Subcommands grouped under /youtube.
 YOUTUBE_SUBCOMMANDS = {
-    "learn": "fetch, rewrite, chunk, embed, and tag one video",
+    "learn": "fetch, rewrite, chunk, and embed one video",
 }
 
 
@@ -904,21 +932,159 @@ class TranscriptMatch:
     title: str
 
 
-def load_tag_video_ids(tag: str) -> set[str]:
-    """Read the video ids listed in ./tags/<tag>."""
-    tag_path = TAG_DIR / tag
-    if not tag_path.is_file():
-        sys.exit(f"Tag file not found: {tag_path}")
+@dataclass(frozen=True)
+class TagProfile:
+    """A soft tag: a name, description, and optional lexical keywords."""
+
+    name: str
+    description: str
+    keywords: tuple[str, ...] = ()
+
+    @property
+    def lexical_terms(self) -> str:
+        return " ".join((self.description, *self.keywords))
+
+    @property
+    def prompt_block(self) -> str:
+        keywords = ", ".join(self.keywords)
+        keyword_line = f"Keywords: {keywords}\n" if keywords else ""
+        return (
+            "<tag_context>\n"
+            f"Tag: {self.name}\n"
+            f"Description: {self.description}\n"
+            f"{keyword_line}"
+            "</tag_context>\n"
+            "The user is currently exploring this tag. Prefer context that "
+            "fits this topic. Do not use this tag description as a source "
+            "of facts, and do not answer from outside the provided chunks. "
+            "If the provided chunks are all outside this topic, say so "
+            "plainly.\n\n"
+        )
+
+
+_TAGS_CACHE: tuple[tuple, dict[str, TagProfile]] | None = None
+
+
+def _tags_signature() -> tuple:
+    """Return a cache/invalidation signature for ./tags.json."""
+    try:
+        stat = TAGS_PATH.stat()
+    except OSError:
+        return ("missing",)
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def tags_version() -> str:
+    """Return a stable version string for the tag registry."""
+    return ":".join(str(part) for part in _tags_signature())
+
+
+def _reject_duplicate_tag_keys(pairs: list[tuple[str, object]]) -> dict:
+    result: dict = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate tag key {key!r}")
+        result[key] = value
+    return result
+
+
+def _normalize_tag_profile(name: object, value: object) -> TagProfile:
+    if not isinstance(name, str) or not TAG_NAME_PATTERN.fullmatch(name):
+        raise ValueError(
+            f"invalid tag name {name!r}; use lowercase snake_case "
+            "(letters, digits, and underscores)"
+        )
+
+    if isinstance(value, str):
+        description = value.strip()
+        keywords: tuple[str, ...] = ()
+    elif isinstance(value, dict):
+        description = str(value.get("description", "")).strip()
+        raw_keywords = value.get("keywords", [])
+        if raw_keywords is None:
+            raw_keywords = []
+        if not isinstance(raw_keywords, list):
+            raise ValueError(
+                f"tag {name!r}: keywords must be a list of strings"
+            )
+        normalized: list[str] = []
+        for keyword in raw_keywords:
+            if not isinstance(keyword, str):
+                raise ValueError(
+                    f"tag {name!r}: keywords must be a list of strings"
+                )
+            keyword = " ".join(keyword.split())
+            if keyword and keyword not in normalized:
+                normalized.append(keyword)
+        keywords = tuple(normalized)
+    else:
+        raise ValueError(
+            f"tag {name!r} must be a description string or an object with "
+            "a description and optional keywords"
+        )
+
+    if not description:
+        raise ValueError(f"tag {name!r}: description must not be empty")
+    return TagProfile(name=name, description=description, keywords=keywords)
+
+
+def load_tags(force: bool = False) -> dict[str, TagProfile]:
+    """Load and validate ./tags.json, caching by mtime and size.
+
+    The file is the single source of truth for valid tags. A tag that is not
+    present here is invalid, even if an old ./tags/<tag> file exists.
+    """
+    global _TAGS_CACHE
+    signature = _tags_signature()
+    if not force and _TAGS_CACHE is not None and _TAGS_CACHE[0] == signature:
+        return _TAGS_CACHE[1]
+
+    if not TAGS_PATH.is_file():
+        sys.exit(
+            f"Tag registry not found: {TAGS_PATH}. Create tags.json with at "
+            "least the default tag before starting the chatbot."
+        )
+    try:
+        raw = json.loads(
+            TAGS_PATH.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_tag_keys,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        sys.exit(f"Invalid tag registry {TAGS_PATH}: {exc}")
+
+    if not isinstance(raw, dict) or not raw:
+        sys.exit(
+            f"Invalid tag registry {TAGS_PATH}: expected a non-empty JSON "
+            "object of tag names to descriptions."
+        )
 
     try:
-        lines = tag_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError as exc:
-        sys.exit(f"Cannot read tag file {tag_path}: {exc}")
+        profiles = {
+            name: _normalize_tag_profile(name, value)
+            for name, value in raw.items()
+        }
+    except ValueError as exc:
+        sys.exit(f"Invalid tag registry {TAGS_PATH}: {exc}")
 
-    video_ids = {line.strip() for line in lines if line.strip()}
-    if not video_ids:
-        sys.exit(f"Tag file is empty: {tag_path}")
-    return video_ids
+    _TAGS_CACHE = (signature, profiles)
+    return profiles
+
+
+def available_tags() -> list[str]:
+    """Return the validated tag names from ./tags.json."""
+    return sorted(load_tags())
+
+
+def get_tag(name: str) -> TagProfile:
+    """Return a tag profile, raising KeyError for an invalid tag name."""
+    tag = (name or "").strip()
+    profiles = load_tags()
+    if tag not in profiles:
+        raise KeyError(
+            f"Unknown tag: {tag!r}. Choose one of: "
+            + ", ".join(sorted(profiles))
+        )
+    return profiles[tag]
 
 
 TOKEN_PATTERN = re.compile(r"\b\w+\b", re.UNICODE)
@@ -999,8 +1165,8 @@ class BM25Index:
     fuzzy_buckets: dict[tuple[str, int], list[str]]
 
 
-# Keep a couple of indexes alive (active tag + cross-tag fallback) so a
-# fallback question does not force the active index to be rebuilt afterwards.
+# Keep a couple of indexes alive (global corpus + explicit transcript) so
+# switching scopes does not force an immediate rebuild.
 _BM25_CACHE: "OrderedDict[int, tuple[list[Chunk], BM25Index]]" = OrderedDict()
 BM25_CACHE_ENTRIES = 2
 
@@ -1055,31 +1221,10 @@ def clear_bm25_cache() -> None:
     _BM25_CACHE.clear()
 
 
-def load_chunks(
-    tag: str = DEFAULT_TAG, video_ids: set[str] | None = None
-) -> list[Chunk]:
-    """Load trunk files for a tag, or for an explicit set of video ids.
-
-    By default the video ids come from ./tags/<tag>. When ``video_ids`` is
-    given (the /transcript command), only those videos are loaded. No
-    embedding files are read; BM25 indexes the trunk text lazily on the first
-    question.
-    """
-    if not OUTPUT_DIR.is_dir():
-        sys.exit(f"Transcript directory not found: {OUTPUT_DIR}")
-
-    if video_ids is None:
-        selected_video_ids = load_tag_video_ids(tag)
-        scope = f"tag {tag!r}"
-        outside_scope = f"outside tag {tag!r}"
-    else:
-        selected_video_ids = set(video_ids)
-        scope = "transcript " + ", ".join(sorted(selected_video_ids))
-        outside_scope = "from other transcripts"
-
+def _collect_chunks(selected_video_ids: set[str]) -> tuple[list[Chunk], int]:
+    """Return trunk chunks whose video id is in ``selected_video_ids``."""
     chunks: list[Chunk] = []
     filtered = 0
-
     paths = sorted(
         OUTPUT_DIR.glob("*.trunk"),
         key=lambda p: (p.name.split(".", 1)[0], p.name),
@@ -1098,8 +1243,39 @@ def load_chunks(
                 trunk_path=path,
             )
         )
-
     chunks.sort(key=lambda chunk: (chunk.video_id, chunk.index))
+    return chunks, filtered
+
+
+def load_chunks(
+    tag: str | None = None, video_ids: set[str] | None = None
+) -> list[Chunk]:
+    """Load the global trunk corpus, or an explicit set of video ids.
+
+    Tags are soft scopes resolved at query time, so ``tag`` no longer
+    partitions the corpus. Passing a tag validates it and only changes the
+    progress message. When ``video_ids`` is given (the /transcript command),
+    only those videos are loaded. No embedding files are read; BM25 indexes
+    the trunk text lazily on the first question.
+    """
+    if not OUTPUT_DIR.is_dir():
+        sys.exit(f"Transcript directory not found: {OUTPUT_DIR}")
+
+    if video_ids is not None:
+        selected_video_ids = set(video_ids)
+        scope = "transcript " + ", ".join(sorted(selected_video_ids))
+        outside_scope = "from other transcripts"
+    else:
+        if tag is not None:
+            get_tag(tag)
+        selected_video_ids = set(available_video_ids())
+        if tag is None:
+            scope = "the global corpus"
+        else:
+            scope = f"the global corpus (soft tag {tag!r})"
+        outside_scope = "outside the global corpus"
+
+    chunks, filtered = _collect_chunks(selected_video_ids)
     if not chunks:
         sys.exit(
             f"No trunk files found for {scope} in {OUTPUT_DIR}\n"
@@ -1107,91 +1283,42 @@ def load_chunks(
         )
 
     details = []
-    if filtered and video_ids is None:
-        details.append(f"{filtered} {outside_scope}")
+    if filtered and video_ids is not None:
+        details.append(f"filtered {filtered} trunk(s) {outside_scope}")
     suffix = f" ({', '.join(details)})" if details else ""
-    print(f"Loaded {len(chunks)} trunks for {scope}{suffix}.")
+    print(f"Loaded {len(chunks):,} trunks from "
+          f"{len(selected_video_ids):,} video(s) for {scope}{suffix}.")
     return chunks
+
+
+def load_all_chunks() -> list[Chunk]:
+    """Load every learned trunk into one global corpus for soft tags."""
+    return load_chunks()
 
 
 # Backwards-compatible name for callers that only need the loaded chunks.
 load_embeddings = load_chunks
 
 
-def _tag_corpus_signature() -> tuple:
-    """Return a cheap signature that changes when tagged knowledge changes."""
-    signature = []
-    for tag in available_tags():
-        try:
-            mtime = (TAG_DIR / tag).stat().st_mtime_ns
-        except OSError:
-            continue
-        signature.append((tag, mtime))
-    return tuple(signature)
-
-
-def load_all_tagged_chunks() -> list[Chunk]:
-    """Load the union of trunks for every video listed in ./tags.
-
-    The result is cached and reused until a tag file changes. This is the
-    fallback index for questions that are outside the active tag's scope.
-    Loading it through ``load_chunks`` keeps the loaded chunk shape and
-    ordering consistent with the normal path.
-    """
-    global _ALL_TAGGED_CHUNKS, _ALL_TAGGED_SIGNATURE
-
-    signature = _tag_corpus_signature()
-    if _ALL_TAGGED_CHUNKS is not None and signature == _ALL_TAGGED_SIGNATURE:
-        return _ALL_TAGGED_CHUNKS
-
-    video_ids: set[str] = set()
-    for tag in available_tags():
-        try:
-            video_ids.update(load_tag_video_ids(tag))
-        except SystemExit:
-            continue
-    if not video_ids:
-        _ALL_TAGGED_CHUNKS = []
-        _ALL_TAGGED_SIGNATURE = signature
-        return _ALL_TAGGED_CHUNKS
-
-    try:
-        # Suppress the loader's per-tag progress/warning output. The fallback
-        # is an internal detail; answer() prints a single concise notice when
-        # it actually uses these chunks.
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
-            io.StringIO()
-        ):
-            chunks = load_chunks(video_ids=video_ids)
-    except SystemExit:
-        chunks = []
-
-    _ALL_TAGGED_CHUNKS = chunks
-    _ALL_TAGGED_SIGNATURE = signature
-    return chunks
-
-
 def invalidate_all_tagged_chunks() -> None:
-    """Drop the cross-tag fallback index after the corpus changes."""
-    global _ALL_TAGGED_CHUNKS, _ALL_TAGGED_SIGNATURE
-    _ALL_TAGGED_CHUNKS = None
-    _ALL_TAGGED_SIGNATURE = None
+    """Drop cached lexical indexes after the knowledge base changes.
+
+    Kept as a compatibility alias: tags are now soft, so there is no separate
+    tagged union index to invalidate.
+    """
     clear_bm25_cache()
 
 
+def load_all_tagged_chunks() -> list[Chunk]:
+    """Compatibility wrapper: the tagged union is now the global corpus."""
+    return load_all_chunks()
+
+
 def tags_containing_video(video_id: str) -> list[str]:
-    """Return the tags whose files list ``video_id``."""
-    tags = []
-    for tag in available_tags():
-        try:
-            lines = (TAG_DIR / tag).read_text(
-                encoding="utf-8", errors="replace"
-            ).splitlines()
-        except OSError:
-            continue
-        if video_id in {line.strip() for line in lines if line.strip()}:
-            tags.append(tag)
-    return tags
+    """Return every tag, because tags are soft query-time scopes."""
+    if video_id in set(available_video_ids()):
+        return available_tags()
+    return []
 
 
 def format_bytes(num: float) -> str:
@@ -1268,7 +1395,13 @@ def chat_status_report(
     elif transcript is not None:
         scope = f"single transcript {transcript!r}"
     else:
-        scope = f"tag {tag!r}"
+        scope = f"soft tag {tag!r} over the global corpus"
+        try:
+            description = get_tag(tag).description
+        except KeyError:
+            description = ""
+        if description:
+            scope += f" ({description})"
 
     if depth is None:
         budget = (
@@ -1292,13 +1425,14 @@ def chat_status_report(
         f"{len(video_ids):,} "
         + ("Article(s)" if article is not None else "video(s)"),
         f"  retrieval:   {retrieval}",
-        "  filter:      small-LLM relevance filter (skipped for "
-        "list/aggregation questions)",
+        "  filter:      small-LLM question filter + soft tag scope "
+        "(tag scope is applied to list questions too)",
         "  fallback:    "
         + (
             "disabled (explicit article/transcript scope)"
             if article is not None or transcript is not None
-            else "all tagged videos when the active tag has nothing relevant"
+            else "routes to the best matching tag from ./tags.json when the "
+            "active soft tag has nothing relevant"
         ),
         f"  answer cache: {cache_entries} entr{'y' if cache_entries == 1 else 'ies'}",
         f"  history:     {history_count(HISTORY_FILE):,} saved entries",
@@ -1346,18 +1480,6 @@ class CommandCompleter(Completer):
                 )
 
 
-def available_tags() -> list[str]:
-    """Return the tag names (files) available in ./tags."""
-    try:
-        return sorted(
-            entry.name
-            for entry in TAG_DIR.iterdir()
-            if entry.is_file() and not entry.name.startswith(".")
-        )
-    except OSError:
-        return []
-
-
 def available_video_ids() -> list[str]:
     """Return video ids that have trunk files in ./youtube_transcript."""
     try:
@@ -1373,7 +1495,7 @@ def available_video_ids() -> list[str]:
 
 
 class TagCompleter(Completer):
-    """Tab-complete tag names from ./tags."""
+    """Tab-complete tag names from ./tags.json."""
 
     def get_completions(self, document, complete_event):
         prefix = document.text_before_cursor
@@ -1439,10 +1561,10 @@ def prompt_for_video_id() -> str:
 
 
 def prompt_for_tag() -> str:
-    """Prompt for a tag, tab-completing the files in ./tags."""
+    """Prompt for a tag, tab-completing the names in ./tags.json."""
     tags = available_tags()
     if not tags:
-        sys.exit(f"No tag files found in {TAG_DIR}")
+        sys.exit(f"No tags defined in {TAGS_PATH}")
 
     print(f"Available tags: {', '.join(tags)}")
     session = PromptSession(
@@ -1450,7 +1572,7 @@ def prompt_for_tag() -> str:
         complete_while_typing=True,
         multiline=False,
     )
-    # Keep prompting until a real tag file is selected.
+    # Keep prompting until a valid registry tag is selected.
     while True:
         try:
             tag = session.prompt("Tag: ").strip()
@@ -1459,7 +1581,7 @@ def prompt_for_tag() -> str:
             sys.exit("No tag selected.")
         if not tag:
             continue
-        if (TAG_DIR / tag).is_file():
+        if tag in tags:
             return tag
         print(
             f"Unknown tag: {tag!r}. "
@@ -1989,9 +2111,9 @@ def top_chunks(
         # seafood market from entering the context merely because it contains
         # "market". For equally distinctive names ("Terence Tao"), either name
         # is enough, so alias spellings remain retrievable. This is a soft
-        # constraint: if nothing matches (for example the name is not in this
-        # tag), leave the BM25 ranking untouched so the cross-tag fallback can
-        # still run.
+        # constraint: if nothing matches (for example the name is not in the
+        # corpus), leave the BM25 ranking untouched so soft-tag routing can
+        # still reconsider the question.
         document_tokens = {
             id(chunk): tokens
             for chunk, tokens in zip(chunks, index.tokenized_documents)
@@ -2243,6 +2365,233 @@ def filter_candidates(
         for number, item in enumerate(candidates, start=1)
         if number in chosen
     ]
+
+
+@dataclass
+class TagScopeResult:
+    """Outcome of applying a soft tag to a question's candidate set."""
+
+    status: str  # ok | none | skipped | error
+    candidates: list[tuple[Chunk, float]]
+    seconds: float = 0.0
+
+
+# Words that appear in almost every tag description and therefore do not
+# distinguish one tag from another in the lexical fallback.
+TAG_PROFILE_STOPWORDS = frozenset(
+    "a an the and or but if then than that this these those there here "
+    "what which who whom whose when where why how is are was were be been "
+    "being do does did done have has had can could should would will may "
+    "might must shall to of in on at for from with about into over after "
+    "before under between during any some all more most other another "
+    "such only just also very much many few own same so not no nor too "
+    "its their your our his her them they we you i me my us software "
+    "programming language languages tools tooling practices practice "
+    "including include includes related using use used effects impact "
+    "society social people organizations organizations work works working".split()
+)
+
+
+def _tag_terms(profile: TagProfile) -> frozenset[str]:
+    """Return the distinctive lexical terms for a tag profile."""
+    terms = {
+        token
+        for token in tokenize(profile.lexical_terms)
+        if len(token) > 1 and token not in TAG_PROFILE_STOPWORDS
+    }
+    return frozenset(terms)
+
+
+def _chunk_tag_coverage(chunk: Chunk, terms: frozenset[str]) -> float:
+    """Return the fraction of distinctive tag terms present in a chunk."""
+    if not terms:
+        return 0.0
+    text = f"{video_title(chunk.video_id)}\n{paragraph_text(chunk)}"
+    document_terms = set(tokenize(text))
+    if not document_terms:
+        return 0.0
+    matched = sum(1 for term in terms if term in document_terms)
+    return matched / len(terms)
+
+
+def lexical_tag_scope(
+    profile: TagProfile,
+    candidates: list[tuple[Chunk, float]],
+    alpha: float = TAG_SCOPE_WEIGHT,
+) -> list[tuple[Chunk, float]]:
+    """Cheap tag-aware re-rank used when the small tag filter is unavailable.
+
+    The question's BM25 score stays dominant; tag coverage only breaks ties
+    and nudges candidates that mention the tag's distinctive terms.
+    """
+    if not candidates:
+        return []
+    terms = _tag_terms(profile)
+    if not terms:
+        return list(candidates)
+    best_question_score = max(score for _chunk, score in candidates) or 1.0
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            -((item[1] / best_question_score)
+              * (1.0 + alpha * _chunk_tag_coverage(item[0], terms))),
+            -item[1],
+            item[0].video_id,
+            item[0].index,
+        ),
+    )
+    return ranked
+
+
+def _parse_filter_numbers(
+    response: str, count: int
+) -> tuple[str, list[int]]:
+    """Parse a small-model candidate-number response."""
+    cleaned = THINK_PATTERN.sub("", response).strip()
+    if re.search(r"\bNONE\b", cleaned, re.IGNORECASE):
+        return "none", []
+    chosen: list[int] = []
+    seen: set[int] = set()
+    for token in re.findall(r"\d+", cleaned):
+        number = int(token)
+        if 1 <= number <= count and number not in seen:
+            seen.add(number)
+            chosen.append(number)
+    if not chosen:
+        return "error", []
+    return "ok", chosen
+
+
+def tag_filter_candidates(
+    question: str,
+    candidates: list[tuple[Chunk, float]],
+    profile: TagProfile,
+    model: str = FILTER_MODEL,
+) -> TagScopeResult:
+    """Keep candidates relevant to both the question and the soft tag.
+
+    Unlike ``filter_candidates``, this scope gate has no always-keep or
+    false-negative safety net: a tag miss must be visible to the caller so it
+    can route to another tag or explain the scope. On a model failure the
+    deterministic lexical tag prior is used and the status is ``error``.
+    """
+    if not candidates:
+        return TagScopeResult("none", [], 0.0)
+    if not LLM_FILTER_ENABLED:
+        return TagScopeResult("skipped", list(candidates), 0.0)
+
+    started = time.monotonic()
+    kept: list[tuple[Chunk, float]] = []
+    had_error = False
+    batch_size = max(1, FILTER_MAX_CANDIDATES)
+    tag_text = profile.prompt_block.strip()
+
+    for offset in range(0, len(candidates), batch_size):
+        batch = candidates[offset : offset + batch_size]
+        lines = []
+        for number, (chunk, _score) in enumerate(batch, start=1):
+            snippet = " ".join(paragraph_text(chunk).split())
+            if len(snippet) > FILTER_SNIPPET_CHARS:
+                snippet = snippet[:FILTER_SNIPPET_CHARS].rstrip() + "..."
+            lines.append(f"[{number}] {snippet}")
+        prompt = TAG_SCOPE_FILTER_PROMPT.format(
+            tag=tag_text,
+            question=question,
+            candidates="\n".join(lines),
+        )
+        try:
+            response = generate_text(
+                prompt,
+                model=model,
+                temperature=0.0,
+                num_predict=FILTER_NUM_PREDICT,
+                stop=["\n\n"],
+            )
+        except RuntimeError as exc:
+            print(f"Warning: tag scope filter failed: {exc}", file=sys.stderr)
+            had_error = True
+            break
+        status, numbers = _parse_filter_numbers(response, len(batch))
+        if status == "none":
+            continue
+        if status == "error":
+            had_error = True
+            break
+        chosen = set(numbers)
+        kept.extend(
+            item
+            for number, item in enumerate(batch, start=1)
+            if number in chosen
+        )
+
+    seconds = time.monotonic() - started
+    if had_error:
+        return TagScopeResult(
+            "error", lexical_tag_scope(profile, candidates), seconds
+        )
+    if not kept:
+        return TagScopeResult("none", [], seconds)
+    # Preserve the original question ranking within the kept set.
+    kept_ids = {id(chunk) for chunk, _score in kept}
+    ordered = [item for item in candidates if id(item[0]) in kept_ids]
+    return TagScopeResult("ok", ordered, seconds)
+
+
+def rank_tags_for_question(
+    question: str,
+    chunks: list[Chunk],
+    exclude: str | None = None,
+    limit: int | None = None,
+) -> list[str]:
+    """Rank registry tags by lexical fit to the question and its candidates.
+
+    This is the cheap first pass of the soft-tag router. It inspects the top
+    question matches over the global corpus, then scores each tag profile by
+    its coverage of those candidates plus direct overlap with the question.
+    """
+    profiles = load_tags()
+    other_tags = [name for name in sorted(profiles) if name != exclude]
+    if not other_tags:
+        return []
+    if not chunks:
+        return other_tags[:limit] if limit is not None else other_tags
+
+    try:
+        expansion = expand_query(question)
+    except RuntimeError:
+        expansion = ""
+    try:
+        ranked_chunks = top_chunks(
+            question,
+            chunks,
+            limit=TAG_ROUTE_CANDIDATES,
+            expansion=expansion,
+        )
+    except Exception:
+        ranked_chunks = []
+    candidates = [chunk for chunk, _score in ranked_chunks[:10]]
+    question_terms = set(tokenize(question)) - TAG_PROFILE_STOPWORDS
+
+    scores: dict[str, float] = {}
+    for name in other_tags:
+        profile = profiles[name]
+        terms = _tag_terms(profile)
+        if not terms:
+            scores[name] = 0.0
+            continue
+        if candidates:
+            coverage = sum(
+                _chunk_tag_coverage(chunk, terms) for chunk in candidates
+            ) / len(candidates)
+        else:
+            coverage = 0.0
+        overlap = (
+            len(terms & question_terms) / len(terms) if question_terms else 0.0
+        )
+        scores[name] = coverage + 0.5 * overlap
+
+    ordered = sorted(other_tags, key=lambda name: (-scores[name], name))
+    return ordered[:limit] if limit is not None else ordered
 
 
 def pop_translation_segment(buffer: str, final: bool = False) -> tuple[str, str]:
@@ -4064,27 +4413,26 @@ def learn_video(value: str) -> str | None:
 
 
 def video_is_tagged(video_id: str, tag: str) -> bool:
-    """Return whether ``video_id`` is recorded in ./tags/<tag>."""
-    try:
-        lines = (TAG_DIR / tag).read_text(
-            encoding="utf-8", errors="replace"
-        ).splitlines()
-    except OSError:
-        return False
-    return video_id in {line.strip() for line in lines if line.strip()}
+    """Compatibility helper for the soft-tag model.
+
+    Every learned video is available to every valid tag; relevance is decided
+    at query time from the tag description and the video's trunks.
+    """
+    return tag in load_tags() and video_id in set(available_video_ids())
 
 
 def switch_tag(
     argument: str, current_chunks: list[Chunk]
 ) -> tuple[str, list[Chunk]] | None:
-    """Handle /tag: load another tag and release the old trunks.
+    """Handle /tag: change only the soft tag context.
 
-    Returns the new tag and chunks, or None when the switch was cancelled or
-    failed (in which case the current trunks stay loaded).
+    The global trunk corpus is unchanged, so no reload or BM25 rebuild is
+    needed. Returns the new tag and the current chunks, or None when the
+    switch was cancelled or the tag is not in ./tags.json.
     """
     tags = available_tags()
     if not tags:
-        print(f"No tag files found in {TAG_DIR}.", file=sys.stderr)
+        print(f"No tags defined in {TAGS_PATH}.", file=sys.stderr)
         return None
 
     new_tag = argument.strip()
@@ -4100,32 +4448,25 @@ def switch_tag(
         print(f"Tag switch cancelled: {exc}", file=sys.stderr)
         return None
 
-    print(f"Switching to tag {new_tag!r}, reloading trunks...")
-    try:
-        new_chunks = load_chunks(new_tag)
-    except SystemExit as exc:
-        print(f"Cannot switch to tag {new_tag!r}: {exc}", file=sys.stderr)
-        return None
-
-    # Drop the old trunks only after the new tag loaded successfully.
-    current_chunks.clear()
-    clear_bm25_cache()
-    gc.collect()
-    print(index_memory_report(new_chunks, build_index=False))
-    return new_tag, new_chunks
+    profile = get_tag(new_tag)
+    print(
+        f"Switching to soft tag {new_tag!r} (global corpus unchanged)."
+    )
+    print(f"  description: {profile.description}")
+    return new_tag, current_chunks
 
 
 def refresh_tag(tag: str, current_chunks: list[Chunk]) -> list[Chunk] | None:
-    """Handle /refresh: reload the trunks for the current tag.
+    """Handle /refresh: reload the global trunk corpus.
 
     Returns the freshly loaded chunks, or None when loading failed (in which
     case the current trunks stay loaded).
     """
-    print(f"Refreshing tag {tag!r}, reloading trunks...")
+    print("Refreshing the global knowledge corpus...")
     try:
-        new_chunks = load_chunks(tag)
+        new_chunks = load_all_chunks()
     except SystemExit as exc:
-        print(f"Cannot refresh tag {tag!r}: {exc}", file=sys.stderr)
+        print(f"Cannot refresh the corpus: {exc}", file=sys.stderr)
         return None
 
     # Drop the old trunks only after the reload succeeded.
@@ -4383,6 +4724,7 @@ def make_cache_key(
         max_context_tokens,
         answer_language or "",
         progressive,
+        tags_version(),
         normalize_question(question),
     )
 
@@ -4452,6 +4794,7 @@ def answer(
     think: bool = False,
     cross_tag_fallback: bool = CROSS_TAG_FALLBACK_ENABLED,
     scope_label: str = "current tag",
+    tag_profile: TagProfile | None = None,
     use_all_chunks: bool = False,
     prepare_selected: Callable[
         [list[tuple[Chunk, float]], list[tuple[Chunk, float]]],
@@ -4469,10 +4812,16 @@ def answer(
     enables the model's reasoning mode (disabled by default).
     ``use_all_chunks`` skips BM25 and uses every supplied chunk in order;
     callers use it for a prebuilt synthetic context (an article digest).
+    ``tag_profile`` applies the soft tag scope to the question candidates and
+    adds the tag context to the answer prompt. ``cross_tag_fallback`` is kept
+    for backwards compatibility; soft-tag routing is now handled by the CLI
+    and server, which know the full registry.
     ``prepare_selected`` receives the BM25 selection and may append parent
     summaries or neighboring paragraphs before the context is built; this is
     used by /article's section-level expansion.
     """
+    if tag_profile is not None:
+        prompt_prefix = tag_profile.prompt_block + prompt_prefix
     def _emit(text: str) -> None:
         if emit is not None:
             if text:
@@ -4623,48 +4972,50 @@ def answer(
         filter_applied = False
         filter_empty = False
         fallback_used = False
+        tag_scope_status = "skipped"
+        tag_scope_seconds = 0.0
     else:
         selected, raw_selected, filter_applied, filter_empty = retrieve_for(
             chunks
         )
         fallback_used = False
-    if not use_all_chunks and cross_tag_fallback and not raw_selected:
-        # The active tag produced no lexical match at all. Before letting the
-        # model report missing data, check every tagged transcript. This
-        # prevents an out-of-scope question (for example an AI question while
-        # the default tag is 'japan') from receiving a false refusal. A filter
-        # false-negative is handled below by keeping the best BM25 candidates
-        # from the active scope, so it never silently changes the tag.
-        all_chunks = load_all_tagged_chunks()
-        if all_chunks and len(all_chunks) > len(chunks):
-            (
-                fallback_selected,
-                fallback_raw,
-                fallback_filter_applied,
-                fallback_filter_empty,
-            ) = retrieve_for(all_chunks)
-            if fallback_selected:
-                best_video = fallback_selected[0][0].video_id
-                best_tags = tags_containing_video(best_video)
-                tag_hint = f" in tag {best_tags[0]!r}" if best_tags else ""
-                reason = (
-                    "no BM25 match"
-                    if not raw_selected
-                    else "candidate filter found nothing relevant"
-                )
+        tag_scope_status = "skipped"
+        tag_scope_seconds = 0.0
+        if tag_profile is not None and raw_selected:
+            scoped = tag_filter_candidates(
+                search_question, raw_selected, tag_profile
+            )
+            tag_scope_status = scoped.status
+            tag_scope_seconds = scoped.seconds
+            if scoped.status in {"ok", "error"}:
+                selected = scoped.candidates
+            elif scoped.status == "none":
+                selected = []
                 _log(
-                    f"[out-of-scope question: {scope_label} had {reason}; "
-                    f"using all tagged knowledge{tag_hint}]"
+                    f"[soft tag {tag_profile.name!r}: no candidate fits this "
+                    "tag context]"
                 )
-                selected = fallback_selected
-                raw_selected = fallback_raw
-                filter_applied = fallback_filter_applied
-                filter_empty = fallback_filter_empty
-                fallback_used = True
+            if scoped.status == "error":
+                _log(
+                    f"[soft tag {tag_profile.name!r}: small tag filter "
+                    "unavailable; using lexical tag ranking]"
+                )
+            elif scoped.status == "ok":
+                _log(
+                    f"[soft tag {tag_profile.name!r}: kept "
+                    f"{len(scoped.candidates)} of {len(raw_selected)} "
+                    "question candidate(s)]"
+                )
 
-    if not use_all_chunks and not selected and raw_selected:
-        # The small filter can be overly strict. Keep a minimal BM25 context
-        # rather than turning a borderline question into a false refusal.
+    if (
+        not use_all_chunks
+        and not selected
+        and raw_selected
+        and tag_scope_status not in {"none"}
+    ):
+        # The small question filter can be overly strict. Keep a minimal BM25
+        # context rather than turning a borderline question into a false
+        # refusal. A tag-scope miss is different: it must reach the router.
         selected = raw_selected[:FILTER_FALSE_NEGATIVE_KEEP]
         _log(
             "[relevance filter returned no candidates; keeping the top "
@@ -4820,6 +5171,8 @@ def answer(
                 "expansion": expansion_done - expansion_started,
                 "bm25": bm25_seconds,
                 "filter": filter_seconds,
+                "tag_scope": tag_scope_status,
+                "tag_scope_seconds": tag_scope_seconds,
                 "candidates": candidate_count,
                 "filter_applied": filter_applied,
                 "fallback": fallback_used,
@@ -4912,7 +5265,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="?",
         const=INTERACTIVE_TAG,
         default=DEFAULT_TAG,
-        help="load only trunks for video ids in ./tags/<tag> "
+        help="soft tag context from ./tags.json "
         f"(default: {DEFAULT_TAG}); omit the value to pick a tag "
         "interactively with tab completion",
     )
@@ -4942,7 +5295,11 @@ def main() -> None:
     tag = args.tag
     if tag == INTERACTIVE_TAG or not tag:
         tag = prompt_for_tag()
-    chunks = load_chunks(tag)
+    try:
+        tag_profile = get_tag(tag)
+    except KeyError as exc:
+        sys.exit(str(exc.args[0]) if exc.args else str(exc))
+    chunks = load_all_chunks()
     print(index_memory_report(chunks, build_index=False))
     transcript: str | None = None
     latest_answer: str | None = None
@@ -4965,7 +5322,8 @@ def main() -> None:
     session = make_prompt_session(history, tag_state)
     print(
         f"RAG chatbot ready ({EXPANSION_MODEL} expansion/filter + "
-        f"{CHAT_MODEL} chat, tag {tag!r}, top {depth} BM25 matching trunks "
+        f"{CHAT_MODEL} chat, soft tag {tag!r}, top {depth} BM25 matching "
+        "trunks "
         f"by default, prompt {PROMPT_TEMPLATE_PATH.name or 'fallback'}). "
         "Type /exit to quit."
     )
@@ -5005,18 +5363,27 @@ def main() -> None:
             elif name == "/tag":
                 switched = switch_tag(argument, chunks)
                 if switched is not None:
-                    tag, chunks = switched
+                    tag, _unchanged = switched
+                    try:
+                        tag_profile = get_tag(tag)
+                    except KeyError as exc:
+                        print(str(exc.args[0]) if exc.args else str(exc))
+                        continue
+                    if transcript is not None:
+                        # /tag leaves an explicit transcript/article scope and
+                        # returns to the global soft-tag corpus.
+                        chunks = load_all_chunks()
                     tag_state["tag"] = tag
                     transcript = None
                     cache.clear()
-                    print(f"Now using tag {tag!r}.")
+                    print(f"Now using soft tag {tag!r}.")
             elif name == "/refresh":
                 refreshed = refresh_tag(tag, chunks)
                 if refreshed is not None:
                     chunks = refreshed
                     transcript = None
                     cache.clear()
-                    print(f"Now using tag {tag!r} (trunks refreshed).")
+                    print(f"Now using soft tag {tag!r} (global corpus refreshed).")
             elif name == "/transcript":
                 switched = switch_transcript(argument, chunks)
                 if switched is not None:
@@ -5092,10 +5459,10 @@ def main() -> None:
                             f"{transcript!r}; the loaded trunks are "
                             "unchanged."
                         )
-                elif video_is_tagged(video_id, tag):
-                    print(f"Reloading trunks for tag {tag!r}...")
+                elif transcript is None:
+                    print("Reloading the global knowledge corpus...")
                     try:
-                        new_chunks = load_chunks(tag)
+                        new_chunks = load_all_chunks()
                     except SystemExit as exc:
                         print(
                             f"Could not reload trunks: {exc}",
@@ -5109,11 +5476,6 @@ def main() -> None:
                         print(
                             index_memory_report(chunks, build_index=False)
                         )
-                else:
-                    print(
-                        f"{video_id} was not added to tag {tag!r}; "
-                        "the loaded trunks are unchanged."
-                    )
             elif name == "/ask":
                 quick_question = argument.strip()
                 if not quick_question:
@@ -5269,13 +5631,68 @@ def main() -> None:
                 cache_key=cache_key,
                 stats=benchmark_stats,
                 progressive=args.progressive,
-                cross_tag_fallback=CROSS_TAG_FALLBACK_ENABLED
-                and transcript is None,
+                tag_profile=tag_profile if transcript is None else None,
                 scope_label=(
-                    f"tag {tag!r}" if transcript is None
+                    f"soft tag {tag!r}" if transcript is None
                     else f"transcript {transcript!r}"
                 ),
             )
+
+            # Soft-tag routing: when no candidate fits both the question and
+            # the active tag, rank the other tags from the same global
+            # corpus, then re-run retrieval once for the best tag(s).
+            if response is None and transcript is None:
+                routed = rank_tags_for_question(
+                    question, chunks, exclude=tag, limit=3
+                )
+                for index, candidate_tag in enumerate(routed, start=1):
+                    print(
+                        f"\n[soft tag {tag!r} had no scoped evidence; "
+                        f"trying {candidate_tag!r} ({index}/{len(routed)})]",
+                        flush=True,
+                    )
+                    candidate_profile = get_tag(candidate_tag)
+                    candidate_stats: dict = {}
+                    candidate_response, candidate_sources = answer(
+                        question,
+                        chunks,
+                        depth=depth,
+                        max_context_tokens=max_context_tokens,
+                        answer_language=answer_language,
+                        cache=cache,
+                        cache_key=make_cache_key(
+                            candidate_tag,
+                            transcript,
+                            depth,
+                            max_context_tokens,
+                            answer_language,
+                            question,
+                            args.progressive,
+                        ),
+                        stats=candidate_stats,
+                        progressive=args.progressive,
+                        tag_profile=candidate_profile,
+                        scope_label=f"soft tag {candidate_tag!r}",
+                    )
+                    if candidate_response is not None:
+                        tag = candidate_tag
+                        tag_profile = candidate_profile
+                        tag_state["tag"] = tag
+                        response = candidate_response
+                        sources = candidate_sources
+                        benchmark_stats = candidate_stats
+                        print(
+                            f"\n[answer found under soft tag {tag!r}; "
+                            "switched from the previous tag]",
+                            flush=True,
+                        )
+                        break
+                if response is None:
+                    print(
+                        "\nNo soft tag could answer this question from the "
+                        "available knowledge.",
+                        flush=True,
+                    )
         except Exception as exc:
             print(f"\nError: {exc}", file=sys.stderr)
         else:

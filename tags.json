@@ -1,0 +1,50 @@
+{
+  "ai_and_coding": {
+    "description": "Artificial intelligence, AI companies and labs, AI models and tools, large language models, software engineering, programming, coding, and the effects of AI on software development and technical work.",
+    "keywords": ["artificial intelligence", "AI", "LLM", "large language model", "software engineering", "programming", "coding", "developer", "OpenAI", "Anthropic", "machine learning"]
+  },
+  "ai_math_coding": {
+    "description": "Artificial intelligence, mathematics, and coding: machine learning theory, mathematical reasoning, algorithms, proofs, quantitative methods, and AI-assisted programming.",
+    "keywords": ["AI", "mathematics", "math", "algorithm", "proof", "quantitative", "machine learning", "coding"]
+  },
+  "artificial_intelligence": {
+    "description": "Artificial intelligence, AI companies and labs, large language models, machine learning, AI capabilities, AI safety, and the societal or economic impact of AI.",
+    "keywords": ["artificial intelligence", "AI", "LLM", "large language model", "machine learning", "AI safety", "OpenAI", "Anthropic", "DeepMind"]
+  },
+  "golang": {
+    "description": "The Go programming language: syntax, concurrency with goroutines and channels, the standard library, tooling, performance, backend services, and Go ecosystem practices.",
+    "keywords": ["Go", "golang", "goroutine", "channel", "net/http", "cobra", "go.mod", "generics"]
+  },
+  "home_inspector_california": {
+    "description": "California home inspection: property condition, construction defects, inspection reports, building systems, and residential real-estate due diligence in California.",
+    "keywords": ["California", "home inspection", "property", "construction defect", "inspection report", "residential real estate"]
+  },
+  "japan": {
+    "description": "Japan, Japanese culture, society, economy, history, language, travel, and people or organizations from Japan.",
+    "keywords": ["Japan", "Japanese", "Sapporo", "Hokkaido", "Tokyo", "Kyoto", "Osaka", "Nagoya", "Fukuoka", "Hiroshima", "Okinawa", "ramen", "sushi", "wagyu", "Nijo Market"]
+  },
+  "math": {
+    "description": "Mathematics: algebra, calculus, geometry, number theory, probability, statistics, proofs, and mathematical problem solving.",
+    "keywords": ["mathematics", "math", "algebra", "calculus", "geometry", "number theory", "probability", "statistics", "proof"]
+  },
+  "php": {
+    "description": "The PHP programming language: syntax, web development, Composer, frameworks such as Laravel and Symfony, and PHP tooling and practices.",
+    "keywords": ["PHP", "Composer", "Laravel", "Symfony", "PHP manual", "web development"]
+  },
+  "programming_software": {
+    "description": "Software engineering and programming: languages, architecture, testing, developer tools, DevOps, careers, and engineering practice.",
+    "keywords": ["software engineering", "programming", "architecture", "testing", "developer tools", "DevOps", "career"]
+  },
+  "retire": {
+    "description": "Retirement planning: pensions, savings, withdrawal strategies, early retirement, cost of living, healthcare, and retirement visas.",
+    "keywords": ["retirement", "pension", "savings", "withdrawal", "early retirement", "cost of living", "healthcare", "retirement visa"]
+  },
+  "rust": {
+    "description": "The Rust programming language: ownership, borrowing, lifetimes, the borrow checker, Cargo, crates, systems programming, and safe concurrency.",
+    "keywords": ["Rust", "ownership", "borrowing", "lifetime", "borrow checker", "Cargo", "crate", "systems programming"]
+  },
+  "trade_school_job_program_bubble": {
+    "description": "Trade schools, vocational training, job programs, labor-market bubbles, career switching, and the value of non-degree credentials.",
+    "keywords": ["trade school", "vocational training", "job program", "labor market", "career switch", "non-degree credential"]
+  }
+}

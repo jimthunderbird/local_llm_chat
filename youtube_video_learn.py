@@ -11,7 +11,10 @@ Runs, in order:
     2. rewrite.py
     3. create_trunks.py
     4. create_embeddings.py
-    5. youtube_video_tag_gen.py --youtube_video_hash
+
+Tagging is no longer part of ingestion: tags in ./tags.json are soft
+query-time scopes, so a newly learned video is immediately available to every
+valid tag.
 """
 
 import argparse
@@ -84,7 +87,6 @@ STEPS = [
     ("rewrite.py", ["<hash>"]),
     ("create_trunks.py", ["<hash>"]),
     ("create_embeddings.py", ["<hash>"]),
-    ("youtube_video_tag_gen.py", ["--youtube_video_hash=<hash>"]),
 ]
 
 

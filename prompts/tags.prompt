@@ -1,0 +1,16 @@
+task (completed) {
+  please perform the code refactor based on ./research/tags_system_refactor.html
+}
+
+task.research_tags_refactor (completed) {
+  research only, save the result result to {directory_of_this_prompt}/research/tags_system_refactor.html {
+    - currently, the /tag command relies on a physical tag files that aggregate list of youtube video ids in each file, this makes the video learning process too long
+    - for each video, we should still get its transcript, rewrite it and create trunks, but we should not need to bind it to any tags yet
+    - instead, when the command /tag <tag_name> is run, we should set a global context of <tag_name, for the <questoin>, we should then only fetch related trunks related to this global context "and" the <question>, this way, each tag is a "soft" tag instead of a "hard" tag
+    - also, we should not need a dedicated tag generation process like: youtube_video_tag_gen.py
+    - currently, we have a file tag_description.json, where we define list of tags and its description
+      we should keep that, but rename the file to tags.json
+      if a specific tag is not defined in tags.json, we should consider it is an invalid tag
+    - we should also consider using the tag desription in the global tag specific context
+  }
+}

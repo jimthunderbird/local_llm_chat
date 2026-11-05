@@ -5097,10 +5097,12 @@ function applyState(state, loadHistory = false) {
     ? `article ${state.article}`
     : state.transcript
       ? `transcript ${state.transcript}`
-      : "tag scope";
+      : "soft tag · global corpus";
   $("#status-scope").title = state.article
     ? `Only ${state.article} is used as context`
-    : "";
+    : state.transcript
+      ? "Only this transcript is used as context"
+      : (state.tag_description || "The tag is a soft query-time scope over all learned trunks");
   $("#status-depth").textContent = state.depth_label || "—";
   $("#status-chunks").textContent = `${state.chunks ?? "?"} / ${state.videos ?? "?"} videos`;
   $("#status-conversation").textContent =
@@ -5740,26 +5742,17 @@ function completionContext() {
   const name = value.slice(0, firstSpace).toLowerCase();
   let kind = null;
   let start = firstSpace + 1;
-  if (name === "/tag" || name === "/tag_gen") kind = "tags";
+  if (name === "/tag") kind = "tags";
   else if (name === "/transcript" || name === "/search_transcript") kind = "transcripts";
   else if (name === "/youtube") {
-    // First argument: the subcommand. For /youtube tag_gen, complete existing
-    // tag names as the second argument.
+    // First argument: complete the subcommand; no tag-specific subcommands.
     const args = value.slice(firstSpace + 1, caret);
     const subSeparator = args.search(/\s/);
     if (subSeparator < 0) {
       kind = "youtube_subcommands";
       start = firstSpace + 1;
     } else {
-      const subcommand = args.slice(0, subSeparator).toLowerCase();
-      if (subcommand === "tag_gen") {
-        const rest = args.slice(subSeparator + 1);
-        const leading = (rest.match(/^\s*/) || [""])[0].length;
-        kind = "tags";
-        start = firstSpace + 1 + subSeparator + 1 + leading;
-      } else {
-        return null;
-      }
+      return null;
     }
   }
   else if (name === "/news") {

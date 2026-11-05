@@ -106,7 +106,7 @@ WEB_COMMANDS = {
     "/help": "show commands and keyboard shortcuts",
     "/new": "start a fresh conversation (clears follow-up context)",
     "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
-    "learn_playlist <playlist> | search <keyword> | tag_gen <tag>",
+    "learn_playlist <playlist> | search <keyword>",
     "/news": "list the latest news from cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, or krasia (optionally /news [source ...] [count])",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
@@ -142,8 +142,6 @@ def medium_username() -> str:
 
 COMMAND_ARGUMENTS = {
     "/tag",
-    # Backwards-compatible alias for /youtube tag_gen.
-    "/tag_gen",
     "/transcript",
     "/search_transcript",
     "/youtube",
@@ -161,11 +159,10 @@ COMMAND_ARGUMENTS = {
 # Subcommands grouped under /youtube. Kept in display order for Tab
 # completion and the /help panel.
 YOUTUBE_SUBCOMMANDS = {
-    "learn": "fetch, rewrite, chunk, embed, and tag one video",
+    "learn": "fetch, rewrite, chunk, and embed one video",
     "learn_topic": "search YouTube for <topic> and learn the top 3 videos",
     "learn_playlist": "learn every video in a YouTube playlist",
     "search": "search YouTube for <keyword> and show the 6 most recent 5-40 minute videos with English captions",
-    "tag_gen": "classify untagged videos for <tag_name>, creating the tag if needed",
 }
 
 # /youtube search shows six cards at a time. The "More" button below the
@@ -270,10 +267,10 @@ VIDEO_SUMMARY_PROMPT = """You summarize YouTube videos for a viewer who is decid
 # keep chatting while the transcript is fetched, rewritten, chunked, embedded,
 # and tagged.  Progress is reported as a percentage by the status endpoint.
 VIDEO_LEARN_TRANSCRIPT_DIR = SCRIPT_DIR / "youtube_transcript"
-# Weights match youtube_video_learn.STEPS: fetch, rewrite, trunks, embeddings,
-# tags.  They only make the progress bar move sensibly between steps; the
-# embeddings and tag steps refine their share from the subprocess output.
-VIDEO_LEARN_STEP_WEIGHTS = (10.0, 30.0, 15.0, 30.0, 15.0)
+# Weights match youtube_video_learn.STEPS: fetch, rewrite, trunks, embeddings.
+# They only make the progress bar move sensibly between steps; the embeddings
+# step refines its share from the subprocess output.
+VIDEO_LEARN_STEP_WEIGHTS = (10.0, 30.0, 20.0, 40.0)
 VIDEO_LEARN_ACTIVE_STATES = {"queued", "running"}
 
 # Follow-up handling. The browser backend keeps a short server-side
@@ -2210,6 +2207,11 @@ def load_chunks_captured(**kwargs):
     return capture_call(chat.load_chunks, **kwargs)
 
 
+def load_all_chunks_captured():
+    """Load the global soft-tag corpus without leaking prints."""
+    return capture_call(chat.load_all_chunks)
+
+
 def source_payload(sources):
     """Serialize source chunks for the browser."""
     payload = []
@@ -3318,6 +3320,7 @@ def _iterative_evidence(
     candidate_limit: int = 50,
     require_sufficient: bool = False,
     apply_filter: bool = True,
+    tag_profile: chat.TagProfile | None = None,
 ) -> list[tuple[chat.Chunk, float]]:
     """Gather evidence in small rounds, stopping when it is sufficient.
 
@@ -3397,13 +3400,29 @@ def _iterative_evidence(
     if require_sufficient and not sufficient:
         # The gathered paragraphs never answered the question. Fall back to
         # the normal retrieval path, which still applies its own filter and
-        # cross-tag fallback rules, instead of forcing unrelated evidence into
+        # soft-tag routing rules, instead of forcing unrelated evidence into
         # the prompt.
         log(
             f"[{label} iterative: evidence stayed insufficient after "
             f"{max_rounds} round(s); using normal retrieval]"
         )
         return []
+
+    if tag_profile is not None and evidence:
+        scoped = chat.tag_filter_candidates(question, evidence, tag_profile)
+        if scoped.status == "none":
+            log(
+                f"[{label} iterative: no evidence fits soft tag "
+                f"{tag_profile.name!r}; using normal retrieval]"
+            )
+            return []
+        if scoped.candidates:
+            log(
+                f"[{label} iterative: soft tag {tag_profile.name!r} kept "
+                f"{len(scoped.candidates)} of {len(evidence)} evidence "
+                "paragraph(s)]"
+            )
+            evidence = scoped.candidates
 
     if not evidence or not structure:
         return evidence
@@ -3462,6 +3481,7 @@ def _youtube_iterative_evidence(
     budget: int,
     log: Callable[[str], None],
     depth: int | None = None,
+    tag_profile: chat.TagProfile | None = None,
 ) -> list[tuple[chat.Chunk, float]]:
     """Iteratively gather YouTube transcript evidence for a normal question.
 
@@ -3502,6 +3522,7 @@ def _youtube_iterative_evidence(
         # List-style questions need broad coverage; the normal answer path
         # already skips the small relevance filter for them.
         apply_filter=not enumerative,
+        tag_profile=tag_profile,
     )
 
 
@@ -3665,6 +3686,10 @@ class ChatState:
     ) -> None:
         self.lock = threading.RLock()
         self.tag = tag
+        try:
+            self.tag_profile = chat.get_tag(tag)
+        except KeyError as exc:
+            raise SystemExit(str(exc.args[0]) if exc.args else str(exc))
         self.max_context_tokens = max_context_tokens
         self.progressive = progressive
         self.depth: int | None = chat.DEFAULT_DEPTH
@@ -3688,10 +3713,13 @@ class ChatState:
         self.conversation_revision = 0
         chat.HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
         chat.HISTORY_FILE.touch(exist_ok=True)
-        chunks, _printed, error = load_chunks_captured(tag=tag)
+        chunks, _printed, error = load_all_chunks_captured()
         if error or chunks is None:
-            raise SystemExit(error or f"No trunks found for tag {tag!r}")
+            raise SystemExit(error or "No trunks found in the global corpus")
         self.chunks = chunks
+        # The global corpus stays loaded even while /transcript or /article uses
+        # a narrower in-memory scope; switching back to a tag is metadata-only.
+        self.global_chunks = chunks
         self.history: list[str] = self.read_history()
         self.started_at = __import__("time").time()
 
@@ -3771,10 +3799,14 @@ class ChatState:
         self.reset_conversation()
         gc.collect()
 
-    def adopt_tag(self, tag: str, chunks: list[chat.Chunk]) -> None:
+    def adopt_tag(self, tag: str, chunks: list[chat.Chunk] | None = None) -> None:
         """Switch to a tag that successfully answered, keeping conversation."""
         self.tag = tag
-        self.chunks = chunks
+        try:
+            self.tag_profile = chat.get_tag(tag)
+        except KeyError:
+            pass
+        self.chunks = chunks if chunks is not None else self.global_chunks
         self.transcript = None
         self.article_path = None
         self.article_title = ""
@@ -3784,63 +3816,25 @@ class ChatState:
         gc.collect()
 
     def fallback_tag_order(self, question: str) -> list[str]:
-        """Rank the other tags by how likely they are to answer ``question``.
+        """Rank other registry tags by lexical fit to the question.
 
-        The ranking uses the same BM25 machinery as normal retrieval over the
-        union of tagged trunks. Each matching trunk contributes its score to
-        the tag(s) that list its video, so tags with stronger and more
-        numerous matches are tried first. Tags without a lexical match are
-        kept as a last resort; they are cheap to reject because the answer
-        model is never called when retrieval finds nothing.
+        Tags are soft, so the router inspects the top question matches over
+        the one global corpus and scores each tag description/keywords. This
+        replaces the old union-of-tag-files BM25 ranking.
         """
         other_tags = [tag for tag in chat.available_tags() if tag != self.tag]
         if not other_tags:
             return []
-
-        all_chunks = chat.load_all_tagged_chunks()
-        if not all_chunks:
-            return other_tags[:MAX_TAG_FALLBACK_ATTEMPTS]
-
         try:
-            expansion = chat.expand_query(question)
-        except RuntimeError:
-            expansion = ""
-        try:
-            ranked = chat.top_chunks(
+            ranked = chat.rank_tags_for_question(
                 question,
-                all_chunks,
-                limit=len(all_chunks),
-                max_context_tokens=self.max_context_tokens,
-                expansion=expansion,
+                self.global_chunks or self.chunks,
+                exclude=self.tag,
+                limit=MAX_TAG_FALLBACK_ATTEMPTS,
             )
         except Exception:
             ranked = []
-
-        tags_for_video: dict[str, list[str]] = {}
-        for tag in other_tags:
-            try:
-                video_ids = chat.load_tag_video_ids(tag)
-            except SystemExit:
-                continue
-            for video_id in video_ids:
-                tags_for_video.setdefault(video_id, []).append(tag)
-
-        best_score: dict[str, float] = {}
-        match_count: dict[str, int] = {}
-        for chunk, score in ranked:
-            for tag in tags_for_video.get(chunk.video_id, ()):
-                best_score[tag] = max(best_score.get(tag, 0.0), score)
-                match_count[tag] = match_count.get(tag, 0) + 1
-
-        ordered = sorted(
-            other_tags,
-            key=lambda tag: (
-                -best_score.get(tag, 0.0),
-                -match_count.get(tag, 0),
-                tag,
-            ),
-        )
-        return ordered[:MAX_TAG_FALLBACK_ATTEMPTS]
+        return ranked or other_tags[:MAX_TAG_FALLBACK_ATTEMPTS]
 
     @property
     def depth_label(self) -> str:
@@ -3852,6 +3846,8 @@ class ChatState:
         video_ids = {chunk.video_id for chunk in self.chunks}
         data = {
             "tag": self.tag,
+            "tag_description": self.tag_profile.description,
+            "tag_keywords": list(self.tag_profile.keywords),
             "transcript": self.transcript,
             "depth": self.depth,
             "depth_label": self.depth_label,
@@ -3867,7 +3863,7 @@ class ChatState:
                 else (
                     f"transcript {self.transcript!r}"
                     if self.transcript is not None
-                    else f"tag {self.tag!r}"
+                    else f"soft tag {self.tag!r} over the global corpus"
                 )
             ),
             "article": self.article_path,
@@ -4038,7 +4034,6 @@ def _run_video_learn_job(state: ChatState, video_id: str) -> None:
             start = progress
             end = min(100.0, start + weights[index])
             trunk_total = 0
-            tag_total = 0
             if script == "create_embeddings.py":
                 trunk_total = len(
                     list(VIDEO_LEARN_TRANSCRIPT_DIR.glob(f"{video_id}.*.trunk"))
@@ -4078,23 +4073,6 @@ def _run_video_learn_job(state: ChatState, video_id: str) -> None:
                                 progress=round(start + (end - start) * ratio, 1),
                                 message=(
                                     f"Embedding {saved}/{trunk_total} trunk(s)"
-                                ),
-                            )
-                            continue
-                    elif script == "youtube_video_tag_gen.py":
-                        match = re.search(r"against\s+(\d+)\s+tag\(s\)", clean)
-                        if match:
-                            tag_total = int(match.group(1))
-                        match = re.match(r"\[(\d+)\]", clean)
-                        if match and tag_total > 0:
-                            checked = min(int(match.group(1)), tag_total)
-                            ratio = checked / tag_total
-                            _update_video_learn_job(
-                                state,
-                                video_id,
-                                progress=round(start + (end - start) * ratio, 1),
-                                message=(
-                                    f"Tagging {checked}/{tag_total} tag(s)"
                                 ),
                             )
                             continue
@@ -4146,15 +4124,16 @@ def _refresh_knowledge_after_learn(state: ChatState, video_id: str) -> None:
     """Make a newly learned video available without restarting the server."""
     try:
         with state.lock:
-            chat.invalidate_all_tagged_chunks()
+            chat.clear_bm25_cache()
             state.cache.clear()
-            if state.article_path is not None or state.transcript is not None:
-                return
-            if not chat.video_is_tagged(video_id, state.tag):
-                return
-            chunks, _printed, error = load_chunks_captured(tag=state.tag)
+            chunks, _printed, error = load_all_chunks_captured()
             if error or chunks is None:
                 return
+            state.global_chunks = chunks
+            if state.article_path is not None or state.transcript is not None:
+                return
+            # Tags are soft, so the new video is immediately in scope for the
+            # active tag; no membership check or classification pass is needed.
             state.replace_chunks(chunks)
     except Exception:
         # A failed cache refresh must not turn a successful learn into an
@@ -4361,9 +4340,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             ]
 
         if kind == "tags":
+            profiles = chat.load_tags()
             return [
-                {"value": tag, "description": "tag"}
-                for tag in chat.available_tags()
+                {"value": tag, "description": profiles[tag].description}
+                for tag in sorted(profiles)
                 if tag.startswith(query)
             ]
 
@@ -5000,6 +4980,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             max_context_tokens_override: int | None = None,
             prepare_selected: Callable | None = None,
             prepare_stats: dict | None = None,
+            tag_profile: chat.TagProfile | None = None,
         ):
             """Answer once from a single tag; no union fallback inside this."""
             attempt_stats: dict = {}
@@ -5063,6 +5044,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                             if depth_override is not None
                             else state.depth
                         ),
+                        tag_profile=tag_profile,
                     )
                     if evidence:
                         chunks = [chunk for chunk, _score in evidence]
@@ -5121,6 +5103,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     # successful answer also switches the active tag.
                     cross_tag_fallback=False,
                     scope_label=scope_label,
+                    tag_profile=tag_profile,
                     use_all_chunks=use_all_chunks,
                     prepare_selected=prepare_selected,
                     emit=emit_answer_delta,
@@ -5364,6 +5347,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     max_context_tokens_override=article_attempt_budget,
                     prepare_selected=article_prepare_selected,
                     prepare_stats=article_prepare_stats,
+                    tag_profile=(
+                        None
+                        if article_mode or state.transcript is not None
+                        else state.tag_profile
+                    ),
                 )
                 if error:
                     return
@@ -5402,6 +5390,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 max_context_tokens_override=article_attempt_budget,
                 prepare_selected=article_prepare_selected,
                 prepare_stats=article_prepare_stats,
+                tag_profile=(
+                    None
+                    if article_mode or state.transcript is not None
+                    else state.tag_profile
+                ),
             )
             if error:
                 return
@@ -5504,7 +5497,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         if (
             chat.CROSS_TAG_FALLBACK_ENABLED
-            and not coding_mode
             and not documentation_backed_tag
             and not article_mode
             and state.transcript is None
@@ -5526,12 +5518,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     self._sse("reset", {"reason": f"retrying in tag {tag!r}"})
                     visible = False
 
-                new_chunks, _printed, load_error = load_chunks_captured(tag=tag)
                 attempted.append(tag)
-                if load_error or new_chunks is None:
-                    self._sse_text(
-                        "log", f"[cannot load tag {tag!r}: {load_error}]"
-                    )
+                new_chunks = state.global_chunks or state.chunks
+                try:
+                    candidate_profile = chat.get_tag(tag)
+                except KeyError:
                     continue
 
                 (
@@ -5540,7 +5531,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     candidate_stats,
                     error,
                 ) = attempt(
-                    tag, new_chunks, f"tag {tag!r}", report_errors=False
+                    tag,
+                    new_chunks,
+                    f"soft tag {tag!r}",
+                    report_errors=False,
+                    tag_profile=candidate_profile,
                 )
                 if error:
                     self._sse_text(
@@ -5648,8 +5643,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._sse_text("output", "\n" + report + "\n")
         elif name == "/tag":
             self._command_tag(argument)
-        elif name == "/tag_gen":
-            self._command_tag_gen(argument)
         elif name == "/refresh":
             self._command_refresh()
         elif name == "/transcript":
@@ -5755,22 +5748,34 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 + "\n",
             )
             return
-
-        new_chunks, printed, error = load_chunks_captured(tag=argument)
-        if error or new_chunks is None:
-            self._sse_text(
-                "output", f"\nCannot switch to tag {argument!r}: {error}\n"
-            )
+        try:
+            profile = chat.get_tag(argument)
+        except KeyError as exc:
+            message = str(exc.args[0]) if exc.args else str(exc)
+            self._sse_text("output", "\n" + message + "\n")
             return
-        state.replace_chunks(new_chunks)
+
+        # Tags are soft scopes, not corpus partitions. If the current scope is
+        # an article or a single transcript, restore the global corpus first;
+        # otherwise this is a metadata-only switch.
+        if (
+            state.transcript is not None
+            or state.article_path is not None
+            or state.chunks is not state.global_chunks
+        ):
+            state.replace_chunks(state.global_chunks)
+        else:
+            state.reset_conversation()
         state.tag = argument
+        state.tag_profile = profile
         state.transcript = None
         state.cache.clear()
         self._sse_text(
             "output",
-            "\n" + (printed + "\n" if printed else "")
-            + chat.index_memory_report(new_chunks, build_index=False)
-            + f"\nNow using tag {argument!r}.\n",
+            f"\nNow using soft tag {argument!r}.\n"
+            f"{profile.description}\n"
+            + chat.index_memory_report(state.chunks, build_index=False)
+            + "\n",
         )
         self._sse("meta", state.snapshot())
 
@@ -5779,13 +5784,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if state.article_path is not None:
             self._refresh_article(state.article_path)
             return
-        new_chunks, printed, error = load_chunks_captured(tag=state.tag)
+        new_chunks, printed, error = load_all_chunks_captured()
         if error or new_chunks is None:
             self._sse_text(
                 "output",
-                f"\nCannot refresh tag {state.tag!r}: {error}\n",
+                f"\nCannot refresh the knowledge corpus: {error}\n",
             )
             return
+        state.global_chunks = new_chunks
         state.replace_chunks(new_chunks)
         state.transcript = None
         state.cache.clear()
@@ -5793,7 +5799,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             "output",
             "\n" + (printed + "\n" if printed else "")
             + chat.index_memory_report(new_chunks, build_index=False)
-            + f"\nNow using tag {state.tag!r} (trunks refreshed).\n",
+            + f"\nNow using soft tag {state.tag!r} (global corpus refreshed).\n",
         )
         self._sse("meta", state.snapshot())
 
@@ -5941,8 +5947,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_learn_playlist(rest)
         elif subcommand == "search":
             self._command_youtube_search(rest)
-        elif subcommand == "tag_gen":
-            self._command_tag_gen(rest)
         else:
             self._sse_text(
                 "output",
@@ -6608,9 +6612,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         return True
 
     def _finish_learn(self, video_ids: list[str], label: str = "/youtube learn") -> None:
-        """Invalidate tag caches and reload the active scope after learning."""
+        """Invalidate caches and refresh the global soft-tag corpus."""
         state = self.state
-        chat.invalidate_all_tagged_chunks()
+        chat.clear_bm25_cache()
         state.cache.clear()
         for video_id in video_ids:
             self._sse_text(
@@ -6620,6 +6624,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         new_chunks = printed = error = None
         reloaded = False
+
+        # Keep the global corpus current even when an article or transcript
+        # scope is active, so a later /tag or /refresh sees the new video.
+        global_chunks, _global_printed, global_error = load_all_chunks_captured()
+        if not global_error and global_chunks is not None:
+            state.global_chunks = global_chunks
+
         if state.article_path is not None:
             self._sse_text(
                 "output",
@@ -6638,19 +6649,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     f"\nStill answering only from transcript "
                     f"{state.transcript!r}; the loaded trunks are unchanged.\n",
                 )
-        elif any(
-            chat.video_is_tagged(video_id, state.tag) for video_id in video_ids
-        ):
-            new_chunks, printed, error = load_chunks_captured(tag=state.tag)
-            reloaded = True
         else:
-            listed = ", ".join(repr(video_id) for video_id in video_ids)
-            verb = "was" if len(video_ids) == 1 else "were"
-            self._sse_text(
-                "output",
-                f"\n{listed} {verb} not added to tag {state.tag!r}; "
-                "the loaded trunks are unchanged.\n",
-            )
+            # Tags are soft: a newly learned video belongs to the global corpus
+            # immediately, without a tag membership check or classifier pass.
+            new_chunks, printed, error = global_chunks, _global_printed, global_error
+            reloaded = True
 
         if reloaded:
             if error or new_chunks is None:
@@ -6659,6 +6662,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     f"\n{label}: could not reload the active scope: {error}\n",
                 )
             else:
+                state.global_chunks = new_chunks
                 state.replace_chunks(new_chunks)
                 self._sse_text(
                     "output",
@@ -6668,120 +6672,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     )
                     + "\n",
                 )
-        self._sse("meta", state.snapshot())
-
-    def _command_tag_gen(self, argument: str) -> None:
-        state = self.state
-        tag = argument.strip()
-        if not tag:
-            self._sse_text(
-                "output",
-                "\nUsage: /youtube tag_gen <tag_name> "
-                "(creates the tag if new; Tab completes existing names)\n",
-            )
-            return
-
-        tags = chat.available_tags()
-        if tag in {".", ".."} or "/" in tag or "\\" in tag:
-            self._sse_text(
-                "output", f"\nInvalid tag name: {tag!r}.\n"
-            )
-            return
-        if tag not in tags:
-            # youtube_video_tag_gen.py creates missing tags itself; don't reject the
-            # request just because ./tags does not contain it yet.
-            self._sse_text(
-                "output",
-                f"\n/youtube tag_gen: tag {tag!r} does not exist yet; it will be "
-                "created by the classifier.\n",
-            )
-
-        script = "youtube_video_tag_gen.py"
-        argv = ["--tag", tag]
-        self._sse_text(
-            "output",
-            f"\n/youtube tag_gen: classifying untagged videos against tag {tag!r}.\n"
-            f"\n=== {script} {' '.join(argv)} ===\n",
-        )
-        process = None
-        try:
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-u",
-                    str(SCRIPT_DIR / script),
-                    *argv,
-                ],
-                cwd=SCRIPT_DIR,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-            assert process.stdout is not None
-            try:
-                for line in process.stdout:
-                    self._sse_text("output", line)
-                returncode = process.wait()
-            except ClientDisconnected:
-                # The browser cancelled the stream; stop the classifier too.
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-                raise
-        except OSError as exc:
-            self._sse_text(
-                "output", f"\n/youtube tag_gen: could not run {script}: {exc}\n"
-            )
-            return
-        if returncode != 0:
-            self._sse_text(
-                "output",
-                f"\n/youtube tag_gen: {script} exited with code {returncode}; "
-                "reloading from whatever was written so far.\n",
-            )
-
-        # tag files can change even on a non-zero exit (for example when the
-        # model returns an unclear answer), so always drop every cached
-        # tagged-chunk set (including the union used by cross-tag fallback)
-        # and this session's answer cache.
-        chat.invalidate_all_tagged_chunks()
-        state.cache.clear()
-        self._sse_text(
-            "output",
-            f"\n/youtube tag_gen: finished updating tag {tag!r}.\n",
-        )
-
-        if (
-            state.article_path is None
-            and state.transcript is None
-            and state.tag == tag
-        ):
-            new_chunks, printed, error = load_chunks_captured(tag=tag)
-            if error or new_chunks is None:
-                self._sse_text(
-                    "output",
-                    f"\n/youtube tag_gen: could not reload tag {tag!r}: {error}\n",
-                )
-            else:
-                state.replace_chunks(new_chunks)
-                self._sse_text(
-                    "output",
-                    "\n" + (printed + "\n" if printed else "")
-                    + chat.index_memory_report(
-                        new_chunks, build_index=False
-                    )
-                    + f"\nNow using tag {tag!r} (trunks refreshed).\n",
-                )
-        else:
-            self._sse_text(
-                "output",
-                f"\nThe active scope was not reloaded. Use /refresh (or /tag "
-                f"{tag}) to pick up the new trunks.\n",
-            )
         self._sse("meta", state.snapshot())
 
     def _command_news(self, argument: str) -> None:
@@ -7726,7 +7616,7 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), ChatRequestHandler)
     server.daemon_threads = True
     address = f"http://{args.host}:{args.port}/"
-    print(f"Loaded {len(state.chunks)} trunks for tag {state.tag!r}.")
+    print(f"Loaded {len(state.chunks)} trunks for soft tag {state.tag!r}.")
     print(f"YouTube local chat server running at {address}")
     print("Press Ctrl+C to stop.")
     try:

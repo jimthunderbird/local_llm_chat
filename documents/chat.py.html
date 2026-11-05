@@ -144,10 +144,10 @@
 
 <div class="grid">
   <div class="card">
-    <h4>Two data scopes</h4>
-    <p><strong>Tag scope</strong> — all video ids listed in <code>./tags/&lt;tag&gt;</code>. Default tag: <code>japan</code>.</p>
-    <p><strong>Transcript scope</strong> — one video selected with <code>/transcript</code>. Cross-tag fallback is disabled in this scope.</p>
-    <p class="small"><code>./tags</code> is a plain-text index: one YouTube video id per line.</p>
+    <h4>Data scopes</h4>
+    <p><strong>Soft tag scope</strong> — one global corpus filtered at query time by the tag description and keywords in <code>./tags.json</code>. Default tag: <code>japan</code>.</p>
+    <p><strong>Transcript scope</strong> — one video selected with <code>/transcript</code>. Tag routing is disabled in this scope.</p>
+    <p class="small"><code>./tags.json</code> is the tag registry; tags are never written into per-video files.</p>
   </div>
   <div class="card">
     <h4>Three local models</h4>
@@ -173,12 +173,13 @@
     </ul>
   </li>
   <li><strong><code>prewarm()</code></strong> <span class="pill">chat.py:2606</span> runs in a daemon thread and sends a one-token request to <code>qwen3:1.7b</code> and <code>ornith:35b</code> with <code>keep_alive="30m"</code>. This moves model loading off the input critical path. Failures are ignored.</li>
-  <li><strong><code>load_chunks(tag)</code></strong> <span class="pill">chat.py:532</span>:
+  <li><strong><code>load_all_chunks()</code></strong>:
     <ul>
-      <li>reads <code>./tags/&lt;tag&gt;</code> into a set of video ids;</li>
-      <li>globs <code>./youtube_transcript/*.trunk</code> and keeps files whose video id is in that set;</li>
+      <li>validates the selected tag against <code>./tags.json</code>;</li>
+      <li>globs every <code>./youtube_transcript/*.trunk</code> file into one global corpus;</li>
       <li>creates lightweight <code>Chunk(video_id, index, trunk_path)</code> objects, sorted by <code>(video_id, index)</code>;</li>
-      <li>reads <em>no</em> trunk text and builds <em>no</em> BM25 index yet.</li>
+      <li>reads <em>no</em> trunk text and builds <em>no</em> BM25 index yet;</li>
+      <li><code>/tag</code> thereafter changes only metadata, not the corpus.</li>
     </ul>
   </li>
   <li><strong>Text is loaded lazily</strong> through two LRU caches:
@@ -357,22 +358,12 @@ tokenized_documents.append(tokenize(document))</code></pre>
 <p>The filter prompt lists each candidate number plus a snippet capped at 700 characters (<code>FILTER_SNIPPET_CHARS</code>). <code>qwen3:1.7b</code> must return a comma-separated list of useful candidate numbers, or exactly <code>NONE</code>. The call uses <code>temperature=0</code>, <code>num_predict=96</code>, and stops at a blank line.</p>
 <ul>
   <li><strong>Parsed list</strong> → keep only those candidates.</li>
-  <li><strong><code>NONE</code></strong> → candidate set treated as empty; cross-tag fallback may run.</li>
-  <li><strong>Unparseable / request failure</strong> → filter reported as skipped; unfiltered BM25 candidates are kept.</li>
+  <li><strong><code>NONE</code></strong> → candidate set treated as empty; soft-tag routing may run.</li>
+  <li><strong>Unparseable / request failure</strong> → question filter reported as skipped; unfiltered BM25 candidates are kept. The separate tag-scope filter has its own status and lexical fallback.</li>
 </ul>
 
-<h3>5.3 Cross-tag fallback</h3>
-<p>If the active tag yields no selected chunk, or the filter returns <code>NONE</code>, and the scope is a tag (not an explicit transcript), <code>answer()</code> calls <code>load_all_tagged_chunks()</code> <span class="pill">chat.py:607</span>. That function:</p>
-<ul>
-  <li>unions the video ids from every <code>./tags/*</code> file;</li>
-  <li>loads the corresponding trunks with the normal loader, suppressing its progress output;</li>
-  <li>caches the union and invalidates it when any tag file’s mtime changes or after <code>/youtube learn</code>;</li>
-  <li>re-runs the same expansion + BM25 + filter pipeline over the larger corpus.</li>
-</ul>
-<p>If fallback finds chunks, the chatbot prints a note such as:</p>
-<pre><code>[out-of-scope question: tag 'japan' had no BM25 match; using all tagged
- knowledge in tag 'ai_and_coding']</code></pre>
-<p>This prevents a false “insufficient information” answer for an out-of-scope question. The fallback index costs memory only when needed and then stays in the two-entry BM25 cache.</p>
+<h3>5.3 Soft-tag routing</h3>
+<p>Tags no longer partition the corpus. After question retrieval, <code>tag_filter_candidates()</code> asks <code>qwen3:1.7b</code> to keep only candidates relevant to both the active tag (name, description, keywords) and the question. If the tag filter returns <code>NONE</code>, the CLI/server ranks the other registry tags from the same candidate set using lexical tag profiles and re-runs retrieval for the best tag(s), switching only after a scoped answer succeeds. If no tag fits, the chatbot explains the scope instead of silently citing unrelated chunks. Fallback is disabled for explicit <code>/transcript</code> and <code>/article</code> scopes.</p>
 <div class="callout warn">
   <p><strong>Filter safety net:</strong> if the filter returns nothing but BM25 did return candidates, <code>answer()</code> keeps the best <code>FILTER_MIN_KEEP = 3</code> unfiltered candidates rather than refusing to answer.</p>
 </div>
@@ -400,11 +391,11 @@ tokenized_documents.append(tokenize(document))</code></pre>
   <tr><th>Structure</th><th>Contents</th><th>Bound</th></tr>
   <tr><td><code>Chunk</code></td><td><code>video_id</code>, <code>index</code>, <code>trunk_path</code>; no text held in the object</td><td>one per loaded trunk</td></tr>
   <tr><td><code>BM25Index</code></td><td><code>chunks</code>, <code>tokenized_documents</code>, <code>BM25Okapi</code></td><td>one per indexed scope</td></tr>
-  <tr><td><code>_BM25_CACHE</code></td><td>active-scope index + cross-tag fallback index</td><td>2 entries, LRU</td></tr>
+  <tr><td><code>_BM25_CACHE</code></td><td>global-corpus index + explicit-scope index</td><td>2 entries, LRU</td></tr>
   <tr><td><code>_read_paragraph_cached</code></td><td>paragraph body per trunk path</td><td>8,192-entry LRU</td></tr>
   <tr><td><code>_read_title_cached</code></td><td>title per video</td><td>4,096-entry LRU</td></tr>
   <tr><td><code>AnswerCache</code></td><td>answer text, sources, context token count</td><td>32-entry LRU</td></tr>
-  <tr><td><code>_ALL_TAGGED_CHUNKS</code></td><td>lazy union of all tagged videos</td><td>1 list, signature-invalidated</td></tr>
+  <tr><td><code>load_all_tagged_chunks()</code></td><td>compatibility alias for the global corpus</td><td>no separate index</td></tr>
   <tr><td><code>PlainFileHistory</code></td><td>questions + commands on disk</td><td>no in-memory index</td></tr>
 </table>
 <p>Switching tags calls <code>chunks.clear()</code>, replaces the list, clears the BM25 cache, and runs <code>gc.collect()</code>. The paragraph/title LRU caches are <strong>not</strong> cleared, so switching tags does not immediately return all text memory to the OS; entries are reused when paths overlap and evicted only by LRU pressure.</p>
