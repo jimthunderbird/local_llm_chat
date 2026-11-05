@@ -231,6 +231,14 @@ FUZZY_ENTITY_TOPIC_STOPWORDS = FUZZY_ANCHOR_STOPWORDS | frozenset(
     "word words essay paragraph paragraphs sentence sentences summary "
     "summarize explanation describe description".split()
 )
+# Acronyms in questions (for example "IDP") are often spelled out in the
+# corpus next to their definition ("International Driving Permit (IDP)").
+# BM25 cannot bridge the two forms on its own, so the expansion is mined from
+# the documents that contain the acronym and added to the query.
+ACRONYM_QUERY_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]{1,7}\b")
+ACRONYM_STOPWORDS = frozenset(
+    "a an the of and for in on to from with".split()
+)
 # Context window requested from Ollama for answer generation.
 ANSWER_NUM_CTX = 32768
 # Keep all models resident between questions to avoid cold-start latency.
@@ -1181,6 +1189,12 @@ class BM25Index:
 # switching scopes does not force an immediate rebuild.
 _BM25_CACHE: "OrderedDict[int, tuple[list[Chunk], BM25Index]]" = OrderedDict()
 BM25_CACHE_ENTRIES = 2
+# Acronym -> full form (or None when the corpus never defines it), memoized per
+# chunk list so repeated questions do not rescan the documents.
+_ACRONYM_CACHE: "OrderedDict[int, tuple[list[Chunk], dict[str, str | None]]]" = (
+    OrderedDict()
+)
+ACRONYM_CACHE_ENTRIES = 2
 
 
 def build_bm25_index(chunks: list[Chunk]) -> BM25Index:
@@ -1231,6 +1245,88 @@ def get_bm25_index(chunks: list[Chunk]) -> BM25Index:
 def clear_bm25_cache() -> None:
     """Drop every cached BM25 index after the knowledge base changes."""
     _BM25_CACHE.clear()
+    _ACRONYM_CACHE.clear()
+
+
+def _acronym_phrase(phrase: str, acronym: str) -> str | None:
+    """Return the suffix of ``phrase`` whose initials match ``acronym``.
+
+    A definition sentence like "An International Driving Permit (IDP)" yields
+    a leading article, so the match is allowed to start at a later word.
+    """
+    words = phrase.split()
+    for start in range(len(words)):
+        candidates = [
+            word
+            for word in words[start:]
+            if word.lower().strip("'’&.-”) ") not in ACRONYM_STOPWORDS
+        ]
+        if len(candidates) < 2:
+            continue
+        initials = "".join(word[0] for word in candidates).upper()
+        if initials == acronym:
+            return " ".join(candidates)
+    return None
+
+
+def acronym_expansion(
+    acronym: str, chunks: list[Chunk], index: BM25Index
+) -> str | None:
+    """Mine the full form of ``acronym`` from documents that use it.
+
+    Only documents whose token list contains the acronym are scanned, which
+    keeps the lookup cheap even on the full corpus. The result is cached per
+    chunk list and invalidated by ``clear_bm25_cache``.
+    """
+    key = acronym.upper()
+    entry = _ACRONYM_CACHE.get(id(chunks))
+    if entry is None or entry[0] is not chunks:
+        entry = (chunks, {})
+        _ACRONYM_CACHE[id(chunks)] = entry
+        _ACRONYM_CACHE.move_to_end(id(chunks))
+        while len(_ACRONYM_CACHE) > ACRONYM_CACHE_ENTRIES:
+            _ACRONYM_CACHE.popitem(last=False)
+    memo = entry[1]
+    if key in memo:
+        return memo[key]
+
+    token = key.lower()
+    pattern = re.compile(
+        r"(?P<phrase>(?:[A-Za-z][A-Za-z'’&.-]*\s+){0,8})"
+        r"\(\s*" + re.escape(key) + r"s?\s*\)"
+    )
+    expansion: str | None = None
+    for document_index, document in enumerate(index.tokenized_documents):
+        if token not in document:
+            continue
+        text = paragraph_text(chunks[document_index])
+        for match in pattern.finditer(text):
+            phrase = _acronym_phrase(match.group("phrase"), key)
+            if phrase:
+                expansion = phrase
+                break
+        if expansion:
+            break
+
+    memo[key] = expansion
+    return expansion
+
+
+def question_acronym_expansions(
+    question: str, chunks: list[Chunk], index: BM25Index
+) -> list[str]:
+    """Return corpus-derived full forms for acronyms in ``question``."""
+    expansions: list[str] = []
+    seen: set[str] = set()
+    for acronym in ACRONYM_QUERY_PATTERN.findall(question):
+        key = acronym.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        expansion = acronym_expansion(key, chunks, index)
+        if expansion:
+            expansions.append(expansion)
+    return expansions
 
 
 def _collect_chunks(selected_video_ids: set[str]) -> tuple[list[Chunk], int]:
@@ -2099,8 +2195,14 @@ def top_chunks(
     index = get_bm25_index(chunks)
     question_tokens = tokenize(question)
     corrections = fuzzy_query_terms(question_tokens, index)
+    acronym_terms = tokenize(
+        " ".join(question_acronym_expansions(question, chunks, index))
+    )
     query_tokens = (
-        question_tokens * 2 + corrections * 2 + tokenize(expansion)
+        question_tokens * 2
+        + corrections * 2
+        + acronym_terms * 2
+        + tokenize(expansion)
     )
     if not query_tokens:
         return []
@@ -2503,7 +2605,21 @@ def tag_filter_candidates(
     kept: list[tuple[Chunk, float]] = []
     had_error = False
     batch_size = max(1, FILTER_MAX_CANDIDATES)
-    tag_text = profile.prompt_block.strip()
+    # Use a compact tag descriptor here, not ``profile.prompt_block``. The
+    # prompt block is written for the answer model and ends with "If the
+    # provided chunks are all outside this topic, say so plainly", which
+    # biases the tiny scope model toward NONE even when the candidates are a
+    # clear tag match (for example IDP chunks under the japan tag).
+    keyword_line = (
+        f"\nKeywords: {', '.join(profile.keywords)}"
+        if profile.keywords
+        else ""
+    )
+    tag_text = (
+        f"Tag: {profile.name}\n"
+        f"Description: {profile.description}{keyword_line}"
+        + "\n"
+    )
 
     for offset in range(0, len(candidates), batch_size):
         batch = candidates[offset : offset + batch_size]
@@ -2524,7 +2640,6 @@ def tag_filter_candidates(
                 model=model,
                 temperature=0.0,
                 num_predict=FILTER_NUM_PREDICT,
-                stop=["\n\n"],
             )
         except RuntimeError as exc:
             print(f"Warning: tag scope filter failed: {exc}", file=sys.stderr)

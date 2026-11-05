@@ -1,4 +1,10 @@
 task (completed) {
+  bug: when in tag "japan", for the question: where can i get IDP?
+  expect: there should be plenty of trunks to match this
+  actual: No tagged knowledge could answer this question (tried: japan, php, aiandcoding, aimath, aimathcoding, artificialintelligence, homeinspectorcalifornia).
+}
+
+task (completed) {
   bug: what is terence tao's opinion on ai? in 600 words
   expect: we should have plenty of trunks matching this question
   actual: No tagged knowledge could answer this question (tried: aimath, aimathcoding, artificialintelligence, aiandcoding, math, php, tradeschooljobprogrambubble).
