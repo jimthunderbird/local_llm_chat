@@ -1,4 +1,10 @@
 task (completed) {
+  bug: what is terence tao's opinion on ai? in 600 words
+  expect: we should have plenty of trunks matching this question
+  actual: No tagged knowledge could answer this question (tried: aimath, aimathcoding, artificialintelligence, aiandcoding, math, php, tradeschooljobprogrambubble).
+}
+
+task (completed) {
   please perform the code refactor based on ./research/tags_system_refactor.html
 }
 

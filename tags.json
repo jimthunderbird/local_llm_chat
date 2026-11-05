@@ -3,6 +3,10 @@
     "description": "Artificial intelligence, AI companies and labs, AI models and tools, large language models, software engineering, programming, coding, and the effects of AI on software development and technical work.",
     "keywords": ["artificial intelligence", "AI", "LLM", "large language model", "software engineering", "programming", "coding", "developer", "OpenAI", "Anthropic", "machine learning"]
   },
+  "ai_math": {
+    "description":"Relationship between Artificial Intelligence and Math",
+    "keywords": ["artificial intelligence","math"]
+  },
   "ai_math_coding": {
     "description": "Artificial intelligence, mathematics, and coding: machine learning theory, mathematical reasoning, algorithms, proofs, quantitative methods, and AI-assisted programming.",
     "keywords": ["AI", "mathematics", "math", "algorithm", "proof", "quantitative", "machine learning", "coding"]

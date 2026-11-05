@@ -219,6 +219,18 @@ FUZZY_ENTITY_MIN_COOCCURRENCE = 2
 # "market" in "Nijo Market"). Such a word must not match other entities on
 # its own, so retrieval anchors on the distinctive word(s) instead.
 FUZZY_ENTITY_GENERIC_DF_RATIO = 4.0
+# Topic anchors used to choose among an entity's chunks. Short but meaningful
+# terms such as "AI" must count, and answer-format words ("in 600 words") or
+# bare numbers must not. A narrow topic subset is only trusted when it keeps
+# enough entity chunks to be evidence rather than an accident of one rare
+# word; otherwise the entity ranking is left intact.
+FUZZY_ENTITY_TOPIC_MIN_TERM_LENGTH = 2
+FUZZY_ENTITY_TOPIC_MIN_MATCHES = 3
+FUZZY_ENTITY_TOPIC_STOPWORDS = FUZZY_ANCHOR_STOPWORDS | frozenset(
+    "it its he him his she her they them we us our you your i my mine "
+    "word words essay paragraph paragraphs sentence sentences summary "
+    "summarize explanation describe description".split()
+)
 # Context window requested from Ollama for answer generation.
 ANSWER_NUM_CTX = 32768
 # Keep all models resident between questions to avoid cold-start latency.
@@ -2140,9 +2152,10 @@ def top_chunks(
             topic_terms = {
                 token
                 for token in question_tokens
-                if len(token) >= 3
+                if len(token) >= FUZZY_ENTITY_TOPIC_MIN_TERM_LENGTH
+                and not token.isdigit()
                 and token in index.vocabulary
-                and token not in FUZZY_ANCHOR_STOPWORDS
+                and token not in FUZZY_ENTITY_TOPIC_STOPWORDS
                 and token not in entity_tokens
             }
             if topic_terms:
@@ -2151,7 +2164,13 @@ def top_chunks(
                     for chunk, score in focused
                     if topic_terms.intersection(document_tokens[id(chunk)])
                 ]
-                if topical:
+                # A single generic or incidental word must not collapse a
+                # large entity set into a couple of chunks. Keep the topical
+                # subset only when it still represents the entity evidence.
+                min_topic_matches = min(
+                    FUZZY_ENTITY_TOPIC_MIN_MATCHES, len(focused)
+                )
+                if len(topical) >= min_topic_matches:
                     focused = topical
             ranked = focused
 
