@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Making /youtube search feel instant</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --ink: #e7e9ee;
+    --muted: #a4abb8;
+    --accent: #6aa6ff;
+    --accent-2: #7ee0b8;
+    --warn: #ffb454;
+    --bad: #ff6b6b;
+    --border: #2a2f3a;
+    --code: #0b0d11;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 48px 24px 96px; }
+  h1 { font-size: 2.1rem; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.02em; }
+  h2 { font-size: 1.45rem; margin: 56px 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); letter-spacing: -0.01em; }
+  h3 { font-size: 1.12rem; margin: 32px 0 10px; color: var(--accent-2); }
+  p { margin: 12px 0; }
+  .sub { color: var(--muted); font-size: 0.95rem; margin: 0 0 28px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 0.88em; }
+  pre {
+    background: var(--code);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-size: 0.84rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; margin: 20px 0; }
+  .callout { border-left: 3px solid var(--accent); background: var(--panel); padding: 14px 18px; border-radius: 0 8px 8px 0; margin: 20px 0; }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.bad { border-left-color: var(--bad); }
+  .callout.good { border-left-color: var(--accent-2); }
+  table { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 0.92rem; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  tbody tr:hover { background: rgba(255,255,255,0.02); }
+  .tag { display: inline-block; font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+  .tag.free { color: var(--accent-2); border-color: rgba(126,224,184,0.35); }
+  .tag.paid { color: var(--warn); border-color: rgba(255,180,84,0.35); }
+  .tag.risky { color: var(--bad); border-color: rgba(255,107,107,0.35); }
+  .tag.recommended { color: var(--accent); border-color: rgba(106,166,255,0.4); }
+  .toc { columns: 2; column-gap: 32px; font-size: 0.92rem; }
+  .toc a { display: block; padding: 3px 0; color: var(--muted); }
+  .toc a:hover { color: var(--accent); }
+  ul, ol { padding-left: 24px; }
+  li { margin: 6px 0; }
+  .muted { color: var(--muted); }
+  .small { font-size: 0.85rem; }
+  .kbd { font-family: ui-monospace, Menlo, monospace; font-size: 0.82em; background: var(--panel-2); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 1px 6px; }
+  hr { border: 0; border-top: 1px solid var(--border); margin: 40px 0; }
+  .bars { margin: 18px 0; }
+  .bar-row { display: grid; grid-template-columns: 200px 1fr 72px; gap: 10px; align-items: center; margin: 8px 0; font-size: 0.9rem; }
+  .bar-track { background: var(--panel-2); border-radius: 5px; height: 18px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 5px; }
+  .bar-fill.s1 { background: linear-gradient(90deg, #6aa6ff, #4c7dd0); }
+  .bar-fill.s2 { background: linear-gradient(90deg, #ff6b6b, #c94f4f); }
+  .bar-fill.s3 { background: linear-gradient(90deg, #ffb454, #d28f36); }
+  .bar-num { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } .bar-row { grid-template-columns: 120px 1fr 64px; } }
+  @media (max-width: 720px) { .toc { columns: 1; } main { padding: 28px 16px 64px; } }
+  .ok { color: var(--accent-2); }
+  .bad { color: var(--bad); }
+  .warn { color: var(--warn); }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Making <code>/youtube search</code> feel instant</h1>
+<p class="sub">Research note for <code>local_llm_chat</code> · 2026-11-04 · scope: <code>app/chat_server.py</code> (<code>_command_youtube_search</code>, <code>_run_youtube_search</code>), <code>search_youtube.py</code>, and the <code>videos</code> SSE event in <code>app/chat.html</code>.</p>
+
+<div class="callout">
+<strong>Question.</strong> <code>/youtube search "&lt;words&gt;"</code> works, but the video cards take a long time to appear.
+Where does the time actually go, and what is the fastest safe way to show cards in the chat?
+</div>
+
+<h2 id="tldr">1. TL;DR</h2>
+<p>
+The current command does far more network work than the UI needs before it renders anything.
+In a measured run of the exact production arguments, it took <strong>31.7 s</strong> end to end.
+<strong>~70% of that was one phase: fetching the upload date of up to 40 candidates, one watch-page extraction at a time.</strong>
+</p>
+
+<div class="bars">
+  <div class="bar-row">
+    <span>Search 100 candidates</span>
+    <span class="bar-track"><span class="bar-fill s1" style="width:19.6%"></span></span>
+    <span class="bar-num">6.5 s</span>
+  </div>
+  <div class="bar-row">
+    <span>Fetch 40 upload dates</span>
+    <span class="bar-track"><span class="bar-fill s2" style="width:70.0%"></span></span>
+    <span class="bar-num">23.0 s</span>
+  </div>
+  <div class="bar-row">
+    <span>Verify English captions</span>
+    <span class="bar-track"><span class="bar-fill s3" style="width:10.4%"></span></span>
+    <span class="bar-num">3.4 s</span>
+  </div>
+</div>
+
+<div class="callout good">
+<strong>Recommended path.</strong> Remove the per-video date enrichment from the critical path, shrink the candidate pool,
+verify captions only for the shortlist (in parallel, with a deadline), and stream cards to the UI in batches.
+The same existing libraries already reach <strong>~3.7 s</strong> with a 24-candidate pool and a 12-way caption check;
+a direct InnerTube search response can bring the first cards down to <strong>~1–2.5 s</strong>, with dates and caption
+checks filling in afterwards.
+</div>
+
+<h2 id="toc">Contents</h2>
+<div class="toc">
+  <a href="#measured">2. What was measured</a>
+  <a href="#pipeline">3. Current pipeline, step by step</a>
+  <a href="#why">4. Why each phase is slow</a>
+  <a href="#ranking">5. Recommendations, ranked</a>
+  <a href="#design">6. Target design</a>
+  <a href="#code">7. Implementation sketches</a>
+  <a href="#budget">8. Latency budget</a>
+  <a href="#risks">9. Risks and trade-offs</a>
+  <a href="#validation">10. Validation plan</a>
+  <a href="#refs">11. References</a>
+</div>
+
+<h2 id="measured">2. What was measured</h2>
+<p>
+Benchmarks were run from this machine on <strong>2026-11-04</strong> with <code>yt-dlp 2026.10.26</code> and
+<code>youtube-transcript-api</code> in a clean Python 3.12 virtualenv. The command matched
+<code>app/chat_server.py::_run_youtube_search</code> exactly:
+</p>
+<pre><code>python -u search_youtube.py --json --limit 7 \
+  --min-duration 300 --max-duration 2400 \
+  --any-date --sort-recent -- "rust programming"</code></pre>
+
+<table>
+<thead>
+<tr><th>Phase</th><th>Measured</th><th>Network work</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td>Build search result set</td>
+  <td><strong>6.46 s</strong></td>
+  <td>5 InnerTube search pages</td>
+  <td><code>playlistend = max(7×10, 100) = 100</code>; each page returns ~20 videos.</td>
+</tr>
+<tr>
+  <td>Fetch upload dates</td>
+  <td><strong>23.01 s</strong></td>
+  <td>40 full watch-page metadata extractions, 8 workers</td>
+  <td><code>_enrich_upload_dates()</code>; 5 waves × ~3.6 s per wave.</td>
+</tr>
+<tr>
+  <td>Verify English captions</td>
+  <td><strong>3.42 s</strong></td>
+  <td>14 caption lookups, 8 workers</td>
+  <td>First batch is <code>max(7×2, 12) = 14</code>; enough passed to fill 7.</td>
+</tr>
+<tr>
+  <td><strong>Total</strong></td>
+  <td><strong>31.7 s</strong> (script)</td>
+  <td>~60 HTTP requests</td>
+  <td>Before the server even emits the <code>videos</code> SSE event.</td>
+</tr>
+</tbody>
+</table>
+
+<h3>Per-operation costs</h3>
+<table>
+<thead>
+<tr><th>Operation</th><th>Cold cost</th><th>Comment</th></tr>
+</thead>
+<tbody>
+<tr><td>One <code>_fetch_upload_date()</code> (yt-dlp watch extraction)</td><td>~3.0–3.6 s</td><td>Heavy: watch page + player response + format processing, even with <code>skip_download</code>.</td></tr>
+<tr><td>Flat search, <code>playlistend=7</code></td><td>1.33 s</td><td>One page, no continuation.</td></tr>
+<tr><td>Flat search, <code>playlistend=20</code></td><td>1.93 s</td><td>One page plus one continuation.</td></tr>
+<tr><td>Flat search, <code>playlistend=40</code></td><td>2.41 s</td><td>Two continuations.</td></tr>
+<tr><td>Flat search, <code>playlistend=100</code></td><td>6.46 s</td><td>Five continuations; 2.4× the cost of 40 for no extra cards.</td></tr>
+<tr><td>One <code>YouTubeTranscriptApi().list()</code></td><td>~1.0–1.6 s</td><td>Network-bound; parallelises well.</td></tr>
+<tr><td>6 transcript checks, parallel</td><td>1.23 s</td><td>Compared with 5.98 s serially.</td></tr>
+<tr><td>Direct InnerTube search, 1 page</td><td>~0.8–1.0 s</td><td>Includes <code>publishedTimeText</code>, length, channel, thumbnail in the same JSON.</td></tr>
+<tr><td>InnerTube continuation page</td><td>~0.76 s</td><td>20 more videos per request.</td></tr>
+</tbody>
+</table>
+
+<h3>Fast-path simulation with the existing libraries</h3>
+<p>
+Requesting 24 flat candidates, filtering by duration, then checking the first 12 for English captions in parallel:
+</p>
+<table>
+<thead>
+<tr><th>Variant</th><th>Measured</th><th>Result</th></tr>
+</thead>
+<tbody>
+<tr><td>Flat search (24) + parallel caption check (12)</td><td><strong>3.69 s</strong></td><td>11 duration-eligible; 12/12 caption checks passed.</td></tr>
+<tr><td>Direct InnerTube page + 6–12 parallel caption checks (estimate)</td><td><strong>~2.0–2.5 s</strong></td><td>Same data, one fewer parsing layer; estimate based on measured 0.8–1.0 s search + 1.0–1.5 s checks.</td></tr>
+<tr><td>Direct InnerTube page, captions verified in background</td><td><strong>~1.0 s</strong></td><td>Cards visible immediately; caption badge settles shortly after.</td></tr>
+</tbody>
+</table>
+
+<div class="callout warn">
+<strong>Important 2026 finding.</strong> YouTube's web search no longer offers “Sort by upload date”.
+The modern filter panel only has <em>Prioritize: Relevance / Popularity</em>. In live tests,
+<code>sp=CAI=</code> (the historical upload-date sort parameter) is accepted but <strong>does not reorder results</strong>.
+Do not replace the date-enrichment phase with an <code>sp</code> sort flag; it will silently return relevance order.
+Upload-date <em>filters</em> (“Today”, “This week”, “This month”, “This year”) still work.
+</div>
+
+<h2 id="pipeline">3. Current pipeline, step by step</h2>
+<p>The path from pressing Enter to seeing cards is:</p>
+<ol>
+  <li><strong>UI → server.</strong> The command handler (<code>app/chat_server.py:5953</code>) emits a text line and calls
+      <code>_cached_youtube_search(keyword, 7)</code> (<code>:6086</code>).</li>
+  <li><strong>Server → subprocess.</strong> <code>_run_youtube_search()</code> (<code>:6010</code>) spawns
+      <code>search_youtube.py</code> with <code>--json --limit 7 --min-duration 300 --max-duration 2400 --any-date --sort-recent</code>
+      and waits for the process to finish (<code>subprocess.run</code>, 180 s timeout).</li>
+  <li><strong>Search.</strong> <code>search_videos()</code> (<code>search_youtube.py:226</code>) builds
+      <code>playlistend = max(limit × 10, 100)</code> (<code>:248</code>) and asks yt-dlp for flat results.
+      Because <code>--any-date</code> is set, <code>_search_url(..., within_year=False)</code> (<code>:86</code>) omits the
+      <code>sp</code> filter entirely.</li>
+  <li><strong>Duration filter.</strong> Entries are kept only if <code>ie_key == "Youtube"</code>, duration is known, and
+      <code>300 ≤ duration ≤ 2400</code> (<code>:262–278</code>). In the measured run, 100 entries produced 59 eligible videos.</li>
+  <li><strong>Date enrichment.</strong> In recent mode, <code>_enrich_upload_dates()</code> (<code>:173</code>) fetches exact upload
+      dates for the first 40 videos with <code>DATE_ENRICH_LIMIT = 40</code> and 8 workers, using a full
+      <code>yt_dlp.extract_info(watch_url)</code> per video (<code>:154</code>).</li>
+  <li><strong>Sort.</strong> Videos are sorted newest-first by <code>timestamp</code> (<code>:303–311</code>). This is why the
+      enrichment exists: flat search results do not include upload dates.</li>
+  <li><strong>Caption verification.</strong> <code>_with_english_transcripts()</code> (<code>:196</code>) checks candidates in
+      batches of <code>max(limit×2, 12)=14</code>, 8 workers, calling <code>YouTubeTranscriptApi().list()</code>
+      (<code>has_english_transcript</code>, <code>:110</code>). It stops when <code>limit</code> videos pass.</li>
+  <li><strong>Server → UI.</strong> Only after the subprocess exits does the server emit one
+      <code>videos</code> SSE event (<code>:6000–6008</code>). <code>app/chat.html:5544</code> replaces
+      <code>entry.videos</code> and renders all cards at once.</li>
+</ol>
+
+<h2 id="why">4. Why each phase is slow</h2>
+
+<h3>4.1 Date enrichment dominates (23 s)</h3>
+<p>
+<code>_fetch_upload_date()</code> uses <code>yt-dlp</code> to extract a full watch page just to read one field.
+That is expensive even with <code>skip_download</code>: yt-dlp fetches the watch page, the player response, and may
+process JavaScript/format metadata before returning. Measured at ~3.0–3.6 s per video. With 8 workers and 40 videos,
+the phase is five sequential waves: <strong>~18–23 s</strong>.
+</p>
+<p>
+Worse, the date is only needed for ordering and for a small label on each card. All 40 fetches are done even though
+the UI shows six cards.
+</p>
+
+<h3>4.2 The candidate pool is 4–14× larger than needed (6.5 s)</h3>
+<p>
+<code>CANDIDATE_MULTIPLIER = 10</code> and <code>MIN_CANDIDATES = 100</code> (<code>:63–64</code>) mean a request for
+7 videos walks five search-result pages. Each page is ~0.76–1.0 s, so the pool alone costs 4–6 s. For a
+“most recent” search, 24–40 candidates is normally enough to survive duration filtering.
+</p>
+
+<h3>4.3 Caption checks are serialised into the critical path (3.4 s)</h3>
+<p>
+The “every returned video must have English captions” guarantee is enforced before rendering. That is a reasonable
+product rule, but it does not have to be a blocking rule. <code>youtube-transcript-api</code> needs ~1–1.6 s per lookup
+(network round-trip to the player endpoint). Parallelism helps (6 checks: 5.98 s serial → 1.23 s parallel), but the
+current batch size and the fact that the UI waits for all of it add seconds.
+</p>
+<div class="callout warn">
+<strong>Hidden failure mode.</strong> <code>has_english_transcript()</code> catches <em>every</em> exception and returns
+<code>False</code> (<code>search_youtube.py:117–127</code>). On a blocked cloud IP (see
+<a href="./avoid_ip_blocking.html">avoid_ip_blocking.html</a>), every candidate looks captionless, so the batch loop
+keeps scanning and may eventually return fewer than 6 videos — or none. In that case the command is both slow and
+wrong. Treat “lookup failed” differently from “no English track”.
+</div>
+
+<h3>4.4 The UI cannot render progressively</h3>
+<p>
+<code>_run_youtube_search()</code> waits for the subprocess, parses all JSONL, normalises every item, returns a list, and
+then sends one <code>videos</code> event. Nothing is painted until the slowest phase finishes. Even with a perfect
+backend, the perceived latency is the sum of all phases.
+</p>
+
+<h3>4.5 Subprocess and repeated work</h3>
+<p>
+The subprocess costs only ~0.13 s here (imports are warm), so it is not the main problem. But it also means:
+</p>
+<ul>
+  <li>The cache is only in memory (<code>self.state.youtube_search_cache</code>, <code>chat_server.py:3679</code>) and
+      dies with the server.</li>
+  <li>“More” re-runs the whole search if the cache does not already hold enough results (<code>:6086–6107</code>).</li>
+  <li>Concurrent identical searches can duplicate all of the work (no single-flight lock).</li>
+</ul>
+
+<h2 id="ranking">5. Recommendations, ranked</h2>
+
+<table>
+<thead>
+<tr><th>Priority</th><th>Change</th><th>Expected effect</th><th>Effort</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td><span class="tag recommended">P0</span></td>
+  <td><strong>Take upload-date enrichment off the critical path.</strong> Use the <code>publishedTimeText</code> already present in search results to order/display recent videos; optionally fetch exact dates lazily for the six visible cards only.</td>
+  <td><strong>−18 to −23 s</strong></td>
+  <td>medium</td>
+</tr>
+<tr>
+  <td><span class="tag recommended">P0</span></td>
+  <td><strong>Shrink the candidate pool.</strong> Start at 24–40, expand with continuations only when filters leave too few.</td>
+  <td><strong>−4 to −5 s</strong></td>
+  <td>low</td>
+</tr>
+<tr>
+  <td><span class="tag recommended">P0</span></td>
+  <td><strong>Verify captions for the shortlist only</strong>, in parallel, with a 1.5–2 s deadline. Do not scan the entire pool. Distinguish lookup failure from “no English track”.</td>
+  <td><strong>−2 s</strong>, avoids pathological scans</td>
+  <td>low</td>
+</tr>
+<tr>
+  <td><span class="tag recommended">P0</span></td>
+  <td><strong>Stream cards in batches</strong> instead of one final event; render skeletons immediately. Caption badge can settle asynchronously.</td>
+  <td>First paint <strong>~1–2.5 s</strong></td>
+  <td>medium</td>
+</tr>
+<tr>
+  <td><span class="tag free">P1</span></td>
+  <td><strong>Persistent cache</strong> for search results (15–60 min TTL), exact dates (30 days), caption availability (7 days, negative 1 day). Serve stale-while-revalidate.</td>
+  <td>Warm searches <strong>&lt;200 ms</strong></td>
+  <td>low–medium</td>
+</tr>
+<tr>
+  <td><span class="tag free">P1</span></td>
+  <td><strong>Single-flight per keyword</strong> and store the continuation token so “More” is one request.</td>
+  <td>No duplicate work; “More” <strong>~0.8 s</strong></td>
+  <td>low</td>
+</tr>
+<tr>
+  <td><span class="tag free">P1</span></td>
+  <td><strong>Call the search module in-process</strong> (or keep a long-lived worker) and reuse one <code>requests.Session</code> / <code>YoutubeDL</code>. Warm up at server start.</td>
+  <td>−0.1–0.4 s cold; simpler streaming</td>
+  <td>low</td>
+</tr>
+<tr>
+  <td><span class="tag paid">P2</span></td>
+  <td><strong>YouTube Data API v3</strong> <code>search.list(order=date)</code> + <code>videos.list(part=contentDetails,snippet)</code> when a key is available.</td>
+  <td>Exact dates + durations + caption presence in <strong>2 calls</strong>, ~0.3–0.8 s</td>
+  <td>medium (quota)</td>
+</tr>
+<tr>
+  <td><span class="tag risky">P2</span></td>
+  <td>Third-party search APIs (Piped/Invidious/hosted search) as a fallback.</td>
+  <td>Varies</td>
+  <td>medium; reliability/ops risk</td>
+</tr>
+</tbody>
+</table>
+
+<h2 id="design">6. Target design</h2>
+<p>
+Split the command into a <em>fast path</em> that answers the user and a <em>background enrichment</em> path that
+does not block rendering.
+</p>
+
+<pre><code>Enter
+  │
+  ├─ cache hit? ── yes ──► emit cached cards immediately (stale-while-revalidate)
+  │
+  └─ no
+      │
+      ├─ InnerTube search (1 page, videos+This-year filter, 20 items)   ~0.8–1.0 s
+      │     └─ parse videoRenderer: id, title, length, channel, thumb,
+      │        publishedTimeText (relative), viewCount
+      │
+      ├─ duration filter 5–40 min client-side (free)
+      │
+      ├─ emit first batch of 6 cards  ────────────────────────────────► UI paints
+      │
+      ├─ caption verify first 12 in parallel, 1.5–2 s deadline
+      │     └─ emit updated batch (verified:true/false) ──────────────► badges settle
+      │
+      └─ optional: exact dates for visible 6, background, cache 30 d ─► emit update
+</code></pre>
+
+<h3>What to show when exact dates are unavailable</h3>
+<p>
+InnerTube returns relative strings such as <code>"3 weeks ago"</code>, <code>"5 months ago"</code>, and
+<code>"1 year ago"</code>. These are enough for “most recent” ordering and are honest in the UI. Convert them to an
+approximate age (minutes/hours/days/weeks/months/years) for sorting; keep the original string for display.
+Only fetch exact <code>upload_date</code> for cards that are actually visible, and only if the UI needs it.
+</p>
+
+<h3>Caption policy options</h3>
+<table>
+<thead>
+<tr><th>Policy</th><th>First cards</th><th>Guarantee</th><th>Recommendation</th></tr>
+</thead>
+<tbody>
+<tr><td>Block until all 6 verified (current)</td><td>slow</td><td>strict</td><td>no</td></tr>
+<tr><td>Verify first batch before emit</td><td>~2.0–2.5 s</td><td>strict for visible cards</td><td><span class="tag recommended">default</span></td></tr>
+<tr><td>Emit immediately; verify in background; remove/replace failures</td><td>~1.0 s</td><td>eventual; may briefly show a card that disappears</td><td>good if labeled “checking captions…”</td></tr>
+<tr><td>Skip verification; check on click / Summary</td><td>~1.0 s</td><td>none until interaction</td><td>only for a “fast mode”</td></tr>
+</tbody>
+</table>
+
+<h2 id="code">7. Implementation sketches</h2>
+
+<h3>7.1 Direct InnerTube search (fast, includes relative dates)</h3>
+<pre><code>import requests
+
+INNERTUBE_SEARCH = "https://www.youtube.com/youtubei/v1/search?prettyPrint=false"
+# Videos only + "This year" upload filter. Verified live 2026-11-04.
+PARAMS_VIDEOS_THIS_YEAR = "EgQIBRAB"
+CONTEXT = {
+    "client": {
+        "clientName": "WEB",
+        "clientVersion": "2.20240401.00.00",
+        "hl": "en",
+        "gl": "US",
+    }
+}
+
+def _walk(obj, key):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == key:
+                yield v
+            yield from _walk(v, key)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _walk(item, key)
+
+def _runs_text(node):
+    if not node:
+        return ""
+    if "simpleText" in node:
+        return node["simpleText"]
+    return "".join(run.get("text", "") for run in node.get("runs", []))
+
+def _parse_length(text):
+    # "13:59", "1:05:53", "45" -> seconds
+    if not text:
+        return None
+    try:
+        parts = [int(p) for p in text.split(":")]
+    except ValueError:
+        return None
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + part
+    return seconds
+
+def innertube_page(session, keyword, params=PARAMS_VIDEOS_THIS_YEAR):
+    """Return (videos, next_continuation_token)."""
+    body = {"context": CONTEXT, "query": keyword, "params": params}
+    data = session.post(INNERTUBE_SEARCH, json=body, timeout=6).json()
+
+    videos = []
+    for renderer in _walk(data, "videoRenderer"):
+        vid = renderer.get("videoId")
+        if not vid:
+            continue
+        thumbs = renderer.get("thumbnail", {}).get("thumbnails") or []
+        videos.append({
+            "id": vid,
+            "title": _runs_text(renderer.get("title")),
+            "channel": _runs_text(renderer.get("ownerText")),
+            "duration": _parse_length(_runs_text(renderer.get("lengthText"))),
+            "thumbnail": thumbs[-1]["url"] if thumbs else "",
+            "published_text": _runs_text(renderer.get("publishedTimeText")),
+            "url": f"https://www.youtube.com/watch?v={vid}",
+        })
+
+    token = next(iter(_walk(data, "continuationCommand")), {}).get("token")
+    return videos, token
+
+def innertube_continuation(session, token):
+    body = {"context": CONTEXT, "continuation": token}
+    data = session.post(INNERTUBE_SEARCH, json=body, timeout=6).json()
+    videos = []  # same videoRenderer parsing as above
+    ...
+    next_token = next(iter(_walk(data, "continuationCommand")), {}).get("token")
+    return videos, next_token
+</code></pre>
+
+<p class="small muted">
+Notes: response is large (~600 KB uncompressed, ~80 KB gzip); let <code>requests</code> negotiate gzip.
+InnerTube is undocumented, so keep the current yt-dlp path as a fallback and pin/rotate the client version.
+</p>
+
+<h3>7.2 Relative-date parsing for ordering</h3>
+<pre><code>import re
+from datetime import datetime, timedelta, timezone
+
+_UNIT = {
+    "second": 1, "minute": 60, "hour": 3600, "day": 86400,
+    "week": 7 * 86400, "month": 30 * 86400, "year": 365 * 86400,
+}
+
+def relative_age_seconds(text):
+    """'3 weeks ago' -> 1814400; unknown -> None."""
+    m = re.match(r"(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago", text or "")
+    if not m:
+        return None
+    return int(m.group(1)) * _UNIT[m.group(2)]
+
+def sort_newest_first(videos, now=None):
+    now = now or datetime.now(timezone.utc)
+    def key(pair):
+        index, video = pair
+        age = relative_age_seconds(video.get("published_text"))
+        if age is None:
+            return (0, -index)          # unknown dates last
+        return (1, -age, -index)        # smaller age = newer
+    return [v for _, v in sorted(enumerate(videos), key=key, reverse=True)]
+</code></pre>
+
+<h3>7.3 Caption verification with a deadline</h3>
+<pre><code>import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def verify_captions(video_ids, api, deadline_s=2.0, workers=16):
+    """Return {video_id: True/False/None}; None means 'not checked in time'."""
+    results = {vid: None for vid in video_ids}
+    if not video_ids:
+        return results
+    pool = ThreadPoolExecutor(max_workers=min(workers, len(video_ids)))
+    futures = {pool.submit(has_english_transcript, vid, api): vid
+               for vid in video_ids}
+    end = time.monotonic() + deadline_s
+    try:
+        for future in as_completed(futures, timeout=max(0.0, end - time.monotonic())):
+            vid = futures[future]
+            try:
+                results[vid] = future.result()
+            except Exception:
+                results[vid] = None
+    except TimeoutError:
+        pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return results
+</code></pre>
+<p>
+Change <code>has_english_transcript()</code> to return three states internally
+(<code>True</code> / <code>False</code> / <code>Unknown</code>) so a network error does not masquerade as
+“no captions”. Only <code>False</code> should remove a card; <code>Unknown</code> can stay with a neutral badge.
+</p>
+
+<h3>7.4 Progressive SSE</h3>
+<p>
+The frontend already replaces <code>entry.videos</code> on every <code>videos</code> event
+(<code>app/chat.html:5544–5552</code>), so the server can emit the same event multiple times with an accumulated,
+stable list. No protocol change is strictly required.
+</p>
+<pre><code># app/chat_server.py — inside _command_youtube_search
+def emit(items, *, pending, verified_count, has_more):
+    self._sse("videos", {
+        "keyword": keyword,
+        "items": items,
+        "has_more": has_more,
+        "pending": pending,              # optional UI hint
+        "verified_count": verified_count,
+    })
+
+candidates = fast_search(keyword, limit=24)           # ~0.8–1.2 s
+visible = candidates[:YOUTUBE_SEARCH_PAGE_SIZE]
+emit(visible, pending=True, verified_count=0,
+     has_more=len(candidates) > len(visible))
+
+checks = verify_captions([v["id"] for v in candidates[:12]],
+                         transcript_api, deadline_s=2.0)
+verified = [v for v in visible if checks.get(v["id"]) is not False]
+emit(verified, pending=False,
+     verified_count=sum(1 for v in verified if checks.get(v["id"]) is True),
+     has_more=len(candidates) > len(verified))
+</code></pre>
+<p>
+To avoid the “card disappears” effect, label pending cards with a subtle “checking captions…” note and only
+remove a card when the lookup definitively says there is no English track.
+</p>
+
+<h3>7.5 Persistent cache with stale-while-revalidate</h3>
+<pre><code>import hashlib, json, os, tempfile, time
+from pathlib import Path
+
+CACHE = Path.home() / ".cache" / "local_llm_chat" / "youtube"
+CACHE.mkdir(parents=True, exist_ok=True)
+
+def cache_key(kind, *parts):
+    raw = "\x1f".join(str(p) for p in parts)
+    return CACHE / f"{kind}-{hashlib.sha256(raw.encode()).hexdigest()[:24]}.json"
+
+def cache_read(path, ttl):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if time.time() - data.get("created", 0) > ttl:
+        return None
+    return data
+
+def cache_write(path, payload):
+    payload = {**payload, "created": time.time()}
+    fd, tmp = tempfile.mkstemp(dir=CACHE, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+</code></pre>
+<table>
+<thead>
+<tr><th>Cache</th><th>Key</th><th>TTL</th><th>Reason</th></tr>
+</thead>
+<tbody>
+<tr><td>Search page</td><td>keyword + sp params + duration window</td><td>15–60 min</td><td>New videos appear quickly; keep short.</td></tr>
+<tr><td>Continuation token</td><td>same as search</td><td>15–60 min</td><td>Makes “More” one request.</td></tr>
+<tr><td>Exact upload date</td><td>video id</td><td>30 days</td><td>Immutable.</td></tr>
+<tr><td>English caption availability</td><td>video id</td><td>7 days positive / 1 day negative</td><td>Captions can be added later; negative results may be transient errors.</td></tr>
+</tbody>
+</table>
+
+<h3>7.6 Optional: YouTube Data API v3 path</h3>
+<pre><code># Two calls, exact metadata, no watch-page scraping:
+# 1) search.list: 100 quota units, returns ids + publishedAt + thumbnails
+GET https://www.googleapis.com/youtube/v3/search
+    ?part=snippet&amp;type=video&amp;order=date&amp;maxResults=50
+    &amp;q=rust+programming&amp;key=$YOUTUBE_API_KEY
+
+# 2) videos.list: 1 quota unit, up to 50 ids, returns duration + caption flag
+GET https://www.googleapis.com/youtube/v3/videos
+    ?part=contentDetails,snippet&amp;id=ID1,ID2,...
+    &amp;key=$YOUTUBE_API_KEY
+</code></pre>
+<ul>
+  <li><code>order=date</code> is the supported exact-date ordering; this is what the web UI no longer offers.</li>
+  <li><code>contentDetails.duration</code> is ISO-8601 (<code>PT13M59S</code>); parse to seconds and filter 5–40 min.</li>
+  <li><code>contentDetails.caption</code> tells you captions exist, but <em>not</em> whether they are English. Keep a short
+      transcript check for the final 6–12.</li>
+  <li>Quota: 101 units per uncached search; the default 10,000/day allows ~99 searches/day. Cache aggressively, or request
+      a quota increase. Keep the key server-side (environment variable), never in <code>chat.html</code>.</li>
+</ul>
+
+<h2 id="budget">8. Latency budget</h2>
+<table>
+<thead>
+<tr><th>Stage</th><th>Current</th><th>Target (P0)</th><th>Target (warm cache)</th></tr>
+</thead>
+<tbody>
+<tr><td>Search / candidate collection</td><td>6.5 s</td><td>0.8–1.5 s (1 page)</td><td>&lt;50 ms</td></tr>
+<tr><td>Upload dates</td><td>23.0 s</td><td>0 (relative text) or background</td><td>0</td></tr>
+<tr><td>Caption verification</td><td>3.4 s</td><td>1.0–1.5 s (shortlist, parallel)</td><td>0–100 ms (cached)</td></tr>
+<tr><td>Server → first <code>videos</code> event</td><td>~31.7 s</td><td><strong>1.5–2.5 s</strong></td><td><strong>&lt;200 ms</strong></td></tr>
+<tr><td>“More” button</td><td>re-runs search</td><td>~0.8 s from continuation</td><td>&lt;50 ms</td></tr>
+</tbody>
+</table>
+
+<h2 id="risks">9. Risks and trade-offs</h2>
+<table>
+<thead>
+<tr><th>Risk</th><th>Impact</th><th>Mitigation</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td>InnerTube is undocumented and changes without notice.</td>
+  <td>Search breaks or returns empty.</td>
+  <td>Keep yt-dlp as fallback; pin client version; add a smoke test that asserts ≥1 videoRenderer for a known query.</td>
+</tr>
+<tr>
+  <td>YouTube throttling / bot checks / IP blocks.</td>
+  <td>Caption lookups fail, cards drop, searches slow down.</td>
+  <td>Cap concurrency (8–16), add timeouts, distinguish <code>Unknown</code> from <code>False</code>, cache, and follow the IP-block playbook.</td>
+</tr>
+<tr>
+  <td>Relative dates are coarse (“1 year ago”).</td>
+  <td>Ordering ties and less precise labels.</td>
+  <td>Use relative text only for ordering; fetch exact dates lazily for visible cards or use Data API <code>order=date</code>.</td>
+</tr>
+<tr>
+  <td>Progressive caption checks can remove a card after it is shown.</td>
+  <td>Jarring UI, possible duplicate layout shifts.</td>
+  <td>Show “checking captions…” state, reserve card slots, only remove on definitive <code>False</code>.</td>
+</tr>
+<tr>
+  <td>Cache staleness.</td>
+  <td>New uploads missing for the TTL window.</td>
+  <td>Short search TTL (15–30 min), stale-while-revalidate, manual refresh on repeated searches.</td>
+</tr>
+<tr>
+  <td>Concurrent identical searches duplicate work.</td>
+  <td>CPU/network spikes, rate limits.</td>
+  <td>Single-flight per cache key; queue followers onto the first result.</td>
+</tr>
+<tr>
+  <td>Data API quota exhaustion.</td>
+  <td>Search fails for the rest of the day.</td>
+  <td>Cache, quota accounting, fall back to InnerTube/yt-dlp, keep the key server-side.</td>
+</tr>
+</tbody>
+</table>
+
+<h2 id="validation">10. Validation plan</h2>
+<ol>
+  <li><strong>Instrument the phases.</strong> Record <code>t_search</code>, <code>t_filter</code>, <code>t_dates</code>,
+      <code>t_verify</code>, <code>t_emit</code>. Log to stderr when <code>YOUTUBE_SEARCH_TIMING=1</code>; optionally
+      surface in <code>/benchmark</code>.</li>
+  <li><strong>Baseline.</strong> Run 10 distinct queries × 3 cold runs and 3 warm runs. Report p50/p95 for:
+      time to first <code>videos</code> event, time to 6 visible cards, and “More” latency.</li>
+  <li><strong>Correctness checks</strong> for every returned video:
+      duration in <code>[300, 2400]</code>; English caption verified; URL resolves; no duplicate ids; no Shorts/channels/playlists.</li>
+  <li><strong>Adversarial queries:</strong> “quantum physics lecture” (long videos), “japan travel 2026” (newsy/recent),
+      “rust programming” (many old evergreen results), a query with almost no captioned results, and a query with zero
+      results.</li>
+  <li><strong>UI checks:</strong> skeletons appear immediately; cards never reorder unexpectedly; “More” appends unseen
+      videos; caption failures disappear cleanly; cached searches are instant.</li>
+  <li><strong>Regression guard:</strong> if InnerTube returns no <code>videoRenderer</code>, fall back to yt-dlp and log a
+      warning instead of showing “no videos”.</li>
+</ol>
+
+<h2 id="refs">11. References</h2>
+<ul>
+  <li>YouTube Data API v3, <code>search.list</code>: <a href="https://developers.google.com/youtube/v3/docs/search/list">developers.google.com/youtube/v3/docs/search/list</a>
+      (<code>order=date</code>, <code>publishedAfter</code>, quota cost 100 units).</li>
+  <li>YouTube Data API v3, <code>videos.list</code>: <a href="https://developers.google.com/youtube/v3/docs/videos/list">developers.google.com/youtube/v3/docs/videos/list</a>
+      (<code>contentDetails.duration</code>, <code>contentDetails.caption</code>).</li>
+  <li>yt-dlp: <a href="https://github.com/yt-dlp/yt-dlp">github.com/yt-dlp/yt-dlp</a> — flat search, continuations, watch extraction.</li>
+  <li>youtube-transcript-api: <a href="https://github.com/jdepoix/youtube-transcript-api">github.com/jdepoix/youtube-transcript-api</a> — <code>list()</code> language tracks.</li>
+  <li>Related repo note: <a href="./avoid_ip_blocking.html"><code>research/youtube/avoid_ip_blocking.html</code></a> — why caption checks can fail silently from cloud IPs.</li>
+</ul>
+
+<hr>
+<p class="small muted">
+Measured on 2026-11-04 in <code>/Users/jhuang/airesearch/local_llm_chat</code>. Phase timings vary with network and YouTube throttling;
+the relative shape (date enrichment dominates) was stable across repeated runs.
+</p>
+
+</main>
+</body>
+</html>

@@ -1,3 +1,17 @@
+task.optimize_youtube_searching_speed (completed) {
+  reference research.optimize_youtube_searching_speed, in searching_speed.html, we have:
+  "Recommended path. Remove the per-video date enrichment from the critical path, shrink the candidate pool, verify captions only for the shortlist (in parallel, with a deadline), and stream cards to the UI in batches. The same existing libraries already reach ~3.7 s with a 24-candidate pool and a 12-way caption check; a direct InnerTube search response can bring the first cards down to ~1–2.5 s, with dates and caption checks filling in afterwards."
+
+  please imrpove the speed based on the recommendation above
+}
+
+task.research.optimize_youtube_searching_speed (completed) {
+  research only, save the research result to {directory_of_this_prompt}/../research/youtube/searching_speed.html {
+    currently the command /youtube search "<words>" works, but it is very slow, it takes a long time to have the result videos show up in the chat
+    how can we improve the video showing speed
+  }
+}
+
 task.research.avoid_ip_blocking (completed) {
   research only, save the research result to {directory_of_this_prompt}/../research/youtube/avoid_ip_blocking.html {
     currently the youtube transcript fetching is blocked by youtube since the ip is from a cloud provider, how can we work around this issue

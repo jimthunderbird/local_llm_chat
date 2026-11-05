@@ -3339,6 +3339,8 @@ function makeEntry(kind, options = {}) {
     videosKeyword: "",
     videosHasMore: false,
     videosLoading: false,
+    videosPending: false,
+    videosCaptionsUnverified: false,
     videosError: "",
     newsEl: document.createElement("div"),
     el: document.createElement("div"),
@@ -3991,6 +3993,7 @@ function normalizeVideoItems(rawItems) {
       thumbnail: String(item?.thumbnail || "").trim(),
       uploadDate: String(item?.upload_date || "").trim(),
       published: String(item?.published || "").trim(),
+      publishedText: String(item?.published_text || "").trim(),
       timestamp: Number(item?.timestamp) || 0,
       url: String(item?.url || "").trim(),
     }))
@@ -4000,6 +4003,7 @@ function normalizeVideoItems(rawItems) {
 async function loadMoreVideos(entry) {
   if (!entry.videosKeyword || entry.videosLoading) return;
   entry.videosLoading = true;
+  entry.videosPending = false;
   entry.videosError = "";
   scheduleRender(entry);
   try {
@@ -4057,7 +4061,12 @@ function renderVideoResults(entry) {
   label.textContent = "YouTube videos";
   const note = document.createElement("span");
   note.className = "video-list-note";
-  note.textContent = `${items.length} result${items.length === 1 ? "" : "s"} · 5–40 min · English captions`;
+  const captionNote = entry.videosPending
+    ? "checking English captions…"
+    : entry.videosCaptionsUnverified
+      ? "English captions unavailable to verify"
+      : "English captions";
+  note.textContent = `${items.length} result${items.length === 1 ? "" : "s"} · 5–40 min · ${captionNote}`;
   head.appendChild(label);
   head.appendChild(note);
   container.appendChild(head);
@@ -4122,7 +4131,9 @@ function renderVideoResults(entry) {
     published.className = "video-date";
     published.textContent = dateValue
       ? `Published ${formatVideoDate(dateValue)}`
-      : "Release date unavailable";
+      : item.publishedText
+        ? `Published ${item.publishedText}`
+        : "Release date unavailable";
     if (item.duration > 0) {
       published.textContent += ` · ${formatVideoDuration(item.duration)}`;
     }
@@ -5547,6 +5558,8 @@ function submitText(text, fromChoice = false) {
       entry.videosHasMore = data?.has_more !== undefined
         ? Boolean(data.has_more)
         : entry.videos.length >= YOUTUBE_SEARCH_PAGE_SIZE;
+      entry.videosPending = Boolean(data?.pending);
+      entry.videosCaptionsUnverified = Boolean(data?.captions_unverified);
       entry.videosLoading = false;
       entry.videosError = "";
       scheduleRender(entry);

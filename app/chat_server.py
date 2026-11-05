@@ -5954,11 +5954,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         """Search YouTube and show clickable thumbnail cards.
 
         Usage: /youtube search "<keyword>"
-        Returns 6 of the most recent English-captioned videos between 5 and
-        40 minutes long, including their release dates and durations.  Unlike
-        /youtube learn_topic this only lists the videos; nothing is learned.
-        Each card opens a centered player, and its Summary button streams an
-        AI overview of the video.
+        Returns 6 of the most recent 5-40 minute videos with English captions.
+        Cards are streamed as soon as the fast search returns; caption checks
+        then update the list in place.  Unlike /youtube learn_topic this only
+        lists the videos; nothing is learned.  Each card opens a centered
+        player, and its Summary button streams an AI overview of the video.
         """
         keyword = argument.strip()
         if len(keyword) >= 2 and keyword[0] == keyword[-1] and keyword[0] in "\"'":
@@ -5972,13 +5972,34 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         self._sse_text(
             "output",
             f"\n/youtube search: searching YouTube for {keyword!r} "
-            "(most recent 5-40 minute videos with English captions)...\n",
+            "(5-40 minute videos; captions checked as cards load)...\n",
         )
         # Fetch one extra result so the UI knows whether a "More" button is
         # useful without making a second search just to find out.
+        candidate_state: dict[str, object] = {"items": [], "has_more": False}
+
+        def on_candidates(items: list[dict], has_more: bool) -> None:
+            if not items:
+                return
+            candidate_state["items"] = items
+            candidate_state["has_more"] = has_more
+            # Paint the cards immediately.  A later "videos" event replaces
+            # this list with the caption-verified one.
+            self._sse(
+                "videos",
+                {
+                    "keyword": keyword,
+                    "items": items[:YOUTUBE_SEARCH_PAGE_SIZE],
+                    "has_more": has_more,
+                    "pending": True,
+                },
+            )
+
         try:
             results = self._cached_youtube_search(
-                keyword, YOUTUBE_SEARCH_PAGE_SIZE + 1
+                keyword,
+                YOUTUBE_SEARCH_PAGE_SIZE + 1,
+                on_candidates=on_candidates,
             )
         except RuntimeError as exc:
             self._sse_text("output", f"\n/youtube search: {exc}\n")
@@ -5986,6 +6007,26 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         videos = results[:YOUTUBE_SEARCH_PAGE_SIZE]
         if not videos:
+            pending_items = list(candidate_state["items"])[
+                :YOUTUBE_SEARCH_PAGE_SIZE
+            ]
+            if pending_items:
+                self._sse_text(
+                    "output",
+                    "\n/youtube search: showing the matching videos found so "
+                    "far; English captions could not be verified in time.\n",
+                )
+                self._sse(
+                    "videos",
+                    {
+                        "keyword": keyword,
+                        "items": pending_items,
+                        "has_more": bool(candidate_state["has_more"]),
+                        "pending": False,
+                        "captions_unverified": True,
+                    },
+                )
+                return
             self._sse_text(
                 "output",
                 "\n/youtube search: no videos between 5 and 40 minutes with "
@@ -6004,58 +6045,36 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "keyword": keyword,
                 "items": videos,
                 "has_more": len(results) > YOUTUBE_SEARCH_PAGE_SIZE,
+                "pending": False,
             },
         )
 
-    def _run_youtube_search(self, keyword: str, limit: int) -> list[dict]:
-        """Run search_youtube.py and return normalized video metadata."""
-        try:
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "-u",
-                    str(SCRIPT_DIR / "search_youtube.py"),
-                    "--json",
-                    "--limit",
-                    str(limit),
-                    "--min-duration",
-                    "300",
-                    "--max-duration",
-                    "2400",
-                    "--any-date",
-                    "--sort-recent",
-                    "--",
-                    keyword,
-                ],
-                cwd=SCRIPT_DIR,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=180,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError("YouTube search timed out.") from exc
-        except OSError as exc:
-            raise RuntimeError(
-                f"could not run search_youtube.py: {exc}"
-            ) from exc
+    def _youtube_search_command(
+        self, keyword: str, limit: int, progressive: bool
+    ) -> list[str]:
+        return [
+            sys.executable,
+            "-u",
+            str(SCRIPT_DIR / "search_youtube.py"),
+            "--progressive-json" if progressive else "--json",
+            "--limit",
+            str(limit),
+            "--min-duration",
+            "300",
+            "--max-duration",
+            "2400",
+            "--any-date",
+            "--sort-recent",
+            "--",
+            keyword,
+        ]
 
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
-            raise RuntimeError(
-                "YouTube search failed" + (f": {detail}" if detail else ".")
-            )
-
+    def _normalize_youtube_items(
+        self, raw_items: list[dict], limit: int
+    ) -> list[dict]:
         videos = []
         seen = set()
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                video = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        for video in raw_items or []:
             if not isinstance(video, dict):
                 continue
             video_id = str(video.get("id") or "")
@@ -6074,6 +6093,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "thumbnail": str(video.get("thumbnail") or "").strip(),
                     "upload_date": str(video.get("upload_date") or "").strip(),
                     "published": str(video.get("published") or "").strip(),
+                    "published_text": str(
+                        video.get("published_text") or ""
+                    ).strip(),
                     "timestamp": int(video.get("timestamp") or 0),
                     "url": str(video.get("url") or "").strip()
                     or f"https://www.youtube.com/watch?v={video_id}",
@@ -6083,7 +6105,166 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 break
         return videos
 
-    def _cached_youtube_search(self, keyword: str, limit: int) -> list[dict]:
+    def _parse_youtube_json_lines(
+        self, output: str, limit: int
+    ) -> list[dict]:
+        raw_items = []
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                video = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(video, dict):
+                continue
+            if video.get("type") == "videos":
+                raw_items = video.get("items") or []
+            elif video.get("id"):
+                # Legacy one-object-per-line output.
+                raw_items.append(video)
+        return self._normalize_youtube_items(raw_items, limit)
+
+    def _run_youtube_search(
+        self,
+        keyword: str,
+        limit: int,
+        on_candidates: Callable[[list[dict], bool], None] | None = None,
+    ) -> list[dict]:
+        """Run search_youtube.py and return normalized video metadata.
+
+        With ``on_candidates`` the script is asked to emit its duration-filtered
+        candidates before caption verification.  Those are passed to the
+        callback immediately, so the UI can paint cards while the final list is
+        still being assembled.
+        """
+        progressive = on_candidates is not None
+        command = self._youtube_search_command(keyword, limit, progressive)
+
+        if not progressive:
+            try:
+                result = subprocess.run(
+                    command,
+                    cwd=SCRIPT_DIR,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=180,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("YouTube search timed out.") from exc
+            except OSError as exc:
+                raise RuntimeError(
+                    f"could not run search_youtube.py: {exc}"
+                ) from exc
+
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(
+                    "YouTube search failed" + (f": {detail}" if detail else ".")
+                )
+            return self._parse_youtube_json_lines(result.stdout, limit)
+
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=SCRIPT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not run search_youtube.py: {exc}"
+            ) from exc
+
+        stderr_lines: list[str] = []
+
+        def drain_stderr() -> None:
+            if process.stderr is None:
+                return
+            try:
+                for line in process.stderr:
+                    stderr_lines.append(line)
+            except Exception:
+                pass
+
+        stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+        stderr_thread.start()
+        timed_out = threading.Event()
+
+        def kill_process() -> None:
+            timed_out.set()
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+        timer = threading.Timer(180, kill_process)
+        timer.start()
+        final_videos: list[dict] = []
+        candidate_videos: list[dict] = []
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    event_type = payload.get("type")
+                    if event_type == "candidates":
+                        items = self._normalize_youtube_items(
+                            payload.get("items") or [], limit
+                        )
+                        if items:
+                            candidate_videos = items
+                            on_candidates(
+                                items,
+                                len(items) > YOUTUBE_SEARCH_PAGE_SIZE,
+                            )
+                    elif event_type == "videos":
+                        final_videos = self._normalize_youtube_items(
+                            payload.get("items") or [], limit
+                        )
+                    elif payload.get("id"):
+                        candidate_videos.append(payload)
+            returncode = process.wait()
+        finally:
+            timer.cancel()
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                process.wait()
+            stderr_thread.join(timeout=1)
+
+        if timed_out.is_set():
+            raise RuntimeError("YouTube search timed out.")
+        if returncode != 0:
+            detail = "".join(stderr_lines).strip()
+            raise RuntimeError(
+                "YouTube search failed" + (f": {detail}" if detail else ".")
+            )
+        if final_videos:
+            return final_videos
+        # The final event was empty: usually every caption lookup timed out.
+        # Return no results so _command_youtube_search can keep the candidate
+        # cards it already emitted and label them as unverified.
+        return []
+
+    def _cached_youtube_search(
+        self,
+        keyword: str,
+        limit: int,
+        on_candidates: Callable[[list[dict], bool], None] | None = None,
+    ) -> list[dict]:
         """Return up to `limit` results, growing a per-keyword cache on demand.
 
         YouTube's recent-first ordering is stable, so asking for a larger
@@ -6097,12 +6278,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             if cached is not None and len(cached) >= limit:
                 return list(cached[:limit])
 
-        videos = self._run_youtube_search(keyword, limit)
+        videos = self._run_youtube_search(
+            keyword, limit, on_candidates=on_candidates
+        )
         with self.state.lock:
             existing = self.state.youtube_search_cache.get(keyword)
             if existing is not None and len(existing) >= len(videos):
                 videos = existing
-            else:
+            elif videos:
                 self.state.youtube_search_cache[keyword] = videos
         return list(videos[:limit])
 
