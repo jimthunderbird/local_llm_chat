@@ -3638,6 +3638,8 @@ function makeEntry(kind, options = {}) {
     newsDone: false,
     videos: [],
     videosKeyword: "",
+    videosHeading: "",
+    videosNote: "",
     videosHasMore: false,
     videosLoading: false,
     videosPending: false,
@@ -4360,7 +4362,7 @@ function renderVideoResults(entry) {
   const head = document.createElement("div");
   head.className = "video-list-head";
   const label = document.createElement("span");
-  label.textContent = "YouTube videos";
+  label.textContent = entry.videosHeading || "YouTube videos";
   const note = document.createElement("span");
   note.className = "video-list-note";
   const captionNote = entry.videosPending
@@ -4368,7 +4370,8 @@ function renderVideoResults(entry) {
     : entry.videosCaptionsUnverified
       ? "English captions unavailable to verify"
       : "English captions";
-  note.textContent = `${items.length} result${items.length === 1 ? "" : "s"} · 5–60 min · ${captionNote}`;
+  note.textContent = entry.videosNote ||
+    `${items.length} result${items.length === 1 ? "" : "s"} · 5–60 min · ${captionNote}`;
   head.appendChild(label);
   head.appendChild(note);
   container.appendChild(head);
@@ -6302,6 +6305,8 @@ function submitText(text, fromChoice = false) {
     videos: (data) => {
       entry.videos = normalizeVideoItems(data?.items);
       entry.videosKeyword = String(data?.keyword || "").trim();
+      entry.videosHeading = String(data?.heading || "").trim();
+      entry.videosNote = String(data?.note || "").trim();
       entry.videosHasMore = data?.has_more !== undefined
         ? Boolean(data.has_more)
         : entry.videos.length >= YOUTUBE_SEARCH_PAGE_SIZE;

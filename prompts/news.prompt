@@ -1,4 +1,12 @@
 source: {
+  wsj: {
+    - https://feeds.content.dowjones.io/public/rss/RSSMarketsMain
+    - https://feeds.content.dowjones.io/public/rss/WSJcomUSBusiness
+    - https://feeds.content.dowjones.io/public/rss/RSSWSJD
+    - https://feeds.content.dowjones.io/public/rss/RSSWorldNews
+    - https://feeds.content.dowjones.io/public/rss/RSSUSnews
+    - https://feeds.content.dowjones.io/public/rss/socialeconomyfeed
+  }
   cnn: {
     - https://openrss.org/feed/www.cnn.com
     - https://openrss.org/feed/www.cnn.com/world
@@ -32,6 +40,26 @@ source: {
   }
 }
 
+task (completed) {
+  update news sources {source}
+
+  Implemented:
+  news_fetch.php
+  - Added the `wsj` source with all six Dow Jones RSS feeds from {source}:
+    Markets, US Business, Tech, World News, US News, and Social Economy.
+    Each feed is its own section, and a `per_feed_limit` keeps a balanced
+    10-story sample from every section (60 stories by default).
+  - Kept `full_article` off for WSJ: its RSS feeds carry only a short deck and
+    the article pages return HTTP 401 (paywall/bot block), so a forced
+    full-article fetch would replace usable text with nothing. The feed deck
+    is used as the detail body instead.
+  app/chat_server.py
+  - Added wsj to NEWS_SOURCES (tab completion and source selection), the
+    /news help text, and the /news command docstring.
+  - Verified with `php news_fetch.php --json --source wsj --limit 3`, which
+    streamed items with titles, dates, images, and paragraphs.
+}
+
 task.bug.krasia (completed) {
   bug:
   in /news krasia, each article detail seems to be only fetching the summary of the news
@@ -53,10 +81,6 @@ task.select_news_sources (completed) {
 
 task.cover_picture (completed) {
   for every single source in the detail view, please try your best to include source images
-}
-
-task (completed) {
-  update news sources {source}
 }
 
 task (completed) {

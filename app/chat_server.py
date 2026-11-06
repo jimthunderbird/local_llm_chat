@@ -110,13 +110,14 @@ WEB_COMMANDS = {
     "/new": "start a fresh conversation (clears follow-up context)",
     "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
     "learn_playlist <playlist> | search <keyword> | bookmark list",
-    "/news": "list the latest news from cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, or krasia (optionally /news [source ...] [count])",
+    "/news": "list the latest news from wsj, cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, or krasia (optionally /news [source ...] [count])",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
 }
 
 # News sources accepted by /news and completed by news_fetch.php.
 NEWS_SOURCES = {
+    "wsj": "The Wall Street Journal",
     "cnn": "CNN News",
     "yahoo_finance": "Yahoo Finance",
     "kqed": "KQED News",
@@ -6392,23 +6393,54 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "click Bookmark.\n",
             )
             return
-        lines = [
-            f"\nBookmarked videos ({len(entries)}, latest first):\n",
-        ]
+        # Render the bookmarks with the same cards as /youtube search so a
+        # saved video can be played, summarized, or learned in place.  The
+        # entries are stored oldest-first; show the newest first.
+        videos: list[dict] = []
         for entry in reversed(entries):
             video_id = str(entry.get("id") or "")
-            url = f"https://www.youtube.com/watch?v={video_id}"
-            title = str(entry.get("title") or video_id)
-            meta = []
+            if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                continue
+            try:
+                duration = max(0, int(entry.get("duration") or 0))
+            except (TypeError, ValueError):
+                duration = 0
             date = str(entry.get("date") or "").strip()
-            if date:
-                meta.append(date)
-            duration = format_youtube_duration(int(entry.get("duration") or 0))
-            if duration:
-                meta.append(duration)
-            suffix = f" ({' · '.join(meta)})" if meta else ""
-            lines.append(f"  - {title}{suffix}\n    {url}\n")
-        self._sse_text("output", "\n".join(lines) + "\n")
+            videos.append(
+                {
+                    "id": video_id,
+                    "title": str(entry.get("title") or video_id),
+                    "thumbnail": str(entry.get("thumbnail") or ""),
+                    "duration": duration,
+                    "upload_date": date,
+                    "published": date,
+                    "published_text": date,
+                    "url": f"https://www.youtube.com/watch?v={video_id}",
+                }
+            )
+        if not videos:
+            self._sse_text(
+                "output", "\nNo valid bookmarked videos found.\n"
+            )
+            return
+        self._sse_text(
+            "output",
+            f"\nBookmarked videos ({len(videos)}, latest first):\n",
+        )
+        self._sse(
+            "videos",
+            {
+                "keyword": "",
+                "items": videos,
+                "has_more": False,
+                "pending": False,
+                "heading": "Bookmarked videos",
+                "note": (
+                    f"{len(videos)} saved video"
+                    f"{'' if len(videos) == 1 else 's'} · latest first"
+                ),
+            },
+        )
 
     def _command_youtube_search(self, argument: str) -> None:
         """Search YouTube and show clickable thumbnail cards.
@@ -7316,7 +7348,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         """Stream the latest news stories to the browser.
 
         Usage: /news [SOURCE ...] [number-of-stories]
-        Each SOURCE is one of cnn, yahoo_finance, kqed, sfgate, sfbayview,
+        Each SOURCE is one of wsj, cnn, yahoo_finance, kqed, sfgate, sfbayview,
         mission_local, richmond_sunset, techcrunch, or krasia. Several sources
         may be selected.
         Without a source, every supported source is shown as its own section.

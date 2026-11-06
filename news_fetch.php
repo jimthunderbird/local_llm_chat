@@ -8,6 +8,8 @@ declare(strict_types=1);
  * stream each story's title + paragraphs + source images, source by source.
  *
  * Sources:
+ *   wsj           Wall Street Journal markets, business, tech, world, US and
+ *                 social-economy RSS feeds published by Dow Jones
  *   cnn           CNN RSS feeds served by openrss.org (top/world/us/politics/business)
  *   yahoo_finance Yahoo Finance stock market news via Google News RSS
  *   kqed          KQED News RSS feed
@@ -27,7 +29,7 @@ declare(strict_types=1);
  * Usage:
  *   ./news_fetch.php [--json] [--source SOURCE ...] [--limit N]
  *
- * --source accepts cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local,
+ * --source accepts wsj, cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local,
  * richmond_sunset, techcrunch, krasia, or medium and may be repeated (or given as a
  * comma separated list).
  * Without --source, every static source is fetched and emitted as its own
@@ -37,6 +39,43 @@ declare(strict_types=1);
  */
 
 const SOURCES = [
+    'wsj' => [
+        'label' => 'The Wall Street Journal',
+        'kind' => 'rss',
+        // The WSJ RSS feeds carry only a short deck, and the article pages
+        // themselves are paywalled/blocked (HTTP 401), so use the feed deck
+        // as the detail body instead of forcing a full-article fetch.
+        'default_limit' => 60,
+        // Each WSJ feed is large, so take a balanced sample from every
+        // section instead of letting the Markets feed fill the whole quota.
+        'per_feed_limit' => 10,
+        'feeds' => [
+            'markets' => [
+                'label' => 'Markets',
+                'url' => 'https://feeds.content.dowjones.io/public/rss/RSSMarketsMain',
+            ],
+            'business' => [
+                'label' => 'US Business',
+                'url' => 'https://feeds.content.dowjones.io/public/rss/WSJcomUSBusiness',
+            ],
+            'tech' => [
+                'label' => 'Tech',
+                'url' => 'https://feeds.content.dowjones.io/public/rss/RSSWSJD',
+            ],
+            'world' => [
+                'label' => 'World News',
+                'url' => 'https://feeds.content.dowjones.io/public/rss/RSSWorldNews',
+            ],
+            'us' => [
+                'label' => 'US News',
+                'url' => 'https://feeds.content.dowjones.io/public/rss/RSSUSnews',
+            ],
+            'economy' => [
+                'label' => 'Social Economy',
+                'url' => 'https://feeds.content.dowjones.io/public/rss/socialeconomyfeed',
+            ],
+        ],
+    ],
     'cnn' => [
         'label' => 'CNN News',
         'kind' => 'rss',
@@ -1737,6 +1776,8 @@ function storyStream(array $sourceKeys, ?int $limit, ?string $section): Generato
                 : parseRssStories($body, $sourceKey, $source['label'], $feed['label']);
 
             $selected = [];
+            $feedEmitted = 0;
+            $feedLimit = $source['per_feed_limit'] ?? null;
             foreach ($stories as $story) {
                 $key = storyKey($story);
                 if ($key !== '' && isset($seen[$key])) {
@@ -1747,8 +1788,12 @@ function storyStream(array $sourceKeys, ?int $limit, ?string $section): Generato
                 }
                 $selected[] = publicStory($story);
                 $emitted++;
+                $feedEmitted++;
                 $total++;
                 if ($emitted >= $sourceLimit) {
+                    break;
+                }
+                if ($feedLimit !== null && $feedEmitted >= $feedLimit) {
                     break;
                 }
             }

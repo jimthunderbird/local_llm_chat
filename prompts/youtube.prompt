@@ -1,3 +1,19 @@
+task.bookmark_list_command_result_ui (completed) {
+  after typing the command: /youtube bookmark list:
+  - we should get a list of videos rendered the same as the result of /youtube search <keyword>
+
+  Implemented:
+  app/chat_server.py
+  - /youtube bookmark list now emits the same "videos" event as /youtube search,
+    with the bookmarks converted to the search-card shape (id, title,
+    thumbnail, duration, date, URL) and newest first. Invalid ids are skipped.
+  app/chat.html
+  - The video-card renderer accepts optional "heading" and "note" fields, so
+    the bookmark list reads "Bookmarked videos · N saved videos · latest first"
+    while using the same clickable cards, player modal, Summary, and Learn
+    buttons as search results. No More button is shown.
+}
+
 task.youtube_video_bookmark (completed) {
   bookmark_file: {directory_of_this_prompt}/../.chat/youtube_video_bookmark.json
 
