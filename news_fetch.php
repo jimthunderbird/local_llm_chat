@@ -20,6 +20,7 @@ declare(strict_types=1);
  *   techcrunch    TechCrunch WordPress REST API
  *   krasia        KrASIA RSS feed (Asian tech and startup news)
  *   wccftech      Wccftech RSS feed (hardware, mobile and gaming news)
+ *   hackernews    Hacker News RSS feed (front-page technology stories)
  *   medium        The Medium author feed configured in ~/.medium/username
  *                 (https://medium.com/feed/@username), used by /medium
  *
@@ -31,7 +32,7 @@ declare(strict_types=1);
  *   ./news_fetch.php [--json] [--source SOURCE ...] [--limit N]
  *
  * --source accepts wsj, cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local,
- * richmond_sunset, techcrunch, krasia, wccftech, or medium and may be repeated (or given as a
+ * richmond_sunset, techcrunch, krasia, wccftech, hackernews, or medium and may be repeated (or given as a
  * comma separated list).
  * Without --source, every static source is fetched and emitted as its own
  * section; medium is only used when explicitly selected.
@@ -206,6 +207,20 @@ const SOURCES = [
             'latest' => [
                 'label' => 'Latest Stories',
                 'url' => 'https://wccftech.com/feed/',
+            ],
+        ],
+    ],
+    'hackernews' => [
+        'label' => 'Hacker News',
+        'kind' => 'rss',
+        // The Hacker News feed carries only the headline and a Comments
+        // link, so fetch the linked article for the detail view.
+        'full_article' => true,
+        'default_limit' => 10,
+        'feeds' => [
+            'latest' => [
+                'label' => 'Front Page',
+                'url' => 'https://news.ycombinator.com/rss',
             ],
         ],
     ],

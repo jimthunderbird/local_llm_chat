@@ -41,6 +41,9 @@ source: {
   wccftech: {
     - https://wccftech.com/feed/
   }
+  hackernews: {
+    - https://news.ycombinator.com/rss
+  }
 }
 
 task (completed) {
@@ -48,16 +51,16 @@ task (completed) {
 
   Implemented:
   news_fetch.php
-  - Added the `wccftech` source (https://wccftech.com/feed/) as a new RSS
-    source, so every entry in {source} is now supported.
-  - Wccftech's feed only carries a truncated excerpt plus a "Read full
-    article" link, so the source uses `full_article`, which fetches and
-    caches the full article page for the detail view.
-  - Verified with `php news_fetch.php --json --source wccftech --limit 3`;
+  - Added the `hackernews` source (https://news.ycombinator.com/rss) as a
+    new RSS source, so every entry in {source} is now supported.
+  - The Hacker News feed carries only the headline and a Comments link, so
+    the source uses `full_article`, which fetches and caches the linked
+    article page for the detail view (limit 10 stories).
+  - Verified with `php news_fetch.php --json --source hackernews --limit 3`;
     stories stream with titles, dates, full paragraphs, and cover images.
   app/chat_server.py
-  - Added wccftech to NEWS_SOURCES (tab completion, the /news source picker,
-    and validation), the /news help text, and the /news command docstring.
+  - Added hackernews to NEWS_SOURCES (tab completion, the /news source
+    picker, and validation), the /news help text, and the command docstring.
 }
 
 task (completed) {
