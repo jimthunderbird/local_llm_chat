@@ -2508,8 +2508,8 @@ ARTICLE_ROUTER_MODEL = chat.FILTER_MODEL
 # Normal tag questions reuse the /article iterative evidence loop. YouTube
 # transcripts are shorter per paragraph but a tag can span many videos, so the
 # same bounded-round design applies. Enumeration questions need wider coverage.
-YOUTUBE_ITERATIVE_MAX_ROUNDS = 4
-YOUTUBE_ITERATIVE_ENUMERATIVE_ROUNDS = 6
+YOUTUBE_ITERATIVE_MAX_ROUNDS = 3
+YOUTUBE_ITERATIVE_ENUMERATIVE_ROUNDS = 5
 YOUTUBE_ITERATIVE_EVIDENCE_TOKENS = 16000
 YOUTUBE_ITERATIVE_BATCH = 4
 YOUTUBE_ITERATIVE_ENUMERATIVE_BATCH = 6
@@ -3096,7 +3096,7 @@ def _article_classify_with_model(
             model=ARTICLE_ROUTER_MODEL,
             temperature=0.0,
             num_predict=32,
-            num_ctx=4096,
+            num_ctx=8192,
             stop=["\n"],
         )
     except RuntimeError:
@@ -3286,7 +3286,7 @@ def _article_sufficiency_check(
             prompt,
             model=ARTICLE_ROUTER_MODEL,
             temperature=0.0,
-            num_predict=96,
+            num_predict=64,
             num_ctx=8192,
             stop=["\n\n"],
         )
@@ -3321,6 +3321,7 @@ def _iterative_evidence(
     require_sufficient: bool = False,
     apply_filter: bool = True,
     tag_profile: chat.TagProfile | None = None,
+    check_every: int = 1,
 ) -> list[tuple[chat.Chunk, float]]:
     """Gather evidence in small rounds, stopping when it is sufficient.
 
@@ -3336,14 +3337,21 @@ def _iterative_evidence(
     search_question = question
     sufficient = False
     paragraph_chunks = [chunk for chunk in chunks if chunk.index > 0]
+    # The original question does not change between rounds, so expand it once.
+    # Later rounds append the sufficiency checker's ``missing`` terms to the
+    # BM25 query, which already gives those terms full weight; expanding the
+    # whole question again only repeated a small-model call. ``expand_query``
+    # is also cached, so tag routing and /article reuse this result.
+    try:
+        expansion = chat.expand_query(question)
+    except RuntimeError:
+        expansion = ""
+    filter_done = False
+    previous_missing = ""
 
     for round_number in range(1, max_rounds + 1):
         if used >= budget:
             break
-        try:
-            expansion = chat.expand_query(search_question)
-        except RuntimeError:
-            expansion = ""
         ranked = chat.top_chunks(
             search_question,
             paragraph_chunks,
@@ -3358,7 +3366,21 @@ def _iterative_evidence(
         if not candidates:
             break
 
-        if apply_filter and len(candidates) >= chat.FILTER_MIN_CANDIDATES:
+        # Run the small relevance filter once, when the candidate pool is in
+        # its effective range, instead of on every round. When a soft tag is
+        # active, ``tag_filter_candidates`` already screens the final evidence
+        # for both question and tag relevance, so this earlier filter is pure
+        # duplicate work. Without a tag (for example /transcript or /article),
+        # keep one filter to remove off-topic BM25 matches.
+        if (
+            apply_filter
+            and tag_profile is None
+            and not filter_done
+            and chat.FILTER_MIN_CANDIDATES
+            <= len(candidates)
+            <= chat.FILTER_MAX_CANDIDATES
+        ):
+            filter_done = True
             filtered = chat.filter_candidates(
                 search_question, candidates[: chat.FILTER_MAX_CANDIDATES]
             )
@@ -3370,6 +3392,10 @@ def _iterative_evidence(
                 ]
 
         added = 0
+        # Gather a wider first batch. A sufficiency check is the most
+        # expensive step in the loop, so front-loading a few extra paragraphs
+        # often answers the question after one check instead of two or three.
+        round_batch = batch * 2 if round_number == 1 else batch
         for chunk, score in candidates:
             key = (chunk.video_id, chunk.index)
             if key in seen:
@@ -3381,7 +3407,7 @@ def _iterative_evidence(
             seen.add(key)
             used += tokens
             added += 1
-            if added >= batch:
+            if added >= round_batch:
                 break
         if not added:
             break
@@ -3389,12 +3415,33 @@ def _iterative_evidence(
             f"[{label} iterative: round {round_number}/{max_rounds}, "
             f"added {added} paragraph(s), evidence ~{used:,} token(s)]"
         )
+        # Checking sufficiency is the expensive step. Enumerative questions
+        # need several rounds of coverage, so checking every other round
+        # avoids repeating the small-model call while still stopping as soon
+        # as the growing evidence is judged sufficient (or at the last round).
+        if (
+            check_every > 1
+            and round_number != 1
+            and round_number % check_every != 0
+            and round_number != max_rounds
+        ):
+            continue
         verdict = _article_sufficiency_check(question, evidence)
         if verdict["sufficient"]:
             sufficient = True
             log(f"[{label} iterative: evidence is sufficient; stopping]")
             break
         if verdict["missing"]:
+            missing_key = verdict["missing"].strip().lower()
+            if round_number > 1 and missing_key == previous_missing:
+                # The last round did not change what the model says is
+                # missing, so another identical search will not help.
+                log(
+                    f"[{label} iterative: missing terms did not change; "
+                    "stopping early]"
+                )
+                break
+            previous_missing = missing_key
             search_question = f"{question} {verdict['missing']}"
 
     if require_sufficient and not sufficient:
@@ -3523,6 +3570,7 @@ def _youtube_iterative_evidence(
         # already skips the small relevance filter for them.
         apply_filter=not enumerative,
         tag_profile=tag_profile,
+        check_every=2 if enumerative else 1,
     )
 
 

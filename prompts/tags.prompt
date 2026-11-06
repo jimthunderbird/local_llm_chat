@@ -1,4 +1,43 @@
 task (completed) {
+  currently when asking a question, the iterative evidence approach is very slow, please find ways to make it faster
+
+  Optimizations implemented                                                                                                                          
+  app/chat_server.py                                                                                                                                 
+  - Eliminated repeated query expansion — the question is expanded once per loop instead of once per round; missing terms are appended directly to   
+  the BM25 query.                                                                                                                                  
+  - Stopped duplicate relevance filtering — with an active soft tag, the final tag_filter_candidates already filters for question + tag relevance,   
+  so the per-round filter_candidates call was removed. It still runs once for non-tag scopes (/transcript, /article).                              
+  - Wider first retrieval batch — round 1 now gathers 2× the normal batch, so most questions finish after one sufficiency check instead of 2–3.      
+  - Fewer rounds/checks — non-enumerative cap reduced 4→3, enumerative 6→5; enumerative questions check sufficiency every other round instead of     
+  every round.                                                                                                                                     
+  - Early stop on unchanged missing terms — avoids a pointless extra round when the checker keeps reporting the same gap.                            
+  - Fixed a hidden model-reload penalty — the article router used num_ctx=4096 while all other small-model calls used 8192. Switching context size   
+  caused Ollama to reload qwen3:1.7b between calls. All small-model calls now use 8192, avoiding ~1s reloads.                                      
+  - Reduced sufficiency output budget 96→64 tokens.                                                                                                  
+
+  chat.py                                                                                                                                            
+  - Added an LRU cache for expand_query, shared by the iterative loop, tag routing, and normal retrieval.                                            
+  Measured effect                                                                                                                                    
+
+  Warm-model benchmark over the real tag corpus (_youtube_iterative_evidence, tag japan):                                                            
+
+  ┌────────────────────────────────────────┬──────────┬───────┐                                                                                      
+  │ Question                               │ Before   │ After │                                                                                      
+  ├────────────────────────────────────────┼──────────┼───────┤                                                                                      
+  │ where can i get IDP?                   │ 6.5–8.2s │ 3.4s  │                                                                                      
+  ├────────────────────────────────────────┼──────────┼───────┤                                                                                      
+  │ what are all levels of wagyu           │ 7.3s     │ 4.4s  │                                                                                      
+  ├────────────────────────────────────────┼──────────┼───────┤                                                                                      
+  │ where is nijo market                   │ 6.6s     │ 3.6s  │                                                                                      
+  ├────────────────────────────────────────┼──────────┼───────┤                                                                                      
+  │ requirements for 90-day long-stay visa │ 7.5s     │ 5.6s  │                                                                                      
+  └────────────────────────────────────────┴──────────┴───────┘                                                                                      
+
+  Roughly 35–50% faster, with fewer small-model calls per question. The task is marked (completed) in prompts/tags.prompt, and no incomplete prompt  
+  tasks remain.      
+}
+
+task (completed) {
   bug: when in tag "japan", for the question: where can i get IDP?
   expect: there should be plenty of trunks to match this
   actual: No tagged knowledge could answer this question (tried: japan, php, aiandcoding, aimath, aimathcoding, artificialintelligence, homeinspectorcalifornia).
@@ -21,8 +60,8 @@ task.research_tags_refactor (completed) {
     - instead, when the command /tag <tag_name> is run, we should set a global context of <tag_name, for the <questoin>, we should then only fetch related trunks related to this global context "and" the <question>, this way, each tag is a "soft" tag instead of a "hard" tag
     - also, we should not need a dedicated tag generation process like: youtube_video_tag_gen.py
     - currently, we have a file tag_description.json, where we define list of tags and its description
-      we should keep that, but rename the file to tags.json
-      if a specific tag is not defined in tags.json, we should consider it is an invalid tag
+    we should keep that, but rename the file to tags.json
+    if a specific tag is not defined in tags.json, we should consider it is an invalid tag
     - we should also consider using the tag desription in the global tag specific context
   }
 }

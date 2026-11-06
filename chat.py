@@ -2416,8 +2416,14 @@ def translate_to_chinese(text: str, model: str = TRANSLATION_MODEL) -> str:
     return translation
 
 
-def expand_query(query: str, model: str = EXPANSION_MODEL) -> str:
-    """Generate a short line of BM25 synonyms and related terms."""
+@lru_cache(maxsize=512)
+def _expand_query_cached(query: str, model: str) -> str:
+    """Generate and cache a short line of BM25 synonyms and related terms.
+
+    The iterative evidence loop and the soft-tag router both expand the same
+    question repeatedly; caching avoids paying for the small model on every
+    round and every tag-routing attempt.
+    """
     response = generate_text(
         QUERY_EXPANSION_PROMPT.format(query=query),
         model=model,
@@ -2428,6 +2434,11 @@ def expand_query(query: str, model: str = EXPANSION_MODEL) -> str:
     expanded = THINK_PATTERN.sub("", response)
     expanded = re.sub(r"[^\w\s-]", " ", expanded)
     return " ".join(expanded.split())[:500]
+
+
+def expand_query(query: str, model: str = EXPANSION_MODEL) -> str:
+    """Generate a short line of BM25 synonyms and related terms (cached)."""
+    return _expand_query_cached(query, model)
 
 
 def filter_candidates(
