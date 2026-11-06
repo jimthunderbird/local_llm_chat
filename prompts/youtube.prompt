@@ -1,3 +1,77 @@
+task.youtube_video_bookmark (completed) {
+  bookmark_file: {directory_of_this_prompt}/../.chat/youtube_video_bookmark.json
+
+  Implemented:
+  app/chat.html
+  - Added a "Bookmark" button next to the video title in the /youtube search
+    player modal. It posts id, thumbnail, title, release date, and duration to
+    /api/youtube_bookmark and shows a "Bookmarked ✓" state afterwards.
+  app/chat_server.py
+  - /api/youtube_bookmark appends a JSON Lines entry to
+    .chat/youtube_video_bookmark.json, newest last. Re-bookmarking a video
+    moves its entry to the end, and the file is capped at 500 entries by
+    dropping the oldest ones. Writes are atomic.
+  - Added /youtube bookmark list, which prints every bookmark latest-first
+    with its title, release date, duration, and YouTube URL. Tab completion
+    covers both the /youtube bookmark subcommand and its "list" action.
+
+  in the video popup {
+    next to the video title, add a new button "Bookmark", when click {
+      - add the following entry to {bookmark_file} {
+        id: <video_id>
+        thumbnail: <video_thumbnail>
+        title: <video_title>
+        date: <video_release_date>
+        duration: <video_duration>
+      }
+      - {bookmark_file} should keep maximum 500 entries, one entry per line, the latest entry should be towards the end of the file
+      - once the maximum number of entries of the {bookmark_file} is reached, remove the oldest entry and add the new entry
+    }
+  }
+
+  add new command: /youtube bookmark list (list all videos in {bookmark_file}, sort from latest to oldest)
+}
+
+task.ask_about_this_video.dictionary_searchable_answer.bug (completed) {
+  in task.ask_about_this_video.dictionary_searchable_answer, when i click on the word on the answer, it should show another popup with the dictionary answer streaming
+
+  Root cause:
+  #popup used z-index 58, exactly the same as #video-panel. Because #popup
+  appears earlier in the DOM, the video modal painted over it, so the lookup
+  stream did start but was invisible behind the modal.
+
+  Implemented:
+  app/chat.html
+  - Raised #popup to z-index 80, above the video panel (58), learn panel (59),
+  and maximized player (70), so word clicks inside in-modal answers show the
+  streaming dictionary popup on top of the video modal.
+}
+
+task.ask_about_this_video.dictionary_searchable_answer (completed) {
+  in the task.ask_about_this_video:
+  - make every word in the answer dictionary searchable
+
+  Implemented:
+  app/chat.html
+  - In-modal answers now render with clickable word spans, and a delegated
+  click handler on the video chat message list opens the same streaming /dict
+  popup used by the main chat, with the current answer text as context.
+  - Dragging to select text still copies/selects normally instead of opening
+  the dictionary.
+}
+
+task.ask_about_this_video.stickly_answers (completed) {
+  in the task.ask_about_this_video:
+  - in the "Chat", if the answer is still loading, make the first part of the answer sticky to the top while other parts are still loading, this way i can keep reading the answer while the answer is still loading
+
+  Implemented:
+  app/chat.html
+  - While an in-modal answer is streaming, its first markdown block is sticky
+  at the top of the video chat message list. Later text continues to stream
+  and scroll underneath it, so the beginning stays readable until the answer
+  completes; the sticky behavior is removed when streaming ends.
+}
+
 task.ask_about_this_video (completed) {
   after task.video_duration and task.transcript_command_refactor are completed {
     when a video is popup, present a 2 column layout:
@@ -7,7 +81,7 @@ task.ask_about_this_video (completed) {
         present a "Learn" button, which will behave the same as "/youtube learn <this current video's url>"
       } else {
         present a "Chat" button {
-          a chatbot with command "/youtube transcript <this current video's url>" applied so that we can chat on this particular video
+          a chatbot with command "/youtube transcript <this current video's url>" applied so that we can chat on this particular video, the chat should happen right in the video popup, DO NOT jump back to the main chat!
         }
       }
     }

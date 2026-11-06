@@ -46,6 +46,9 @@ Endpoints:
     POST /api/video_summary      SSE: fetch a YouTube video's English transcript
                                   and stream an AI summary for the /youtube
                                   search result modal
+    POST /api/video_chat         SSE: answer a question from one learned video's
+                                  transcript inside the video modal, using a
+                                  session isolated from the main chat
     POST /api/video_learn        start the youtube_video_learn.py pipeline in
                                   the background for a /youtube search card
     GET  /api/video_learn_status current background learn progress (all jobs,
@@ -106,7 +109,7 @@ WEB_COMMANDS = {
     "/help": "show commands and keyboard shortcuts",
     "/new": "start a fresh conversation (clears follow-up context)",
     "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
-    "learn_playlist <playlist> | search <keyword>",
+    "learn_playlist <playlist> | search <keyword> | bookmark list",
     "/news": "list the latest news from cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, or krasia (optionally /news [source ...] [count])",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
@@ -163,6 +166,7 @@ YOUTUBE_SUBCOMMANDS = {
     "search": "search YouTube for <keyword> and show the 6 most recent 5-60 minute videos with English captions",
     "transcript": "use one transcript by hash/URL, or search titles with ag",
     "search_transcript": "search transcript titles with ag and pick a video",
+    "bookmark": "list bookmarked videos, latest first: /youtube bookmark list",
 }
 
 # /youtube search duration window (seconds).
@@ -283,6 +287,81 @@ VIDEO_LEARN_TRANSCRIPT_DIR = SCRIPT_DIR / "youtube_transcript"
 # step refines its share from the subprocess output.
 VIDEO_LEARN_STEP_WEIGHTS = (10.0, 30.0, 20.0, 40.0)
 VIDEO_LEARN_ACTIVE_STATES = {"queued", "running"}
+
+# The /youtube player modal has a "Bookmark" button. Bookmarks are stored as
+# JSON Lines in .chat/youtube_video_bookmark.json: one entry per line, newest
+# entry last, capped so the file never grows without bound.
+YOUTUBE_BOOKMARK_PATH = SCRIPT_DIR / ".chat" / "youtube_video_bookmark.json"
+YOUTUBE_BOOKMARK_LIMIT = 500
+
+
+def read_youtube_bookmarks() -> list[dict]:
+    """Return bookmarked videos in file order (oldest first)."""
+    try:
+        lines = YOUTUBE_BOOKMARK_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    entries: list[dict] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict) and entry.get("id"):
+            entries.append(entry)
+    return entries
+
+
+def write_youtube_bookmarks(entries: list[dict]) -> None:
+    """Atomically rewrite the bookmark file, one JSON entry per line."""
+    YOUTUBE_BOOKMARK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    content = "".join(
+        json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries
+    )
+    temp_path = YOUTUBE_BOOKMARK_PATH.with_suffix(".json.tmp")
+    temp_path.write_text(content, encoding="utf-8")
+    temp_path.replace(YOUTUBE_BOOKMARK_PATH)
+
+
+def add_youtube_bookmark(payload: dict) -> dict:
+    """Append one bookmark, moving an existing entry for the same video."""
+    video_id = str(payload.get("id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise ValueError("Missing or invalid YouTube video id")
+    try:
+        duration = max(0, int(payload.get("duration") or 0))
+    except (TypeError, ValueError):
+        duration = 0
+    entry = {
+        "id": video_id,
+        "thumbnail": str(payload.get("thumbnail") or "").strip(),
+        "title": str(payload.get("title") or "").strip(),
+        "date": str(payload.get("date") or "").strip(),
+        "duration": duration,
+    }
+    entries = [
+        existing
+        for existing in read_youtube_bookmarks()
+        if existing.get("id") != video_id
+    ]
+    entries.append(entry)
+    entries = entries[-YOUTUBE_BOOKMARK_LIMIT:]
+    write_youtube_bookmarks(entries)
+    return entry
+
+
+def format_youtube_duration(seconds: int) -> str:
+    """Format a duration in seconds as m:ss or h:mm:ss."""
+    if seconds <= 0:
+        return ""
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
 
 # Follow-up handling. The browser backend keeps a short server-side
 # conversation so a question such as "what does he think about AI?" can be
@@ -3865,6 +3944,7 @@ class ChatState:
         tag: str,
         max_context_tokens: int = chat.MAX_CONTEXT_TOKENS,
         progressive: bool = False,
+        chunks: list[chat.Chunk] | None = None,
     ) -> None:
         self.lock = threading.RLock()
         self.tag = tag
@@ -3899,12 +3979,15 @@ class ChatState:
         self.conversation_revision = 0
         chat.HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
         chat.HISTORY_FILE.touch(exist_ok=True)
-        chunks, _printed, error = load_all_chunks_captured()
-        if error or chunks is None:
-            raise SystemExit(error or "No trunks found in the global corpus")
+        if chunks is None:
+            chunks, _printed, error = load_all_chunks_captured()
+            if error or chunks is None:
+                raise SystemExit(error or "No trunks found in the global corpus")
         self.chunks = chunks
         # The global corpus stays loaded even while /transcript or /article uses
         # a narrower in-memory scope; switching back to a tag is metadata-only.
+        # An explicitly supplied corpus (the in-video chat) is also used as the
+        # fallback corpus, though transcript scope disables tag fallback.
         self.global_chunks = chunks
         self.history: list[str] = self.read_history()
         self.started_at = __import__("time").time()
@@ -4146,6 +4229,47 @@ def video_is_learned(video_id: str) -> bool:
     )
 
 
+# The "Chat" button inside a /youtube search video modal keeps its own
+# conversation scoped to that one transcript. It must not disturb the main
+# chat's tag/transcript scope, so each video gets a lightweight ChatState with
+# only its own trunks loaded.
+VIDEO_CHAT_STATES: dict[str, ChatState] = {}
+VIDEO_CHAT_LOCK = threading.Lock()
+
+
+def get_video_chat_state(video_id: str) -> ChatState:
+    """Return (creating if needed) the isolated chat session for a video."""
+    with VIDEO_CHAT_LOCK:
+        session = VIDEO_CHAT_STATES.get(video_id)
+        if session is not None:
+            return session
+        if not video_is_learned(video_id):
+            raise RuntimeError(
+                "This video has not been learned yet. Click Learn first, then "
+                "chat about its transcript."
+            )
+        chunks, _printed, error = load_chunks_captured(video_ids={video_id})
+        if error or not chunks:
+            raise RuntimeError(
+                error
+                or f"No trunk files found for transcript {video_id!r}."
+            )
+        # Use the neutral default tag: the transcript scope overrides tag
+        # retrieval, and a documentation-backed tag would wrongly divert
+        # questions to the official language docs.
+        session = ChatState(chat.DEFAULT_TAG, chunks=chunks)
+        session.transcript = video_id
+        session.global_chunks = chunks
+        VIDEO_CHAT_STATES[video_id] = session
+        return session
+
+
+def forget_video_chat_state(video_id: str) -> None:
+    """Drop a cached session, for example after the video is re-learned."""
+    with VIDEO_CHAT_LOCK:
+        VIDEO_CHAT_STATES.pop(video_id, None)
+
+
 def _video_learn_jobs_snapshot(
     state: ChatState, video_id: str | None = None
 ) -> list[dict] | dict | None:
@@ -4313,6 +4437,9 @@ def _run_video_learn_job(state: ChatState, video_id: str) -> None:
 
 def _refresh_knowledge_after_learn(state: ChatState, video_id: str) -> None:
     """Make a newly learned video available without restarting the server."""
+    # A re-learn can change the transcript's trunks, so drop any in-modal chat
+    # session that still holds the old chunks.
+    forget_video_chat_state(video_id)
     try:
         with state.lock:
             chat.clear_bm25_cache()
@@ -4527,6 +4654,17 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return [
                 {"value": name, "description": description}
                 for name, description in YOUTUBE_SUBCOMMANDS.items()
+                if name.startswith(lowered)
+            ]
+
+        if kind == "youtube_bookmark_actions":
+            lowered = query.lower()
+            actions = {
+                "list": "list bookmarked videos, latest first",
+            }
+            return [
+                {"value": name, "description": description}
+                for name, description in actions.items()
                 if name.startswith(lowered)
             ]
 
@@ -4766,6 +4904,33 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             self._handle_video_summary(payload)
             return
+        if parsed.path == "/api/video_chat":
+            payload = self._read_json()
+            if payload is None:
+                return
+            video_id = str(payload.get("id") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                self._send_error_json("Missing or invalid YouTube video id", 400)
+                return
+            question = str(payload.get("question") or "").strip()
+            if not question:
+                self._send_error_json("Missing question", 400)
+                return
+            self._handle_video_chat(
+                video_id, question, reset=bool(payload.get("reset"))
+            )
+            return
+        if parsed.path == "/api/youtube_bookmark":
+            payload = self._read_json()
+            if payload is None:
+                return
+            try:
+                entry = add_youtube_bookmark(payload)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            self._send_json({"ok": True, "bookmark": entry})
+            return
         if parsed.path == "/api/youtube_more":
             payload = self._read_json()
             if payload is None:
@@ -4812,6 +4977,64 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     self._sse("done", {"state": state.snapshot()})
                 except ClientDisconnected:
                     pass
+
+    def _handle_video_chat(
+        self, video_id: str, question: str, reset: bool = False
+    ) -> None:
+        """Stream an answer from one video's transcript inside the video modal.
+
+        This is the in-modal equivalent of ``/youtube transcript <url>``
+        followed by a question, but it runs against a dedicated session so the
+        main chat's conversation and scope are left untouched.
+        """
+        try:
+            session = get_video_chat_state(video_id)
+        except RuntimeError as exc:
+            self._begin_sse()
+            try:
+                self._sse("error", {"message": str(exc)})
+                self._sse("done", {})
+            except ClientDisconnected:
+                pass
+            return
+
+        previous_state = self.state
+        self.state = session
+        try:
+            with session.lock:
+                if reset:
+                    session.reset_conversation()
+                    session.cache.clear()
+                    session.latest_answer = None
+                    session.latest_sources = []
+                    session.latest_benchmark = None
+                self._begin_sse()
+                try:
+                    self._sse("meta", session.snapshot())
+                    self._run_question(question)
+                    self._sse(
+                        "done",
+                        {
+                            "state": session.snapshot(),
+                            "benchmark": (
+                                chat.format_benchmark_line(
+                                    session.latest_benchmark
+                                )
+                                if session.latest_benchmark is not None
+                                else ""
+                            ),
+                        },
+                    )
+                except ClientDisconnected:
+                    pass
+                except Exception as exc:  # Keep the modal informed.
+                    try:
+                        self._sse("error", {"message": str(exc)})
+                        self._sse("done", {"state": session.snapshot()})
+                    except ClientDisconnected:
+                        pass
+        finally:
+            self.state = previous_state
 
     def _run_question(self, question: str) -> None:
         state = self.state
@@ -6142,12 +6365,50 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_transcript(rest, direct=False)
         elif subcommand == "search_transcript":
             self._command_transcript(rest, direct=False, title_only=True)
+        elif subcommand == "bookmark":
+            self._command_youtube_bookmark(rest)
         else:
             self._sse_text(
                 "output",
                 f"\nUnknown /youtube subcommand: {subcommand!r}. "
                 "Use /youtube to see the available subcommands.\n",
             )
+
+    def _command_youtube_bookmark(self, argument: str) -> None:
+        """List the videos saved with the player modal's Bookmark button."""
+        action = argument.strip().lower()
+        if action != "list":
+            self._sse_text(
+                "output",
+                "\nUsage: /youtube bookmark list\n"
+                "Use the Bookmark button in a video player to save a video.\n",
+            )
+            return
+        entries = read_youtube_bookmarks()
+        if not entries:
+            self._sse_text(
+                "output",
+                "\nNo bookmarked videos yet. Open a /youtube search video and "
+                "click Bookmark.\n",
+            )
+            return
+        lines = [
+            f"\nBookmarked videos ({len(entries)}, latest first):\n",
+        ]
+        for entry in reversed(entries):
+            video_id = str(entry.get("id") or "")
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            title = str(entry.get("title") or video_id)
+            meta = []
+            date = str(entry.get("date") or "").strip()
+            if date:
+                meta.append(date)
+            duration = format_youtube_duration(int(entry.get("duration") or 0))
+            if duration:
+                meta.append(duration)
+            suffix = f" ({' · '.join(meta)})" if meta else ""
+            lines.append(f"  - {title}{suffix}\n    {url}\n")
+        self._sse_text("output", "\n".join(lines) + "\n")
 
     def _command_youtube_search(self, argument: str) -> None:
         """Search YouTube and show clickable thumbnail cards.

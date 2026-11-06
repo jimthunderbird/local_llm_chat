@@ -848,7 +848,10 @@
 
   #popup {
     position: fixed;
-    z-index: 58;
+    /* Must sit above every modal (video panel 58, learn panel 59, maximized
+     * video 70) so word clicks in in-modal answers actually show the
+     * streaming /dict popup instead of painting it behind the modal. */
+    z-index: 80;
     width: min(440px, calc(100vw - 24px));
     max-height: min(56vh, 520px);
     display: flex;
@@ -1280,6 +1283,34 @@
     user-select: none;
   }
   .video-modal-head-main { min-width: 0; flex: 1; }
+  .video-title-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .video-title-row .video-modal-title { min-width: 0; }
+  .video-bookmark {
+    flex: 0 0 auto;
+    margin-top: 1px;
+    background: #142334;
+    color: var(--text);
+    border: 1px solid #30465d;
+    border-radius: 6px;
+    padding: 3px 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.3;
+    cursor: pointer;
+  }
+  .video-bookmark:hover:not(:disabled) {
+    border-color: var(--accent-2);
+    color: #fff;
+  }
+  .video-bookmark:disabled { cursor: default; opacity: .8; }
+  .video-bookmark.is-saved {
+    border-color: var(--accent-2);
+    color: var(--accent-2);
+  }
   .video-modal-title { color: var(--accent); font-weight: 700; font-size: 14px; line-height: 1.35; }
   .video-modal-meta { color: var(--dim); font-size: 11px; margin-top: 4px; }
   .video-link {
@@ -1380,6 +1411,123 @@
     background: var(--accent-2);
     transition: width .25s ease;
   }
+  .video-chat {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: #101b26;
+    border: 1px solid #223344;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .video-chat[hidden] { display: none; }
+  .video-chat-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 11px;
+    border-bottom: 1px solid #223344;
+    user-select: none;
+  }
+  .video-chat-head .video-action-title { flex: 1; }
+  #video-chat-close {
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 2px;
+  }
+  #video-chat-close:hover { color: var(--text); }
+  .video-chat-messages {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 90px;
+    max-height: min(34vh, 320px);
+    overflow-y: auto;
+    padding: 11px;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .video-chat-empty {
+    color: var(--dim);
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
+  .video-chat-msg {
+    max-width: 100%;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+  }
+  .video-chat-msg.user {
+    align-self: flex-end;
+    background: #16283a;
+    border: 1px solid #2d4760;
+    border-radius: 8px 8px 2px 8px;
+    padding: 6px 10px;
+    color: #dbe8f5;
+    white-space: pre-wrap;
+  }
+  .video-chat-msg.assistant {
+    align-self: stretch;
+    color: #cfdae5;
+    border-left: 2px solid #2f4a60;
+    padding-left: 10px;
+  }
+  /* While an answer is still streaming, keep the beginning of it pinned to
+     the top of the message list. New text keeps arriving below, but the
+     first part stays readable instead of scrolling out of view. */
+  .video-chat-msg.assistant.is-streaming .markdown > :first-child {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    margin-top: 0;
+    padding: .1em 0 .4em;
+    background: #101b26;
+    box-shadow: 0 1px 0 #223344;
+  }
+  .video-chat-msg.assistant.error { color: var(--warn); border-left-color: var(--warn); }
+  .video-chat-msg .markdown p:first-child { margin-top: 0; }
+  .video-chat-msg .markdown p:last-child { margin-bottom: 0; }
+  .video-chat-thinking { color: var(--warn); font-size: 11.5px; }
+  .video-chat-error { color: var(--warn); font-size: 11.5px; margin-top: 4px; }
+  .video-chat-compose {
+    display: flex;
+    align-items: flex-end;
+    gap: 7px;
+    padding: 9px 11px 11px;
+    border-top: 1px solid #223344;
+  }
+  #video-chat-input {
+    flex: 1;
+    min-height: 42px;
+    max-height: 130px;
+    resize: vertical;
+    background: #0a121a;
+    color: var(--text);
+    border: 1px solid #30465d;
+    border-radius: 6px;
+    padding: 7px 9px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  #video-chat-input:focus { outline: 1px solid var(--accent-2); }
+  #video-chat-send {
+    flex: 0 0 auto;
+    background: #142334;
+    color: var(--text);
+    border: 1px solid #30465d;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-family: var(--mono);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #video-chat-send:hover:not(:disabled) { border-color: var(--accent-2); color: #fff; }
+  #video-chat-send:disabled { opacity: .65; cursor: wait; }
   .video-player {
     position: relative;
     width: 100%;
@@ -1764,7 +1912,11 @@
   <div class="video-modal-card" role="dialog" aria-modal="true" aria-labelledby="video-modal-title">
     <div class="video-modal-head">
       <div class="video-modal-head-main">
-        <div id="video-modal-title" class="video-modal-title">YouTube video</div>
+        <div class="video-title-row">
+          <div id="video-modal-title" class="video-modal-title">YouTube video</div>
+          <button id="video-bookmark" class="video-bookmark" type="button"
+                  title="Bookmark this video">Bookmark</button>
+        </div>
         <div id="video-modal-meta" class="video-modal-meta"></div>
       </div>
       <a id="video-link" class="video-link" href="#" target="_blank" rel="noopener noreferrer">Open on YouTube ↗</a>
@@ -1786,6 +1938,20 @@
             <button id="video-action-btn" class="video-action-btn" type="button" hidden></button>
             <div id="video-action-progress" class="video-action-progress" hidden>
               <div id="video-action-fill" class="video-action-fill"></div>
+            </div>
+          </div>
+          <div id="video-chat" class="video-chat" hidden>
+            <div class="video-chat-head">
+              <span class="video-action-title">Chat about this video</span>
+              <button id="video-chat-close" type="button" title="Close chat">×</button>
+            </div>
+            <div id="video-chat-messages" class="video-chat-messages">
+              <div class="video-chat-empty">Ask a question and the answer will use only this video's transcript.</div>
+            </div>
+            <div class="video-chat-compose">
+              <textarea id="video-chat-input" rows="2"
+                        placeholder="Ask about this video… (Enter to send, Shift+Enter for a new line)"></textarea>
+              <button id="video-chat-send" type="button">Send</button>
             </div>
           </div>
           <div id="video-summary" class="video-summary" hidden>
@@ -1908,6 +2074,7 @@ const newsTranslationLabelEl = $("#news-translation-label");
 const newsTranslationBodyEl = $("#news-translation-body");
 const videoPanelEl = $("#video-panel");
 const videoModalTitleEl = $("#video-modal-title");
+const videoBookmarkEl = $("#video-bookmark");
 const videoModalMetaEl = $("#video-modal-meta");
 const videoLinkEl = $("#video-link");
 const videoPlayerEl = $("#video-player");
@@ -1919,6 +2086,10 @@ const videoActionNoteEl = $("#video-action-note");
 const videoActionBtnEl = $("#video-action-btn");
 const videoActionProgressEl = $("#video-action-progress");
 const videoActionFillEl = $("#video-action-fill");
+const videoChatEl = $("#video-chat");
+const videoChatMessagesEl = $("#video-chat-messages");
+const videoChatInputEl = $("#video-chat-input");
+const videoChatSendEl = $("#video-chat-send");
 const videoSummaryLoadingEl = $("#video-summary-loading");
 const videoSummaryErrorEl = $("#video-summary-error");
 const videoSummaryContentEl = $("#video-summary-content");
@@ -4668,6 +4839,225 @@ function videoStateIsLearned(state) {
   );
 }
 
+/* ------------------------------------------------------------------ *
+ *  In-modal chat for one learned video
+ *
+ *  The Chat button must not close the modal or send anything to the main
+ *  chat. It opens a small conversation panel backed by /api/video_chat,
+ *  which keeps a separate transcript-scoped session on the server.
+ * ------------------------------------------------------------------ */
+let videoChatController = null;
+let videoChatFresh = true;
+let videoChatBusy = false;
+let videoChatGeneration = 0;
+
+function videoChatClearMessages() {
+  videoChatMessagesEl.textContent = "";
+  const empty = document.createElement("div");
+  empty.className = "video-chat-empty";
+  empty.textContent =
+    "Ask a question and the answer will use only this video's transcript.";
+  videoChatMessagesEl.appendChild(empty);
+}
+
+function videoChatScrollToBottom() {
+  videoChatMessagesEl.scrollTop = videoChatMessagesEl.scrollHeight;
+}
+
+function videoChatAppendUser(text) {
+  videoChatMessagesEl.querySelector(".video-chat-empty")?.remove();
+  const node = document.createElement("div");
+  node.className = "video-chat-msg user";
+  node.textContent = text;
+  videoChatMessagesEl.appendChild(node);
+  videoChatScrollToBottom();
+}
+
+function videoChatAppendAssistant() {
+  videoChatMessagesEl.querySelector(".video-chat-empty")?.remove();
+  const message = {
+    el: document.createElement("div"),
+    text: "",
+    error: "",
+    thinking: true,
+    streaming: true,
+    renderPending: false,
+  };
+  message.el.className = "video-chat-msg assistant";
+  message.el._videoChatMessage = message;
+  videoChatMessagesEl.appendChild(message.el);
+  videoChatRenderMessage(message);
+  return message;
+}
+
+function videoChatRenderMessage(message) {
+  if (!message?.el) return;
+  message.el.classList.toggle("is-streaming", Boolean(message.streaming));
+  message.el.textContent = "";
+  if (message.text) {
+    const body = document.createElement("div");
+    body.className = "markdown";
+    // Match the main chat: every word in an answer is a /dict lookup target.
+    body.dataset.clickable = "true";
+    body.appendChild(renderMarkdown(message.text, true));
+    message.el.appendChild(body);
+  }
+  if (message.thinking && !message.text && !message.error) {
+    const thinking = document.createElement("div");
+    thinking.className = "video-chat-thinking";
+    thinking.textContent = "thinking…";
+    message.el.appendChild(thinking);
+  }
+  if (message.error) {
+    const error = document.createElement("div");
+    error.className = "video-chat-error";
+    error.textContent = message.error;
+    message.el.appendChild(error);
+  }
+  videoChatScrollToBottom();
+}
+
+function scheduleVideoChatRender(message) {
+  if (!message || message.renderPending) return;
+  message.renderPending = true;
+  window.setTimeout(() => {
+    message.renderPending = false;
+    videoChatRenderMessage(message);
+  }, 55);
+}
+
+function resetVideoChat(hide = true) {
+  videoChatGeneration += 1;
+  if (videoChatController) {
+    videoChatController.abort();
+    videoChatController = null;
+  }
+  videoChatFresh = true;
+  videoChatBusy = false;
+  if (videoChatSendEl) videoChatSendEl.disabled = false;
+  if (videoChatInputEl) videoChatInputEl.value = "";
+  if (videoChatMessagesEl) videoChatClearMessages();
+  if (videoChatEl && hide) videoChatEl.hidden = true;
+}
+
+function openVideoChat() {
+  if (!videoItem?.id) return;
+  videoChatEl.hidden = false;
+  videoChatScrollToBottom();
+  videoChatInputEl.focus({ preventScroll: true });
+}
+
+function closeVideoChatPanel() {
+  resetVideoChat(true);
+}
+
+function sendVideoChatMessage() {
+  const item = videoItem;
+  const question = String(videoChatInputEl.value || "").trim();
+  if (!item?.id || !question || videoChatBusy) return;
+  const generation = videoChatGeneration;
+  const reset = videoChatFresh;
+  videoChatFresh = false;
+  videoChatBusy = true;
+  videoChatInputEl.value = "";
+  videoChatSendEl.disabled = true;
+  videoChatAppendUser(question);
+  const message = videoChatAppendAssistant();
+  const controller = new AbortController();
+  videoChatController = controller;
+
+  const isCurrent = () => generation === videoChatGeneration;
+  const handlers = {
+    delta: (data) => {
+      if (!isCurrent()) return;
+      message.thinking = false;
+      message.text += String(data?.text || "");
+      scheduleVideoChatRender(message);
+    },
+    reset: () => {
+      if (!isCurrent()) return;
+      message.text = "";
+      message.error = "";
+      scheduleVideoChatRender(message);
+    },
+    error: (data) => {
+      if (!isCurrent()) return;
+      message.thinking = false;
+      message.streaming = false;
+      message.error = data?.message || "Unknown server error.";
+      scheduleVideoChatRender(message);
+    },
+    done: () => {
+      if (!isCurrent()) return;
+      message.thinking = false;
+      message.streaming = false;
+      videoChatRenderMessage(message);
+    },
+  };
+
+  streamSSE(
+    "/api/video_chat",
+    { id: item.id, question, reset },
+    handlers,
+    controller.signal
+  )
+    .catch((error) => {
+      if (!isCurrent() || error?.name === "AbortError") return;
+      message.thinking = false;
+      message.streaming = false;
+      message.error = error?.message || String(error);
+      videoChatRenderMessage(message);
+    })
+    .finally(() => {
+      if (!isCurrent()) return;
+      if (videoChatController === controller) videoChatController = null;
+      videoChatBusy = false;
+      videoChatSendEl.disabled = false;
+      message.thinking = false;
+      message.streaming = false;
+      videoChatRenderMessage(message);
+      videoChatInputEl.focus({ preventScroll: true });
+    });
+}
+
+/* Every word in the in-modal answer opens the same streaming /dict popup as
+ * the main chat. A plain click starts the lookup; dragging to select text
+ * must not. */
+videoChatMessagesEl.addEventListener("click", (event) => {
+  const wordEl = event.target.closest?.(".word");
+  if (!wordEl) return;
+  const markdownEl = wordEl.closest(
+    '.video-chat-msg.assistant .markdown[data-clickable="true"]'
+  );
+  if (!markdownEl) return;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && String(selection).trim()) return;
+  const messageEl = wordEl.closest(".video-chat-msg.assistant");
+  const message = messageEl?._videoChatMessage;
+  event.preventDefault();
+  event.stopPropagation();
+  openDictionaryPopup(
+    wordEl.dataset.word || wordEl.textContent,
+    message?.text || "",
+    wordEl
+  );
+});
+
+videoChatSendEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  sendVideoChatMessage();
+});
+videoChatInputEl.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  event.stopPropagation();
+  sendVideoChatMessage();
+});
+$("#video-chat-close").addEventListener("click", (event) => {
+  event.preventDefault();
+  closeVideoChatPanel();
+});
+
 /* Right-hand column of the video modal: a Learn button until the video has
  * a transcript/rewrite, then a Chat button that scopes the conversation to
  * this video (equivalent to /youtube transcript <url>). */
@@ -4697,13 +5087,12 @@ function renderVideoAction(item) {
 
   if (learned) {
     videoActionNoteEl.textContent =
-      "This video is learned. Chat uses only this video's transcript.";
+      "This video is learned. Chat here, without leaving this window.";
     videoActionBtnEl.textContent = "Chat";
     videoActionBtnEl.classList.add("is-chat");
-    videoActionBtnEl.title = "Chat about this video";
+    videoActionBtnEl.title = "Chat about this video in this window";
     videoActionBtnEl.onclick = () => {
-      closeVideoModal();
-      submitText(`/youtube transcript ${item.url || item.id}`, true);
+      openVideoChat();
     };
     return;
   }
@@ -4766,6 +5155,8 @@ function openVideoModal(item, mode = "play") {
   if (!item?.id) return;
   resetVideoSummary();
   resetVideoAction();
+  resetVideoChat();
+  resetVideoBookmark();
   setVideoMaximized(false);
   videoItem = item;
   videoModalTitleEl.textContent = item.title || item.id;
@@ -4796,6 +5187,8 @@ function openVideoModal(item, mode = "play") {
 function closeVideoModal() {
   resetVideoSummary();
   resetVideoAction();
+  resetVideoChat();
+  resetVideoBookmark();
   setVideoMaximized(false);
   videoItem = null;
   videoPanelEl.hidden = true;
@@ -4825,6 +5218,72 @@ videoMaximizeEl.addEventListener("click", (event) => {
   event.preventDefault();
   event.stopPropagation();
   toggleVideoMaximized();
+});
+
+/* Bookmark the video currently shown in the player modal. The server keeps
+ * the entries in .chat/youtube_video_bookmark.json and caps the file at 500. */
+function resetVideoBookmark() {
+  if (!videoBookmarkEl) return;
+  videoBookmarkEl.textContent = "Bookmark";
+  videoBookmarkEl.classList.remove("is-saved");
+  videoBookmarkEl.disabled = false;
+  videoBookmarkEl.title = "Bookmark this video";
+}
+
+function videoBookmarkPayload(item) {
+  const fallbackThumbnail = `https://i.ytimg.com/vi/${encodeURIComponent(
+    item.id
+  )}/mqdefault.jpg`;
+  const date =
+    item.published || item.uploadDate || item.publishedText || "";
+  return {
+    id: item.id,
+    thumbnail: item.thumbnail || fallbackThumbnail,
+    title: item.title || item.id,
+    date,
+    duration: item.duration || 0,
+  };
+}
+
+videoBookmarkEl.addEventListener("click", async (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  const item = videoItem;
+  if (!item?.id || videoBookmarkEl.disabled) return;
+  videoBookmarkEl.disabled = true;
+  videoBookmarkEl.textContent = "Saving…";
+  videoBookmarkEl.title = "Saving this video to your bookmarks…";
+  try {
+    const response = await fetch("/api/youtube_bookmark", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(videoBookmarkPayload(item)),
+    });
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try {
+        const text = await response.text();
+        if (text) {
+          try {
+            detail = JSON.parse(text).error || detail;
+          } catch {
+            detail = text.slice(0, 200);
+          }
+        }
+      } catch { /* ignore */ }
+      throw new Error(detail);
+    }
+    videoBookmarkEl.textContent = "Bookmarked ✓";
+    videoBookmarkEl.classList.add("is-saved");
+    videoBookmarkEl.title =
+      "Saved. Run /youtube bookmark list to see all bookmarks.";
+  } catch (error) {
+    videoBookmarkEl.textContent = "Bookmark failed";
+    videoBookmarkEl.title = error?.message || String(error);
+    window.setTimeout(() => {
+      if (videoItem?.id === item.id) resetVideoBookmark();
+    }, 2500);
+  }
 });
 
 /* Escape restores the maximized player first; a second Escape closes the
@@ -6045,6 +6504,11 @@ function completionContext() {
         const rest = args.slice(subSeparator);
         const leading = rest.length - rest.trimStart().length;
         start = firstSpace + 1 + subSeparator + leading;
+      } else if (sub === "bookmark") {
+        kind = "youtube_bookmark_actions";
+        const rest = args.slice(subSeparator);
+        const leading = rest.length - rest.trimStart().length;
+        start = firstSpace + 1 + subSeparator + leading;
       } else {
         return null;
       }
@@ -6812,8 +7276,11 @@ document.addEventListener("keydown", (event) => {
   }
   // Keep Ctrl/⌘+Enter working when focus sits on a button instead of the
   // composer. (When the composer is focused, its own handler already sent.)
+  // Do not let it send the main composer's text while the in-video chat is
+  // being used.
   if (key === "Enter" && (event.metaKey || event.ctrlKey)
-      && helpPanel.hidden && document.activeElement !== inputEl) {
+      && helpPanel.hidden && document.activeElement !== inputEl
+      && !event.target.closest?.("#video-chat")) {
     event.preventDefault();
     hideCompletion();
     submitText(inputEl.value);
