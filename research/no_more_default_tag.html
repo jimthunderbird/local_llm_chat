@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auto-Selecting Soft Tags Instead of Defaulting to "japan"</title>
+<style>
+  :root {
+    --fg: #1b1f23;
+    --muted: #57606a;
+    --line: #d0d7de;
+    --bg: #ffffff;
+    --soft: #f6f8fa;
+    --accent: #0969da;
+    --warn: #9a6700;
+    --good: #1a7f37;
+    --bad: #cf222e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto;
+    max-width: 1080px;
+    padding: 40px 28px 90px;
+    color: var(--fg);
+    background: var(--bg);
+    font: 16px/1.62 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  h1, h2, h3, h4 { line-height: 1.25; margin-top: 2em; }
+  h1 { margin-top: 0; font-size: 2rem; border-bottom: 1px solid var(--line); padding-bottom: .35em; }
+  h2 { font-size: 1.42rem; border-bottom: 1px solid var(--line); padding-bottom: .25em; }
+  h3 { font-size: 1.14rem; }
+  h4 { font-size: 1rem; }
+  p, li { max-width: 88ch; }
+  a { color: var(--accent); }
+  code {
+    font: .88em/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--soft);
+    border: 1px solid #eaeef2;
+    border-radius: 4px;
+    padding: .1em .3em;
+  }
+  pre {
+    background: #0d1117;
+    color: #e6edf3;
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font: .84rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre code { background: none; border: 0; padding: 0; color: inherit; }
+  table { border-collapse: collapse; width: 100%; margin: 1.1em 0; font-size: .93rem; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; vertical-align: top; text-align: left; }
+  th { background: var(--soft); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .muted { color: var(--muted); }
+  .small { font-size: .9rem; }
+  .callout {
+    border-left: 4px solid var(--accent);
+    background: #f0f6ff;
+    padding: 12px 16px;
+    margin: 1.2em 0;
+    border-radius: 0 6px 6px 0;
+  }
+  .callout.warn { border-left-color: var(--warn); background: #fff8e5; }
+  .callout.good { border-left-color: var(--good); background: #eefbf1; }
+  .callout.bad { border-left-color: var(--bad); background: #fff0f0; }
+  .pill {
+    display: inline-block;
+    font-size: .75rem;
+    font-weight: 600;
+    letter-spacing: .02em;
+    padding: .14em .55em;
+    border-radius: 999px;
+    background: var(--soft);
+    border: 1px solid var(--line);
+    color: var(--muted);
+    vertical-align: middle;
+  }
+  .pill.good { background: #eefbf1; border-color: #b7e4c7; color: var(--good); }
+  .pill.warn { background: #fff8e5; border-color: #f0d58c; color: var(--warn); }
+  .pill.bad { background: #fff0f0; border-color: #f4b8b8; color: var(--bad); }
+  .toc { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 14px 20px; }
+  .toc ol { margin: .4em 0; }
+  .toc li { margin: .2em 0; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 760px) { .two-col { grid-template-columns: 1fr; } }
+  .kpi { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: var(--soft); }
+  .kpi strong { display: block; font-size: 1.3rem; line-height: 1.2; }
+  .kpi span { color: var(--muted); font-size: .88rem; }
+  .verdict { font-size: 1.04rem; }
+  .footnote { color: var(--muted); font-size: .86rem; }
+</style>
+</head>
+<body>
+
+<h1>Auto-Selecting Soft Tags Instead of Defaulting to <code>japan</code></h1>
+<p class="muted">
+  Research note for the local RAG chatbot. Question: can the chat choose the
+  relevant soft tag(s) from the question instead of opening with the default
+  <code>japan</code> tag, and would that be slower or use more memory?
+</p>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#tldr">Executive answer</a></li>
+    <li><a href="#current">What the current implementation actually does</a></li>
+    <li><a href="#interpretations">Three different meanings of "load related trunks"</a></li>
+    <li><a href="#measurements">Measured baseline</a></li>
+    <li><a href="#speed">Speed impact</a></li>
+    <li><a href="#memory">Memory impact</a></li>
+    <li><a href="#accuracy">The real risk is routing accuracy, not cost</a></li>
+    <li><a href="#design">Recommended design</a></li>
+    <li><a href="#evaluation">Evaluation plan and acceptance criteria</a></li>
+    <li><a href="#verdict">Verdict</a></li>
+    <li><a href="#appendix">Appendix: implementation sketch and touchpoints</a></li>
+  </ol>
+</div>
+
+<h2 id="tldr">1. Executive answer</h2>
+
+<div class="callout good verdict">
+  <strong>Yes, the feature is feasible, and it is a good idea.</strong>
+  But the important detail is that the chatbot already keeps one global trunk
+  corpus in memory and treats every tag as a query-time <em>soft scope</em>.
+  The default <code>japan</code> tag is not a corpus partition. Therefore the
+  proposed change is primarily a <strong>routing</strong> change, not a
+  <strong>loading</strong> change.
+</div>
+
+<div class="two-col">
+  <div class="kpi">
+    <strong>~0.08–0.17 s</strong>
+    <span>Measured lexical tag-routing cost per question on the current
+    11,141-trunk corpus. This is the direct added cost if the route is
+    computed from the question.</span>
+  </div>
+  <div class="kpi">
+    <strong>+0 to a few MiB</strong>
+    <span>Memory cost if routing selects from the already-loaded global
+    corpus. The corpus and BM25 index stay exactly as they are today.</span>
+  </div>
+</div>
+
+<p>
+  If "load related trunks" means <em>physically load only the trunks that
+  belong to the selected tag</em>, memory can drop a lot: the current global
+  retrieval state costs about 67 MiB traced (about 128 MiB process peak RSS),
+  while a lexical <code>japan</code> subset costs about 8.4 MiB traced. But
+  that version is <strong>not recommended as the default</strong>: soft tags
+  overlap, many questions span tags, tag membership is not canonical, and the
+  retrieval corpus is tiny compared with the Ollama models. Reloading per
+  question would also add BM25 rebuild latency and make routing mistakes much
+  harder to recover from.
+</p>
+
+<p>
+  The net effect on latency is likely <strong>neutral to positive</strong>:
+  tag selection adds roughly one BM25 pass plus a small tag-ranking computation
+  (and, if used, one small-model call), but it can avoid the much more
+  expensive cross-tag fallback loop, where each wrong tag costs another
+  retrieval, filter, and answer-generation attempt.
+</p>
+
+<h2 id="current">2. What the current implementation actually does</h2>
+
+<p>
+  The current design is already close to the requested behavior, with one
+  deliberate shortcut: it starts with a default tag instead of selecting a tag
+  from the question.
+</p>
+
+<ul>
+  <li>
+    <strong>One global corpus.</strong> <code>chat.load_chunks()</code> loads
+    every learned <code>*.trunk</code> file into one list. Tags do not own
+    files or partitions any more. The startup path in
+    <code>app/chat_server.py</code> builds one BM25 index for that global list
+    before accepting requests.
+  </li>
+  <li>
+    <strong>Tags are descriptions.</strong> <code>tags.toml</code> is a
+    registry of tag names and natural-language descriptions. A tag is a
+    query-time scope, not a hard filter over a separate corpus.
+  </li>
+  <li>
+    <strong>Default tag.</strong> <code>chat.DEFAULT_TAG = "japan"</code> and
+    the server starts with <code>--tag japan</code>. The first answer attempt
+    therefore uses the <code>japan</code> profile as the soft scope.
+  </li>
+  <li>
+    <strong>Question-level retrieval is already global.</strong> BM25 scores
+    every loaded trunk, not only the current tag's trunks. The tag is applied
+    afterward by <code>chat.tag_filter_candidates()</code> and/or the cheaper
+    lexical <code>lexical_tag_scope()</code>.
+  </li>
+  <li>
+    <strong>Cross-tag fallback already exists.</strong> If the default tag
+    cannot answer, <code>ChatState.fallback_tag_order()</code> calls
+    <code>chat.rank_tags_for_question()</code> to rank other tags and retries
+    them one by one. This is effectively a post-hoc version of the requested
+    feature, but it runs only after a failed answer.
+  </li>
+</ul>
+
+<div class="callout">
+  <strong>Consequence:</strong> "based on the question, examine the existing
+  soft tags, then load the related trunks" can be implemented without changing
+  the corpus-loading architecture at all. The relevant trunks are already
+  loaded; the work is to decide which tag profile(s) should scope the current
+  question, and to do that <em>before</em> the first answer attempt.
+</div>
+
+<h2 id="interpretations">3. Three different meanings of "load related trunks"</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Interpretation</th>
+      <th>What changes</th>
+      <th>Speed</th>
+      <th>Memory</th>
+      <th>Recommendation</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>A. Query-time tag selection</strong><br><span class="muted">Select tag(s), keep the one global corpus and index.</span></td>
+      <td>Add a router before the first answer attempt. Reuse the existing global BM25 index and tag-filter machinery.</td>
+      <td>Adds ~0.08–0.17 s of measured lexical routing; one small-model call if the router uses it. Can remove fallback retries.</td>
+      <td>Effectively zero: a few KiB for scores; no duplicate corpus.</td>
+      <td><span class="pill good">Recommended</span></td>
+    </tr>
+    <tr>
+      <td><strong>B. Physical per-tag loading</strong><br><span class="muted">Load only trunks that belong to the chosen tag, unload the rest.</span></td>
+      <td>Requires canonical tag membership, per-tag index cache, reload on tag change.</td>
+      <td>Startup/switch cost: chunk load is cheap (~0.1 s for the whole corpus), but BM25 build for a subset is ~0.01–0.12 s and must be repeated on switches; routing itself still costs the same.</td>
+      <td>Large reduction for one tag (~8.4 MiB traced for a lexical <code>japan</code> subset vs ~67 MiB global), but overlap and multi-tag questions reduce or eliminate the saving.</td>
+      <td><span class="pill bad">Not recommended as default</span></td>
+    </tr>
+    <tr>
+      <td><strong>C. Precomputed hard tag corpora</strong><br><span class="muted">Assign every trunk to one or more permanent tag stores.</span></td>
+      <td>New ingestion-time classifier and data model; tags stop being soft.</td>
+      <td>Fast per-tag retrieval, but a routing error becomes unrecoverable; mixed-tag questions need unions.</td>
+      <td>Likely similar to or higher than the global corpus because tag memberships overlap; duplicate storage if not shared.</td>
+      <td><span class="pill bad">Avoid</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  The rest of this note focuses on interpretation <strong>A</strong>, because
+  it matches the existing architecture and the intent of the request.
+</p>
+
+<h2 id="measurements">4. Measured baseline</h2>
+
+<p class="small muted">
+  Measurements were taken on the current checkout with the full local corpus,
+  using Python 3.14 with <code>rank-bm25</code>. Times are wall-clock on a warm
+  process. Memory deltas are from <code>tracemalloc</code>; process peak RSS is
+  from <code>resource.getrusage()</code>. The Ollama models are separate
+  processes and are not included in these memory numbers.
+</p>
+
+<h3>4.1 Corpus size</h3>
+
+<table>
+  <thead>
+    <tr><th>Metric</th><th class="num">Value</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Learned videos</td><td class="num">519</td><td>Distinct video hashes</td></tr>
+    <tr><td>Trunk files</td><td class="num">11,141</td><td>One paragraph-level knowledge chunk per file</td></tr>
+    <tr><td>Trunk text</td><td class="num">2,974,732 chars</td><td>About 3.0 MB of raw text on disk</td></tr>
+    <tr><td>Tokenized terms</td><td class="num">676,049</td><td>After the chatbot's tokenizer</td></tr>
+    <tr><td>Distinct vocabulary</td><td class="num">17,228</td><td>BM25 IDF vocabulary size</td></tr>
+    <tr><td>Chunk objects in memory</td><td class="num">9.8 MiB</td><td>Traced delta for the chunk list</td></tr>
+    <tr><td>BM25 index in memory</td><td class="num">56.7 MiB</td><td>Traced delta for tokenized documents + BM25 structures</td></tr>
+    <tr><td>Traced peak</td><td class="num">67.0 MiB</td><td>Corpus plus index plus temporary allocations</td></tr>
+    <tr><td>Process peak RSS</td><td class="num">128.4 MiB</td><td>Includes interpreter, imports, and allocator overhead</td></tr>
+  </tbody>
+</table>
+
+<h3>4.2 Warm query cost</h3>
+
+<table>
+  <thead>
+    <tr><th>Operation</th><th class="num">Measured time</th><th>When it happens</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Load all chunks from disk</td><td class="num">0.10 s</td><td>Startup / refresh</td></tr>
+    <tr><td>Build the global BM25 index</td><td class="num">1.74 s</td><td>Startup, prebuilt before serving</td></tr>
+    <tr><td>BM25 top-20 over the global corpus</td><td class="num">40–76 ms</td><td>Every retrieval and every routing pass (index is cached)</td></tr>
+    <tr><td><code>rank_tags_for_question</code>, lexical only</td><td class="num">77–165 ms</td><td>If auto-routing is enabled; includes one top-40 BM25 pass</td></tr>
+  </tbody>
+</table>
+
+<p class="footnote">
+  The lexical tag-ranking measurement deliberately disabled query expansion
+  so it could run without an Ollama call. In normal operation the first
+  uncached question also pays one small-model query-expansion call
+  (<code>qwen3:1.7b</code>), which is shared with retrieval and cached
+  afterward. The tag scope filter may add one or more small-model calls over
+  batches of up to 20 candidates.
+</p>
+
+<h3>4.3 What a per-tag subset would cost</h3>
+
+<p>
+  There is no canonical soft-tag membership. For illustration, the table below
+  defines a "related" trunk as one whose text covers at least 25% of the
+  distinctive terms in the tag description. That is only a lexical proxy, not
+  a real classifier, but it is enough to show the order of magnitude.
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Tag</th>
+      <th class="num">Trunks at ≥25% description coverage</th>
+      <th class="num">Share of 11,141</th>
+      <th class="num">Subset BM25 build</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td><code>ai_math</code></td><td class="num">950</td><td class="num">8.5%</td><td class="num">0.12 s</td></tr>
+    <tr><td><code>japan</code></td><td class="num">621</td><td class="num">5.6%</td><td class="num">0.07 s</td></tr>
+    <tr><td><code>programming_software</code></td><td class="num">490</td><td class="num">4.4%</td><td class="num">0.06 s</td></tr>
+    <tr><td><code>ai_and_coding</code></td><td class="num">346</td><td class="num">3.1%</td><td class="num">0.04 s</td></tr>
+    <tr><td><code>math</code></td><td class="num">303</td><td class="num">2.7%</td><td class="num">0.04 s</td></tr>
+    <tr><td><code>golang</code></td><td class="num">281</td><td class="num">2.5%</td><td class="num">0.03 s</td></tr>
+    <tr><td><code>rust</code></td><td class="num">45</td><td class="num">0.4%</td><td class="num">0.01 s</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  These subsets are <strong>not disjoint</strong>. Many AI/math/coding trunks
+  satisfy several tag descriptions, and a single video can contain paragraphs
+  relevant to different tags. Any physical partitioning scheme therefore needs
+  overlapping membership or a per-question union, which erodes the memory
+  saving.
+</div>
+
+<p>
+  A direct measurement for the lexical <code>japan</code> subset gives
+  621 trunks, 5.03 MiB of chunk objects and 3.41 MiB of BM25 index, or about
+  8.4 MiB traced. That is roughly one eighth of the global retrieval state, but
+  still small in absolute terms.
+</p>
+
+<h2 id="speed">5. Speed impact</h2>
+
+<h3>5.1 Added work</h3>
+
+<ul>
+  <li>
+    <strong>Lexical routing:</strong> one top-40 BM25 pass over the global
+    index plus scoring 13 tag descriptions over the top 10 candidates. Measured
+    at 77–165 ms. The global BM25 index already exists, so this does not rebuild
+    anything.
+  </li>
+  <li>
+    <strong>Optional small-model routing:</strong> if the router asks
+    <code>qwen3:1.7b</code> to choose a tag from the question and/or a few
+    snippets, add one short generation call. The existing tag-scope filter
+    already uses this model and runs in candidate batches of up to 20. Reusing
+    one ranking/classification call is much cheaper than the multi-round
+    answer path.
+  </li>
+  <li>
+    <strong>No per-question corpus load or index rebuild</strong> in
+    interpretation A. The expensive 1.74 s BM25 build stays a startup cost.
+  </li>
+</ul>
+
+<h3>5.2 Work that can be removed</h3>
+
+<ul>
+  <li>
+    <strong>Wrong-tag first attempts.</strong> Today a question outside
+    <code>japan</code> first retrieves and filters under <code>japan</code>,
+    then may fail, then enters the cross-tag fallback loop. Auto-routing can
+    choose the right scope on the first attempt.
+  </li>
+  <li>
+    <strong>Repeated fallback retrieval.</strong> Each fallback tag currently
+    costs another retrieval/filter/answer attempt. The code reuses
+    tag-independent iterative evidence across tags, but tag filtering and
+    generation still repeat. Removing even one fallback attempt saves far more
+    than the 0.1–0.2 s routing overhead.
+  </li>
+  <li>
+    <strong>User time spent choosing a tag manually.</strong> With an
+    <code>auto</code> mode, the user no longer has to know whether a question is
+    "japan" or "retire", which matters for questions that straddle tags.
+  </li>
+</ul>
+
+<h3>5.3 Expected latency shape</h3>
+
+<table>
+  <thead>
+    <tr><th>Scenario</th><th>Current</th><th>With auto-routing</th><th>Net</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Question clearly in <code>japan</code>, first attempt succeeds</td>
+      <td>Baseline retrieval + tag filter + answer</td>
+      <td>+ ~0.1–0.2 s lexical routing; same answer path</td>
+      <td>Slightly slower</td>
+    </tr>
+    <tr>
+      <td>Question clearly outside <code>japan</code></td>
+      <td>Wrong-tag attempt, then cross-tag ranking, then retry</td>
+      <td>Correct tag on the first attempt</td>
+      <td>Likely faster</td>
+    </tr>
+    <tr>
+      <td>Question spans two tags</td>
+      <td>May fail in the first tag and fall back</td>
+      <td>Union of top-2 tags can succeed immediately</td>
+      <td>Likely faster and more accurate</td>
+    </tr>
+    <tr>
+      <td>Out-of-corpus question</td>
+      <td>Try default tag, then ranked fallbacks</td>
+      <td>Low-confidence route can go straight to global/unscoped retrieval</td>
+      <td>Faster; fewer wasted model calls</td>
+    </tr>
+    <tr>
+      <td>Router is wrong</td>
+      <td>n/a</td>
+      <td>First attempt fails, then existing fallback still recovers</td>
+      <td>Adds routing cost to the current cost</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  In short: auto-routing is not inherently slower. It adds a small, bounded
+  front-end cost and can remove a large, variable tail cost. The worst case is
+  a wrong route plus the existing fallback; the common case is near the
+  baseline and the cross-tag case improves.
+</div>
+
+<h2 id="memory">6. Memory impact</h2>
+
+<h3>6.1 Interpretation A: keep the global corpus</h3>
+
+<p>
+  The one-time global corpus is already required for cross-tag fallback and for
+  questions that do not cleanly belong to one tag. Auto-routing adds only:
+</p>
+
+<ul>
+  <li>a small score table with one float per tag per question (KBs),</li>
+  <li>a bounded route cache keyed by normalized question (KBs to low MBs if
+      capped),</li>
+  <li>no duplicate chunk list and no duplicate BM25 index.</li>
+</ul>
+
+<p>
+  Measured retrieval state is 9.8 MiB of chunks plus 56.7 MiB of BM25 index,
+  with a 67 MiB traced peak and a 128.4 MiB process peak RSS. The routing layer
+  is negligible against those numbers.
+</p>
+
+<h3>6.2 Interpretation B: physically load only related trunks</h3>
+
+<p>
+  The memory saving is real but bounded. For the lexical <code>japan</code>
+  subset, the retrieval state drops from ~67 MiB traced to ~8.4 MiB traced.
+  The <code>ai_math</code> subset is larger, and unions of tags grow toward the
+  global corpus. The trade-offs are:
+</p>
+
+<ul>
+  <li>
+    <strong>You cannot know the right tag without examining the corpus first.</strong>
+    A router that inspects tag descriptions and top question matches needs
+    either a global index or a precomputed tag-membership index. The latter
+    costs memory of its own.
+  </li>
+  <li>
+    <strong>Soft tags overlap.</strong> A hard partition misclassifies
+    boundary paragraphs, and the existing design deliberately lets one video
+    contribute evidence to several tags.
+  </li>
+  <li>
+    <strong>Multi-tag questions need a union.</strong> "Compare Rust and Go"
+    or "retiring in Japan" may need two or more scopes. Loading and unloading
+    per question adds complexity for little gain.
+  </li>
+  <li>
+    <strong>The model is the memory giant.</strong> <code>ornith:35b</code> and
+    even <code>qwen3:1.7b</code> live in separate Ollama processes and are
+    measured in gigabytes. Shaving tens of MiB from the Python retrieval
+    process is not where memory pressure comes from.
+  </li>
+</ul>
+
+<h3>6.3 Interpretation C: precomputed hard tag corpora</h3>
+
+<p>
+  Because the tag definitions are semantic and overlapping, a hard assignment
+  either loses recall or duplicates trunks across tags. Duplicating a large
+  fraction of an 11k-trunk corpus across several tags can use more memory than
+  one shared global corpus, and it turns a routing mistake into a permanent
+  blind spot.
+</p>
+
+<h2 id="accuracy">7. The real risk is routing accuracy, not cost</h2>
+
+<p>
+  The current lexical router is a useful first pass, but it is not accurate
+  enough to be the sole basis for removing the default tag. In a quick
+  measurement with query expansion disabled, <code>rank_tags_for_question</code>
+  returned:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Question</th><th>Top-ranked tags (first four)</th><th>Assessment</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>where is nijo market</td>
+      <td><code>trade_school_job_program_bubble</code>, <code>japan</code>, <code>php</code>, <code>retire</code></td>
+      <td><span class="pill warn">Wrong top-1</span> Japan is only second.</td>
+    </tr>
+    <tr>
+      <td>what are all levels of wagyu</td>
+      <td><code>japan</code>, <code>php</code>, <code>artificial_intelligence</code>, <code>ai_and_coding</code></td>
+      <td><span class="pill good">Correct top-1</span></td>
+    </tr>
+    <tr>
+      <td>show me code to implement binary search in rust</td>
+      <td><code>rust</code>, <code>golang</code>, <code>ai_and_coding</code>, <code>php</code></td>
+      <td><span class="pill good">Correct top-1</span></td>
+    </tr>
+    <tr>
+      <td>did terence tao write a new book</td>
+      <td><code>ai_math</code>, <code>math</code>, <code>ai_math_coding</code>, <code>artificial_intelligence</code></td>
+      <td><span class="pill good">Correct top-1</span></td>
+    </tr>
+    <tr>
+      <td>how do i retire in japan</td>
+      <td><code>ai_and_coding</code>, <code>programming_software</code>, <code>japan</code>, <code>ai_math_coding</code></td>
+      <td><span class="pill bad">Japan is third</span> A mixed-tag question.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  Why this happens: the router scores tag descriptions against the question and
+  the top question-matching chunks. A chunk about Nijo Market may match the
+  question very well but not contain the literal words "Japan" or "Japanese",
+  so the <code>japan</code> description gets weak coverage. Conversely, a broad
+  tag such as <code>ai_and_coding</code> contains many terms and can match
+  incidental words. This is a description-calibration problem, not a reason to
+  abandon the idea.
+</p>
+
+<div class="callout warn">
+  <strong>Do not simply delete the default tag and trust the existing lexical
+  router.</strong> That would regress common questions such as "where is nijo
+  market" and "how do i retire in japan". Use a hybrid router, keep top-k and
+  an unscoped fallback, and evaluate it before changing the default.
+</div>
+
+<h2 id="design">8. Recommended design</h2>
+
+<h3>8.1 Keep the global corpus and index</h3>
+<p>
+  Keep one loaded corpus and one BM25 index. This preserves cross-tag recall,
+  avoids per-question rebuilds, and makes the memory cost of routing negligible.
+</p>
+
+<h3>8.2 Introduce an <code>auto</code> scope, not "no tag"</h3>
+<p>
+  Replace the startup default with an explicit <code>auto</code> mode:
+</p>
+
+<ul>
+  <li><code>/tag auto</code> and a status value such as
+      <code>soft tag auto → japan</code> after routing.</li>
+  <li><code>--tag japan</code> and <code>/tag japan</code> remain available as
+      manual overrides.</li>
+  <li><code>auto</code> should be able to resolve to <em>global</em> (no tag
+      filter) when no tag is confident, rather than forcing a weak tag.</li>
+</ul>
+
+<h3>8.3 Hybrid tag router</h3>
+<ol>
+  <li>
+    Run the normal question normalization and retrieval once. Reuse the BM25
+    index and, if available, the cached query expansion.
+  </li>
+  <li>
+    Score each tag with several weak signals:
+    <ul>
+      <li>BM25 similarity between the question and the tag description,</li>
+      <li>lexical coverage of the tag's distinctive terms in the top
+          question-matching chunks,</li>
+      <li>video-level evidence: if a video is strongly associated with a tag,
+          boost all of that video's chunks (the current code already restores
+          video scope after tag filtering),</li>
+      <li>conversation context: a follow-up in a <code>japan</code>
+          conversation should keep <code>japan</code> unless the question
+          clearly changes topic.</li>
+    </ul>
+  </li>
+  <li>
+    Optionally ask <code>qwen3:1.7b</code> to choose from the top 3–5 candidate
+    tags, given the question and compact tag descriptions. Use a strict
+    multiple-choice prompt and a short output budget. This is the same model
+    already used for query expansion and candidate filtering, so it is
+    normally warm.
+  </li>
+  <li>
+    Select the top tag when its score is clearly above the runner-up; otherwise
+    keep the top 2 or return <code>global</code>. Multi-topic questions should
+    use the union of their top tags, not a forced single choice.
+  </li>
+  <li>
+    Apply the existing tag scope filter to the selected union. If the union
+    fails to answer, the existing cross-tag fallback remains as a safety net
+    and can be ordered using the router's scores.
+  </li>
+</ol>
+
+<h3>8.4 Caching and conversation behavior</h3>
+<ul>
+  <li>
+    Cache the route by normalized question and tag-registry version. The
+    existing query-expansion cache and answer cache already establish this
+    pattern.
+  </li>
+  <li>
+    For follow-ups, bias toward the active resolved tag. A follow-up such as
+    "what about in winter?" should not reroute to an unrelated tag because the
+    pronoun-heavy question has weak lexical evidence.
+  </li>
+  <li>
+    Reset the route when the user explicitly changes tags, transcripts, or
+    articles.
+  </li>
+</ul>
+
+<h3>8.5 Do not unload the corpus per question</h3>
+<p>
+  If memory ever becomes a measured problem, add an optional per-tag index
+  cache with an LRU bound. Do not load and discard trunks on every question.
+  The measured full-corpus load is only 0.10 s, but rebuilding BM25 is 1.74 s,
+  and routing already needs global evidence to make a good decision.
+</p>
+
+<h2 id="evaluation">9. Evaluation plan and acceptance criteria</h2>
+
+<p>
+  Build a small, fixed evaluation set before changing the default. Include
+  clearly single-tag questions, mixed-tag questions, follow-ups, and
+  out-of-corpus questions.
+</p>
+
+<table>
+  <thead>
+    <tr><th>Metric</th><th>What to measure</th><th>Suggested target</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Top-1 route accuracy</td>
+      <td>Question has a known relevant tag; did the router pick it first?</td>
+      <td>≥ 80%</td>
+    </tr>
+    <tr>
+      <td>Top-3 route recall</td>
+      <td>Is a correct tag anywhere in the candidate scope?</td>
+      <td>≥ 95%</td>
+    </tr>
+    <tr>
+      <td>Answer sufficiency</td>
+      <td>Does the answer avoid the "provided context does not contain"
+          refusal when the corpus has evidence?</td>
+      <td>No regression vs. default tag</td>
+    </tr>
+    <tr>
+      <td>Fallback rate</td>
+      <td>Fraction of questions that need the cross-tag fallback loop.</td>
+      <td>≤ 10% for the evaluation set</td>
+    </tr>
+    <tr>
+      <td>Latency</td>
+      <td>p50 and p95 total time and time-to-first-token.</td>
+      <td>p50 ≤ baseline + 250 ms; p95 not worse than baseline</td>
+    </tr>
+    <tr>
+      <td>Memory</td>
+      <td>Process peak RSS after a full benchmark run.</td>
+      <td>Increase ≤ 10 MiB</td>
+    </tr>
+    <tr>
+      <td>Manual override</td>
+      <td><code>/tag</code>, transcript scope, and article scope still behave
+          exactly as before.</td>
+      <td>No regressions</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  The measurement harness can reuse the existing benchmark hooks and the
+  retrieval timings already collected in <code>stats</code>. Capture per-question
+  route decisions so misroutes can be inspected offline rather than guessed
+  from answer text.
+</p>
+
+<h2 id="verdict">10. Verdict</h2>
+
+<div class="callout good">
+  <p>
+    <strong>Feasible?</strong> Yes. The corpus is already global and the tag
+    system is already soft, so this is a routing addition rather than a new
+    storage architecture.
+  </p>
+  <p>
+    <strong>Slower?</strong> Not materially. The measured lexical routing cost
+    is about 0.08–0.17 s per question on the current corpus. A small-model
+    routing call adds a short, bounded generation. The routing cost is often
+    repaid by avoiding a wrong-tag attempt and the cross-tag fallback loop.
+  </p>
+  <p>
+    <strong>More memory?</strong> No, for the recommended query-time scoping
+    design: routing needs only a small score table and optional cache while the
+    existing global corpus and index remain shared. Physically loading only
+    related trunks can save roughly tens of MiB, but that is small compared
+    with the model processes and introduces overlap, multi-tag, rebuild, and
+    routing-error problems.
+  </p>
+  <p>
+    <strong>Main caveat?</strong> The current lexical router is not accurate
+    enough by itself. The implementation should use a hybrid router, keep the
+    top-k tags, support a global fallback, bias follow-ups toward the active
+    tag, and retain the existing cross-tag fallback. With those safeguards,
+    removing the hard-coded <code>japan</code> default is reasonable.
+  </p>
+</div>
+
+<h2 id="appendix">11. Appendix: implementation sketch and touchpoints</h2>
+
+<h3>11.1 Existing code to reuse</h3>
+<table>
+  <thead>
+    <tr><th>Location</th><th>Role</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>chat.py:load_chunks()</code></td>
+      <td>Loads the single global trunk corpus. Tags are validated but do not
+          partition the corpus.</td>
+    </tr>
+    <tr>
+      <td><code>chat.py:build_bm25_index()</code> / <code>get_bm25_index()</code></td>
+      <td>Builds and caches the global lexical index.</td>
+    </tr>
+    <tr>
+      <td><code>chat.py:rank_tags_for_question()</code></td>
+      <td>Existing lexical tag prior over the top question matches. Good first
+          pass, but needs calibration and/or a model tie-breaker.</td>
+    </tr>
+    <tr>
+      <td><code>chat.py:tag_filter_candidates()</code></td>
+      <td>Small-model scope gate that keeps candidates relevant to both the
+          question and the tag.</td>
+    </tr>
+    <tr>
+      <td><code>chat.py:lexical_tag_scope()</code></td>
+      <td>Deterministic fallback when the scope model fails.</td>
+    </tr>
+    <tr>
+      <td><code>app/chat_server.py:ChatState.fallback_tag_order()</code></td>
+      <td>Ranks other tags for cross-tag fallback; can be reused as the router's
+          candidate generator.</td>
+    </tr>
+    <tr>
+      <td><code>app/chat_server.py:ChatState.adopt_tag()</code></td>
+      <td>Switches the active tag without reloading the corpus.</td>
+    </tr>
+    <tr>
+      <td><code>app/chat_server.py:_run_question()</code></td>
+      <td>Main question flow; the first answer attempt should consult the
+          auto-router before choosing <code>state.tag</code>.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>11.2 Pseudo-code</h3>
+<pre><code>def resolve_scope(state, question, conversation):
+    # Manual overrides win.
+    if state.tag != AUTO:
+        return [state.tag]
+
+    # Follow-ups keep the active tag unless the topic clearly changes.
+    if conversation.has_recent_scope() and question_is_follow_up(question):
+        return [conversation.active_tag]
+
+    candidates = rank_tags_for_question(question, state.global_chunks, limit=5)
+    scored = score_tag_descriptions(question, candidates)      # BM25 + overlap
+    if needs_tie_break(scored):
+        scored = ask_small_model_to_choose(question, scored[:5])
+
+    top = choose_top_k(scored, max_k=2, confidence_threshold=...)
+    if not top:
+        return [GLOBAL_SCOPE]                                  # no tag filter
+    return top
+
+# In _run_question:
+scopes = resolve_scope(state, retrieval_question, state.conversation)
+answer = attempt(scopes, state.global_chunks)
+if answer_is_insufficient(answer):
+    answer = existing_cross_tag_fallback(...)                  # safety net
+</code></pre>
+
+<h3>11.3 Operational notes</h3>
+<ul>
+  <li>
+    Show the resolved scope in <code>/status</code> and the status bar, for
+    example <code>auto → japan</code> or <code>auto → global</code>, so a
+    misroute is visible and the user can override it.
+  </li>
+  <li>
+    Keep <code>--tag japan</code> working for repeatable benchmarking and for
+    users who want a fixed scope.
+  </li>
+  <li>
+    Include <code>auto</code> in tab completion and in the command help text.
+  </li>
+  <li>
+    Add routing metrics to the benchmark output: chosen tags, router score,
+    whether the answer needed fallback, and route decision time.
+  </li>
+  <li>
+    Version the route cache with the <code>tags.toml</code> signature, just as
+    the tag loader already invalidates on file changes.
+  </li>
+</ul>
+
+<p class="footnote">
+  All measurements in this note were taken from the current checkout
+  (<code>app/chat_server.py</code>, <code>chat.py</code>,
+  <code>tags.toml</code>) with the full local corpus of 11,141 trunks from 519
+  videos. Timings vary with machine load and Ollama residency; the memory and
+  routing order-of-magnitude conclusions are stable.
+</p>
+
+</body>
+</html>

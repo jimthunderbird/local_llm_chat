@@ -1,4 +1,100 @@
 task (completed) {
+  perform the changes based on {directory_of_this_prompt}/../research/no_more_default_tag.html
+
+  Implemented the recommended query-time auto-routing design (the global
+  corpus and its BM25 index are never partitioned or rebuilt per question).
+
+  chat.py
+  - Added the `auto` scope mode (`AUTO_TAG`) and made it the default tag.
+    `--tag <name>` and `/tag <name>` remain manual overrides.
+  - Added a hybrid tag router. It scores every registry tag with four signals:
+    IDF-weighted direct question/tag-name-and-description overlap, corpus
+    co-occurrence between the question's rare anchors and the tag vocabulary
+    (so "Tokyo"/"Nijo"/"wagyu" reach the japan tag even when the description
+    does not repeat those words), tag-description coverage of the top
+    question-matching chunks, and coverage of the top matching video titles.
+  - A question that directly names a tag (for example "japan" or "rust") routes
+    without a model call. Multi-topic questions where two tag names are equally
+    strong use the global scope. Ambiguous questions ask qwen3:1.7b to choose
+    among the top five lexical candidates using a few retrieved snippets as
+    evidence; a low-support or malformed model answer falls back to the global
+    scope instead of forcing a weak tag.
+  - Routing is cached by normalized question, tag-registry version, corpus
+    identity, active tag, and follow-up flag. Follow-ups keep the active
+    resolved tag instead of rerouting on pronoun-heavy text.
+  - Added `TagRoute`, `route_tags_for_question()`, `is_auto_tag()`, and tab
+    completion/help text for `auto`.
+
+  app/chat_server.py
+  - `ChatState` now tracks `tag_mode`, `resolved_tags`, `route_source`, and
+    route scores. `resolve_auto_scope()` runs before the first answer attempt
+    and only changes metadata; the existing cross-tag fallback remains the
+    safety net for a wrong route.
+  - Manual tags, `/youtube transcript`, and `/article` scopes bypass routing.
+    `/tag auto` restores auto mode and clears the current route; `/tag <name>`
+    switches to a fixed manual tag.
+  - `/status`, the status bar, and the session banner show the resolved scope
+    as `auto → japan` or `auto → global`, and the benchmark stats include the
+    chosen tags, route source, and top route scores.
+
+  app/chat.html
+  - Status and welcome text use the new `tag_label`, so auto routing is visible
+    without hiding the effective tag.
+
+  Verified routes on the current corpus include: nijo market → japan, 3am in
+  Tokyo → japan, IDP → japan, wagyu → japan, binary search in rust → rust,
+  Terence Tao → math, AI/software jobs → ai_and_coding, and an out-of-corpus
+  question ("weather in Paris") → global.
+}
+
+task.research.no_more_default_tag (completed) {
+  research on the following and save the research result to {directory_of_this_prompt}/../research/no_more_default_tag.html {
+    currently when the chat is open, the default tag is "japan"
+    can we do the following:
+    - when a question is asked, base on the <question>, examine the existing soft tags, then load the related trunks to answer the question
+    will this approach be slower and consume more memory?
+  }
+}
+
+task (completed) {
+  please do a systematic and generic improvement on this:
+  - when i ask question: what does 3am in tokyo like? here is the log:
+    [youtube iterative: round 1/3, added 8 paragraph(s), evidence ~527 token(s)][youtube iterative: round 2/3, added 4 paragraph(s), evidence ~927 token(s)][youtube iterative: round 3/3, added 4 paragraph(s), evidence ~1,286 token(s)][youtube iterative: checker still wanted more after 3 round(s); using the 16 gathered paragraph(s)][youtube iterative: soft tag 'japan' kept 3 of 16 evidence paragraph(s)][using 3 prebuilt context trunk(s); BM25 skipped][context size: ~309 token(s) estimated across 3 trunk(s); context window: 32,768 token(s)][no other tag could answer; keeping tag 'japan']The provided context does not contain sufficient information to answer what 3am in Tokyo is like. While one chunk mentions Tokyo's nightlife and the city's "unique dawn transformation," it does not specifically describe the experience or atmosphere at 3am.
+
+    in such case, we found related videos, please dive deep into the related trunks of the video and provide the best possible answer
+
+  Implemented:
+  chat.py
+  - Time expressions are normalized before tokenization (`3am`, `3 am`,
+    `3 a.m.`, `3:00am` -> `3am`), so a question and a transcript paragraph that
+    use different clock formats now match lexically.
+  - Query expansion is validated against the corpus. Expansion terms are
+    deduplicated, and a term is kept only when at least 35% of the documents
+    containing it also contain a distinctive anchor from the original
+    question. A small-model drift such as turning "3am in Tokyo" into
+    "timezone utc offset" no longer dominates BM25 and evicts the real
+    paragraphs.
+  - Added `restore_video_scope`: a soft tag classifies videos, not isolated
+    sentences. If the tag filter accepts one paragraph from a video, the other
+    question-ranked evidence paragraphs from that same video stay in scope.
+  - Added `deep_dive_video_evidence`: when the surviving context is thin
+    (<1,200 estimated tokens), the best matching video (and any secondary
+    video the tag filter accepted more than once) is read in full, in
+    narrative order, within the existing context budget. This turns a handful
+    of isolated snippets into the related video's complete passage.
+  app/chat_server.py
+  - `_youtube_iterative_evidence` now restores video-level tag scope and then
+    deep-dives the related video(s) instead of answering from the few
+    paragraphs that survived the paragraph-level tag filter.
+
+  Verified with the reported question: retrieval now surfaces the Tokyo
+  nightlife video (including "Tokyo at 3 a.m. features streets filled with
+  trash..."), the full 34-paragraph transcript is used (~2,840 tokens), and
+  the generated answer describes the atmosphere, people, dangers, and scene
+  without the "insufficient information" refusal.
+}
+
+task (completed) {
   in tags.toml, remove all the "keywords" section, do not use "keywords" in context at all, simply use "description"
 }
 
@@ -60,40 +156,40 @@ task (completed) {
 task (completed) {
   currently when asking a question, the iterative evidence approach is very slow, please find ways to make it faster
 
-  Optimizations implemented                                                                                                                          
-  app/chat_server.py                                                                                                                                 
-  - Eliminated repeated query expansion — the question is expanded once per loop instead of once per round; missing terms are appended directly to   
-  the BM25 query.                                                                                                                                  
-  - Stopped duplicate relevance filtering — with an active soft tag, the final tag_filter_candidates already filters for question + tag relevance,   
-  so the per-round filter_candidates call was removed. It still runs once for non-tag scopes (/transcript, /article).                              
-  - Wider first retrieval batch — round 1 now gathers 2× the normal batch, so most questions finish after one sufficiency check instead of 2–3.      
-  - Fewer rounds/checks — non-enumerative cap reduced 4→3, enumerative 6→5; enumerative questions check sufficiency every other round instead of     
-  every round.                                                                                                                                     
-  - Early stop on unchanged missing terms — avoids a pointless extra round when the checker keeps reporting the same gap.                            
-  - Fixed a hidden model-reload penalty — the article router used num_ctx=4096 while all other small-model calls used 8192. Switching context size   
-  caused Ollama to reload qwen3:1.7b between calls. All small-model calls now use 8192, avoiding ~1s reloads.                                      
-  - Reduced sufficiency output budget 96→64 tokens.                                                                                                  
+  Optimizations implemented
+  app/chat_server.py
+  - Eliminated repeated query expansion — the question is expanded once per loop instead of once per round; missing terms are appended directly to
+  the BM25 query.
+  - Stopped duplicate relevance filtering — with an active soft tag, the final tag_filter_candidates already filters for question + tag relevance,
+  so the per-round filter_candidates call was removed. It still runs once for non-tag scopes (/transcript, /article).
+  - Wider first retrieval batch — round 1 now gathers 2× the normal batch, so most questions finish after one sufficiency check instead of 2–3.
+  - Fewer rounds/checks — non-enumerative cap reduced 4→3, enumerative 6→5; enumerative questions check sufficiency every other round instead of
+  every round.
+  - Early stop on unchanged missing terms — avoids a pointless extra round when the checker keeps reporting the same gap.
+  - Fixed a hidden model-reload penalty — the article router used num_ctx=4096 while all other small-model calls used 8192. Switching context size
+  caused Ollama to reload qwen3:1.7b between calls. All small-model calls now use 8192, avoiding ~1s reloads.
+  - Reduced sufficiency output budget 96→64 tokens.
 
-  chat.py                                                                                                                                            
-  - Added an LRU cache for expand_query, shared by the iterative loop, tag routing, and normal retrieval.                                            
-  Measured effect                                                                                                                                    
+  chat.py
+  - Added an LRU cache for expand_query, shared by the iterative loop, tag routing, and normal retrieval.
+  Measured effect
 
-  Warm-model benchmark over the real tag corpus (_youtube_iterative_evidence, tag japan):                                                            
+  Warm-model benchmark over the real tag corpus (_youtube_iterative_evidence, tag japan):
 
-  ┌────────────────────────────────────────┬──────────┬───────┐                                                                                      
-  │ Question                               │ Before   │ After │                                                                                      
-  ├────────────────────────────────────────┼──────────┼───────┤                                                                                      
-  │ where can i get IDP?                   │ 6.5–8.2s │ 3.4s  │                                                                                      
-  ├────────────────────────────────────────┼──────────┼───────┤                                                                                      
-  │ what are all levels of wagyu           │ 7.3s     │ 4.4s  │                                                                                      
-  ├────────────────────────────────────────┼──────────┼───────┤                                                                                      
-  │ where is nijo market                   │ 6.6s     │ 3.6s  │                                                                                      
-  ├────────────────────────────────────────┼──────────┼───────┤                                                                                      
-  │ requirements for 90-day long-stay visa │ 7.5s     │ 5.6s  │                                                                                      
-  └────────────────────────────────────────┴──────────┴───────┘                                                                                      
+  ┌────────────────────────────────────────┬──────────┬───────┐
+  │ Question                               │ Before   │ After │
+  ├────────────────────────────────────────┼──────────┼───────┤
+  │ where can i get IDP?                   │ 6.5–8.2s │ 3.4s  │
+  ├────────────────────────────────────────┼──────────┼───────┤
+  │ what are all levels of wagyu           │ 7.3s     │ 4.4s  │
+  ├────────────────────────────────────────┼──────────┼───────┤
+  │ where is nijo market                   │ 6.6s     │ 3.6s  │
+  ├────────────────────────────────────────┼──────────┼───────┤
+  │ requirements for 90-day long-stay visa │ 7.5s     │ 5.6s  │
+  └────────────────────────────────────────┴──────────┴───────┘
 
-  Roughly 35–50% faster, with fewer small-model calls per question. The task is marked (completed) in prompts/tags.prompt, and no incomplete prompt  
-  tasks remain.      
+  Roughly 35–50% faster, with fewer small-model calls per question. The task is marked (completed) in prompts/tags.prompt, and no incomplete prompt
+  tasks remain.
 }
 
 task (completed) {

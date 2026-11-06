@@ -5819,12 +5819,14 @@ function applyState(state, loadHistory = false) {
     historyIndex = history.length;
     historyDraft = "";
   }
-  $("#status-tag").textContent = state.tag || "—";
+  $("#status-tag").textContent = state.tag_label || state.tag || "—";
   $("#status-scope").textContent = state.article
     ? `article ${state.article}`
     : state.transcript
       ? `transcript ${state.transcript}`
-      : "soft tag · global corpus";
+      : (state.tag_mode === "auto"
+          ? `soft tag · ${state.tag_label || "auto"}`
+          : "soft tag · global corpus");
   $("#status-scope").title = state.article
     ? `Only ${state.article} is used as context`
     : state.transcript
@@ -5848,7 +5850,7 @@ function applyState(state, loadHistory = false) {
   const modelLabel = displayModelName(state.models?.chat);
   $("#top-tagline").textContent = state.article
     ? `article ${state.article_title || state.article} · ${state.chunks ?? "?"} paragraphs · ${modelLabel} · /help`
-    : `tag ${state.tag ?? "—"} · ${state.chunks ?? "?"} trunks · ${modelLabel} · /help`;
+    : `tag ${state.tag_label ?? state.tag ?? "—"} · ${state.chunks ?? "?"} trunks · ${modelLabel} · /help`;
   updateModeUI();
   if (helpPanel.hidden === false) renderHelp();
 }
@@ -7960,7 +7962,7 @@ function renderWelcome(state) {
   const banner = document.createElement("div");
   banner.className = "banner";
   const pre = document.createElement("pre");
-  const tag = state?.tag ?? "—";
+  const tag = state?.tag_label ?? state?.tag ?? "—";
   const chunks = state?.chunks ?? "?";
   const videos = state?.videos ?? "?";
   const model = displayModelName(state?.models?.chat);

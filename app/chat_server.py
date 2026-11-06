@@ -8,7 +8,7 @@ Ollama streaming, tag/transcript/article scoping, history, /memory,
 ./app/chat.html.
 
 Usage:
-    python3 app/chat_server.py [--host 127.0.0.1] [--port 8765] [--tag japan]
+    python3 app/chat_server.py [--host 127.0.0.1] [--port 8765] [--tag auto]
                                   [--max-context-tokens N] [--progressive]
 
 Endpoints:
@@ -2611,6 +2611,11 @@ YOUTUBE_ITERATIVE_EVIDENCE_TOKENS = 16000
 YOUTUBE_ITERATIVE_BATCH = 4
 YOUTUBE_ITERATIVE_ENUMERATIVE_BATCH = 6
 YOUTUBE_ITERATIVE_CANDIDATES = 50
+# When the soft-tag filter leaves only a thin context, read deeper into the
+# video(s) that supplied the surviving evidence instead of answering from a
+# few isolated snippets. A context already this large is left untouched to
+# avoid slowing narrow questions with unnecessary extra reading.
+YOUTUBE_DEEP_DIVE_TRIGGER_TOKENS = 1200
 YOUTUBE_ITERATIVE_PROMPT_PREFIX = """### RETRIEVED EVIDENCE
 The context below was gathered in several retrieval rounds from the knowledge
 base and is sufficient for the complete question. Answer every part of the
@@ -3786,7 +3791,43 @@ def _youtube_iterative_evidence(
             f"[youtube iterative: soft tag {tag_profile.name!r} kept "
             f"{len(scoped.candidates)} of {len(base)} evidence paragraph(s)]"
         )
-        return scoped.candidates
+        # A soft tag classifies videos, not isolated paragraphs. Keep the
+        # other question-ranked paragraphs from any video the tag filter
+        # accepted, then read deeper into the best related video(s) instead of
+        # answering from only the handful of paragraphs that survived.
+        restored = chat.restore_video_scope(base, scoped.candidates)
+        if len(restored) > len(scoped.candidates):
+            log(
+                "[youtube iterative: video-level tag scope restored "
+                f"{len(restored) - len(scoped.candidates)} paragraph(s)]"
+            )
+        scoped_counts: dict[str, int] = {}
+        for chunk, _score in scoped.candidates:
+            scoped_counts[chunk.video_id] = (
+                scoped_counts.get(chunk.video_id, 0) + 1
+            )
+        restored_tokens = sum(
+            chat.estimate_tokens(chat.paragraph_text(chunk)) + 16
+            for chunk, _score in restored
+        )
+        if restored_tokens >= YOUTUBE_DEEP_DIVE_TRIGGER_TOKENS:
+            log(
+                "[youtube iterative: context already has "
+                f"~{restored_tokens:,} token(s); not deep-diving further]"
+            )
+            return restored
+        return chat.deep_dive_video_evidence(
+            question,
+            restored,
+            chunks,
+            effective_budget,
+            additional_videos={
+                video_id
+                for video_id, count in scoped_counts.items()
+                if count >= 2
+            },
+            log=log,
+        )
     return []
 
 
@@ -3950,11 +3991,25 @@ class ChatState:
         chunks: list[chat.Chunk] | None = None,
     ) -> None:
         self.lock = threading.RLock()
-        self.tag = tag
-        try:
-            self.tag_profile = chat.get_tag(tag)
-        except KeyError as exc:
-            raise SystemExit(str(exc.args[0]) if exc.args else str(exc))
+        self.tag_mode = (
+            chat.AUTO_TAG if chat.is_auto_tag(tag) else "manual"
+        )
+        # ``tag`` is the effective tag used by the current question. In auto
+        # mode it starts as the auto scope mode and is replaced by the router
+        # before the first answer attempt; ``resolved_tags`` records the tags
+        # that router selected for the latest question.
+        self.tag = chat.AUTO_TAG if self.tag_mode == chat.AUTO_TAG else tag
+        self.resolved_tags: list[str] = []
+        self.route_scores: dict[str, float] = {}
+        self.route_source: str = ""
+        self.route_question: str = ""
+        if self.tag_mode == chat.AUTO_TAG:
+            self.tag_profile = None
+        else:
+            try:
+                self.tag_profile = chat.get_tag(tag)
+            except KeyError as exc:
+                raise SystemExit(str(exc.args[0]) if exc.args else str(exc))
         self.max_context_tokens = max_context_tokens
         self.progressive = progressive
         self.depth: int | None = chat.DEFAULT_DEPTH
@@ -4078,6 +4133,9 @@ class ChatState:
             self.tag_profile = chat.get_tag(tag)
         except KeyError:
             pass
+        if self.tag_mode == chat.AUTO_TAG:
+            self.resolved_tags = [tag]
+            self.route_source = "fallback"
         self.chunks = chunks if chunks is not None else self.global_chunks
         self.transcript = None
         self.article_path = None
@@ -4086,6 +4144,50 @@ class ChatState:
         self.article_iterative = False
         chat.clear_bm25_cache()
         gc.collect()
+
+    def resolve_auto_scope(
+        self, question: str, *, follow_up: bool = False
+    ) -> chat.TagRoute:
+        """Choose the soft tag for this question when the session is in auto.
+
+        This is metadata-only: the global corpus and its cached BM25 index are
+        reused. Manual tags, /youtube transcript, and /article scopes bypass
+        routing entirely. A follow-up keeps the previously resolved tag.
+        """
+        if (
+            self.tag_mode != chat.AUTO_TAG
+            or self.transcript is not None
+            or self.article_path is not None
+        ):
+            return chat.TagRoute(
+                (self.tag,) if self.tag not in {"", chat.AUTO_TAG} else (),
+                {},
+                "manual",
+            )
+        active = self.resolved_tags[0] if self.resolved_tags else None
+        route = chat.route_tags_for_question(
+            question,
+            self.global_chunks or self.chunks,
+            active_tag=active,
+            follow_up=follow_up,
+        )
+        if route.primary is not None:
+            try:
+                profile = chat.get_tag(route.primary)
+            except KeyError:
+                self.tag = chat.AUTO_TAG
+                self.tag_profile = None
+            else:
+                self.tag = route.primary
+                self.tag_profile = profile
+        else:
+            self.tag = chat.AUTO_TAG
+            self.tag_profile = None
+        self.resolved_tags = list(route.tags)
+        self.route_scores = dict(route.scores)
+        self.route_source = route.source
+        self.route_question = question
+        return route
 
     def fallback_tag_order(self, question: str) -> list[str]:
         """Rank other registry tags by lexical fit to the question.
@@ -4122,9 +4224,35 @@ class ChatState:
 
     def snapshot(self, include_history: bool = False) -> dict:
         video_ids = {chunk.video_id for chunk in self.chunks}
+        auto_mode = self.tag_mode == chat.AUTO_TAG
+        effective_tag = self.tag if self.tag not in {"", chat.AUTO_TAG} else None
+        if auto_mode:
+            tag_value = effective_tag or chat.AUTO_TAG
+            tag_label = (
+                f"{chat.AUTO_TAG} → {effective_tag}"
+                if effective_tag
+                else f"{chat.AUTO_TAG} → global"
+            )
+        else:
+            tag_value = self.tag
+            tag_label = self.tag
         data = {
-            "tag": self.tag,
-            "tag_description": self.tag_profile.description,
+            "tag": tag_value,
+            "tag_label": tag_label,
+            "tag_mode": self.tag_mode,
+            "resolved_tags": list(self.resolved_tags),
+            "route_source": self.route_source,
+            "tag_description": (
+                self.tag_profile.description
+                if self.tag_profile is not None
+                else (
+                    "Auto: choose the best soft tag from each question, or "
+                    "use the global scope (no tag filter) when no tag is "
+                    "confident."
+                    if auto_mode
+                    else ""
+                )
+            ),
             "transcript": self.transcript,
             "depth": self.depth,
             "depth_label": self.depth_label,
@@ -4140,7 +4268,12 @@ class ChatState:
                 else (
                     f"transcript {self.transcript!r}"
                     if self.transcript is not None
-                    else f"soft tag {self.tag!r} over the global corpus"
+                    else (
+                        f"auto tag routing over the global corpus "
+                        f"({tag_label})"
+                        if auto_mode
+                        else f"soft tag {self.tag!r} over the global corpus"
+                    )
                 )
             ),
             "article": self.article_path,
@@ -4673,11 +4806,23 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         if kind == "tags":
             profiles = chat.load_tags()
-            return [
+            items = [
                 {"value": tag, "description": profiles[tag].description}
                 for tag in sorted(profiles)
                 if tag.startswith(query)
             ]
+            if chat.AUTO_TAG.startswith(query):
+                items.insert(
+                    0,
+                    {
+                        "value": chat.AUTO_TAG,
+                        "description": (
+                            "choose the best soft tag from each question; "
+                            "use the global scope when no tag is confident"
+                        ),
+                    },
+                )
+            return items
 
         if kind == "news_sources":
             lowered = query.lower()
@@ -5074,6 +5219,25 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     f"{resolved_question}]",
                 )
                 retrieval_question = resolved_question
+
+        auto_route: chat.TagRoute | None = None
+        if (
+            not article_mode
+            and state.transcript is None
+            and state.tag_mode == chat.AUTO_TAG
+        ):
+            auto_route = state.resolve_auto_scope(
+                retrieval_question, follow_up=context_sensitive
+            )
+            resolved_label = auto_route.primary or "global"
+            self._sse_text(
+                "log",
+                f"[auto tag router: {resolved_label} "
+                f"({auto_route.source})]",
+            )
+            # Publish the resolved scope immediately so the status bar shows
+            # "auto → japan" (or "auto → global") while the answer streams.
+            self._sse("meta", state.snapshot())
 
         article_route: ArticleRoute | None = None
         article_prepare_selected: Callable | None = None
@@ -5564,7 +5728,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             f"article {state.article_path!r}"
             if article_mode
             else (
-                f"tag {original_tag!r}"
+                (
+                    f"auto tag {original_tag!r}"
+                    if state.tag_mode == chat.AUTO_TAG
+                    else f"tag {original_tag!r}"
+                )
                 if state.transcript is None
                 else f"transcript {state.transcript!r}"
             )
@@ -6024,6 +6192,18 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         state.latest_sources = sources
         stats["coding_mode"] = coding_mode
         stats["model"] = coding_model if coding_mode else chat_model
+        if auto_route is not None:
+            stats["auto_tag"] = {
+                "tags": list(auto_route.tags),
+                "source": auto_route.source,
+                "scores": {
+                    name: round(score, 4)
+                    for name, score in sorted(
+                        auto_route.scores.items(),
+                        key=lambda item: -item[1],
+                    )[:5]
+                },
+            }
         state.latest_benchmark = stats
         annotations = build_answer_annotations(response, sources)
         if article_mode:
@@ -6085,18 +6265,28 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         elif name == "/depth":
             self._command_depth(argument)
         elif name == "/status":
+            state = self.state
             report = chat.chat_status_report(
-                self.state.tag,
-                self.state.transcript,
-                self.state.chunks,
-                self.state.depth,
-                self.state.max_context_tokens,
-                len(self.state.cache),
-                article=self.state.article_path,
+                (
+                    chat.AUTO_TAG
+                    if state.tag_mode == chat.AUTO_TAG
+                    else state.tag
+                ),
+                state.transcript,
+                state.chunks,
+                state.depth,
+                state.max_context_tokens,
+                len(state.cache),
+                article=state.article_path,
             )
+            if state.tag_mode == chat.AUTO_TAG:
+                report += (
+                    f"\n  auto route:  {state.snapshot()['tag_label']}"
+                    f" ({state.route_source or 'not resolved yet'})"
+                )
             report += (
-                f"  conversation: {len(self.state.conversation)} turn(s) "
-                f"(kept: last {CONVERSATION_MAX_TURNS})\n"
+                f"\n  conversation: {len(state.conversation)} turn(s) "
+                f"(kept: last {CONVERSATION_MAX_TURNS})"
             )
             self._sse_text("output", "\n" + report + "\n")
         elif name == "/new":
@@ -6149,28 +6339,31 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     def _command_tag(self, argument: str) -> None:
         state = self.state
         tags = chat.available_tags()
+        auto_requested = chat.is_auto_tag(argument)
         if not argument:
             self._sse_text(
                 "output",
                 "\nAvailable tags: "
-                + (", ".join(tags) if tags else "none")
-                + "\nUsage: /tag <tag> (Tab completes tag names)\n",
+                + ", ".join([chat.AUTO_TAG, *tags])
+                + "\nUsage: /tag <tag|auto> (Tab completes tag names)\n",
             )
             return
-        if argument not in tags:
+        if not auto_requested and argument not in tags:
             self._sse_text(
                 "output",
                 f"\nUnknown tag: {argument!r}. Choose one of: "
-                + ", ".join(tags)
+                + ", ".join([chat.AUTO_TAG, *tags])
                 + "\n",
             )
             return
-        try:
-            profile = chat.get_tag(argument)
-        except KeyError as exc:
-            message = str(exc.args[0]) if exc.args else str(exc)
-            self._sse_text("output", "\n" + message + "\n")
-            return
+        profile = None
+        if not auto_requested:
+            try:
+                profile = chat.get_tag(argument)
+            except KeyError as exc:
+                message = str(exc.args[0]) if exc.args else str(exc)
+                self._sse_text("output", "\n" + message + "\n")
+                return
 
         # Tags are soft scopes, not corpus partitions. If the current scope is
         # an article or a single transcript, restore the global corpus first;
@@ -6183,14 +6376,35 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             state.replace_chunks(state.global_chunks)
         else:
             state.reset_conversation()
-        state.tag = argument
-        state.tag_profile = profile
+        if auto_requested:
+            state.tag_mode = chat.AUTO_TAG
+            state.tag = chat.AUTO_TAG
+            state.tag_profile = None
+            state.resolved_tags = []
+            state.route_scores = {}
+            state.route_source = ""
+            state.route_question = ""
+            description = (
+                "Choose the best soft tag from each question; use the global "
+                "scope (no tag filter) when no tag is confident."
+            )
+            label = chat.AUTO_TAG
+        else:
+            state.tag_mode = "manual"
+            state.tag = argument
+            state.tag_profile = profile
+            state.resolved_tags = [argument]
+            state.route_scores = {}
+            state.route_source = "manual"
+            state.route_question = ""
+            description = profile.description if profile else ""
+            label = argument
         state.transcript = None
         state.cache.clear()
         self._sse_text(
             "output",
-            f"\nNow using soft tag {argument!r}.\n"
-            f"{profile.description}\n"
+            f"\nNow using soft tag {label!r}.\n"
+            f"{description}\n"
             + chat.index_memory_report(state.chunks, build_index=False)
             + "\n",
         )
