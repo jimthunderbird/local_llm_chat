@@ -110,7 +110,7 @@ WEB_COMMANDS = {
     "/new": "start a fresh conversation (clears follow-up context)",
     "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
     "learn_playlist <playlist> | search <keyword> | bookmark list",
-    "/news": "list the latest news from wsj, cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, or krasia (optionally /news [source ...] [count])",
+    "/news": "list the latest news from wsj, cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, or wccftech (optionally /news [source ...] [count])",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
 }
@@ -127,6 +127,7 @@ NEWS_SOURCES = {
     "richmond_sunset": "Richmond Review",
     "techcrunch": "TechCrunch",
     "krasia": "KrASIA",
+    "wccftech": "Wccftech",
 }
 
 NEWS_SOURCE_USAGE = "|".join(NEWS_SOURCES)
@@ -7349,8 +7350,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         Usage: /news [SOURCE ...] [number-of-stories]
         Each SOURCE is one of wsj, cnn, yahoo_finance, kqed, sfgate, sfbayview,
-        mission_local, richmond_sunset, techcrunch, or krasia. Several sources
-        may be selected.
+        mission_local, richmond_sunset, techcrunch, krasia, or wccftech.
+        Several sources may be selected.
         Without a source, every supported source is shown as its own section.
         """
         argv: list[str] = []

@@ -981,19 +981,6 @@
   }
   .news-title-translation .error-text { margin-top: 3px; }
   .news-meta { color: var(--dim); font-size: 11px; margin-top: 3px; }
-  .news-details {
-    flex: 0 0 auto;
-    background: #142334;
-    color: var(--text);
-    border: 1px solid #30465d;
-    border-radius: 5px;
-    padding: 3px 9px;
-    font-family: var(--mono);
-    font-size: 11.5px;
-    cursor: pointer;
-  }
-  .news-details:hover { border-color: var(--accent-2); color: #fff; }
-
   #news-panel {
     position: fixed;
     inset: 0;
@@ -4182,9 +4169,13 @@ function renderNewsList(entry) {
         titleEl.href = item.link;
         titleEl.target = "_blank";
         titleEl.rel = "noopener noreferrer";
-        titleEl.title = `Open this story on ${itemSource}`;
+        titleEl.title = "Read this story in a popup";
       }
-      titleEl.addEventListener("click", (event) => event.stopPropagation());
+      titleEl.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openNewsModal(item);
+      });
 
       const titleRow = document.createElement("div");
       titleRow.className = "news-title-row";
@@ -4219,19 +4210,7 @@ function renderNewsList(entry) {
       meta.textContent = metaParts.join(" · ");
       main.appendChild(meta);
 
-      const details = document.createElement("button");
-      details.type = "button";
-      details.className = "news-details";
-      details.textContent = "details";
-      details.title = "Read this story in a popup";
-      details.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        openNewsModal(item);
-      });
-
       li.appendChild(main);
-      li.appendChild(details);
       list.appendChild(li);
     });
     container.appendChild(list);

@@ -19,6 +19,7 @@ declare(strict_types=1);
  *   richmond_sunset Richmond Review / Richmond & Sunset news RSS feed
  *   techcrunch    TechCrunch WordPress REST API
  *   krasia        KrASIA RSS feed (Asian tech and startup news)
+ *   wccftech      Wccftech RSS feed (hardware, mobile and gaming news)
  *   medium        The Medium author feed configured in ~/.medium/username
  *                 (https://medium.com/feed/@username), used by /medium
  *
@@ -30,7 +31,7 @@ declare(strict_types=1);
  *   ./news_fetch.php [--json] [--source SOURCE ...] [--limit N]
  *
  * --source accepts wsj, cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local,
- * richmond_sunset, techcrunch, krasia, or medium and may be repeated (or given as a
+ * richmond_sunset, techcrunch, krasia, wccftech, or medium and may be repeated (or given as a
  * comma separated list).
  * Without --source, every static source is fetched and emitted as its own
  * section; medium is only used when explicitly selected.
@@ -191,6 +192,20 @@ const SOURCES = [
             'latest' => [
                 'label' => 'Latest Stories',
                 'url' => 'https://console.kr-asia.com/feed',
+            ],
+        ],
+    ],
+    'wccftech' => [
+        'label' => 'Wccftech',
+        'kind' => 'rss',
+        // Wccftech's feed truncates each story and links to the full article,
+        // so fetch the article page for the detail view.
+        'full_article' => true,
+        'default_limit' => 20,
+        'feeds' => [
+            'latest' => [
+                'label' => 'Latest Stories',
+                'url' => 'https://wccftech.com/feed/',
             ],
         ],
     ],
