@@ -3,9 +3,9 @@
 
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, tag/transcript/article scoping, history, /memory,
-/status, /sources, /benchmark, /youtube, /news, /medium, /wiki,
-/wiki_article, /article, /dict, and /ask. The browser is a pure HTML/CSS/JavaScript single-page app served from
-./app/chat.html.
+/status, /sources, /benchmark, /youtube, /news, /medium, /gutenberg,
+/wiki, /wiki_article, /article, /dict, and /ask. The browser is a pure
+HTML/CSS/JavaScript single-page app served from ./app/chat.html.
 
 Usage:
     python3 app/chat_server.py [--host 127.0.0.1] [--port 8765] [--tag auto]
@@ -17,6 +17,8 @@ Endpoints:
     GET  /api/autocomplete       ?kind=commands|tags|transcripts|paths&q=...
     GET  /api/wiki?word=...      JSON Wikipedia summary
     GET  /api/transcripts?q=...  ag title search results
+    GET  /api/gutenberg_book     ?id=<book_id>&url=<plaintext_url>&title=...
+                                  the cached plaintext used by the book modal
     POST /api/ask                SSE: question or slash-command stream
                                   (answers include a per-paragraph
                                   source-video annotation event; tags other
@@ -53,6 +55,9 @@ Endpoints:
                                   the background for a /youtube search card
     GET  /api/video_learn_status current background learn progress (all jobs,
                                   or ?id=<video_id> for one)
+    POST /api/gutenberg_chat     SSE: answer a question about one Project
+                                  Gutenberg book in a session isolated from
+                                  the main chat
 """
 
 from __future__ import annotations
@@ -112,6 +117,7 @@ WEB_COMMANDS = {
     "learn_playlist <playlist> | search <keyword> | bookmark list",
     "/news": "list the latest news from wsj, cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count])",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
+    "/gutenberg": "search Project Gutenberg books: /gutenberg search <keywords>; click a book to read it and ask questions",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
 }
 
@@ -158,7 +164,66 @@ COMMAND_ARGUMENTS = {
     "/benchmark",
     "/news",
     "/medium",
+    "/gutenberg",
 }
+
+# Subcommands grouped under /gutenberg.
+GUTENBERG_SUBCOMMANDS = {
+    "search": "search Project Gutenberg by title, author, or keyword",
+}
+
+# Project Gutenberg search and per-book chat. /gutenberg search resolves
+# matching books through the Open Library search API and reads each work's
+# `id_project_gutenberg` identifier. Open Library has not linked every work to
+# a Gutenberg text yet, so the Project Gutenberg catalogue search page remains
+# a fallback for those books. The chosen plaintext is downloaded once and
+# cached under .chat. Book chat reuses the /article section-aware RAG pipeline,
+# so a multi-megabyte novel never goes into the model's context at once.
+OPENLIBRARY_SEARCH_URL = "https://openlibrary.org/search.json"
+OPENLIBRARY_SEARCH_FIELDS = (
+    "key,title,author_name,first_publish_year,language,subject,"
+    "id_project_gutenberg,cover_i,cover_edition_key,edition_count,ebook_access"
+)
+GUTENBERG_SEARCH_URL = "https://www.gutenberg.org/ebooks/search/"
+GUTENBERG_SEARCH_BLOCK_RE = re.compile(
+    r'<li class="booklink">(.*?)</li>', re.IGNORECASE | re.DOTALL
+)
+GUTENBERG_SEARCH_LINK_RE = re.compile(
+    r'<a class="link" href="/ebooks/(\d+)"', re.IGNORECASE
+)
+GUTENBERG_SEARCH_TITLE_RE = re.compile(
+    r'<span class="title">(.*?)</span>', re.IGNORECASE | re.DOTALL
+)
+GUTENBERG_SEARCH_AUTHOR_RE = re.compile(
+    r'<span class="subtitle">(.*?)</span>', re.IGNORECASE | re.DOTALL
+)
+GUTENBERG_SEARCH_EXTRA_RE = re.compile(
+    r'<span class="extra">(.*?)</span>', re.IGNORECASE | re.DOTALL
+)
+GUTENBERG_SEARCH_DOWNLOADS_RE = re.compile(r"([\d,]+)\s+downloads", re.IGNORECASE)
+GUTENBERG_BOOK_URL = "https://www.gutenberg.org/ebooks/{book_id}"
+GUTENBERG_BOOK_CACHE_DIR = SCRIPT_DIR / ".chat" / "gutenberg_cache"
+GUTENBERG_BOOK_RESULT_LIMIT = 12
+GUTENBERG_BOOK_STATE_LIMIT = 3
+GUTENBERG_TEXT_MAX_BYTES = 30 * 1024 * 1024
+GUTENBERG_START_MARKER_RE = re.compile(
+    r"\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.*?\*\*\*",
+    re.IGNORECASE | re.DOTALL,
+)
+GUTENBERG_END_MARKER_RE = re.compile(
+    r"\*\*\*\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.*?\*\*\*",
+    re.IGNORECASE | re.DOTALL,
+)
+GUTENBERG_OLD_END_RE = re.compile(
+    r"\n\s*End of (?:the )?Project Gutenberg(?:'s)?.*\Z",
+    re.IGNORECASE | re.DOTALL,
+)
+GUTENBERG_CHAPTER_RE = re.compile(
+    r"^\s*(?:CHAPTER|BOOK|PART|VOLUME|ACT|SCENE)\s+"
+    r"(?:[IVXLCDM]+|\d+)\b[^\n]*$",
+    re.IGNORECASE,
+)
+GUTENBERG_BOOK_ID_RE = re.compile(r"\d{1,8}")
 
 # Subcommands grouped under /youtube. Kept in display order for Tab
 # completion and the /help panel.
@@ -2542,7 +2607,7 @@ ARTICLE_NUMBERED_HEADING_RE = re.compile(
     r"^\s*\d+(?:\.\d+)*[.)]?\s+[A-Za-z]"
 )
 ARTICLE_OVERVIEW_REFERENCE_RE = re.compile(
-    r"\b(?:this|the)\s+(?:article|document|doc|file|page|report|paper)\b",
+    r"\b(?:this|the)\s+(?:article|document|doc|file|page|report|paper|book|novel)\b",
     re.IGNORECASE,
 )
 # A bare deictic ("what is this about?") refers to the whole article. The
@@ -2590,7 +2655,7 @@ ARTICLE_SUBSECTION_RE = re.compile(r"^\s*\d+\.\d+")
 # Structure-aware article routing. The cache directory is content-addressed, so
 # these generated artifacts can live beside the paragraph trunks and be reused
 # until the article bytes change.
-ARTICLE_META_VERSION = 3
+ARTICLE_META_VERSION = 4
 ARTICLE_META_FILENAME = "article_structure.json"
 ARTICLE_SECTION_SUMMARY_CHARS = 1400
 ARTICLE_SECTION_SUMMARY_INDEX_BASE = -100
@@ -2975,7 +3040,17 @@ def _article_section_map(
 
     for index, paragraph in enumerate(paragraphs, start=1):
         normalized = _normalize_article_text(paragraph)
-        is_heading = bool(normalized) and normalized.casefold() in heading_keys
+        # Markdown headings keep their ``##`` marker in the paragraph text,
+        # while _article_headings() stores the heading without it. Compare
+        # both spellings so Markdown sections (and Gutenberg chapter
+        # headings promoted to Markdown) are recognized.
+        heading_text = ARTICLE_MARKDOWN_HEADING_RE.sub(
+            lambda match: match.group("title"), normalized
+        )
+        is_heading = bool(normalized) and (
+            normalized.casefold() in heading_keys
+            or heading_text.casefold() in heading_keys
+        )
         if (
             not is_heading
             and len(normalized) <= 160
@@ -2986,7 +3061,7 @@ def _article_section_map(
         if is_heading:
             current = {
                 "number": len(sections) + 1,
-                "heading": normalized,
+                "heading": heading_text or normalized,
                 "heading_index": index,
                 "start": index,
                 "end": index,
@@ -3980,6 +4055,353 @@ def _load_article_chunks(
     return chunks, title, structure
 
 
+# The /gutenberg command and its two-column book modal. The catalog search is
+# intentionally small and stateless; the per-book chat state is created lazily
+# the first time a question is asked, so opening the modal costs only the
+# plaintext download. Each book gets at most one on-disk copy and one in-memory
+# article index.
+GUTENBERG_CATALOG_CACHE: dict[str, dict] = {}
+GUTENBERG_DOWNLOAD_LOCKS: dict[str, threading.Lock] = {}
+GUTENBERG_DOWNLOAD_LOCK = threading.Lock()
+
+
+def _first_gutenberg_id(values) -> str:
+    """Return the canonical numeric id from an Open Library identifier list."""
+    if not isinstance(values, list):
+        values = [values]
+    for value in values:
+        text = str(value or "").strip()
+        if GUTENBERG_BOOK_ID_RE.fullmatch(text):
+            return str(int(text))
+    return ""
+
+
+def _gutenberg_openlibrary_card(doc: dict) -> dict | None:
+    """Normalize one Open Library work into a Gutenberg book card."""
+    if not isinstance(doc, dict):
+        return None
+    book_id = _first_gutenberg_id(doc.get("id_project_gutenberg"))
+    if not book_id:
+        return None
+    title = str(doc.get("title") or f"Book {book_id}").strip()
+    authors = ", ".join(
+        str(name).strip()
+        for name in (doc.get("author_name") or [])
+        if str(name).strip()
+    )
+    subjects = [
+        str(value).strip()
+        for value in (doc.get("subject") or [])
+        if str(value).strip()
+    ][:4]
+    languages = [
+        str(value).strip()
+        for value in (doc.get("language") or [])
+        if str(value).strip()
+    ]
+    try:
+        first_publish_year = int(doc.get("first_publish_year") or 0)
+    except (TypeError, ValueError):
+        first_publish_year = 0
+    return {
+        "id": book_id,
+        "title": title,
+        "authors": authors,
+        "languages": languages,
+        "subjects": subjects,
+        "first_publish_year": first_publish_year,
+        "download_count": 0,
+        "url": GUTENBERG_BOOK_URL.format(book_id=book_id),
+        "text_url": f"{GUTENBERG_BOOK_URL.format(book_id=book_id)}.txt.utf-8",
+        "source": "openlibrary",
+    }
+
+
+def _gutenberg_search_card(block: str) -> dict | None:
+    """Normalize one result block from the Project Gutenberg search page."""
+    link = GUTENBERG_SEARCH_LINK_RE.search(block)
+    if link is None:
+        return None
+    book_id = str(int(link.group(1)))
+    title_match = GUTENBERG_SEARCH_TITLE_RE.search(block)
+    author_match = GUTENBERG_SEARCH_AUTHOR_RE.search(block)
+    extra_match = GUTENBERG_SEARCH_EXTRA_RE.search(block)
+    title = html.unescape(re.sub(r"<[^>]+>", "", title_match.group(1))).strip() if title_match else ""
+    authors = html.unescape(re.sub(r"<[^>]+>", "", author_match.group(1))).strip() if author_match else ""
+    downloads = 0
+    if extra_match:
+        extra_text = html.unescape(re.sub(r"<[^>]+>", "", extra_match.group(1)))
+        downloads_match = GUTENBERG_SEARCH_DOWNLOADS_RE.search(extra_text)
+        if downloads_match:
+            downloads = int(downloads_match.group(1).replace(",", ""))
+    if not title:
+        title = f"Book {book_id}"
+    return {
+        "id": book_id,
+        "title": title,
+        "authors": authors,
+        "languages": [],
+        "subjects": [],
+        "first_publish_year": 0,
+        "download_count": downloads,
+        "url": GUTENBERG_BOOK_URL.format(book_id=book_id),
+        "text_url": f"{GUTENBERG_BOOK_URL.format(book_id=book_id)}.txt.utf-8",
+        "source": "gutenberg.org",
+    }
+
+
+def _openlibrary_search_params(keyword: str) -> dict:
+    """Build Open Library search parameters from a free-form query.
+
+    A query such as ``the time machine by h g wells`` maps to the documented
+    ``?title=...&author=...`` form. Everything else uses the general ``q``
+    search so keywords and subjects still work.
+    """
+    match = re.match(
+        r"^(?P<title>.+?)\s+by\s+(?P<author>.+)$", keyword.strip(), re.IGNORECASE
+    )
+    if match:
+        title = match.group("title").strip()
+        author = match.group("author").strip()
+        if title and author and len(title) <= 240 and len(author) <= 240:
+            return {"title": title, "author": author}
+    return {"q": keyword}
+
+
+def _search_gutenberg_openlibrary(
+    keyword: str, limit: int = GUTENBERG_BOOK_RESULT_LIMIT
+) -> list[dict]:
+    """Resolve Gutenberg text identifiers through Open Library's search API."""
+    params = _openlibrary_search_params(keyword)
+    params["fields"] = OPENLIBRARY_SEARCH_FIELDS
+    # Open Library returns works, and not every work has a linked Gutenberg
+    # identifier. Ask for a wider page so there are enough usable cards left
+    # after filtering.
+    params["limit"] = max(40, max(1, limit) * 5)
+    try:
+        response = requests.get(
+            OPENLIBRARY_SEARCH_URL,
+            params=params,
+            headers=chat.HTTP_HEADERS,
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"Open Library search failed: {exc}") from exc
+    docs = data.get("docs") if isinstance(data, dict) else None
+    if not isinstance(docs, list):
+        raise RuntimeError("Open Library returned an unexpected response.")
+    items: list[dict] = []
+    seen: set[str] = set()
+    for doc in docs:
+        card = _gutenberg_openlibrary_card(doc)
+        if card is None or card["id"] in seen:
+            continue
+        seen.add(card["id"])
+        GUTENBERG_CATALOG_CACHE[card["id"]] = card
+        items.append(card)
+        if len(items) >= max(1, limit):
+            break
+    return items
+
+
+def _search_gutenberg_gutenberg_org(
+    keyword: str, limit: int = GUTENBERG_BOOK_RESULT_LIMIT
+) -> list[dict]:
+    """Search the Project Gutenberg catalogue page as a fallback.
+
+    Open Library is authoritative for identifiers it has linked, but some
+    public-domain works (for example early H. G. Wells editions) have no
+    `id_project_gutenberg` value yet. The catalogue search page still returns
+    their ebook numbers, so parse those cards without another third-party API.
+    """
+    try:
+        response = requests.get(
+            GUTENBERG_SEARCH_URL,
+            params={"query": keyword},
+            headers=chat.HTTP_HEADERS,
+            timeout=(5, 20),
+        )
+        response.raise_for_status()
+        page = response.text
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Project Gutenberg search failed: {exc}") from exc
+    items: list[dict] = []
+    seen: set[str] = set()
+    for block in GUTENBERG_SEARCH_BLOCK_RE.findall(page):
+        card = _gutenberg_search_card(block)
+        if card is None or card["id"] in seen:
+            continue
+        seen.add(card["id"])
+        GUTENBERG_CATALOG_CACHE[card["id"]] = card
+        items.append(card)
+        if len(items) >= max(1, limit):
+            break
+    return items
+
+
+def search_gutenberg_books(keyword: str, limit: int = GUTENBERG_BOOK_RESULT_LIMIT) -> list[dict]:
+    """Search for Project Gutenberg books and return normalized book cards.
+
+    Open Library is the primary catalog: each matching work contributes its
+    ``id_project_gutenberg`` identifier. Because not every work is linked to a
+    Gutenberg text there yet, the Project Gutenberg catalogue search fills in
+    only the missing cards; results are deduplicated by Gutenberg id.
+    """
+    keyword = keyword.strip()
+    if not keyword:
+        return []
+    limit = max(1, limit)
+    items: list[dict] = []
+    seen: set[str] = set()
+    errors: list[str] = []
+
+    try:
+        for card in _search_gutenberg_openlibrary(keyword, limit):
+            if card["id"] in seen:
+                continue
+            seen.add(card["id"])
+            items.append(card)
+    except RuntimeError as exc:
+        errors.append(str(exc))
+
+    if len(items) < limit:
+        try:
+            for card in _search_gutenberg_gutenberg_org(keyword, limit):
+                if card["id"] in seen:
+                    continue
+                seen.add(card["id"])
+                items.append(card)
+                if len(items) >= limit:
+                    break
+        except RuntimeError as exc:
+            errors.append(str(exc))
+
+    if not items and errors:
+        raise RuntimeError("; ".join(errors))
+    return items[:limit]
+
+
+def _clean_gutenberg_plaintext(raw_text: str) -> str:
+    """Remove the Project Gutenberg header/footer from one downloaded book."""
+    text = raw_text.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+    start = GUTENBERG_START_MARKER_RE.search(text)
+    if start is not None:
+        text = text[start.end():]
+    end = GUTENBERG_END_MARKER_RE.search(text)
+    if end is not None:
+        text = text[:end.start()]
+    text = GUTENBERG_OLD_END_RE.sub("", text)
+    return text.strip() + "\n"
+
+
+def _gutenberg_rag_text(text: str, title: str) -> str:
+    """Make a book-friendly source for the existing article/RAG splitter.
+
+    Project Gutenberg files use hard-wrapped prose and plain ``CHAPTER I``
+    lines. Promote those lines to Markdown headings so the article structure
+    builder can produce section summaries, and put the title first so overview
+    questions retrieve a useful document heading.
+    """
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and GUTENBERG_CHAPTER_RE.match(stripped):
+            lines.append(f"\n## {stripped}\n")
+        else:
+            lines.append(line)
+    body = "\n".join(lines).strip()
+    if title and title.casefold() not in body[:500].casefold():
+        body = f"# {title}\n\n{body}"
+    return body + "\n"
+
+
+def _gutenberg_book_paths(book_id: str) -> tuple[Path, Path]:
+    GUTENBERG_BOOK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return (
+        GUTENBERG_BOOK_CACHE_DIR / f"{book_id}.txt",
+        GUTENBERG_BOOK_CACHE_DIR / f"{book_id}.rag.txt",
+    )
+
+
+def _gutenberg_download_lock(book_id: str) -> threading.Lock:
+    with GUTENBERG_DOWNLOAD_LOCK:
+        lock = GUTENBERG_DOWNLOAD_LOCKS.get(book_id)
+        if lock is None:
+            lock = threading.Lock()
+            GUTENBERG_DOWNLOAD_LOCKS[book_id] = lock
+        return lock
+
+
+def ensure_gutenberg_book(
+    book_id: str,
+    text_url: str = "",
+    title: str = "",
+) -> tuple[str, Path]:
+    """Download (once) and return a book's cleaned plaintext and text path."""
+    if not GUTENBERG_BOOK_ID_RE.fullmatch(book_id):
+        raise ValueError("Missing or invalid Project Gutenberg book id")
+    text_path, rag_path = _gutenberg_book_paths(book_id)
+    if text_path.is_file() and rag_path.is_file():
+        try:
+            return text_path.read_text(encoding="utf-8"), rag_path
+        except OSError:
+            pass
+
+    catalog = GUTENBERG_CATALOG_CACHE.get(book_id) or {}
+    text_url = (text_url or catalog.get("text_url") or "").strip()
+    title = (title or catalog.get("title") or "").strip()
+    if not text_url:
+        # This URL pattern redirects to the available plaintext edition for
+        # nearly every English-language Gutenberg book.
+        text_url = f"https://www.gutenberg.org/ebooks/{book_id}.txt.utf-8"
+
+    with _gutenberg_download_lock(book_id):
+        if text_path.is_file() and rag_path.is_file():
+            return text_path.read_text(encoding="utf-8"), rag_path
+        try:
+            response = requests.get(
+                text_url,
+                headers={**chat.HTTP_HEADERS, "Accept": "text/plain"},
+                stream=True,
+                timeout=(10, 90),
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+            chunks = bytearray()
+            for block in response.iter_content(chunk_size=256 * 1024):
+                if not block:
+                    continue
+                chunks.extend(block)
+                if len(chunks) > GUTENBERG_TEXT_MAX_BYTES:
+                    raise RuntimeError(
+                        "Book plaintext is too large to cache "
+                        f"(limit {GUTENBERG_TEXT_MAX_BYTES:,} bytes)."
+                    )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Could not download the book: {exc}") from exc
+
+        raw_text = _decode_article_bytes(bytes(chunks))
+        text = _clean_gutenberg_plaintext(raw_text)
+        if not text.strip():
+            raise RuntimeError("The downloaded book has no readable text.")
+        if not title:
+            title = next(
+                (line.strip() for line in text.splitlines() if line.strip()),
+                f"Book {book_id}",
+            )[:200]
+
+        text_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_text = text_path.with_name(text_path.name + ".tmp")
+        temp_rag = rag_path.with_name(rag_path.name + ".tmp")
+        temp_text.write_text(text, encoding="utf-8")
+        temp_rag.write_text(_gutenberg_rag_text(text, title), encoding="utf-8")
+        temp_text.replace(text_path)
+        temp_rag.replace(rag_path)
+        return text, rag_path
+
+
 class ChatState:
     """The server-side equivalent of chat.py's interactive session state."""
 
@@ -4406,6 +4828,57 @@ def forget_video_chat_state(video_id: str) -> None:
         VIDEO_CHAT_STATES.pop(video_id, None)
 
 
+# Each open Project Gutenberg book gets its own article-scoped ChatState. The
+# plaintext is split into the same section-aware paragraph trunks used by
+# /article, so retrieval sends only a few relevant paragraphs to the model
+# instead of the whole book. Keep only a few books resident to bound memory;
+# the downloaded plaintext and .article_cache indexes stay on disk for reuse.
+GUTENBERG_BOOK_STATES: dict[str, ChatState] = {}
+GUTENBERG_BOOK_STATE_ORDER: list[str] = []
+GUTENBERG_BOOK_STATE_LOCK = threading.Lock()
+
+
+def get_gutenberg_chat_state(
+    book_id: str, *, text_url: str = "", title: str = ""
+) -> ChatState:
+    """Return (creating if needed) the isolated RAG session for one book."""
+    if not GUTENBERG_BOOK_ID_RE.fullmatch(book_id):
+        raise RuntimeError("Missing or invalid Project Gutenberg book id")
+    with GUTENBERG_BOOK_STATE_LOCK:
+        session = GUTENBERG_BOOK_STATES.get(book_id)
+        if session is not None:
+            if book_id in GUTENBERG_BOOK_STATE_ORDER:
+                GUTENBERG_BOOK_STATE_ORDER.remove(book_id)
+            GUTENBERG_BOOK_STATE_ORDER.append(book_id)
+            return session
+
+        catalog = GUTENBERG_CATALOG_CACHE.get(book_id) or {}
+        book_title = (title or catalog.get("title") or f"Book {book_id}").strip()
+        _plaintext, rag_path = ensure_gutenberg_book(
+            book_id,
+            text_url=text_url or str(catalog.get("text_url") or ""),
+            title=book_title,
+        )
+        chunks, loaded_title, structure = _load_article_chunks(rag_path)
+        if not chunks:
+            raise RuntimeError("The book has no readable paragraphs.")
+        session = ChatState(chat.DEFAULT_TAG, chunks=chunks)
+        session.transcript = None
+        session.article_path = str(rag_path)
+        session.article_title = loaded_title or book_title
+        session.article_structure = structure
+        session.article_iterative = True
+        session.global_chunks = chunks
+        GUTENBERG_BOOK_STATES[book_id] = session
+        GUTENBERG_BOOK_STATE_ORDER.append(book_id)
+
+        while len(GUTENBERG_BOOK_STATE_ORDER) > GUTENBERG_BOOK_STATE_LIMIT:
+            oldest = GUTENBERG_BOOK_STATE_ORDER.pop(0)
+            GUTENBERG_BOOK_STATES.pop(oldest, None)
+            gc.collect()
+        return session
+
+
 def _video_learn_jobs_snapshot(
     state: ChatState, video_id: str | None = None
 ) -> list[dict] | dict | None:
@@ -4758,6 +5231,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             keyword = (params.get("q") or [""])[0].strip()
             self._transcript_search_json(keyword)
             return
+        if path == "/api/gutenberg_book":
+            params = parse_qs(parsed.query)
+            book_id = (params.get("id") or [""])[0].strip()
+            text_url = (params.get("url") or [""])[0].strip()
+            title = (params.get("title") or [""])[0].strip()
+            self._gutenberg_book_json(book_id, text_url, title)
+            return
         self._send_error_json("Not found", 404)
 
     def _serve_chat_html(self) -> None:
@@ -4790,6 +5270,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return [
                 {"value": name, "description": description}
                 for name, description in YOUTUBE_SUBCOMMANDS.items()
+                if name.startswith(lowered)
+            ]
+
+        if kind == "gutenberg_subcommands":
+            lowered = query.lower()
+            return [
+                {"value": name, "description": description}
+                for name, description in GUTENBERG_SUBCOMMANDS.items()
                 if name.startswith(lowered)
             ]
 
@@ -4984,6 +5472,47 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             }
         )
 
+    def _gutenberg_book_json(
+        self, book_id: str, text_url: str = "", title: str = ""
+    ) -> None:
+        """Return one book's cached plaintext for the two-column modal."""
+        if not GUTENBERG_BOOK_ID_RE.fullmatch(book_id):
+            self._send_error_json(
+                "Usage: /api/gutenberg_book?id=<book_id>", 400
+            )
+            return
+        try:
+            text, _rag_path = ensure_gutenberg_book(
+                book_id, text_url=text_url, title=title
+            )
+        except (ValueError, RuntimeError) as exc:
+            self._send_error_json(str(exc), 502)
+            return
+        catalog = GUTENBERG_CATALOG_CACHE.get(book_id) or {}
+        resolved_title = (
+            title
+            or str(catalog.get("title") or "")
+            or next(
+                (line.strip() for line in text.splitlines() if line.strip()),
+                f"Book {book_id}",
+            )[:200]
+        )
+        self._send_json(
+            {
+                "id": book_id,
+                "title": resolved_title,
+                "authors": str(catalog.get("authors") or ""),
+                "languages": catalog.get("languages") or [],
+                "subjects": catalog.get("subjects") or [],
+                "download_count": int(catalog.get("download_count") or 0),
+                "url": GUTENBERG_BOOK_URL.format(book_id=book_id),
+                "text_url": text_url
+                or str(catalog.get("text_url") or ""),
+                "text": text,
+                "characters": len(text),
+            }
+        )
+
     # ---- POST ---------------------------------------------------------
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
@@ -5092,6 +5621,28 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             self._handle_youtube_more(keyword, exclude)
             return
+        if parsed.path == "/api/gutenberg_chat":
+            payload = self._read_json()
+            if payload is None:
+                return
+            book_id = str(payload.get("id") or "").strip()
+            if not GUTENBERG_BOOK_ID_RE.fullmatch(book_id):
+                self._send_error_json(
+                    "Missing or invalid Project Gutenberg book id", 400
+                )
+                return
+            question = str(payload.get("question") or "").strip()
+            if not question:
+                self._send_error_json("Missing question", 400)
+                return
+            self._handle_gutenberg_chat(
+                book_id,
+                question,
+                title=str(payload.get("title") or "").strip(),
+                text_url=str(payload.get("url") or "").strip(),
+                reset=bool(payload.get("reset")),
+            )
+            return
         self._send_error_json("Not found", 404)
 
     # ---- SSE: ask / commands -----------------------------------------
@@ -5176,6 +5727,73 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 except ClientDisconnected:
                     pass
                 except Exception as exc:  # Keep the modal informed.
+                    try:
+                        self._sse("error", {"message": str(exc)})
+                        self._sse("done", {"state": session.snapshot()})
+                    except ClientDisconnected:
+                        pass
+        finally:
+            self.state = previous_state
+
+    def _handle_gutenberg_chat(
+        self,
+        book_id: str,
+        question: str,
+        *,
+        title: str = "",
+        text_url: str = "",
+        reset: bool = False,
+    ) -> None:
+        """Stream an answer from one Project Gutenberg book.
+
+        The book is split into article-style paragraph trunks on first use and
+        searched with the same iterative, section-aware RAG loop as /article.
+        A dedicated session keeps the main chat's scope and conversation
+        untouched while the modal is open.
+        """
+        try:
+            session = get_gutenberg_chat_state(
+                book_id, text_url=text_url, title=title
+            )
+        except (RuntimeError, ValueError) as exc:
+            self._begin_sse()
+            try:
+                self._sse("error", {"message": str(exc)})
+                self._sse("done", {})
+            except ClientDisconnected:
+                pass
+            return
+
+        previous_state = self.state
+        self.state = session
+        try:
+            with session.lock:
+                if reset:
+                    session.reset_conversation()
+                    session.cache.clear()
+                    session.latest_answer = None
+                    session.latest_sources = []
+                    session.latest_benchmark = None
+                self._begin_sse()
+                try:
+                    self._sse("meta", session.snapshot())
+                    self._run_question(question)
+                    self._sse(
+                        "done",
+                        {
+                            "state": session.snapshot(),
+                            "benchmark": (
+                                chat.format_benchmark_line(
+                                    session.latest_benchmark
+                                )
+                                if session.latest_benchmark is not None
+                                else ""
+                            ),
+                        },
+                    )
+                except ClientDisconnected:
+                    pass
+                except Exception as exc:  # Keep the book modal informed.
                     try:
                         self._sse("error", {"message": str(exc)})
                         self._sse("done", {"state": session.snapshot()})
@@ -6254,6 +6872,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_news(argument)
         elif name == "/medium":
             self._command_medium(argument)
+        elif name == "/gutenberg":
+            self._command_gutenberg(argument)
         elif name == "/wiki":
             self._command_wiki(argument)
         elif name == "/wiki_article":
@@ -7629,6 +8249,46 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
         self._stream_news_events("news_fetch.php", "/medium", argv)
+
+    def _command_gutenberg(self, argument: str) -> None:
+        """Search Project Gutenberg; the browser renders clickable book cards.
+
+        Usage: /gutenberg search <keywords>
+        Clicking a card opens a two-column modal: the book's plaintext on the
+        left and an isolated RAG chat about that book on the right.
+        """
+        subcommand, _, rest = argument.strip().partition(" ")
+        keyword = rest.strip()
+        if subcommand.lower() != "search" or not keyword:
+            self._sse_text(
+                "output",
+                "\nUsage: /gutenberg search <keywords>\n"
+                "Search Project Gutenberg by title, author, or keyword, then "
+                "click a book to read it and ask questions.\n",
+            )
+            return
+        self._sse_text(
+            "log", f"[gutenberg: searching the catalog for {keyword!r}]"
+        )
+        try:
+            items = search_gutenberg_books(keyword)
+        except RuntimeError as exc:
+            self._sse_text("output", f"\n/gutenberg: {exc}\n")
+            return
+        if not items:
+            self._sse_text(
+                "output",
+                f"\nNo Project Gutenberg books matched {keyword!r}.\n",
+            )
+            return
+        self._sse(
+            "books",
+            {
+                "keyword": keyword,
+                "heading": f"Project Gutenberg · {keyword}",
+                "items": items,
+            },
+        )
 
     def _stream_news_events(
         self, script_name: str, command: str, extra_argv: list[str]

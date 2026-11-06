@@ -1,0 +1,99 @@
+task (completed) {
+  refactor /guttenberg search <keywords>:
+  - use examples like "https://openlibrary.org/search.json?title=the+time+machine&author=h+g+wells", pull the matching Gutenberg text identifier
+
+  Implemented:
+  app/chat_server.py
+  - `/gutenberg search` now resolves books through the Open Library search
+    API. A free-form query such as `the time machine by h g wells` is mapped
+    to the documented `?title=...&author=...` form; other queries use `q`.
+  - Each matching Open Library work contributes its `id_project_gutenberg`
+    value, which becomes the Gutenberg ebook id, page URL, and plaintext URL.
+    Results are deduplicated by Gutenberg id and carry the work's title,
+    authors, languages, subjects, and first-publish year.
+  - Some works (for example the prompt's Time Machine example) are not yet
+    linked to a Gutenberg text in Open Library. In that case the Project
+    Gutenberg catalogue search page is used as a fallback, parsing ebook ids,
+    titles, authors, and download counts. Open Library results always come
+    first; the fallback only fills the remaining slots.
+  - The plaintext download/cache, `/api/gutenberg_book`, and per-book RAG chat
+    are unchanged and work with both sources.
+  app/chat.html
+  - Book cards show the Open Library first-publish year when available.
+
+  Verified: `pride and prejudice`, `sherlock holmes`, and `frankenstein`
+  resolve through Open Library; `the time machine by h g wells` resolves to
+  Gutenberg ebook 35 through the fallback, and its plaintext downloads and
+  cleans correctly.
+}
+
+task (completed) {
+  in the left column of the book popup modal, make every single word of the plaintext content of the book dictionary searchable, similar to the behavior the answer  
+}
+
+  Implemented:
+  app/chat.html
+  - The book's plaintext stays as one text node instead of one span per
+    word, so multi-megabyte Gutenberg books do not create millions of DOM
+    nodes. A pointer-to-caret mapping finds the word under the cursor, moves
+    the caret across only that word's characters, and sends a small
+    surrounding excerpt to the existing streaming /api/dict popup.
+  - Hovering a word shows the same highlight and pointer cursor as answer
+    words (using the CSS Custom Highlight API when available). Dragging to
+    select text does not start a lookup.
+  - Added a "click any word to define" hint to the plaintext pane and
+    mentioned Gutenberg text in the keyboard/mouse help.
+
+task (completed) {
+  create command /gutenberg {
+    - /gutenberg search <keywords>: use https://gutendex.com/books/?search=<keyword>
+
+    - display the result as a list of book links with book title, link to the book (like "https://gutendex.com/books/1342")
+
+    - when click on the book link, open up a modal with 2 columns similar to the youtube video popup {
+      column left:  
+        - load the plaintext of the book
+      column right:
+        - ask question on the book, but keep in mind {
+          - each book contains large amount of text that consume a lot of context, please find a way to implement a memory efficient, context efficeint and fast RAG for answering question related to this book
+        }
+    }
+  }
+
+  Implemented:
+  app/chat_server.py
+  - Added /gutenberg search <keywords>. It queries the public Gutendex
+    catalog (https://gutendex.com/books/?search=...) and streams a "books"
+    SSE event with normalized cards: id, title, authors, languages, subjects,
+    download count, the Gutenberg page URL, and the plaintext URL. Searches
+    retry once because Gutendex occasionally stalls after accepting a
+    connection.
+  - Added GET /api/gutenberg_book, which downloads a chosen book's plaintext
+    once under .chat/gutenberg_cache/<id>.txt, strips the Project Gutenberg
+    header/footer, and also writes a RAG-friendly copy with chapter lines
+    promoted to Markdown headings. This endpoint powers the modal's left
+    column.
+  - Added POST /api/gutenberg_chat. It lazily builds an isolated,
+    article-scoped ChatState from the cached plaintext using the existing
+    /article section-aware trunk/summary builder, then answers through the
+    normal iterative RAG loop. Only the relevant retrieved paragraphs and
+    section summaries enter the model context, so novels of millions of
+    characters never fill the context window. At most three book sessions are
+    kept in memory (LRU), while their downloads and article indexes remain on
+    disk. Each book has its own conversation so the main chat is untouched.
+  - Fixed Markdown section detection in the shared article structure builder:
+    headings are stored without their "##" marker but paragraph text keeps
+    it, so Markdown headings (including promoted Gutenberg chapters) now map
+    to sections correctly. ARTICLE_META_VERSION was bumped to rebuild old
+    caches.
+
+  app/chat.html
+  - /gutenberg search renders a two-column book-card grid with title, author,
+    language/download/subject metadata, and a "Read & ask" affordance.
+  - Clicking a card opens a centered two-column modal. The left pane streams
+    in the cached full plaintext. The right pane is a per-book chat backed by
+    /api/gutenberg_chat, with streaming answers, dictionary-clickable words,
+    Enter/Shift+Enter handling, and Escape/backdrop close.
+  - Added /gutenberg subcommand tab completion and a "Project Gutenberg"
+    command label.
+}
