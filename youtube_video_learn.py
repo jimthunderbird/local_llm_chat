@@ -12,7 +12,7 @@ Runs, in order:
     3. create_trunks.py
     4. create_embeddings.py
 
-Tagging is no longer part of ingestion: tags in ./tags.json are soft
+Tagging is no longer part of ingestion: tags in ./tags.toml are soft
 query-time scopes, so a newly learned video is immediately available to every
 valid tag.
 """

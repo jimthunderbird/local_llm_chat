@@ -142,8 +142,6 @@ def medium_username() -> str:
 
 COMMAND_ARGUMENTS = {
     "/tag",
-    "/transcript",
-    "/search_transcript",
     "/youtube",
     "/ask",
     "/wiki",
@@ -162,14 +160,27 @@ YOUTUBE_SUBCOMMANDS = {
     "learn": "fetch, rewrite, chunk, and embed one video",
     "learn_topic": "search YouTube for <topic> and learn the top 3 videos",
     "learn_playlist": "learn every video in a YouTube playlist",
-    "search": "search YouTube for <keyword> and show the 6 most recent 5-40 minute videos with English captions",
+    "search": "search YouTube for <keyword> and show the 6 most recent 5-60 minute videos with English captions",
+    "transcript": "use one transcript by hash/URL, or search titles with ag",
+    "search_transcript": "search transcript titles with ag and pick a video",
 }
+
+# /youtube search duration window (seconds).
+YOUTUBE_SEARCH_MIN_DURATION = 5 * 60
+YOUTUBE_SEARCH_MAX_DURATION = 60 * 60
 
 # /youtube search shows six cards at a time. The "More" button below the
 # cards asks /api/youtube_more for the next six from the same cached search.
 YOUTUBE_SEARCH_PAGE_SIZE = 6
 # Cache at most this many results per keyword, even after many "More" clicks.
 YOUTUBE_SEARCH_MAX_RESULTS = 200
+# After the first page is painted, quietly fill the cache with a few more
+# pages.  The "More" button then usually reads from memory instead of paying
+# for another YouTube search and caption check.
+YOUTUBE_SEARCH_PREFETCH_RESULTS = 37
+# How long a "More" request will wait for that prefetch before doing its own
+# search.  A prefetch normally finishes in a few seconds.
+YOUTUBE_PREFETCH_WAIT_SECONDS = 8.0
 
 # The browser's "中文" button translates a finished answer paragraph by
 # paragraph. The larger chat model preserves technical terminology and names
@@ -236,7 +247,7 @@ SNIPPET_QUESTION_PROMPT = """You are an expert {language} developer. Answer the 
 # /youtube search cards have a "Summary" button.  Clicking it fetches the
 # video's English transcript and streams a short overview into a centered
 # modal.  The transcript can be long, so cap it to keep the prompt inside the
-# model's context window while still covering most 5-40 minute videos.
+# model's context window while still covering most 5-60 minute videos.
 VIDEO_SUMMARY_MODEL = "ornith:35b"
 VIDEO_SUMMARY_NUM_CTX = 32768
 MAX_VIDEO_SUMMARY_TRANSCRIPT_CHARS = 80_000
@@ -1880,6 +1891,10 @@ FOLLOW_UP_OPENERS = re.compile(
 # treated as a refusal when the answer model says the retrieved context is
 # insufficient (the answer prompt asks it to use a specific phrase for that).
 MAX_TAG_FALLBACK_ATTEMPTS = 6
+# Tags whose lexical fit to the question is below this value are not worth a
+# full retrieval + small-model scope check. Without a floor, an unanswerable
+# question could spend 20-30 seconds trying arbitrarily ordered tags.
+FALLBACK_TAG_MIN_SCORE = 0.05
 INSUFFICIENT_ANSWER_PATTERN = re.compile(
     r"(?:"
     r"(?:the\s+)?(?:provided|available|given\s+)?context\s+"
@@ -3307,6 +3322,58 @@ def _article_sufficiency_check(
     return {"sufficient": sufficient, "missing": missing[:300]}
 
 
+_PARAGRAPH_CHUNKS_CACHE: dict[int, tuple[list[chat.Chunk], list[chat.Chunk]]] = {}
+
+
+def _iterative_paragraph_chunks(chunks: list[chat.Chunk]) -> list[chat.Chunk]:
+    """Return a stable paragraph-only list for BM25 indexing.
+
+    ``get_bm25_index`` caches by list identity. Building a fresh
+    ``[chunk for chunk in chunks if chunk.index > 0]`` list on every question
+    defeated that cache and rebuilt the whole corpus index (~2 seconds) each
+    time. Keep one filtered list per source corpus instead.
+    """
+    if not any(chunk.index <= 0 for chunk in chunks):
+        # YouTube corpora contain only paragraph chunks, so no copy is needed.
+        return chunks
+    key = id(chunks)
+    entry = _PARAGRAPH_CHUNKS_CACHE.get(key)
+    if entry is not None and entry[0] is chunks:
+        return entry[1]
+    filtered = [chunk for chunk in chunks if chunk.index > 0]
+    _PARAGRAPH_CHUNKS_CACHE[key] = (chunks, filtered)
+    while len(_PARAGRAPH_CHUNKS_CACHE) > 4:
+        _PARAGRAPH_CHUNKS_CACHE.pop(next(iter(_PARAGRAPH_CHUNKS_CACHE)))
+    return filtered
+
+
+def _evidence_covers_question(
+    question: str, evidence: list[tuple[chat.Chunk, float]]
+) -> bool:
+    """Cheap check: does the gathered evidence mention every question term?
+
+    The small-model sufficiency check costs more than the rest of a simple
+    retrieval round. When the evidence already contains every content word
+    from the question, there is no reason to ask the model. A miss (including
+    a synonym or a misspelling) still falls back to the model, so this is a
+    conservative fast path.
+    """
+    if not evidence:
+        return False
+    question_terms = {
+        token
+        for token in chat.tokenize(question)
+        if len(token) > 1 and token not in chat.FUZZY_ANCHOR_STOPWORDS
+    }
+    if not question_terms:
+        return False
+    evidence_text = " ".join(
+        chat.paragraph_text(chunk) for chunk, _score in evidence
+    )
+    evidence_terms = set(chat.tokenize(evidence_text))
+    return question_terms.issubset(evidence_terms)
+
+
 def _iterative_evidence(
     question: str,
     chunks: list[chat.Chunk],
@@ -3319,6 +3386,7 @@ def _iterative_evidence(
     batch: int = 4,
     candidate_limit: int = 50,
     require_sufficient: bool = False,
+    accept_insufficient: bool = False,
     apply_filter: bool = True,
     tag_profile: chat.TagProfile | None = None,
     check_every: int = 1,
@@ -3336,7 +3404,7 @@ def _iterative_evidence(
     used = 0
     search_question = question
     sufficient = False
-    paragraph_chunks = [chunk for chunk in chunks if chunk.index > 0]
+    paragraph_chunks = _iterative_paragraph_chunks(chunks)
     # The original question does not change between rounds, so expand it once.
     # Later rounds append the sufficiency checker's ``missing`` terms to the
     # BM25 query, which already gives those terms full weight; expanding the
@@ -3415,13 +3483,24 @@ def _iterative_evidence(
             f"[{label} iterative: round {round_number}/{max_rounds}, "
             f"added {added} paragraph(s), evidence ~{used:,} token(s)]"
         )
+        # Fast path: for a simple question, evidence that already contains all
+        # of the question's content words is sufficient by inspection. This
+        # skips a small-model call on most direct fact questions.
+        if not chat.LIST_QUERY_PATTERN.search(question) and (
+            _evidence_covers_question(question, evidence)
+        ):
+            sufficient = True
+            log(
+                f"[{label} iterative: evidence covers the question terms; "
+                "stopping]"
+            )
+            break
         # Checking sufficiency is the expensive step. Enumerative questions
         # need several rounds of coverage, so checking every other round
         # avoids repeating the small-model call while still stopping as soon
         # as the growing evidence is judged sufficient (or at the last round).
         if (
             check_every > 1
-            and round_number != 1
             and round_number % check_every != 0
             and round_number != max_rounds
         ):
@@ -3445,15 +3524,26 @@ def _iterative_evidence(
             search_question = f"{question} {verdict['missing']}"
 
     if require_sufficient and not sufficient:
-        # The gathered paragraphs never answered the question. Fall back to
-        # the normal retrieval path, which still applies its own filter and
-        # soft-tag routing rules, instead of forcing unrelated evidence into
-        # the prompt.
+        if not accept_insufficient:
+            # The gathered paragraphs never answered the question. Fall back
+            # to the normal retrieval path, which still applies its own filter
+            # and soft-tag routing rules, instead of forcing unrelated
+            # evidence into the prompt.
+            log(
+                f"[{label} iterative: evidence stayed insufficient after "
+                f"{max_rounds} round(s); using normal retrieval]"
+            )
+            return []
+        # The checker is intentionally conservative (especially for list
+        # questions). We already have question-ranked paragraphs, so use them
+        # and let the soft-tag filter and the answer model decide. Falling back
+        # to a second BM25 pass repeated roughly two seconds of work and
+        # replaced broader evidence with a much smaller context.
         log(
-            f"[{label} iterative: evidence stayed insufficient after "
-            f"{max_rounds} round(s); using normal retrieval]"
+            f"[{label} iterative: checker still wanted more after "
+            f"{max_rounds} round(s); using the {len(evidence)} gathered "
+            "paragraph(s)]"
         )
-        return []
 
     if tag_profile is not None and evidence:
         scoped = chat.tag_filter_candidates(question, evidence, tag_profile)
@@ -3529,6 +3619,7 @@ def _youtube_iterative_evidence(
     log: Callable[[str], None],
     depth: int | None = None,
     tag_profile: chat.TagProfile | None = None,
+    cache: dict | None = None,
 ) -> list[tuple[chat.Chunk, float]]:
     """Iteratively gather YouTube transcript evidence for a normal question.
 
@@ -3538,6 +3629,12 @@ def _youtube_iterative_evidence(
     in rounds, and retrieval stops as soon as the gathered paragraphs can answer
     the whole question. List/enumeration questions get more rounds and a larger
     budget because they need broader coverage.
+
+    Retrieval and the sufficiency checks are independent of the soft tag: only
+    the final ``tag_filter_candidates`` call depends on it. ``cache`` stores the
+    tag-independent evidence for the current question so cross-tag fallback can
+    reuse it instead of rerunning expansion, BM25, and the small-model
+    sufficiency loop once per candidate tag.
     """
     enumerative = bool(chat.LIST_QUERY_PATTERN.search(question))
     effective_budget = budget
@@ -3548,30 +3645,67 @@ def _youtube_iterative_evidence(
     candidate_limit = (
         depth if depth is not None and depth > 0 else YOUTUBE_ITERATIVE_CANDIDATES
     )
-    return _iterative_evidence(
+    # A tag-scoped answer is screened once by tag_filter_candidates below, so
+    # the generic relevance filter inside the loop is redundant. For a
+    # transcript scope (no tag) keep it to remove off-topic BM25 matches.
+    base_apply_filter = tag_profile is None and not enumerative
+    cache_key = (
         question,
-        chunks,
+        id(chunks),
         effective_budget,
-        log,
-        label="youtube",
-        max_rounds=(
-            YOUTUBE_ITERATIVE_ENUMERATIVE_ROUNDS
-            if enumerative
-            else YOUTUBE_ITERATIVE_MAX_ROUNDS
-        ),
-        batch=(
-            YOUTUBE_ITERATIVE_ENUMERATIVE_BATCH
-            if enumerative
-            else YOUTUBE_ITERATIVE_BATCH
-        ),
-        candidate_limit=candidate_limit,
-        require_sufficient=True,
-        # List-style questions need broad coverage; the normal answer path
-        # already skips the small relevance filter for them.
-        apply_filter=not enumerative,
-        tag_profile=tag_profile,
-        check_every=2 if enumerative else 1,
+        candidate_limit,
+        enumerative,
+        base_apply_filter,
     )
+    base = cache.get(cache_key) if cache is not None else None
+    if base is None:
+        base = _iterative_evidence(
+            question,
+            chunks,
+            effective_budget,
+            log,
+            label="youtube",
+            max_rounds=(
+                YOUTUBE_ITERATIVE_ENUMERATIVE_ROUNDS
+                if enumerative
+                else YOUTUBE_ITERATIVE_MAX_ROUNDS
+            ),
+            batch=(
+                YOUTUBE_ITERATIVE_ENUMERATIVE_BATCH
+                if enumerative
+                else YOUTUBE_ITERATIVE_BATCH
+            ),
+            candidate_limit=candidate_limit,
+            require_sufficient=True,
+            # A conservative "not sufficient" verdict must not throw away
+            # question-ranked evidence and trigger a second retrieval pass.
+            accept_insufficient=True,
+            apply_filter=base_apply_filter,
+            tag_profile=None,
+            check_every=2 if enumerative else 1,
+        )
+        if cache is not None:
+            cache[cache_key] = base
+
+    if not base:
+        return []
+    if tag_profile is None:
+        return base
+
+    scoped = chat.tag_filter_candidates(question, base, tag_profile)
+    if scoped.status == "none":
+        log(
+            f"[youtube iterative: no evidence fits soft tag "
+            f"{tag_profile.name!r}; using normal retrieval]"
+        )
+        return []
+    if scoped.candidates:
+        log(
+            f"[youtube iterative: soft tag {tag_profile.name!r} kept "
+            f"{len(scoped.candidates)} of {len(base)} evidence paragraph(s)]"
+        )
+        return scoped.candidates
+    return []
 
 
 def _decode_article_bytes(data: bytes) -> str:
@@ -3750,6 +3884,10 @@ class ChatState:
         # /youtube search results are reused by the "More" button instead of
         # rerunning the (network-bound) YouTube search from scratch.
         self.youtube_search_cache: dict[str, list[dict]] = {}
+        # In-progress background cache growth, keyed by search keyword.
+        # The More handler waits on the event instead of starting a duplicate
+        # search for the same keyword.
+        self.youtube_prefetch: dict[str, threading.Event] = {}
         # Background /youtube search card "Learn" jobs, keyed by video id.
         self.video_learn_jobs: dict[str, dict] = {}
         self.video_learn_lock = threading.Lock()
@@ -3867,22 +4005,28 @@ class ChatState:
         """Rank other registry tags by lexical fit to the question.
 
         Tags are soft, so the router inspects the top question matches over
-        the one global corpus and scores each tag description/keywords. This
-        replaces the old union-of-tag-files BM25 ranking.
+        the one global corpus and scores each tag description. This replaces
+        the old union-of-tag-files BM25 ranking.
         """
         other_tags = [tag for tag in chat.available_tags() if tag != self.tag]
         if not other_tags:
             return []
         try:
+            # The score floor removes clearly unrelated tags before any
+            # retrieval or small-model call. If every tag is below the floor,
+            # returning an empty list is correct: there is no plausible scope
+            # to try, so the caller can stop immediately.
             ranked = chat.rank_tags_for_question(
                 question,
                 self.global_chunks or self.chunks,
                 exclude=self.tag,
                 limit=MAX_TAG_FALLBACK_ATTEMPTS,
+                min_score=FALLBACK_TAG_MIN_SCORE,
             )
         except Exception:
-            ranked = []
-        return ranked or other_tags[:MAX_TAG_FALLBACK_ATTEMPTS]
+            # Keep the previous conservative behavior if ranking itself fails.
+            return other_tags[:MAX_TAG_FALLBACK_ATTEMPTS]
+        return ranked
 
     @property
     def depth_label(self) -> str:
@@ -3895,7 +4039,6 @@ class ChatState:
         data = {
             "tag": self.tag,
             "tag_description": self.tag_profile.description,
-            "tag_keywords": list(self.tag_profile.keywords),
             "transcript": self.transcript,
             "depth": self.depth,
             "depth_label": self.depth_label,
@@ -4538,7 +4681,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
     def _transcript_search_json(self, keyword: str) -> None:
         if not keyword:
-            self._send_error_json("Usage: /transcript <keyword>", 400)
+            self._send_error_json("Usage: /youtube transcript <keyword>", 400)
             return
         matches = chat.search_transcript_titles(keyword)
         available = set(chat.available_video_ids())
@@ -4673,6 +4816,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     def _run_question(self, question: str) -> None:
         state = self.state
         article_mode = state.article_path is not None
+        # Tag-independent iterative evidence is reused across the original
+        # tag attempt and every cross-tag fallback attempt for this question.
+        iterative_cache: dict = {}
         answer_language: str | None = None
         retrieval_question = question
         if chat.contains_simplified_chinese(question):
@@ -4729,7 +4875,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
 
         paragraph_chunks = (
-            [chunk for chunk in state.chunks if chunk.index > 0]
+            _iterative_paragraph_chunks(state.chunks)
             if article_mode
             else state.chunks
         )
@@ -5093,6 +5239,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                             else state.depth
                         ),
                         tag_profile=tag_profile,
+                        cache=iterative_cache,
                     )
                     if evidence:
                         chunks = [chunk for chunk, _score in evidence]
@@ -5693,10 +5840,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_tag(argument)
         elif name == "/refresh":
             self._command_refresh()
-        elif name == "/transcript":
-            self._command_transcript(argument, direct=False)
-        elif name == "/search_transcript":
-            self._command_transcript(argument, direct=False, title_only=True)
         elif name == "/youtube":
             self._command_youtube(argument)
         elif name == "/ask":
@@ -5865,7 +6008,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if not argument:
             self._sse_text(
                 "output",
-                "\nUsage: /transcript <hash|URL|keyword> "
+                "\nUsage: /youtube transcript <hash|URL|keyword> "
                 "(Tab completes ids and titles)\n",
             )
             return
@@ -5904,7 +6047,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         for index, match in enumerate(usable, start=1):
             lines.append(f"  {index:>4}. {match.video_id}  {match.title}")
         lines.append(
-            "Select one with /transcript <video_id> or click a result below.\n"
+            "Select one with /youtube transcript <video_id> or click a result below.\n"
         )
         self._sse_text("output", "\n".join(lines))
         self._sse(
@@ -5995,6 +6138,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_learn_playlist(rest)
         elif subcommand == "search":
             self._command_youtube_search(rest)
+        elif subcommand == "transcript":
+            self._command_transcript(rest, direct=False)
+        elif subcommand == "search_transcript":
+            self._command_transcript(rest, direct=False, title_only=True)
         else:
             self._sse_text(
                 "output",
@@ -6006,7 +6153,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         """Search YouTube and show clickable thumbnail cards.
 
         Usage: /youtube search "<keyword>"
-        Returns 6 of the most recent 5-40 minute videos with English captions.
+        Returns 6 of the most recent 5-60 minute videos with English captions.
         Cards are streamed as soon as the fast search returns; caption checks
         then update the list in place.  Unlike /youtube learn_topic this only
         lists the videos; nothing is learned.  Each card opens a centered
@@ -6024,7 +6171,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         self._sse_text(
             "output",
             f"\n/youtube search: searching YouTube for {keyword!r} "
-            "(5-40 minute videos; captions checked as cards load)...\n",
+            "(5-60 minute videos; captions checked as cards load)...\n",
         )
         # Fetch one extra result so the UI knows whether a "More" button is
         # useful without making a second search just to find out.
@@ -6078,10 +6225,19 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         "captions_unverified": True,
                     },
                 )
+                # Keep the cards that were just painted.  Without this, the
+                # "More" button would ask for the next page with an empty
+                # cache and could not advance when caption lookups are
+                # blocked (it would re-fetch, find no new verified videos, and
+                # return nothing).
+                self._merge_youtube_cache(
+                    keyword, list(candidate_state["items"])
+                )
+                self._start_youtube_prefetch(keyword)
                 return
             self._sse_text(
                 "output",
-                "\n/youtube search: no videos between 5 and 40 minutes with "
+                "\n/youtube search: no videos between 5 and 60 minutes with "
                 f"English captions were found for {keyword!r}.\n",
             )
             return
@@ -6100,11 +6256,19 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "pending": False,
             },
         )
+        if len(results) > YOUTUBE_SEARCH_PAGE_SIZE:
+            # Warm the next few pages while the user is still looking at the
+            # first one, so the "More" button usually needs no network work.
+            self._start_youtube_prefetch(keyword)
 
     def _youtube_search_command(
-        self, keyword: str, limit: int, progressive: bool
+        self,
+        keyword: str,
+        limit: int,
+        progressive: bool,
+        exclude: set[str] | None = None,
     ) -> list[str]:
-        return [
+        command = [
             sys.executable,
             "-u",
             str(SCRIPT_DIR / "search_youtube.py"),
@@ -6112,14 +6276,16 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             "--limit",
             str(limit),
             "--min-duration",
-            "300",
+            str(YOUTUBE_SEARCH_MIN_DURATION),
             "--max-duration",
-            "2400",
+            str(YOUTUBE_SEARCH_MAX_DURATION),
             "--any-date",
             "--sort-recent",
-            "--",
-            keyword,
         ]
+        if exclude:
+            command.extend(["--exclude", ",".join(sorted(exclude))])
+        command.extend(["--", keyword])
+        return command
 
     def _normalize_youtube_items(
         self, raw_items: list[dict], limit: int
@@ -6183,16 +6349,30 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         keyword: str,
         limit: int,
         on_candidates: Callable[[list[dict], bool], None] | None = None,
+        exclude: set[str] | None = None,
+        fallback_to_candidates: bool = False,
+        status: dict[str, bool] | None = None,
     ) -> list[dict]:
         """Run search_youtube.py and return normalized video metadata.
 
         With ``on_candidates`` the script is asked to emit its duration-filtered
         candidates before caption verification.  Those are passed to the
         callback immediately, so the UI can paint cards while the final list is
-        still being assembled.
+        still being assembled.  ``exclude`` omits already-known video ids so a
+        "More" request only verifies genuinely new candidates.
+
+        When every English-caption lookup fails (for example because YouTube
+        blocks caption requests from the current IP), the script still emits a
+        usable candidate list.  ``fallback_to_candidates`` returns that list
+        instead of an empty result, so the "More" button and background
+        prefetch keep working with unverified captions rather than appearing
+        to load nothing.  ``status`` is filled with ``captions_unverified`` so
+        callers can label those results honestly.
         """
-        progressive = on_candidates is not None
-        command = self._youtube_search_command(keyword, limit, progressive)
+        progressive = on_candidates is not None or fallback_to_candidates
+        command = self._youtube_search_command(
+            keyword, limit, progressive, exclude=exclude
+        )
 
         if not progressive:
             try:
@@ -6276,10 +6456,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         )
                         if items:
                             candidate_videos = items
-                            on_candidates(
-                                items,
-                                len(items) > YOUTUBE_SEARCH_PAGE_SIZE,
-                            )
+                            if on_candidates is not None:
+                                on_candidates(
+                                    items,
+                                    len(items) > YOUTUBE_SEARCH_PAGE_SIZE,
+                                )
                     elif event_type == "videos":
                         final_videos = self._normalize_youtube_items(
                             payload.get("items") or [], limit
@@ -6305,10 +6486,19 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "YouTube search failed" + (f": {detail}" if detail else ".")
             )
         if final_videos:
+            if status is not None:
+                status["captions_unverified"] = False
             return final_videos
-        # The final event was empty: usually every caption lookup timed out.
-        # Return no results so _command_youtube_search can keep the candidate
-        # cards it already emitted and label them as unverified.
+        # The final event was empty: usually every caption lookup timed out or
+        # was blocked.  A normal /youtube search keeps the candidate cards it
+        # already emitted and labels them as unverified.  "More" and prefetch
+        # have no such callback, so they explicitly ask for the candidates.
+        if fallback_to_candidates and candidate_videos:
+            if status is not None:
+                status["captions_unverified"] = True
+            return candidate_videos[:limit]
+        if status is not None:
+            status["captions_unverified"] = False
         return []
 
     def _cached_youtube_search(
@@ -6341,6 +6531,91 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 self.state.youtube_search_cache[keyword] = videos
         return list(videos[:limit])
 
+    def _youtube_cache_items(self, keyword: str) -> list[dict]:
+        with self.state.lock:
+            return list(self.state.youtube_search_cache.get(keyword) or [])
+
+    def _merge_youtube_cache(
+        self, keyword: str, videos: list[dict]
+    ) -> list[dict]:
+        """Append unseen videos to the keyword cache and return the cache."""
+        with self.state.lock:
+            existing = list(
+                self.state.youtube_search_cache.get(keyword) or []
+            )
+            seen = {video["id"] for video in existing}
+            for video in videos:
+                if video["id"] in seen:
+                    continue
+                seen.add(video["id"])
+                existing.append(video)
+            if existing:
+                self.state.youtube_search_cache[keyword] = existing
+            return list(existing)
+
+    def _grow_youtube_cache(self, keyword: str, target: int) -> list[dict]:
+        """Fetch only the videos needed to reach ``target`` cached results.
+
+        Known ids are passed as ``--exclude`` so caption checks are spent on
+        unseen candidates instead of re-verifying the pages already shown.
+        """
+        target = max(1, min(target, YOUTUBE_SEARCH_MAX_RESULTS))
+        cached = self._youtube_cache_items(keyword)
+        if len(cached) >= target:
+            return cached
+        exclude = {video["id"] for video in cached}
+        videos = self._run_youtube_search(
+            keyword,
+            target - len(cached),
+            exclude=exclude,
+            fallback_to_candidates=True,
+        )
+        return self._merge_youtube_cache(keyword, videos)
+
+    def _start_youtube_prefetch(self, keyword: str) -> None:
+        """Warm the cache for the next "More" clicks in the background."""
+        if not keyword:
+            return
+        with self.state.lock:
+            cached = self.state.youtube_search_cache.get(keyword) or []
+            target = min(
+                max(
+                    YOUTUBE_SEARCH_PREFETCH_RESULTS,
+                    len(cached) + YOUTUBE_SEARCH_PAGE_SIZE * 3,
+                ),
+                YOUTUBE_SEARCH_MAX_RESULTS,
+            )
+            if len(cached) >= target or keyword in self.state.youtube_prefetch:
+                return
+            # Grow in a few small steps.  The first step covers the next
+            # "More" page quickly; later steps keep filling the cache while
+            # the user reads the cards.
+            step = YOUTUBE_SEARCH_PAGE_SIZE * 2
+            targets = []
+            next_target = min(len(cached) + step + 1, target)
+            while next_target < target:
+                targets.append(next_target)
+                next_target = min(next_target + step, target)
+            targets.append(target)
+            event = threading.Event()
+            self.state.youtube_prefetch[keyword] = event
+
+        def prefetch() -> None:
+            try:
+                for step_target in targets:
+                    self._grow_youtube_cache(keyword, step_target)
+            except Exception:
+                # Prefetch is opportunistic; a failure just means "More" will
+                # perform a normal search when the user asks for it.
+                pass
+            finally:
+                with self.state.lock:
+                    if self.state.youtube_prefetch.get(keyword) is event:
+                        self.state.youtube_prefetch.pop(keyword, None)
+                event.set()
+
+        threading.Thread(target=prefetch, daemon=True).start()
+
     def _handle_youtube_more(self, keyword: str, exclude: set[str]) -> None:
         """Return the next page of a previous /youtube search as JSON."""
         if not keyword:
@@ -6348,26 +6623,80 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return
 
         page_size = YOUTUBE_SEARCH_PAGE_SIZE
-        # Ask for one extra unseen result so `has_more` can be exact.
-        requested = min(
-            len(exclude) + page_size + 1,
-            YOUTUBE_SEARCH_MAX_RESULTS,
-        )
+        cached = self._youtube_cache_items(keyword)
+        unseen = [video for video in cached if video["id"] not in exclude]
+
+        # A background prefetch may already be filling the cache.  Poll it for
+        # a short while so we can return as soon as this page is ready, rather
+        # than launching a duplicate YouTube search.
+        if len(unseen) < page_size:
+            with self.state.lock:
+                event = self.state.youtube_prefetch.get(keyword)
+            deadline = time.monotonic() + YOUTUBE_PREFETCH_WAIT_SECONDS
+            while event is not None and time.monotonic() < deadline:
+                event.wait(timeout=0.15)
+                cached = self._youtube_cache_items(keyword)
+                unseen = [
+                    video for video in cached if video["id"] not in exclude
+                ]
+                if len(unseen) >= page_size or event.is_set():
+                    break
+            if len(unseen) < page_size:
+                with self.state.lock:
+                    event = self.state.youtube_prefetch.get(keyword)
+                if event is not None:
+                    event.wait(timeout=0.5)
+                    cached = self._youtube_cache_items(keyword)
+                    unseen = [
+                        video for video in cached
+                        if video["id"] not in exclude
+                    ]
+
+        if len(unseen) >= page_size:
+            items = unseen[:page_size]
+            self._send_json(
+                {
+                    "keyword": keyword,
+                    "items": items,
+                    "has_more": len(unseen) > page_size,
+                }
+            )
+            self._start_youtube_prefetch(keyword)
+            return
+
+        # The cache is short: fetch only the missing, unseen videos.  Asking
+        # for one extra result keeps `has_more` accurate.  If caption checks
+        # are blocked, fall back to the duration/search candidates so "More"
+        # still advances instead of returning an empty page.
+        missing = page_size - len(unseen) + 1
+        known = set(exclude) | {video["id"] for video in cached}
+        status: dict[str, bool] = {}
         try:
-            results = self._cached_youtube_search(keyword, requested)
+            results = self._run_youtube_search(
+                keyword,
+                missing,
+                exclude=known,
+                fallback_to_candidates=True,
+                status=status,
+            )
         except RuntimeError as exc:
             self._send_error_json(f"/youtube search: {exc}", 502)
             return
 
-        unseen = [video for video in results if video["id"] not in exclude]
+        cached = self._merge_youtube_cache(keyword, results)
+        unseen = [video for video in cached if video["id"] not in exclude]
         items = unseen[:page_size]
         self._send_json(
             {
                 "keyword": keyword,
                 "items": items,
                 "has_more": len(unseen) > page_size,
+                "captions_unverified": bool(
+                    status.get("captions_unverified")
+                ),
             }
         )
+        self._start_youtube_prefetch(keyword)
 
     def _command_learn(self, argument: str) -> None:
         if not argument:
@@ -6953,7 +7282,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "output",
                 "\nUsage: /article [--simple] <path_to_an_article>\n"
                 "The file becomes the only context; follow-up questions keep "
-                "the article scope until /tag or /transcript is used.\n"
+                "the article scope until /tag or /youtube transcript is used.\n"
                 "The capped multi-round evidence loop is enabled by default "
                 "(--simple or --fast disables it).\n",
             )
@@ -7648,6 +7977,16 @@ def main() -> None:
     if not CHAT_HTML.is_file():
         sys.exit(f"Missing front end: {CHAT_HTML}")
 
+    # Warm the models while the corpus is being loaded, then wait for the
+    # warmup to finish before accepting requests. Serving during prewarm made
+    # the first question compete with a 20+ GB model load, which more than
+    # doubled its time to first token.
+    prewarm_thread: threading.Thread | None = None
+    if not args.no_prewarm:
+        prewarm_thread = threading.Thread(target=chat.prewarm, daemon=True)
+        prewarm_thread.start()
+        print("Warming Ollama models...", flush=True)
+
     try:
         state = ChatState(
             args.tag,
@@ -7657,16 +7996,32 @@ def main() -> None:
     except SystemExit as exc:
         sys.exit(f"Cannot start chat server: {exc}")
 
-    if not args.no_prewarm:
-        threading.Thread(target=chat.prewarm, daemon=True).start()
+    if prewarm_thread is not None:
+        # Do not block startup forever if Ollama is slow or unavailable; the
+        # first real request still works and will warm the model itself.
+        prewarm_thread.join(timeout=120)
+        if prewarm_thread.is_alive():
+            print(
+                "Ollama warmup is still running; starting anyway.",
+                flush=True,
+            )
+        else:
+            print("Ollama models are ready.", flush=True)
+
+    # Build the BM25 index before accepting requests. Otherwise the first
+    # question pays the index-construction cost for the whole corpus.
+    chat.get_bm25_index(state.chunks)
 
     ChatRequestHandler.state = state
     server = ThreadingHTTPServer((args.host, args.port), ChatRequestHandler)
     server.daemon_threads = True
     address = f"http://{args.host}:{args.port}/"
-    print(f"Loaded {len(state.chunks)} trunks for soft tag {state.tag!r}.")
-    print(f"YouTube local chat server running at {address}")
-    print("Press Ctrl+C to stop.")
+    print(
+        f"Loaded {len(state.chunks)} trunks for soft tag {state.tag!r}.",
+        flush=True,
+    )
+    print(f"YouTube local chat server running at {address}", flush=True)
+    print("Press Ctrl+C to stop.", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

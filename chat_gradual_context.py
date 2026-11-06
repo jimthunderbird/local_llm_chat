@@ -89,6 +89,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,7 +154,7 @@ LIST_PATTERN = re.compile(
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = Path.cwd() / "youtube_transcript"
-TAGS_PATH = Path.cwd() / "tags.json"
+TAGS_PATH = Path.cwd() / "tags.toml"
 DEFAULT_TAG = "japan"
 # Sentinel used by --tag with no value: ask for the tag interactively.
 INTERACTIVE_TAG = "\0__interactive_tag__"
@@ -334,7 +335,7 @@ def load_tag_video_ids(tag: str) -> set[str]:
     """Validate a soft tag and return every learned video id.
 
     This legacy gradual-context clone keeps its embedding-based retrieval, but
-    tags are now soft query-time scopes from ./tags.json rather than physical
+    tags are now soft query-time scopes from ./tags.toml rather than physical
     membership files.
     """
     if tag not in available_tags():
@@ -558,9 +559,9 @@ class CommandCompleter(Completer):
 
 
 def available_tags() -> list[str]:
-    """Return the tag names defined in ./tags.json."""
+    """Return the tag names defined in ./tags.toml."""
     try:
-        raw = json.loads(TAGS_PATH.read_text(encoding="utf-8"))
+        raw = tomllib.loads(TAGS_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     if not isinstance(raw, dict):
@@ -649,7 +650,7 @@ def prompt_for_video_id() -> str:
 
 
 def prompt_for_tag() -> str:
-    """Prompt for a tag, tab-completing the names in ./tags.json."""
+    """Prompt for a tag, tab-completing the names in ./tags.toml."""
     tags = available_tags()
     if not tags:
         sys.exit(f"No tags found in {TAGS_PATH}")
@@ -1873,7 +1874,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="?",
         const=INTERACTIVE_TAG,
         default=DEFAULT_TAG,
-        help="soft tag context from ./tags.json "
+        help="soft tag context from ./tags.toml "
         f"(default: {DEFAULT_TAG}); omit the value to pick a tag "
         "interactively with tab completion",
     )

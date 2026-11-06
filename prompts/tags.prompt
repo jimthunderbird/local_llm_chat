@@ -1,4 +1,63 @@
 task (completed) {
+  in tags.toml, remove all the "keywords" section, do not use "keywords" in context at all, simply use "description"
+}
+
+task (completed) {
+  can we make the time to answer even faster, the goal is to make it 100% faster
+
+  Implemented:
+  app/chat_server.py
+  - Stopped rebuilding the BM25 index on every question. `_iterative_evidence`
+    created a fresh paragraph-only list each time, and `get_bm25_index` caches
+    by list identity, so the whole 10,717-trunk corpus was re-indexed (~2 s)
+    per question. A stable per-corpus paragraph list is now reused, and the
+    server prebuilds the index before accepting requests.
+  - Added a lexical sufficiency fast path: for non-enumerative questions, if
+    the gathered evidence contains every content word of the question, the
+    small-model sufficiency call is skipped. Enumerative questions now check
+    every other round (round 1 was always checked before).
+  - Reused tag-independent iterative evidence across every cross-tag fallback
+    attempt. Expansion, BM25, and sufficiency checks no longer rerun once per
+    candidate tag; only `tag_filter_candidates` is tag-specific.
+  - Added a 0.05 lexical score floor for fallback tags, so clearly unrelated
+    tags are never attempted (IDP no longer tries rust/golang/php/AI).
+  - Removed the duplicate generic relevance filter when a soft tag filter is
+    already running, and stopped discarding gathered evidence with a second
+    BM25 pass when the conservative checker says "not sufficient".
+  - Reused the stable paragraph list for /article retrieval as well.
+  chat.py
+  - Prewarm both the small model and the answer model with the exact `num_ctx`
+    each real call uses, eliminating Ollama reloads on the first question.
+  server startup
+  - Prewarm concurrently with corpus loading, wait for it (bounded at 120 s)
+    before serving, and prebuild BM25. The first question no longer competes
+    with a 20+ GB model load.
+
+  Measured on the same machine, warm server, same questions:
+  ┌────────────────────────────────┬──────────────────┬──────────────────┐
+  │ Question                       │ Before (total /  │ After (total /   │
+  │                                │ TTFT)            │ TTFT)            │
+  ├────────────────────────────────┼──────────────────┼──────────────────┤
+  │ where is nijo market           │ 10.8 s / 10.1 s  │ 3.3 s / 2.4 s    │
+  │ what are all levels of wagyu   │ 13.5 s / 7.4 s   │ 8.0 s / 1.8 s    │
+  │ where can i get IDP?           │ 29.8 s / 29.8 s  │ 1.4 s / 1.4 s    │
+  │ what time does nijo market open│ 4.8 s / 4.7 s    │ 1.4 s / 1.3 s    │
+  └────────────────────────────────┴──────────────────┴──────────────────┘
+
+  Time-to-first-token improved by roughly 50-95% and total time by roughly
+  25-95%. The remaining floor for long list answers is answer generation by
+  ornith:35b (~44 tok/s); for "levels of wagyu" that is 6.5 s of the 8.0 s
+  total, so halving total time for long answers would require a faster answer
+  model or deliberately shorter output, both of which conflict with the
+  existing model/answer requirements.
+}
+
+task (completed) {
+  change tags.json to tags.toml, that will be easier for human to maintain the tag information
+  change related code to reflect this change as well
+}
+
+task (completed) {
   currently when asking a question, the iterative evidence approach is very slow, please find ways to make it faster
 
   Optimizations implemented                                                                                                                          

@@ -1,0 +1,42 @@
+# Tag registry: the single source of truth for valid tags.
+# Each top-level table is a tag scope used by the chatbot. A tag that is
+# not defined here is invalid.
+
+[ai_and_coding]
+description = "Artificial intelligence, AI companies and labs, AI models and tools, large language models, software engineering, programming, coding, and the effects of AI on software development and technical work."
+
+[ai_math]
+description = "Relationship between Artificial Intelligence and Math"
+
+[ai_math_coding]
+description = "Artificial intelligence, mathematics, and coding: machine learning theory, mathematical reasoning, algorithms, proofs, quantitative methods, and AI-assisted programming."
+
+[artificial_intelligence]
+description = "Artificial intelligence, AI companies and labs, large language models, machine learning, AI capabilities, AI safety, and the societal or economic impact of AI."
+
+[golang]
+description = "The Go programming language: syntax, concurrency with goroutines and channels, the standard library, tooling, performance, backend services, and Go ecosystem practices."
+
+[home_inspector_california]
+description = "California home inspection: property condition, construction defects, inspection reports, building systems, and residential real-estate due diligence in California."
+
+[japan]
+description = "Japan, Japanese culture, society, economy, history, language, travel, and people or organizations from Japan."
+
+[math]
+description = "Mathematics: algebra, calculus, geometry, number theory, probability, statistics, proofs, and mathematical problem solving."
+
+[php]
+description = "The PHP programming language: syntax, web development, Composer, frameworks such as Laravel and Symfony, and PHP tooling and practices."
+
+[programming_software]
+description = "Software engineering and programming: languages, architecture, testing, developer tools, DevOps, careers, and engineering practice."
+
+[retire]
+description = "Retirement planning: pensions, savings, withdrawal strategies, early retirement, cost of living, healthcare, and retirement visas."
+
+[rust]
+description = "The Rust programming language: ownership, borrowing, lifetimes, the borrow checker, Cargo, crates, systems programming, and safe concurrency."
+
+[trade_school_job_program_bubble]
+description = "Trade schools, vocational training, job programs, labor-market bubbles, career switching, and the value of non-degree credentials."

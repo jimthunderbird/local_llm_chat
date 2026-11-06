@@ -33,11 +33,11 @@ The pipeline is:
 
 There are two distinct data scopes:
 
-    tag scope        one global corpus, scoped at query time by ./tags.json
+    tag scope        one global corpus, scoped at query time by ./tags.toml
     transcript scope trunks of one video only, selected by /transcript
     article scope    paragraphs of one local article, selected by /article
 
-The default tag is "japan". ./tags.json is the tag registry: each tag has a
+The default tag is "japan". ./tags.toml is the tag registry: each tag has a
 description and optional keywords. Tags do not partition the corpus and are
 never assigned to videos during ingestion. No embeddings are loaded at any
 point.
@@ -469,7 +469,7 @@ Why memory stays moderate
       "Error: ..." and keeps the session alive.
     - Query expansion failure: warning, retrieval uses the original question.
     - Filter failure/unparseable output: keep unfiltered BM25 candidates.
-    - Tag scope returns NONE: route to the best other tag from tags.json
+    - Tag scope returns NONE: route to the best other tag from tags.toml
       (unless in transcript/article scope); if no tag fits, explain the scope.
     - No trunks in scope: load_chunks exits with a hint to run youtube_video_learn.py.
     - Trunk read failure in context build: that chunk is skipped; if no text

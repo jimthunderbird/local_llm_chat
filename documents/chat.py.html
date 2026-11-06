@@ -145,9 +145,9 @@
 <div class="grid">
   <div class="card">
     <h4>Data scopes</h4>
-    <p><strong>Soft tag scope</strong> — one global corpus filtered at query time by the tag description and keywords in <code>./tags.json</code>. Default tag: <code>japan</code>.</p>
+    <p><strong>Soft tag scope</strong> — one global corpus filtered at query time by the tag description and keywords in <code>./tags.toml</code>. Default tag: <code>japan</code>.</p>
     <p><strong>Transcript scope</strong> — one video selected with <code>/transcript</code>. Tag routing is disabled in this scope.</p>
-    <p class="small"><code>./tags.json</code> is the tag registry; tags are never written into per-video files.</p>
+    <p class="small"><code>./tags.toml</code> is the tag registry; tags are never written into per-video files.</p>
   </div>
   <div class="card">
     <h4>Three local models</h4>
@@ -175,7 +175,7 @@
   <li><strong><code>prewarm()</code></strong> <span class="pill">chat.py:2606</span> runs in a daemon thread and sends a one-token request to <code>qwen3:1.7b</code> and <code>ornith:35b</code> with <code>keep_alive="30m"</code>. This moves model loading off the input critical path. Failures are ignored.</li>
   <li><strong><code>load_all_chunks()</code></strong>:
     <ul>
-      <li>validates the selected tag against <code>./tags.json</code>;</li>
+      <li>validates the selected tag against <code>./tags.toml</code>;</li>
       <li>globs every <code>./youtube_transcript/*.trunk</code> file into one global corpus;</li>
       <li>creates lightweight <code>Chunk(video_id, index, trunk_path)</code> objects, sorted by <code>(video_id, index)</code>;</li>
       <li>reads <em>no</em> trunk text and builds <em>no</em> BM25 index yet;</li>

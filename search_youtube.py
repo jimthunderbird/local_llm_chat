@@ -6,7 +6,7 @@ Usage:
     python3 search_youtube.py <keyword> --json [--limit N] \\
         [--min-duration SECONDS] [--max-duration SECONDS] \\
         [--any-date] [--no-transcript-check] [--sort-recent] \\
-        [--progressive-json]
+        [--progressive-json] [--exclude VIDEO_IDS]
 
 Outputs one video hash per line, e.g.:
     FTwxtyOEGyM
@@ -445,6 +445,7 @@ def _search_candidates_innertube(
     max_duration,
     enough,
     within_year,
+    exclude=frozenset(),
 ):
     """Fetch a small, filtered candidate pool via InnerTube.
 
@@ -473,7 +474,7 @@ def _search_candidates_innertube(
                 break
             for video in page:
                 video_id = video["id"]
-                if video_id in seen:
+                if video_id in seen or video_id in exclude:
                     continue
                 seen.add(video_id)
                 if _duration_ok(video, min_duration, max_duration):
@@ -497,6 +498,7 @@ def _search_candidates_ytdlp(
     min_duration,
     max_duration,
     within_year,
+    exclude=frozenset(),
 ):
     """Fallback candidate search using yt-dlp's flat playlist extraction."""
     options = {
@@ -519,6 +521,7 @@ def _search_candidates_ytdlp(
         if (
             not video_id
             or video_id in seen
+            or video_id in exclude
             or not VIDEO_ID_RE.match(video_id)
             # Skip anything that is not a plain video result (channels,
             # playlists, etc.).
@@ -631,13 +634,14 @@ def search_videos(
     within_year=True,
     sort_recent=False,
     on_candidates=None,
+    exclude=None,
 ):
     """Return up to `limit` video metadata dicts matching `keyword`.
 
     Durations are given in seconds.  By default results are restricted to
     videos published within the last year, at most 20 minutes long, and with
     an English transcript available.  ``/youtube search`` relaxes the date
-    restriction and uses a 5-40 minute duration window; it still requires
+    restriction and uses a 5-60 minute duration window; it still requires
     English captions for every returned video.
 
     With ``sort_recent`` the results are ordered newest first using the
@@ -648,9 +652,15 @@ def search_videos(
     ``on_candidates`` is an optional callback used by progressive callers.  It
     receives the ordered, duration-filtered candidates before caption
     verification so a UI can paint cards immediately.
+
+    ``exclude`` is a set of already-known video ids.  They are filtered out
+    while the candidate pool is collected, so caption checks are spent only
+    on genuinely new videos (this is what makes the UI "More" button cheap).
     """
+    exclude = frozenset(exclude or ())
     candidate_limit = min(
-        max(limit * CANDIDATE_MULTIPLIER, MIN_CANDIDATES),
+        max(limit * CANDIDATE_MULTIPLIER, MIN_CANDIDATES)
+        + len(exclude),
         MAX_CANDIDATES,
     )
     enough = max(
@@ -665,6 +675,7 @@ def search_videos(
         max_duration=max_duration,
         enough=enough,
         within_year=within_year,
+        exclude=exclude,
     )
     if videos is None:
         videos = _search_candidates_ytdlp(
@@ -673,6 +684,7 @@ def search_videos(
             min_duration=min_duration,
             max_duration=max_duration,
             within_year=within_year,
+            exclude=exclude,
         )
         if sort_recent and videos:
             _enrich_upload_dates(videos)
@@ -773,6 +785,15 @@ def main(argv=None):
             "event (used by the /youtube search UI)"
         ),
     )
+    parser.add_argument(
+        "--exclude",
+        default="",
+        metavar="VIDEO_IDS",
+        help=(
+            "comma-separated video ids to omit from candidates and results "
+            "(used by the /youtube More button)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.limit < 1:
@@ -781,6 +802,12 @@ def main(argv=None):
         parser.error("--min-duration cannot be negative")
     if args.max_duration < args.min_duration:
         parser.error("--max-duration must be greater than or equal to --min-duration")
+
+    exclude = {
+        video_id.strip()
+        for video_id in args.exclude.split(",")
+        if video_id.strip()
+    }
 
     def emit_candidates(candidates):
         if not candidates or not args.progressive_json:
@@ -807,6 +834,7 @@ def main(argv=None):
             within_year=not args.any_date,
             sort_recent=args.sort_recent,
             on_candidates=emit_candidates,
+            exclude=exclude,
         )
     except Exception as exc:
         sys.exit(f"YouTube search failed: {exc}")

@@ -1260,7 +1260,7 @@
   }
   #video-panel[hidden] { display: none; }
   .video-modal-card {
-    width: min(900px, 100%);
+    width: min(1120px, 100%);
     max-height: 88vh;
     display: flex;
     flex-direction: column;
@@ -1309,17 +1309,120 @@
     font-size: 13px;
     color: #cfdae5;
   }
+  .video-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.55fr) minmax(250px, 1fr);
+    gap: 14px;
+    align-items: start;
+  }
+  .video-side {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-height: min(48vh, 460px);
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+  @media (max-width: 760px) {
+    .video-layout { grid-template-columns: minmax(0, 1fr); }
+    .video-side { max-height: none; overflow: visible; }
+  }
+  .video-action {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    background: #101b26;
+    border: 1px solid #223344;
+    border-radius: 8px;
+  }
+  .video-action-title {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .video-action-note {
+    color: var(--dim);
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+  .video-action-btn {
+    align-self: flex-start;
+    background: #142334;
+    color: var(--text);
+    border: 1px solid #30465d;
+    border-radius: 6px;
+    padding: 7px 18px;
+    font-family: var(--mono);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .video-action-btn:hover:not(:disabled) {
+    border-color: var(--accent-2);
+    color: #fff;
+  }
+  .video-action-btn:disabled { opacity: .65; cursor: wait; }
+  .video-action-btn.is-chat { border-color: #3d6b8f; }
+  .video-action-progress {
+    height: 6px;
+    background: #0a121a;
+    border: 1px solid #30465d;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .video-action-progress[hidden] { display: none; }
+  .video-action-fill {
+    width: 0%;
+    height: 100%;
+    background: var(--accent-2);
+    transition: width .25s ease;
+  }
   .video-player {
     position: relative;
     width: 100%;
     height: min(48vh, 460px);
-    margin: 0 0 14px;
+    margin: 0;
     background: #060a0e;
     border: 1px solid #223344;
     border-radius: 8px;
     overflow: hidden;
   }
   .video-player[hidden] { display: none; }
+  .video-player.is-maximized {
+    position: fixed;
+    inset: 12px;
+    width: auto;
+    height: auto;
+    margin: 0;
+    z-index: 70;
+    border-radius: 10px;
+    box-shadow: 0 0 0 100vmax rgba(2, 6, 10, .92);
+  }
+  .video-maximize {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 2;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(8, 14, 20, .72);
+    border: 1px solid rgba(120, 170, 210, .45);
+    border-radius: 6px;
+    color: #dfeaf5;
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: .72;
+    transition: opacity .15s ease, background .15s ease;
+  }
+  .video-maximize:hover { opacity: 1; background: rgba(16, 27, 38, .95); }
+  .video-maximize:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .video-player iframe {
     position: absolute;
     inset: 0;
@@ -1341,6 +1444,12 @@
   #video-summary-error { margin-bottom: 8px; }
   #video-summary-error[hidden] { display: none; }
   .video-summary .markdown p:first-child { margin-top: 0; }
+  .video-side .video-summary {
+    padding: 12px;
+    background: #101b26;
+    border: 1px solid #223344;
+    border-radius: 8px;
+  }
 
   /* Small centered modal used when a /youtube search video is already learned. */
   #learn-panel {
@@ -1662,16 +1771,30 @@
       <button id="video-close" type="button" title="Close (Esc)">×</button>
     </div>
     <div class="video-modal-body">
-      <div id="video-player" class="video-player" hidden>
-        <iframe id="video-iframe" title="YouTube video player"
-                allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
-                allowfullscreen loading="lazy"></iframe>
-      </div>
-      <div id="video-summary" class="video-summary" hidden>
-        <div class="video-summary-label">Summary</div>
-        <div id="video-summary-loading" hidden>summarizing this video…</div>
-        <div id="video-summary-error" class="error-text" hidden></div>
-        <div id="video-summary-content" class="markdown"></div>
+      <div class="video-layout">
+        <div id="video-player" class="video-player" hidden>
+          <iframe id="video-iframe" title="YouTube video player"
+                  allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+                  allowfullscreen loading="lazy"></iframe>
+          <button id="video-maximize" class="video-maximize" type="button"
+                  title="Maximize player" aria-label="Maximize player">⛶</button>
+        </div>
+        <div class="video-side">
+          <div id="video-action" class="video-action" hidden>
+            <div class="video-action-title">This video</div>
+            <div id="video-action-note" class="video-action-note"></div>
+            <button id="video-action-btn" class="video-action-btn" type="button" hidden></button>
+            <div id="video-action-progress" class="video-action-progress" hidden>
+              <div id="video-action-fill" class="video-action-fill"></div>
+            </div>
+          </div>
+          <div id="video-summary" class="video-summary" hidden>
+            <div class="video-summary-label">Summary</div>
+            <div id="video-summary-loading" hidden>summarizing this video…</div>
+            <div id="video-summary-error" class="error-text" hidden></div>
+            <div id="video-summary-content" class="markdown"></div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -1731,7 +1854,7 @@
       <span class="k">Ctrl+L / ⌘K</span><span class="d">clear the console</span>
       <span class="k">Drag text</span><span class="d">select output text, then Ctrl+C / ⌘C to copy</span>
       <span class="k">Click a word</span><span class="d">open a streaming /dict popup (drag instead to select); also works in /news, /medium, and video summaries</span>
-      <span class="k">Click a video</span><span class="d">play it in a centered modal; the Summary button streams an AI overview of the video</span>
+      <span class="k">Click a video</span><span class="d">play it in a centered modal; the right column offers Learn or Chat, and the Summary button streams an AI overview</span>
       <span class="k">中文 in /news</span><span class="d">translate a news or Medium story title, or the open story, into Simplified Chinese</span>
       <span class="k">? in code</span><span class="d">explain that line (rust, golang, and php answers)</span>
       <span class="k">− in popup</span><span class="d">minimize the dictionary popup; click its chip at the right of the status bar to reopen</span>
@@ -1789,7 +1912,13 @@ const videoModalMetaEl = $("#video-modal-meta");
 const videoLinkEl = $("#video-link");
 const videoPlayerEl = $("#video-player");
 const videoIframeEl = $("#video-iframe");
+const videoMaximizeEl = $("#video-maximize");
 const videoSummaryEl = $("#video-summary");
+const videoActionEl = $("#video-action");
+const videoActionNoteEl = $("#video-action-note");
+const videoActionBtnEl = $("#video-action-btn");
+const videoActionProgressEl = $("#video-action-progress");
+const videoActionFillEl = $("#video-action-fill");
 const videoSummaryLoadingEl = $("#video-summary-loading");
 const videoSummaryErrorEl = $("#video-summary-error");
 const videoSummaryContentEl = $("#video-summary-content");
@@ -3317,6 +3446,7 @@ function makeEntry(kind, options = {}) {
     text: "",
     output: "",
     choices: [],
+    choicesKind: "",
     error: "",
     complete: false,
     clickable: Boolean(options.clickable),
@@ -3545,7 +3675,7 @@ function renderEntry(entry) {
         toast("Wait for the current answer to finish.");
         return;
       }
-      submitText(`/transcript ${choice.value}`, true);
+      submitText(`/youtube transcript ${choice.value}`, true);
     });
     entry.choicesEl.appendChild(button);
   }
@@ -4035,6 +4165,7 @@ async function loadMoreVideos(entry) {
       (item) => !seen.has(item.id)
     );
     if (items.length) entry.videos = (entry.videos || []).concat(items);
+    if (data?.captions_unverified) entry.videosCaptionsUnverified = true;
     entry.videosHasMore = Boolean(data?.has_more);
   } catch (error) {
     entry.videosError = error?.message || String(error);
@@ -4066,7 +4197,7 @@ function renderVideoResults(entry) {
     : entry.videosCaptionsUnverified
       ? "English captions unavailable to verify"
       : "English captions";
-  note.textContent = `${items.length} result${items.length === 1 ? "" : "s"} · 5–40 min · ${captionNote}`;
+  note.textContent = `${items.length} result${items.length === 1 ? "" : "s"} · 5–60 min · ${captionNote}`;
   head.appendChild(label);
   head.appendChild(note);
   container.appendChild(head);
@@ -4285,6 +4416,7 @@ function refreshVideoLearnUi(videoId) {
   )) {
     updateVideoLearnButton(button, state);
   }
+  if (videoItem?.id === videoId) renderVideoAction(videoItem);
 }
 
 function ensureVideoLearnPolling(delay = 600) {
@@ -4515,9 +4647,126 @@ function startVideoSummary(item) {
     });
 }
 
+let videoActionGeneration = 0;
+
+function resetVideoAction() {
+  videoActionGeneration += 1;
+  if (!videoActionEl) return;
+  videoActionEl.hidden = true;
+  videoActionNoteEl.textContent = "";
+  videoActionBtnEl.hidden = true;
+  videoActionBtnEl.disabled = false;
+  videoActionBtnEl.onclick = null;
+  videoActionBtnEl.className = "video-action-btn";
+  videoActionProgressEl.hidden = true;
+  videoActionFillEl.style.width = "0%";
+}
+
+function videoStateIsLearned(state) {
+  return Boolean(
+    state?.learned || state?.status === "learned" || state?.status === "done"
+  );
+}
+
+/* Right-hand column of the video modal: a Learn button until the video has
+ * a transcript/rewrite, then a Chat button that scopes the conversation to
+ * this video (equivalent to /youtube transcript <url>). */
+function renderVideoAction(item) {
+  if (!item?.id || !videoActionEl || videoItem?.id !== item.id) return;
+  const state = videoLearnState.get(item.id);
+  const running = state?.status === "running" || state?.status === "queued";
+  const learned = videoStateIsLearned(state);
+
+  videoActionEl.hidden = false;
+  videoActionBtnEl.hidden = false;
+  videoActionBtnEl.disabled = false;
+  videoActionBtnEl.className = "video-action-btn";
+  videoActionBtnEl.onclick = null;
+  videoActionProgressEl.hidden = !running;
+
+  if (running) {
+    const percent = videoLearnPercent(state);
+    videoActionFillEl.style.width = `${percent}%`;
+    const step = String(state?.step || "Learning")
+      .replace(/\.py$/i, "")
+      .replace(/_/g, " ");
+    videoActionNoteEl.textContent = `${step} · ${Math.round(percent)}%`;
+    videoActionBtnEl.hidden = true;
+    return;
+  }
+
+  if (learned) {
+    videoActionNoteEl.textContent =
+      "This video is learned. Chat uses only this video's transcript.";
+    videoActionBtnEl.textContent = "Chat";
+    videoActionBtnEl.classList.add("is-chat");
+    videoActionBtnEl.title = "Chat about this video";
+    videoActionBtnEl.onclick = () => {
+      closeVideoModal();
+      submitText(`/youtube transcript ${item.url || item.id}`, true);
+    };
+    return;
+  }
+
+  if (state?.status === "error") {
+    videoActionNoteEl.textContent = state.error
+      ? `Learn failed: ${state.error}`
+      : "Learn failed.";
+    videoActionBtnEl.textContent = "Retry";
+    videoActionBtnEl.title = "Retry learning this video";
+  } else {
+    videoActionNoteEl.textContent =
+      "Learn this video to chat with its transcript in this window.";
+    videoActionBtnEl.textContent = "Learn";
+    videoActionBtnEl.title = "Learn this video in the background";
+  }
+  videoActionBtnEl.onclick = () => {
+    startVideoLearn(item).then(() => renderVideoAction(item));
+  };
+}
+
+async function refreshVideoAction(item) {
+  if (!item?.id) return;
+  const generation = ++videoActionGeneration;
+  videoActionEl.hidden = false;
+  videoActionNoteEl.textContent = "Checking whether this video is learned…";
+  videoActionBtnEl.hidden = true;
+  videoActionProgressEl.hidden = true;
+  try {
+    const response = await fetch(
+      `/api/video_learn_status?id=${encodeURIComponent(item.id)}`
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    if (generation !== videoActionGeneration || videoItem?.id !== item.id) {
+      return;
+    }
+    if (data?.id) videoLearnState.set(item.id, data);
+    renderVideoAction(item);
+  } catch (error) {
+    if (generation !== videoActionGeneration || videoItem?.id !== item.id) {
+      return;
+    }
+    // Fall back to whatever the card-level Learn state already knows.
+    if (videoLearnState.has(item.id)) {
+      renderVideoAction(item);
+    } else {
+      videoActionNoteEl.textContent =
+        "Could not check the learned status. You can still try learning it.";
+      videoActionBtnEl.hidden = false;
+      videoActionBtnEl.textContent = "Learn";
+      videoActionBtnEl.onclick = () => {
+        startVideoLearn(item).then(() => renderVideoAction(item));
+      };
+    }
+  }
+}
+
 function openVideoModal(item, mode = "play") {
   if (!item?.id) return;
   resetVideoSummary();
+  resetVideoAction();
+  setVideoMaximized(false);
   videoItem = item;
   videoModalTitleEl.textContent = item.title || item.id;
   const metaParts = [];
@@ -4541,15 +4790,52 @@ function openVideoModal(item, mode = "play") {
     videoSummaryEl.hidden = true;
   }
   videoPanelEl.hidden = false;
+  refreshVideoAction(item);
 }
 
 function closeVideoModal() {
   resetVideoSummary();
+  resetVideoAction();
+  setVideoMaximized(false);
   videoItem = null;
   videoPanelEl.hidden = true;
   videoIframeEl.src = "about:blank";
   videoSummaryEl.hidden = true;
 }
+
+/* Maximize the embedded player to fill the viewport, and restore it back to
+ * the modal's default size. The iframe is only resized, never reloaded, so
+ * playback position and state are preserved across both transitions. */
+function setVideoMaximized(maximized) {
+  const isMaximized = Boolean(maximized);
+  videoPlayerEl.classList.toggle("is-maximized", isMaximized);
+  videoMaximizeEl.textContent = isMaximized ? "🗗" : "⛶";
+  videoMaximizeEl.title = isMaximized ? "Restore player (Esc)" : "Maximize player";
+  videoMaximizeEl.setAttribute(
+    "aria-label",
+    isMaximized ? "Restore player" : "Maximize player"
+  );
+}
+
+function toggleVideoMaximized() {
+  setVideoMaximized(!videoPlayerEl.classList.contains("is-maximized"));
+}
+
+videoMaximizeEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  toggleVideoMaximized();
+});
+
+/* Escape restores the maximized player first; a second Escape closes the
+ * modal. Capture phase so it wins over the modal close shortcut below. */
+document.addEventListener("keydown", (event) => {
+  if (event.isComposing || event.key !== "Escape") return;
+  if (videoPlayerEl.classList.contains("is-maximized") === false) return;
+  event.preventDefault();
+  event.stopPropagation();
+  setVideoMaximized(false);
+}, true);
 
 $("#video-close").addEventListener("click", closeVideoModal);
 videoPanelEl.addEventListener("click", (event) => {
@@ -5568,6 +5854,7 @@ function submitText(text, fromChoice = false) {
     },
     choices: (data) => {
       entry.choices = Array.isArray(data.items) ? data.items : [];
+      entry.choicesKind = String(data?.kind || "");
       scheduleRender(entry);
     },
     error: (data) => addError(entry, data.message || "Unknown server error."),
@@ -5743,16 +6030,24 @@ function completionContext() {
   let kind = null;
   let start = firstSpace + 1;
   if (name === "/tag") kind = "tags";
-  else if (name === "/transcript" || name === "/search_transcript") kind = "transcripts";
   else if (name === "/youtube") {
-    // First argument: complete the subcommand; no tag-specific subcommands.
+    // First argument: complete the subcommand.  After "transcript" or
+    // "search_transcript", complete the learned video hashes.
     const args = value.slice(firstSpace + 1, caret);
     const subSeparator = args.search(/\s/);
     if (subSeparator < 0) {
       kind = "youtube_subcommands";
       start = firstSpace + 1;
     } else {
-      return null;
+      const sub = args.slice(0, subSeparator).toLowerCase();
+      if (sub === "transcript" || sub === "search_transcript") {
+        kind = "transcripts";
+        const rest = args.slice(subSeparator);
+        const leading = rest.length - rest.trimStart().length;
+        start = firstSpace + 1 + subSeparator + leading;
+      } else {
+        return null;
+      }
     }
   }
   else if (name === "/news") {

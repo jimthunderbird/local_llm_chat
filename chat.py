@@ -4,12 +4,12 @@
 Usage:
     python3 chat.py [--tag <tag>]
 
-If --tag is given without a value, the available tags in ./tags.json are
+If --tag is given without a value, the available tags in ./tags.toml are
 listed and can be tab-completed at the interactive "Tag:" prompt.
 
 At startup every ./youtube_transcript/<youtube_video_hash>.<index>.trunk file
 is loaded into one global in-memory corpus. Tags are soft query-time scopes:
---tag (default: japan) selects a tag from ./tags.json, and retrieval keeps
+--tag (default: japan) selects a tag from ./tags.toml, and retrieval keeps
 trunks that are relevant to both the question and that tag's description. No
 embedding files and no cosine similarity are used.
 
@@ -23,11 +23,11 @@ For each question:
        per-video cap, near-duplicate removal, and a token budget).
     4. Filter the candidate chunks with the small qwen3:1.7b question filter
        before synthesis (skipped for list/aggregation questions, which need
-       broad coverage). Then apply the soft tag scope: the tag name,
-       description, and keywords are sent to the same small model, which keeps
+       broad coverage). Then apply the soft tag scope: the tag name and
+       description are sent to the same small model, which keeps
        only candidates relevant to both the tag context and the question. If
-       no candidate fits, routing may switch to another tag from tags.json.
-       An explicit `/transcript` scope never falls back.
+       no candidate fits, routing may switch to another tag from tags.toml.
+       An explicit `/youtube transcript` scope never falls back.
     5. Wrap every selected trunk in a numbered <chunk id="N"> block and build
        the answer prompt from ./research/100_trunks_prompt.txt, so the model
        stays grounded in the retrieved passages without exposing chunk ids.
@@ -57,12 +57,12 @@ Commands:
     /memory            Show memory used by the BM25 index.
     /tag [tag]         Switch the soft tag context (does not reload trunks).
     /refresh           Reload the global trunk corpus.
-    /transcript <hash|keyword>
+    /youtube transcript <hash|keyword>
                        Use one video's transcript (reloads trunks).
                        A keyword searches the .title files with ag and shows
                        a hinting list of <hash> <title> matches to pick from.
-    /search_transcript <keyword>
-                       Alias for /transcript <keyword>.
+    /youtube search_transcript <keyword>
+                       Search transcript titles with ag and pick a video.
     /youtube learn <hash|url>
                        Fetch, rewrite, chunk, and embed a video.
     /wiki <question>   For a narrow fact question, search the full Wikipedia
@@ -99,6 +99,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
@@ -197,6 +198,9 @@ FILTER_NUM_PREDICT = 96
 LLM_FILTER_ENABLED = True
 # Query expansion is deliberately tiny: a single line, at most 32 tokens.
 EXPANSION_NUM_PREDICT = 32
+# All small-model helper calls use this context size. Keeping it identical
+# everywhere (including prewarm) prevents Ollama from reloading the model.
+EXPANSION_NUM_CTX = 8192
 # Fuzzy query-term correction. Proper nouns are frequently misspelled in
 # questions ("terrence tao" / "terrance tao" vs. "Terence Tao") and BM25
 # matches whole tokens exactly, so an out-of-vocabulary word contributes
@@ -246,8 +250,8 @@ OLLAMA_KEEP_ALIVE = "30m"
 # When the active tag has no lexically relevant trunk, search every tagged
 # video before concluding that the knowledge base cannot answer. This keeps
 # the tag as the default scope without turning an out-of-scope question into
-# a false "insufficient information" answer. It is disabled for /transcript,
-# where the single-video scope is explicit.
+# a false "insufficient information" answer. It is disabled for
+# /youtube transcript, where the single-video scope is explicit.
 CROSS_TAG_FALLBACK_ENABLED = True
 # Questions that ask for an exhaustive or comparative answer get more context.
 LIST_QUERY_PATTERN = re.compile(
@@ -263,7 +267,7 @@ PROGRESSIVE_FIRST_PASS = 10
 CHARS_PER_TOKEN = 4
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = Path.cwd() / "youtube_transcript"
-TAGS_PATH = Path.cwd() / "tags.json"
+TAGS_PATH = Path.cwd() / "tags.toml"
 DEFAULT_TAG = "japan"
 # A tag context is a soft query-time scope, not a partition of the corpus.
 # These guards validate the registry before it is used.
@@ -872,9 +876,7 @@ COMMANDS = {
     "/memory": "show memory used by the BM25 index",
     "/tag": "switch the soft tag context (does not reload trunks)",
     "/refresh": "reload the global trunk corpus",
-    "/transcript": "use one transcript by hash/URL or search titles with ag",
-    "/search_transcript": "alias for /transcript <keyword> (ag title search)",
-    "/youtube": "YouTube video commands: /youtube learn <hash|url>",
+    "/youtube": "YouTube commands: /youtube learn <hash|url> | transcript <hash|URL|keyword> | search_transcript <keyword>",
     "/ask": "ask a quick question directly (no knowledge-base retrieval)",
     "/wiki": "answer narrow fact questions from Wikipedia article excerpts, else show entity summaries",
     "/wiki_article": "print the full Wikipedia article for each main entity of <question>",
@@ -891,6 +893,8 @@ COMMANDS = {
 # Subcommands grouped under /youtube.
 YOUTUBE_SUBCOMMANDS = {
     "learn": "fetch, rewrite, chunk, and embed one video",
+    "transcript": "use one transcript by hash/URL, or search titles with ag",
+    "search_transcript": "search transcript titles with ag and pick a video",
 }
 
 
@@ -946,7 +950,8 @@ class AnswerCache:
 
 @dataclass(frozen=True)
 class TranscriptMatch:
-    """A title-file match returned by /transcript and /search_transcript."""
+    """A title-file match returned by /youtube transcript and
+    /youtube search_transcript."""
 
     video_id: str
     title: str
@@ -954,25 +959,21 @@ class TranscriptMatch:
 
 @dataclass(frozen=True)
 class TagProfile:
-    """A soft tag: a name, description, and optional lexical keywords."""
+    """A soft tag: a name and description used as the query-time scope."""
 
     name: str
     description: str
-    keywords: tuple[str, ...] = ()
 
     @property
     def lexical_terms(self) -> str:
-        return " ".join((self.description, *self.keywords))
+        return self.description
 
     @property
     def prompt_block(self) -> str:
-        keywords = ", ".join(self.keywords)
-        keyword_line = f"Keywords: {keywords}\n" if keywords else ""
         return (
             "<tag_context>\n"
             f"Tag: {self.name}\n"
             f"Description: {self.description}\n"
-            f"{keyword_line}"
             "</tag_context>\n"
             "The user is currently exploring this tag. Prefer context that "
             "fits this topic. Do not use this tag description as a source "
@@ -986,7 +987,7 @@ _TAGS_CACHE: tuple[tuple, dict[str, TagProfile]] | None = None
 
 
 def _tags_signature() -> tuple:
-    """Return a cache/invalidation signature for ./tags.json."""
+    """Return a cache/invalidation signature for ./tags.toml."""
     try:
         stat = TAGS_PATH.stat()
     except OSError:
@@ -999,15 +1000,6 @@ def tags_version() -> str:
     return ":".join(str(part) for part in _tags_signature())
 
 
-def _reject_duplicate_tag_keys(pairs: list[tuple[str, object]]) -> dict:
-    result: dict = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate tag key {key!r}")
-        result[key] = value
-    return result
-
-
 def _normalize_tag_profile(name: object, value: object) -> TagProfile:
     if not isinstance(name, str) or not TAG_NAME_PATTERN.fullmatch(name):
         raise ValueError(
@@ -1017,39 +1009,21 @@ def _normalize_tag_profile(name: object, value: object) -> TagProfile:
 
     if isinstance(value, str):
         description = value.strip()
-        keywords: tuple[str, ...] = ()
     elif isinstance(value, dict):
         description = str(value.get("description", "")).strip()
-        raw_keywords = value.get("keywords", [])
-        if raw_keywords is None:
-            raw_keywords = []
-        if not isinstance(raw_keywords, list):
-            raise ValueError(
-                f"tag {name!r}: keywords must be a list of strings"
-            )
-        normalized: list[str] = []
-        for keyword in raw_keywords:
-            if not isinstance(keyword, str):
-                raise ValueError(
-                    f"tag {name!r}: keywords must be a list of strings"
-                )
-            keyword = " ".join(keyword.split())
-            if keyword and keyword not in normalized:
-                normalized.append(keyword)
-        keywords = tuple(normalized)
     else:
         raise ValueError(
             f"tag {name!r} must be a description string or an object with "
-            "a description and optional keywords"
+            "a description"
         )
 
     if not description:
         raise ValueError(f"tag {name!r}: description must not be empty")
-    return TagProfile(name=name, description=description, keywords=keywords)
+    return TagProfile(name=name, description=description)
 
 
 def load_tags(force: bool = False) -> dict[str, TagProfile]:
-    """Load and validate ./tags.json, caching by mtime and size.
+    """Load and validate ./tags.toml, caching by mtime and size.
 
     The file is the single source of truth for valid tags. A tag that is not
     present here is invalid, even if an old ./tags/<tag> file exists.
@@ -1061,21 +1035,18 @@ def load_tags(force: bool = False) -> dict[str, TagProfile]:
 
     if not TAGS_PATH.is_file():
         sys.exit(
-            f"Tag registry not found: {TAGS_PATH}. Create tags.json with at "
+            f"Tag registry not found: {TAGS_PATH}. Create tags.toml with at "
             "least the default tag before starting the chatbot."
         )
     try:
-        raw = json.loads(
-            TAGS_PATH.read_text(encoding="utf-8"),
-            object_pairs_hook=_reject_duplicate_tag_keys,
-        )
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raw = tomllib.loads(TAGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
         sys.exit(f"Invalid tag registry {TAGS_PATH}: {exc}")
 
     if not isinstance(raw, dict) or not raw:
         sys.exit(
-            f"Invalid tag registry {TAGS_PATH}: expected a non-empty JSON "
-            "object of tag names to descriptions."
+            f"Invalid tag registry {TAGS_PATH}: expected non-empty TOML "
+            "tables mapping tag names to descriptions."
         )
 
     try:
@@ -1091,7 +1062,7 @@ def load_tags(force: bool = False) -> dict[str, TagProfile]:
 
 
 def available_tags() -> list[str]:
-    """Return the validated tag names from ./tags.json."""
+    """Return the validated tag names from ./tags.toml."""
     return sorted(load_tags())
 
 
@@ -1362,7 +1333,8 @@ def load_chunks(
 
     Tags are soft scopes resolved at query time, so ``tag`` no longer
     partitions the corpus. Passing a tag validates it and only changes the
-    progress message. When ``video_ids`` is given (the /transcript command),
+    progress message. When ``video_ids`` is given (the /youtube transcript
+    command),
     only those videos are loaded. No embedding files are read; BM25 indexes
     the trunk text lazily on the first question.
     """
@@ -1539,7 +1511,7 @@ def chat_status_report(
         + (
             "disabled (explicit article/transcript scope)"
             if article is not None or transcript is not None
-            else "routes to the best matching tag from ./tags.json when the "
+            else "routes to the best matching tag from ./tags.toml when the "
             "active soft tag has nothing relevant"
         ),
         f"  answer cache: {cache_entries} entr{'y' if cache_entries == 1 else 'ies'}",
@@ -1555,8 +1527,8 @@ class CommandCompleter(Completer):
         text = document.text_before_cursor
         if not text.startswith("/"):
             return
-        # Commands are always the first word; once an argument is typed,
-        # only /tag gets completions (the tag names from ./tags).
+        # Commands are always the first word. Once an argument is typed,
+        # /tag, /youtube, and /youtube transcript get completions.
         if any(ch.isspace() for ch in text):
             name, _, argument = text.partition(" ")
             prefix = argument.lstrip()
@@ -1564,13 +1536,23 @@ class CommandCompleter(Completer):
                 for tag in available_tags():
                     if tag.startswith(prefix):
                         yield Completion(tag, start_position=-len(prefix))
-            elif name.lower() == "/transcript":
-                for video_id in available_video_ids():
-                    if video_id.startswith(prefix):
-                        yield Completion(video_id, start_position=-len(prefix))
             elif name.lower() == "/youtube":
+                subcommand, separator, subargument = prefix.partition(" ")
+                if separator:
+                    if subcommand.lower() in {
+                        "transcript",
+                        "search_transcript",
+                    }:
+                        video_prefix = subargument.lstrip()
+                        for video_id in available_video_ids():
+                            if video_id.startswith(video_prefix):
+                                yield Completion(
+                                    video_id,
+                                    start_position=-len(video_prefix),
+                                )
+                    return
                 for subcommand, description in YOUTUBE_SUBCOMMANDS.items():
-                    if subcommand.startswith(prefix):
+                    if subcommand.startswith(prefix.lower()):
                         yield Completion(
                             subcommand,
                             start_position=-len(prefix),
@@ -1603,7 +1585,7 @@ def available_video_ids() -> list[str]:
 
 
 class TagCompleter(Completer):
-    """Tab-complete tag names from ./tags.json."""
+    """Tab-complete tag names from ./tags.toml."""
 
     def get_completions(self, document, complete_event):
         prefix = document.text_before_cursor
@@ -1623,7 +1605,7 @@ class VideoCompleter(Completer):
 
 
 class TranscriptMatchCompleter(Completer):
-    """Tab-complete video ids from the current /transcript matches."""
+    """Tab-complete video ids from the current /youtube transcript matches."""
 
     def __init__(self, matches: list[TranscriptMatch]) -> None:
         self.matches = matches
@@ -1669,7 +1651,7 @@ def prompt_for_video_id() -> str:
 
 
 def prompt_for_tag() -> str:
-    """Prompt for a tag, tab-completing the names in ./tags.json."""
+    """Prompt for a tag, tab-completing the names in ./tags.toml."""
     tags = available_tags()
     if not tags:
         sys.exit(f"No tags defined in {TAGS_PATH}")
@@ -1806,10 +1788,10 @@ def make_prompt_session(
     def _auto_space(buffer) -> None:
         if buffer.text in {
             "/tag",
-            "/transcript",
-            "/search_transcript",
             "/youtube",
             "/youtube learn",
+            "/youtube transcript",
+            "/youtube search_transcript",
             "/wiki",
             "/wiki_article",
             "/dict",
@@ -2621,15 +2603,9 @@ def tag_filter_candidates(
     # provided chunks are all outside this topic, say so plainly", which
     # biases the tiny scope model toward NONE even when the candidates are a
     # clear tag match (for example IDP chunks under the japan tag).
-    keyword_line = (
-        f"\nKeywords: {', '.join(profile.keywords)}"
-        if profile.keywords
-        else ""
-    )
     tag_text = (
         f"Tag: {profile.name}\n"
-        f"Description: {profile.description}{keyword_line}"
-        + "\n"
+        f"Description: {profile.description}\n"
     )
 
     for offset in range(0, len(candidates), batch_size):
@@ -2687,12 +2663,18 @@ def rank_tags_for_question(
     chunks: list[Chunk],
     exclude: str | None = None,
     limit: int | None = None,
+    min_score: float = 0.0,
 ) -> list[str]:
     """Rank registry tags by lexical fit to the question and its candidates.
 
     This is the cheap first pass of the soft-tag router. It inspects the top
     question matches over the global corpus, then scores each tag profile by
     its coverage of those candidates plus direct overlap with the question.
+
+    ``min_score`` drops tags whose lexical evidence is too weak to be worth a
+    full retrieval/answer attempt. Cross-tag fallback uses it to avoid spending
+    several seconds on clearly unrelated tags (for example trying ``golang``
+    and ``php`` for a question about a Japanese driving permit).
     """
     profiles = load_tags()
     other_tags = [name for name in sorted(profiles) if name != exclude]
@@ -2736,6 +2718,8 @@ def rank_tags_for_question(
         scores[name] = coverage + 0.5 * overlap
 
     ordered = sorted(other_tags, key=lambda name: (-scores[name], name))
+    if min_score > 0.0:
+        ordered = [name for name in ordered if scores[name] >= min_score]
     return ordered[:limit] if limit is not None else ordered
 
 
@@ -4573,7 +4557,7 @@ def switch_tag(
 
     The global trunk corpus is unchanged, so no reload or BM25 rebuild is
     needed. Returns the new tag and the current chunks, or None when the
-    switch was cancelled or the tag is not in ./tags.json.
+    switch was cancelled or the tag is not in ./tags.toml.
     """
     tags = available_tags()
     if not tags:
@@ -4659,7 +4643,7 @@ def activate_transcript(
 def switch_transcript(
     argument: str, current_chunks: list[Chunk]
 ) -> tuple[str, list[Chunk]] | None:
-    """Handle /transcript: pick one video's trunks and release the rest.
+    """Handle /youtube transcript: pick one video's trunks and release the rest.
 
     The argument may be a video id, a YouTube URL, or a keyword. Keywords
     are searched against ./youtube_transcript/*.title with ag, and the
@@ -4819,10 +4803,10 @@ def select_transcript_match(
 def search_and_switch_transcript(
     argument: str, current_chunks: list[Chunk]
 ) -> tuple[str, list[Chunk]] | None:
-    """Handle /search_transcript and /transcript <keyword>."""
+    """Handle /youtube search_transcript and /youtube transcript <keyword>."""
     keyword = argument.strip()
     if not keyword:
-        print("Usage: /search_transcript <keyword>")
+        print("Usage: /youtube search_transcript <keyword>")
         return None
 
     matches = search_transcript_titles(keyword)
@@ -5085,6 +5069,10 @@ def answer(
 
         should_filter = (
             LLM_FILTER_ENABLED
+            # A soft tag already runs ``tag_filter_candidates`` over the raw
+            # candidates below; running the generic relevance filter first is
+            # duplicate small-model work and roughly doubles that latency.
+            and tag_profile is None
             and not LIST_QUERY_PATTERN.search(question)
             and FILTER_MIN_CANDIDATES <= len(raw) <= FILTER_MAX_CANDIDATES
         )
@@ -5382,8 +5370,19 @@ def show_sources(sources: list[tuple[Chunk, float]]) -> None:
 
 
 def prewarm() -> None:
-    """Load the expansion/filter and chat models and keep them resident."""
-    for model in (EXPANSION_MODEL, CHAT_MODEL):
+    """Load the expansion/filter and chat models and keep them resident.
+
+    Warm each model with the same ``num_ctx`` the real calls use. Ollama
+    reloads a model whenever the requested context size changes, so warming
+    with the default context used to guarantee a slow reload on the first
+    question (and another one whenever the small and answer models alternated).
+    """
+    targets = (
+        (EXPANSION_MODEL, EXPANSION_NUM_CTX),
+        (FILTER_MODEL, EXPANSION_NUM_CTX),
+        (CHAT_MODEL, ANSWER_NUM_CTX),
+    )
+    for model, num_ctx in dict.fromkeys(targets):
         try:
             requests.post(
                 f"{OLLAMA_HOST}/api/generate",
@@ -5392,9 +5391,9 @@ def prewarm() -> None:
                     "prompt": "",
                     "stream": False,
                     "keep_alive": OLLAMA_KEEP_ALIVE,
-                    "options": {"num_predict": 1},
+                    "options": {"num_predict": 1, "num_ctx": num_ctx},
                 },
-                timeout=(2, 120),
+                timeout=(2, 180),
             )
         except requests.RequestException:
             # Prewarming is best-effort; the first real request still works.
@@ -5410,7 +5409,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="?",
         const=INTERACTIVE_TAG,
         default=DEFAULT_TAG,
-        help="soft tag context from ./tags.json "
+        help="soft tag context from ./tags.toml "
         f"(default: {DEFAULT_TAG}); omit the value to pick a tag "
         "interactively with tab completion",
     )
@@ -5481,7 +5480,7 @@ def main() -> None:
         "dd/dw = delete, u = undo. Up/Down = question + command history."
     )
     print(
-        "Commands: /tag [tag], /refresh, /transcript <hash|keyword>, "
+        "Commands: /tag [tag], /refresh, /youtube transcript <hash|keyword>, "
         "/youtube learn <hash|url>, /ask <question>, /wiki <question>, "
         "/wiki_article <question>, /dict <word>, /depth <n|auto>, "
         "/memory, /status, /sources, /benchmark [on|off], /exit. "
@@ -5529,29 +5528,27 @@ def main() -> None:
                     transcript = None
                     cache.clear()
                     print(f"Now using soft tag {tag!r} (global corpus refreshed).")
-            elif name == "/transcript":
-                switched = switch_transcript(argument, chunks)
-                if switched is not None:
-                    transcript, chunks = switched
-                    cache.clear()
-                    print(
-                        f"Now answering only from transcript {transcript!r}."
-                    )
-            elif name == "/search_transcript":
-                switched = search_and_switch_transcript(argument, chunks)
-                if switched is not None:
-                    transcript, chunks = switched
-                    cache.clear()
-                    print(
-                        f"Now answering only from transcript {transcript!r}."
-                    )
             elif name == "/youtube":
                 subcommand, _, subargument = argument.partition(" ")
                 subcommand = subcommand.strip().lower()
                 value = subargument.strip()
+                if subcommand in {"transcript", "search_transcript"}:
+                    if subcommand == "transcript":
+                        switched = switch_transcript(value, chunks)
+                    else:
+                        switched = search_and_switch_transcript(value, chunks)
+                    if switched is not None:
+                        transcript, chunks = switched
+                        cache.clear()
+                        print(
+                            f"Now answering only from transcript {transcript!r}."
+                        )
+                    continue
                 if subcommand != "learn":
                     print(
-                        "Usage: /youtube learn <youtube_video_hash|url>"
+                        "Usage: /youtube learn <youtube_video_hash|url> | "
+                        "transcript <hash|URL|keyword> | "
+                        "search_transcript <keyword>"
                     )
                     continue
                 if not value:
@@ -5736,7 +5733,8 @@ def main() -> None:
             else:
                 print(
                     f"Unknown command: {name}. "
-                    "Try /tag [tag], /refresh, /transcript <hash|keyword>, "
+                    "Try /tag [tag], /refresh, "
+                    "/youtube transcript <hash|keyword>, "
                     "/youtube learn <hash|url>, /ask <question>, /wiki <question>, "
                     "/wiki_article <question>, /dict <word>, "
                     "/depth <n|auto>, /memory, /status, /sources, "

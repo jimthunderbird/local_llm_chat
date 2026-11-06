@@ -1,3 +1,127 @@
+task.ask_about_this_video (completed) {
+  after task.video_duration and task.transcript_command_refactor are completed {
+    when a video is popup, present a 2 column layout:
+    - column left: the video player
+    - column right: {
+      if this video is not "learned" yet {
+        present a "Learn" button, which will behave the same as "/youtube learn <this current video's url>"
+      } else {
+        present a "Chat" button {
+          a chatbot with command "/youtube transcript <this current video's url>" applied so that we can chat on this particular video
+        }
+      }
+    }
+  }
+}
+
+task.transcript_command_refactor (completed) {
+  currently there is a /transcript command, please change it to /youtube transcript
+}
+
+task.video_duration (completed) {
+  - larger range of videos: we should return a list of 6 related and most recent videos ranging from 5 minutes to 60 minutes
+}
+
+task (completed) {
+  bug:
+  now when i click "learn" in youtube video, it fails to fetch youtube transcript, why? please fix it
+
+  Root cause:
+  youtube-transcript-api raises RequestBlocked/IpBlocked on this network, and
+  the learn pipeline had no fallback, so fetch_youtube_transcript.py exited
+  before rewrite/trunks/embeddings ever ran.
+
+  Implemented:
+  fetch_youtube_transcript.py
+  - Added a provider chain: youtube-transcript-api first, then a yt-dlp
+  fallback. The fallback tries the ios/web_embedded/mweb/android_vr player
+  clients and uses --ignore-no-formats-error, so captions are retrievable
+  even when YouTube returns "Sign in to confirm you're not a bot" to the
+  transcript API.
+  - Parses yt-dlp's json3 captions (VTT as fallback) into the same plain-text
+  format the rest of the pipeline already expects.
+  - Added caching: an existing .transcript is reused, and an existing .title
+  is reused, so retries and the learn pipeline are idempotent and do not
+  hit YouTube or Ollama again.
+  - Added opt-in proxy support (YT_PROXY_URL, WEBSHARE_PROXY_USERNAME/
+  WEBSHARE_PROXY_PASSWORD) and opt-in yt-dlp cookies
+  (YT_COOKIES_FROM_BROWSER, YT_COOKIES_FILE).
+  - Saves the transcript before calling Ollama, so a model/title failure no
+  longer discards a successful fetch, and reports one concise error with
+  the blocking hint plus both provider failures.
+
+  Verified with the blocked network that originally failed: the direct API
+  reports "blocked", the yt-dlp ios client downloads json3 captions, and the
+  transcript + 20-word title are written successfully. A second run completes
+  from cache in ~0.15 s.
+}
+
+task (completed) {
+  bug:
+  when clicking on the "More" button under the list of youtube video, no videos are loaded
+
+  Implemented:
+  search_youtube.py
+  - Unchanged; the progressive candidate event already contains the next
+  duration-filtered videos even when caption verification cannot finish.
+
+  app/chat_server.py
+  - `_run_youtube_search` can now fall back to the candidate list when every
+  English-caption lookup fails (for example when YouTube blocks caption
+  requests). It also reports `captions_unverified` to the caller.
+  - The `/youtube search` fallback path seeds the per-keyword cache with the
+  candidate cards that were just painted, instead of leaving the cache
+  empty.
+  - Background prefetch and `/api/youtube_more` use the candidate fallback,
+  so "More" returns the next unseen videos rather than an empty page when
+  caption checks are blocked.
+
+  app/chat.html
+  - `loadMoreVideos` preserves/sets the unverified-caption state reported by
+  the server, so the list label stays accurate after loading more cards.
+}
+
+task (completed) {
+  currently, using youtube search <words> loads the list of video really fast, but when clicking on the "More" button, the video list is loading very slowly, please speed it up
+
+  Implemented:
+  search_youtube.py
+  - Added `--exclude <video ids>`. Excluded ids are dropped while the
+  candidate pool is collected, so caption checks are spent only on new
+  videos instead of re-verifying the page the user already sees.
+  - Candidate limits grow with the excluded set, so excluding a long list
+  cannot starve the "More" page of candidates.
+
+  app/chat_server.py
+  - After the first /youtube page is rendered, a daemon thread warms the
+  per-keyword cache to ~37 results in the background. The next "More"
+  clicks are then served from memory with no YouTube round-trip.
+  - "More" now returns cached unseen videos immediately when available,
+  waits briefly for an in-progress prefetch instead of starting a
+  duplicate search, and otherwise fetches only the missing unseen videos
+  with `--exclude`.
+  - Cache growth appends deduplicated results, preserving the newest-first
+  order, and keeps prefetching after each "More" so later clicks stay fast.
+}
+
+task (completed) {
+  for youtube video player, make it so that it can maximize and resume to the default size
+
+  Implemented:
+  app/chat.html
+  - Added a "⛶" maximize control in the top-right corner of the embedded
+  YouTube player inside the /youtube search modal.
+  - Clicking it toggles `.video-player.is-maximized`, which pins the player to
+  the viewport (`position: fixed; inset: 12px`) with the rest of the page
+  dimmed, and clicking the "🗗" control (or pressing Escape) restores the
+  modal's default player size.
+  - The iframe is only resized, never reloaded, so playback continues from the
+  same position across maximize/restore.
+  - Escape restores a maximized player first; a second Escape then closes the
+  modal as before (capture-phase handler, so it beats the existing shortcut).
+  - Maximized state is reset whenever the modal is opened or closed.
+}
+
 task.optimize_youtube_searching_speed (completed) {
   reference research.optimize_youtube_searching_speed, in searching_speed.html, we have:
   "Recommended path. Remove the per-video date enrichment from the critical path, shrink the candidate pool, verify captions only for the shortlist (in parallel, with a deadline), and stream cards to the UI in batches. The same existing libraries already reach ~3.7 s with a 24-candidate pool and a 12-way caption check; a direct InnerTube search response can bring the first cards down to ~1–2.5 s, with dates and caption checks filling in afterwards."
