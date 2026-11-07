@@ -1,4 +1,20 @@
 task (completed) {
+  find out how the chat works in the book specific chat, what kind of technique or algorithms does it use, save the findings to documents/project_gutenberg_book_specific_chat.html  
+}
+
+  Findings:
+  documents/project_gutenberg_book_specific_chat.html now documents the full
+  /gutenberg book-specific chat architecture: Open Library plus Gutenberg
+  catalogue search, the two-file plaintext/RAG cache, the content-addressed
+  article cache, the overview/digest/section-summary/paragraph trunk layout,
+  regex and small-model question routing (overview, section, narrow, iterative),
+  BM25 plus query expansion/fuzzy correction, the bounded iterative evidence and
+  small-model sufficiency loop, prompt construction and streaming, per-book
+  ChatState isolation with a 3-book LRU, context/token budgets, memory and
+  latency characteristics, browser word lookup and per-book chat behavior, and
+  design limits.
+
+task (completed) {
   refactor /guttenberg search <keywords>:
   - use examples like "https://openlibrary.org/search.json?title=the+time+machine&author=h+g+wells", pull the matching Gutenberg text identifier
 

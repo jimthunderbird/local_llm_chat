@@ -1,0 +1,1211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project Gutenberg Book-Specific Chat — Architecture and Algorithms</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #121923;
+    --panel-2: #17202c;
+    --border: #263243;
+    --text: #d6e1ec;
+    --muted: #92a4b8;
+    --accent: #62d6a8;
+    --accent-2: #7cb8ff;
+    --warn: #e7c46a;
+    --code: #0a0e14;
+    --inline: #1b2634;
+    --max: 1180px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: linear-gradient(180deg, #0b1017 0%, var(--bg) 360px);
+    color: var(--text);
+    font: 15px/1.62 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+  }
+  a { color: var(--accent-2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header {
+    max-width: var(--max);
+    margin: 0 auto;
+    padding: 52px 26px 24px;
+  }
+  header .eyebrow {
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+  }
+  header h1 {
+    margin: 10px 0 12px;
+    font-size: clamp(28px, 4.5vw, 46px);
+    line-height: 1.12;
+    letter-spacing: -.02em;
+  }
+  header p.lede {
+    max-width: 880px;
+    margin: 0;
+    color: var(--muted);
+    font-size: 17px;
+  }
+  header .meta {
+    margin-top: 18px;
+    color: #798a9e;
+    font-size: 12.5px;
+  }
+  main {
+    max-width: var(--max);
+    margin: 0 auto;
+    padding: 0 26px 80px;
+  }
+  nav.toc {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 22px;
+    margin: 18px 0 34px;
+  }
+  nav.toc strong { color: var(--accent); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; }
+  nav.toc ol { margin: 10px 0 0; padding-left: 22px; columns: 2; column-gap: 40px; }
+  nav.toc li { margin: 4px 0; break-inside: avoid; }
+  section {
+    margin: 0 0 38px;
+    padding: 26px 28px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+  }
+  section > h2 {
+    margin: 0 0 14px;
+    font-size: 24px;
+    letter-spacing: -.01em;
+  }
+  section > h2 .num {
+    color: var(--accent);
+    font-weight: 600;
+    margin-right: 10px;
+  }
+  h3 { margin: 26px 0 10px; font-size: 17.5px; color: #e8f1fa; }
+  h4 { margin: 20px 0 8px; font-size: 14.5px; color: var(--accent-2); }
+  p { margin: 9px 0; }
+  ul, ol { margin: 9px 0 9px 22px; padding: 0; }
+  li { margin: 5px 0; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+  .lede { color: var(--muted); }
+  code, kbd {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: .88em;
+    background: var(--inline);
+    border: 1px solid #243143;
+    border-radius: 5px;
+    padding: .12em .38em;
+  }
+  pre {
+    margin: 12px 0;
+    padding: 16px 18px;
+    overflow: auto;
+    background: var(--code);
+    border: 1px solid #202c3c;
+    border-radius: 10px;
+    font: 12.5px/1.6 "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    color: #c7d6e6;
+  }
+  pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+    font-size: 13.5px;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 8px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: var(--panel-2); color: #dfe9f4; font-weight: 650; }
+  tr:nth-child(even) td { background: rgba(255,255,255,.012); }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin: 14px 0;
+  }
+  .card {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 15px 17px;
+  }
+  .card h4 { margin-top: 0; }
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: rgba(98, 214, 168, .055);
+    border-radius: 0 8px 8px 0;
+    padding: 12px 16px;
+    margin: 14px 0;
+  }
+  .callout.warn {
+    border-left-color: var(--warn);
+    background: rgba(231, 196, 106, .06);
+  }
+  .tag {
+    display: inline-block;
+    border: 1px solid #2f4054;
+    border-radius: 999px;
+    padding: 1px 9px;
+    color: #a9c7e4;
+    font-size: 11px;
+    margin-right: 4px;
+  }
+  .diagram {
+    color: #a8c4dd;
+    line-height: 1.5;
+  }
+  .kbd-badge {
+    display: inline-block;
+    min-width: 20px;
+    text-align: center;
+    background: #1a2634;
+    border: 1px solid #33475e;
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 0 5px;
+    font: 11px/1.5 monospace;
+    color: #cdddec;
+  }
+  footer {
+    max-width: var(--max);
+    margin: 0 auto;
+    padding: 0 26px 50px;
+    color: #6f8093;
+    font-size: 12px;
+  }
+  @media (max-width: 760px) {
+    nav.toc ol { columns: 1; }
+    .grid { grid-template-columns: 1fr; }
+    section { padding: 20px 18px; }
+    header { padding: 36px 18px 18px; }
+    main, footer { padding-left: 18px; padding-right: 18px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">Research / architecture note</div>
+  <h1>Project Gutenberg Book-Specific Chat</h1>
+  <p class="lede">
+    How the <code>/gutenberg</code> book reader answers questions about a single
+    book: a section-aware, content-addressed, lexical RAG pipeline built on the
+    existing <code>/article</code> engine, isolated per book and streamed into a
+    two-column modal.
+  </p>
+  <div class="meta">
+    Scope: current implementation in <code>app/chat_server.py</code> and
+    <code>app/chat.html</code>, reusing <code>chat.py</code>. Based on source
+    inspection plus the books already cached under <code>.chat/gutenberg_cache</code>.
+  </div>
+</header>
+
+<main>
+<nav class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#summary">Executive summary</a></li>
+    <li><a href="#flow">End-to-end flow</a></li>
+    <li><a href="#catalog">Catalog search</a></li>
+    <li><a href="#ingestion">Book ingestion and caching</a></li>
+    <li><a href="#index">The book-specific index</a></li>
+    <li><a href="#routing">Question routing</a></li>
+    <li><a href="#retrieval">Retrieval and evidence gathering</a></li>
+    <li><a href="#prompt">Prompting and answer streaming</a></li>
+    <li><a href="#session">Session isolation, history, and cache</a></li>
+    <li><a href="#memory">Memory, context, and performance</a></li>
+    <li><a href="#frontend">Browser UI behavior</a></li>
+    <li><a href="#limits">Design limits and failure modes</a></li>
+    <li><a href="#sources">Key source locations</a></li>
+  </ol>
+</nav>
+
+<section id="summary">
+  <h2><span class="num">01</span>Executive summary</h2>
+  <p>
+    The book-specific chat is <strong>not</strong> a separate RAG stack and it
+    does <strong>not</strong> put a whole book into the model context. It is an
+    isolated instance of the existing article pipeline:
+  </p>
+  <ul>
+    <li>
+      <strong>One book = one isolated <code>ChatState</code>.</strong>
+      The main chat's tag/transcript scope and conversation are untouched while
+      the modal is open. Up to three book sessions stay resident; older ones are
+      evicted, while their downloaded text and on-disk index stay cached.
+    </li>
+    <li>
+      <strong>Paragraph-level lexical retrieval.</strong>
+      The cleaned book is split into article-style paragraph trunks. BM25 over
+      those paragraphs is the retrieval source of truth. There are no embeddings
+      and no cosine similarity.
+    </li>
+    <li>
+      <strong>A deterministic summary tree adds document structure.</strong>
+      A cached structure file records chapter/section spans and builds
+      extractive section summaries, a compact overview, and a larger digest.
+      Those synthetic trunks are attached only when useful; they never replace
+      paragraph retrieval.
+    </li>
+    <li>
+      <strong>Routing chooses the cheapest context shape.</strong>
+      A question is routed to one of: whole-book overview, one section, narrow
+      retrieval, or iterative evidence gathering across the book.
+    </li>
+    <li>
+      <strong>Small-model evidence checks bound the context.</strong>
+      The iterative path retrieves a few paragraphs at a time and asks
+      <code>qwen3:1.7b</code> whether the evidence is sufficient, adding missing
+      terms to the next BM25 query. Hard round and token caps guarantee
+      termination.
+    </li>
+    <li>
+      <strong>The answer is streamed by <code>ornith:35b</code>.</strong>
+      The prompt is the existing file-based 100-trunk prompt template, with
+      article-specific instructions prepended. Answers stream over SSE into a
+      per-book chat pane, and every word remains dictionary-clickable.
+    </li>
+  </ul>
+  <div class="callout">
+    <strong>The core idea:</strong> classify the question first, retrieve only
+    the paragraphs (and a few section summaries) needed for that kind of
+    question, then answer inside a bounded 32,768-token model window. A
+    multi-megabyte novel is never copied into the prompt.
+  </div>
+</section>
+
+<section id="flow">
+  <h2><span class="num">02</span>End-to-end flow</h2>
+  <pre class="diagram">/gutenberg search &lt;keywords&gt;
+        │
+        ├─ Open Library search API (primary: id_project_gutenberg)
+        └─ gutenberg.org catalogue search page (fallback for unlinked works)
+        │
+        ▼
+  "books" SSE event → clickable cards in chat.html
+        │
+        ▼
+  openGutenbergModal(book)
+        │
+        ├─ GET /api/gutenberg_book
+        │     └─ ensure_gutenberg_book()
+        │           download once → strip PG header/footer
+        │           → &lt;id&gt;.txt (display) + &lt;id&gt;.rag.txt (RAG)
+        │     └─ left pane streams the full plaintext
+        │
+        └─ first question → POST /api/gutenberg_chat
+              └─ get_gutenberg_chat_state(book_id)
+                    └─ _load_article_chunks(&lt;id&gt;.rag.txt)
+                          content hash → .article_cache/article_&lt;hash&gt;/
+                          overview trunk, digest trunk,
+                          section-summary trunks, paragraph trunks,
+                          cached article_structure.json
+              └─ isolated ChatState (article mode, no tag fallback)
+                    └─ _run_question()
+                          article router
+                          → BM25 / section expansion / iterative evidence
+                          → prompt template + book evidence
+                          → ornith:35b streams tokens
+              └─ SSE: meta → delta* → done
+                    └─ right pane renders Markdown + clickable words</pre>
+  <p>
+    The two columns are intentionally decoupled. The left pane is a pure
+    plaintext read; the right pane owns the retrieval and model work. A book is
+    indexed lazily on the first question, not when the modal opens, so opening a
+    book costs only the plaintext download.
+  </p>
+</section>
+
+<section id="catalog">
+  <h2><span class="num">03</span>Catalog search</h2>
+  <p>
+    <code>/gutenberg search &lt;keywords&gt;</code> is implemented by
+    <code>search_gutenberg_books()</code>. It returns up to
+    <code>GUTENBERG_BOOK_RESULT_LIMIT = 12</code> normalized cards.
+  </p>
+  <ol>
+    <li>
+      <strong>Open Library first.</strong> A free-form query such as
+      <code>the time machine by h g wells</code> is parsed into the documented
+      <code>?title=…&amp;author=…</code> form; other queries use <code>q</code>.
+      The response is requested with
+      <code>id_project_gutenberg, cover_i, cover_edition_key, edition_count,
+      ebook_access</code> and related metadata. Each work that has a numeric
+      <code>id_project_gutenberg</code> becomes a card.
+    </li>
+    <li>
+      <strong>Gutenberg catalogue fallback.</strong> Not every Open Library work
+      is linked to a Gutenberg text yet. If fewer than 12 cards are found, the
+      <code>gutenberg.org/ebooks/search/</code> page is parsed for ebook ids,
+      titles, authors, and download counts. It only fills the remaining slots.
+    </li>
+    <li>
+      <strong>Deduplication.</strong> Results are deduplicated by canonical
+      numeric Gutenberg id, so the same book cannot appear twice from the two
+      sources.
+    </li>
+  </ol>
+  <p>
+    A card carries <code>id</code>, <code>title</code>, <code>authors</code>,
+    <code>languages</code>, <code>subjects</code>,
+    <code>first_publish_year</code>, <code>download_count</code>, the
+    <code>gutenberg.org/ebooks/&lt;id&gt;</code> page URL, and the plaintext URL
+    <code>…/ebooks/&lt;id&gt;.txt.utf-8</code>. The server emits these as a
+    <code>books</code> SSE event; the browser renders clickable cards.
+  </p>
+</section>
+
+<section id="ingestion">
+  <h2><span class="num">04</span>Book ingestion and caching</h2>
+  <p>
+    <code>ensure_gutenberg_book(book_id, text_url, title)</code> owns download
+    and normalization. It is idempotent and safe under concurrent requests:
+    per-book locks make sure two tabs cannot download and write the same book at
+    once.
+  </p>
+  <div class="grid">
+    <div class="card">
+      <h4>Download policy</h4>
+      <ul>
+        <li>Validate the id with <code>^\d{1,8}$</code>.</li>
+        <li>Reuse <code>.chat/gutenberg_cache/&lt;id&gt;.txt</code> and
+          <code>&lt;id&gt;.rag.txt</code> if both exist.</li>
+        <li>Stream the download in 256 KiB blocks.</li>
+        <li>Reject books over
+          <code>GUTENBERG_TEXT_MAX_BYTES = 30 MiB</code>.</li>
+        <li>Write to temporary files, then atomically rename.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Normalization</h4>
+      <ul>
+        <li>Decode UTF-16 when a BOM is present, then try UTF-8 BOM,
+          UTF-8, CP1252, Latin-1, and finally UTF-8 with replacement.</li>
+        <li>Strip the Project Gutenberg
+          <code>*** START OF … ***</code> and
+          <code>*** END OF … ***</code> boilerplate.</li>
+        <li>Remove the older “End of Project Gutenberg” trailer.</li>
+        <li>Store clean text as <code>&lt;id&gt;.txt</code>.</li>
+      </ul>
+    </div>
+  </div>
+  <h3>Why there are two files</h3>
+  <p>
+    <code>&lt;id&gt;.txt</code> is the human-readable book shown in the left
+    pane. <code>&lt;id&gt;.rag.txt</code> is the RAG-friendly copy:
+  </p>
+  <ul>
+    <li>
+      Lines matching
+      <code>CHAPTER|BOOK|PART|VOLUME|ACT|SCENE (roman|digits) …</code> are
+      promoted to Markdown <code>##</code> headings, so the article structure
+      builder can create chapter/section spans and summaries.
+    </li>
+    <li>
+      The title is prepended as <code># Title</code> if it is not already near
+      the top, so broad overview questions retrieve a useful document heading.
+    </li>
+  </ul>
+  <div class="callout warn">
+    <strong>Known normalization limit:</strong> only the chapter conventions in
+    the regex are promoted. Gutenberg editions that use headings such as
+    <code>I.</code>, <code>II.</code>, or plain titles without
+    <code>CHAPTER</code> may collapse into a single section. Retrieval still
+    works at paragraph level; only the parent-summary and section route become
+    coarser.
+  </div>
+</section>
+
+<section id="index">
+  <h2><span class="num">05</span>The book-specific index</h2>
+  <p>
+    On the first question, <code>_load_article_chunks(rag_path)</code> turns the
+    RAG text into an article-style trunk set. The index is
+    <strong>content-addressed</strong>: a SHA-1 of the absolute path plus the
+    file bytes yields <code>article_&lt;16 hex chars&gt;</code>, and everything
+    lives under <code>app/.article_cache/article_&lt;hash&gt;/</code>. Changing
+    the book bytes creates a new cache entry instead of silently reusing stale
+    metadata.
+  </p>
+  <h3>Trunk layout</h3>
+  <table>
+    <thead>
+      <tr><th>Trunk index</th><th>Kind</th><th>Contents</th><th>Used for</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>0</code></td>
+        <td>Overview</td>
+        <td>Title, compact outline, TL;DR/summary section (or opening
+          paragraphs)</td>
+        <td>Concise “what is this book about?” questions</td>
+      </tr>
+      <tr>
+        <td><code>-1</code></td>
+        <td>Digest</td>
+        <td>Overview plus representative content from every major section,
+          capped at <code>16,000</code> characters</td>
+        <td>Long-form overview requests (“in 1000 words”, detailed summary)</td>
+      </tr>
+      <tr>
+        <td><code>-101, -102, …</code></td>
+        <td>Section summary</td>
+        <td>Deterministic extractive summary of one section, up to
+          <code>1,400</code> characters</td>
+        <td>Parent context for retrieved paragraphs; not normal BM25 input</td>
+      </tr>
+      <tr>
+        <td><code>1, 2, 3, …</code></td>
+        <td>Paragraph</td>
+        <td>One book paragraph wrapped in
+          <code>&lt;article&gt;&lt;title&gt;…&lt;paragraph&gt;…</code></td>
+        <td>The retrieval source of truth</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Section summaries use index
+    <code>ARTICLE_SECTION_SUMMARY_INDEX_BASE - section_number</code>
+    (<code>-100 - n</code>). Negative indexes keep synthetic trunks out of
+    ordinary BM25 retrieval; paragraph chunks (<code>index &gt; 0</code>) are the
+    only documents indexed by <code>_iterative_paragraph_chunks()</code>.
+  </p>
+
+  <h3>Structure builder</h3>
+  <p>
+    <code>_article_build_structure()</code> persists
+    <code>article_structure.json</code> with a schema version
+    (<code>ARTICLE_META_VERSION = 4</code>), the book title, headings, overview,
+    digest, sections, and a paragraph map. The map records, for every paragraph,
+    its nearest preceding heading, section number, and section start/end.
+  </p>
+  <ul>
+    <li>
+      <strong>Headings</strong> come from HTML <code>&lt;h1&gt;–&lt;h6&gt;</code>
+      (for articles) and Markdown headings (for Gutenberg chapters). Markdown
+      headings retain <code>##</code> in paragraph text, so the section map
+      compares both spellings.
+    </li>
+    <li>
+      <strong>Section assignment</strong> uses the nearest preceding heading.
+      Numbered headings (<code>1.</code>, <code>2.3</code>) are accepted as a
+      fallback when markup is absent. Text before the first heading becomes an
+      “Introduction” section.
+    </li>
+    <li>
+      <strong>Section summaries</strong> are extractive, not model-generated:
+      take the first substantive paragraphs in the span, skip heading-shaped and
+      tiny navigation fragments, and cap at 1,400 characters. This is fast,
+      deterministic, cacheable, and cannot hallucinate.
+    </li>
+    <li>
+      <strong>Overview</strong> = title + outline (up to 1,400 characters) +
+      TL;DR/summary section (up to 2,400 characters), falling back to the
+      opening substantive paragraphs.
+    </li>
+    <li>
+      <strong>Digest</strong> = the overview plus the first content from each
+      top-level section, with a 16,000-character cap. It exists because a
+      1,000-word overview request needs more than a table of contents and a
+      TL;DR.
+    </li>
+  </ul>
+  <p>
+    Runtime-only indexes (<code>_section_lookup</code>,
+    <code>_paragraph_lookup</code>) are attached after loading and are not
+    persisted.
+  </p>
+
+  <h3>Measured examples from the local cache</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Book</th><th>RAG text</th><th>Sections</th><th>Paragraphs</th>
+        <th>Overview</th><th>Digest</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><em>The Time Machine</em> (PG 35)</td>
+        <td>181,475 chars</td><td>1</td><td>584</td>
+        <td>1,880 chars</td><td>7,013 chars</td>
+      </tr>
+      <tr>
+        <td><em>Alice's Adventures in Wonderland</em> (PG 11)</td>
+        <td>151,239 chars</td><td>25</td><td>905</td>
+        <td>2,103 chars</td><td>13,991 chars</td>
+      </tr>
+      <tr>
+        <td><em>The Car of Destiny</em> (PG 23500)</td>
+        <td>682,951 chars</td><td>2</td><td>2,933</td>
+        <td>1,440 chars</td><td>16,000 chars</td>
+      </tr>
+      <tr>
+        <td><em>60 years of best sellers, 1895–1955</em> (PG 79660)</td>
+        <td>482,054 chars</td><td>1,029</td><td>5,536</td>
+        <td>2,146 chars</td><td>16,000 chars</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="small muted">
+    These are real cache statistics, not estimates. They show why the digest
+    cap matters: a 5,536-paragraph book still contributes one bounded digest
+    trunk for overview questions.
+  </p>
+</section>
+
+<section id="routing">
+  <h2><span class="num">06</span>Question routing</h2>
+  <p>
+    A book session sets <code>article_path</code> and
+    <code>article_iterative = True</code>. That puts
+    <code>_run_question()</code> into article mode and bypasses normal tag
+    routing and cross-tag fallback. Every question is routed by
+    <code>article_question_route()</code> into one of four shapes:
+  </p>
+  <table>
+    <thead>
+      <tr><th>Route</th><th>How it is chosen</th><th>Context shape</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Overview</strong></td>
+        <td>Broad-overview regex, or an overview intent plus a document
+          reference / bare deictic (“what is this about, in 1000 words”).</td>
+        <td>Use <code>chunk -1</code> (digest) when a word count or detailed
+          request is present; otherwise <code>chunk 0</code> (overview). BM25 is
+          skipped.</td>
+      </tr>
+      <tr>
+        <td><strong>Section</strong></td>
+        <td>Question tokens match a section heading (substring or ≥60% heading
+          token coverage), and the question is not enumerative.</td>
+        <td>Restrict candidates to that section's paragraph span; depth 12,
+          budget <code>8,192</code> tokens; attach the section summary and
+          one-paragraph neighbors.</td>
+      </tr>
+      <tr>
+        <td><strong>Narrow</strong></td>
+        <td>Default when the question is a specific fact and no section
+          confidently matches.</td>
+        <td>Iterative evidence because <code>article_iterative</code> is on;
+          otherwise BM25 depth 20 with budget <code>6,144</code> tokens and
+          parent/neighbor expansion.</td>
+      </tr>
+      <tr>
+        <td><strong>Iterative</strong></td>
+        <td>Enumerative/comparative regex, or the configured article default.
+          Also chosen when section intent exists but no heading match is found
+          and the small router says <code>NARROW</code>.</td>
+        <td>Up to 4 rounds × 4 new paragraphs, 50 BM25 candidates per round,
+          <code>16,000</code> token cap, plus one parent summary per represented
+          section.</td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>Small-model fallback router</h3>
+  <p>
+    If a question looks section-oriented (for example “explain the workflow …”)
+    but no heading matches, <code>_article_classify_with_model()</code> asks
+    <code>qwen3:1.7b</code> to reply with exactly one of
+    <code>OVERVIEW</code>, <code>SECTION &lt;n&gt;</code>, or
+    <code>NARROW</code>. The model sees a numbered list of up to 80 section
+    headings (160 characters each) and the question, with
+    <code>num_predict=32</code>. A failed, malformed, or missing response falls
+    back to the ordinary regex route, so the model can improve routing but
+    cannot break it.
+  </p>
+  <div class="callout">
+    Routing is deliberately cheap and conservative. Regex rules handle the
+    obvious cases; the small model is consulted only for ambiguous
+    section-intent questions. The route determines the context budget before
+    any answer model work begins.
+  </div>
+</section>
+
+<section id="retrieval">
+  <h2><span class="num">07</span>Retrieval and evidence gathering</h2>
+  <h3>BM25 over paragraph trunks</h3>
+  <p>
+    <code>chat.top_chunks()</code> builds or reuses a cached
+    <code>BM25Index</code> for the book's paragraph list. Each document is the
+    paragraph text prefixed with the book title. Retrieval is lexical, not
+    vector-based.
+  </p>
+  <ul>
+    <li>
+      <strong>Tokenizer:</strong> lowercase <code>\b\w+\b</code> tokens with
+      conservative plural/inflection folding (for example <em>books</em> →
+      <em>book</em>) and compact time expressions (<em>3 a.m.</em> →
+      <em>3am</em>).
+    </li>
+    <li>
+      <strong>Query weighting:</strong> original question tokens ×2, fuzzy
+      out-of-vocabulary corrections ×2, acronym expansions ×2, and validated
+      small-model expansion terms ×1.
+    </li>
+    <li>
+      <strong>Fuzzy correction:</strong> words missing from the index vocabulary
+      are matched against same-first-letter, similar-length vocabulary words by
+      string similarity plus co-occurrence with other query anchors. This
+      handles misspelled names and places without changing correctly spelled
+      words.
+    </li>
+    <li>
+      <strong>Acronym expansion:</strong> for an acronym in the question, the
+      corpus is mined for a nearby definition such as “International Driving
+      Permit (IDP)” and the full form is added to the query.
+    </li>
+    <li>
+      <strong>Entity focus:</strong> when the question contains a named entity,
+      candidates are softly constrained to chunks mentioning that entity (and
+      preferably its topic words). If no chunk matches, the constraint is
+      dropped rather than returning an empty result.
+    </li>
+    <li>
+      <strong>Query expansion:</strong> <code>qwen3:1.7b</code> proposes search
+      terms, but expansion terms are validated against the corpus. A term is
+      kept only when enough documents containing it also contain a distinctive
+      anchor from the original question, preventing model drift.
+    </li>
+    <li>
+      <strong>Selection:</strong> explicit depth returns the top N; adaptive
+      retrieval applies a score elbow, a score floor, a per-video/per-book
+      chunk cap, near-duplicate Jaccard removal, and a token budget.
+    </li>
+  </ul>
+
+  <h3>Small-model relevance filter</h3>
+  <p>
+    When there are 5–20 candidates and the question is not a list/aggregation
+    question, <code>filter_candidates()</code> asks <code>qwen3:1.7b</code>
+    which candidates are relevant. The filter is bounded and never allowed to
+    destroy the strongest lexical evidence: the top BM25 candidates are always
+    kept, and if the filter rejects everything, retrieval keeps the top five
+    instead of producing a false refusal.
+  </p>
+
+  <h3>The iterative evidence loop</h3>
+  <p>
+    <code>_article_iterative_evidence()</code> delegates to
+    <code>_iterative_evidence()</code>. This is the book chat's most important
+    algorithm:
+  </p>
+  <ol>
+    <li>
+      Expand the question once (cached), then BM25-rank up to 50 paragraph
+      candidates against the whole book.
+    </li>
+    <li>
+      Add new paragraphs: 8 in round 1 (<code>batch × 2</code>), then 4 per
+      round, skipping already-seen chunks and respecting the token budget.
+    </li>
+    <li>
+      Fast path: if the evidence already contains every content word of the
+      question, and the question is not enumerative, stop without a model call.
+    </li>
+    <li>
+      Otherwise ask <code>qwen3:1.7b</code> with
+      <code>ARTICLE_SUFFICIENCY_PROMPT</code>:
+      <code>VERDICT: YES/NO</code>, supporting excerpt number, and
+      <code>MISSING:</code> terms. Excerpt text is capped at 6,000 characters.
+    </li>
+    <li>
+      If sufficient, stop. If not, append the reported missing terms to the next
+      BM25 query. Stop early if the missing terms do not change, if no new
+      candidates appear, after 4 rounds, or at the token cap.
+    </li>
+    <li>
+      In article mode, add one parent section summary for every section
+      represented in the evidence, then return the final context in document
+      order.
+    </li>
+  </ol>
+  <pre><code>for round in 1..4:
+    rank = BM25(search_question, paragraph_chunks, limit=50)
+    add up to 8 (first round) or 4 new paragraphs within budget
+    if evidence covers every question term: stop
+    verdict = qwen3:1.7b.sufficiency(question, evidence)
+    if verdict.sufficient: stop
+    if verdict.missing unchanged: stop
+    search_question += verdict.missing
+
+attach one section summary per represented section
+sort by document order; enforce the final token cap</code></pre>
+  <p>
+    This loop is what makes a narrow factual question cheap: it usually stops
+    after one small batch. A broad “list every …” question keeps gathering
+    until it hits the round or token cap. The cap is a safety property, not a
+    target.
+  </p>
+  <p>
+    The evidence budget for the iterative book route is
+    <code>16,000</code> estimated tokens, but the actual context is usually much
+    smaller because only a few paragraphs are added per round. For example, the
+    cached <em>Time Machine</em> has ~38,145 tokens across 584 paragraphs, so a
+    typical 4-round run selects roughly a few thousand tokens, not the whole
+    book.
+  </p>
+
+  <h3>Narrow and section expansion</h3>
+  <p>
+    When the route is <strong>narrow</strong> (iterative disabled) or
+    <strong>section</strong>, <code>_make_article_expansion()</code> adds
+    context before prompting:
+  </p>
+  <ul>
+    <li>Parent section summaries for the strongest four selected paragraphs.</li>
+    <li>One neighboring paragraph on each side, only within the same section.</li>
+    <li>Strict token budgeting; if expansion would exceed the budget, the
+      original selection is kept.</li>
+  </ul>
+  <p>
+    Section mode additionally restricts the candidate pool to the section's
+    paragraph span and uses depth 12 / 8,192 tokens. This is the most focused
+    context shape.
+  </p>
+</section>
+
+<section id="prompt">
+  <h2><span class="num">08</span>Prompting and answer streaming</h2>
+  <p>
+    <code>chat.answer()</code> builds numbered
+    <code>&lt;chunk id="…"&gt;</code> blocks with the book title emitted once per
+    source, then fills <code>research/100_trunks_prompt.txt</code>. The template
+    enforces grounding in the provided chunks, forbids citing chunk ids, asks
+    for conflict disclosure and deduplicated aggregation, and defines the
+    missing-data response. Article mode prepends a route-specific prefix:
+  </p>
+  <table>
+    <thead>
+      <tr><th>Prefix</th><th>Instruction</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>### ARTICLE OVERVIEW</code></td>
+        <td>Use the title/outline/summary or digest; honor requested length;
+          answer from the whole-document context; omit unsupported details
+          rather than refusing.</td>
+      </tr>
+      <tr>
+        <td><code>### ARTICLE SECTION</code></td>
+        <td>Prefer specific paragraphs for facts and use the section summary for
+          orientation; ground every claim.</td>
+      </tr>
+      <tr>
+        <td><code>### ARTICLE EVIDENCE</code></td>
+        <td>Evidence was gathered across the whole book in rounds and document
+          order; answer every part, including lists and comparisons; do not
+          claim insufficiency.</td>
+      </tr>
+      <tr>
+        <td><code>### ARTICLE CONTEXT</code></td>
+        <td>Narrow retrieval with parent summaries and neighbors; use summaries
+          for orientation only.</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="grid">
+    <div class="card">
+      <h4>Answer model</h4>
+      <p><code>ornith:35b</code>, thinking disabled, requested context window
+        <code>ANSWER_NUM_CTX = 32,768</code> tokens, streamed token by token.</p>
+    </div>
+    <div class="card">
+      <h4>Small helper model</h4>
+      <p><code>qwen3:1.7b</code> at <code>8,192</code> tokens for query
+        expansion, relevance filtering, sufficiency checks, and article/section
+        routing. Keeping the same context size avoids Ollama reloads.</p>
+    </div>
+  </div>
+  <p>
+    Streaming uses SSE. The browser handles <code>meta</code>, <code>delta</code>,
+    <code>reset</code>, <code>error</code>, and <code>done</code> events. The
+    server strips chunk citations and supporting-evidence headings before the
+    final answer is saved or returned, keeping internal retrieval metadata out
+    of the UI.
+  </p>
+  <p>
+    After the answer completes, the server sends the session snapshot and, in
+    benchmark mode, the retrieval/prefill/TTFT line. In normal mode those
+    diagnostics stay out of the answer.
+  </p>
+</section>
+
+<section id="session">
+  <h2><span class="num">09</span>Session isolation, history, and cache</h2>
+  <h3>One session per book</h3>
+  <p>
+    <code>get_gutenberg_chat_state(book_id)</code> returns a dedicated
+    <code>ChatState</code> with:
+  </p>
+  <ul>
+    <li><code>chunks</code> and <code>global_chunks</code> set to the book's
+      trunks only,</li>
+    <li><code>article_path</code> set to the cached <code>.rag.txt</code>,</li>
+    <li><code>article_structure</code> set to the summary tree,</li>
+    <li><code>article_iterative = True</code>,</li>
+    <li>its own conversation, answer cache, latest answer, sources, and
+      benchmark state.</li>
+  </ul>
+  <p>
+    The handler temporarily swaps <code>self.state</code> to the book session,
+    runs the normal question pipeline, and restores the previous state in a
+    <code>finally</code> block. The main chat is therefore unaffected, and
+    book A cannot see book B's text. The neutral default tag is used, but article
+    mode overrides tag routing, so the book never falls back to another tag or to
+    the global transcript corpus.
+  </p>
+
+  <h3>LRU eviction, persistent disk state</h3>
+  <p>
+    <code>GUTENBERG_BOOK_STATE_LIMIT = 3</code>. Each access moves the book to
+    the end of an LRU order; exceeding three resident sessions evicts the oldest
+    and calls <code>gc.collect()</code>. Eviction only drops the in-memory
+    <code>ChatState</code>. The downloaded plaintext, <code>.rag.txt</code>, and
+    <code>.article_cache</code> index stay on disk, so reopening a book is a
+    cache hit rather than a re-download or re-split.
+  </p>
+
+  <h3>Conversation and cache semantics</h3>
+  <ul>
+    <li>
+      <strong>Follow-ups:</strong> when a question contains context-dependent
+      references, <code>resolve_question()</code> asks the conversation model
+      (<code>ministral-3:3b</code>) to rewrite it into a standalone question
+      using up to the last 8 turns. The rewritten question is used for
+      retrieval; the original question is shown in the UI.
+    </li>
+    <li>
+      <strong>Answer cache:</strong> each session has a 32-entry LRU. The key
+      includes the tag/scope, transcript, depth, context budget, answer
+      language, question, tags version, model, and, in article mode, the article
+      path, structure id, and iterative flag. Context-sensitive questions add
+      the conversation revision, so “what does he think?” cannot reuse an answer
+      cached for a different “he”.
+    </li>
+    <li>
+      <strong>Reset:</strong> the first question sent after opening the modal
+      carries <code>reset: true</code>; the server clears that book's
+      conversation, answer cache, and latest answer/sources. Later questions in
+      the same modal keep the thread.
+    </li>
+    <li>
+      <strong>Concurrency:</strong> each session has an <code>RLock</code>, so
+      two questions cannot mutate one book's conversation or cache
+      simultaneously.
+    </li>
+  </ul>
+</section>
+
+<section id="memory">
+  <h2><span class="num">10</span>Memory, context, and performance</h2>
+  <h3>What is bounded, and by how much</h3>
+  <table>
+    <thead>
+      <tr><th>Resource</th><th>Bound / behavior</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Book download</td>
+        <td>30 MiB maximum; streamed in 256 KiB blocks; one cache copy per
+          book.</td>
+      </tr>
+      <tr>
+        <td>Resident book sessions</td>
+        <td>3 <code>ChatState</code> objects; LRU eviction with GC.</td>
+      </tr>
+      <tr>
+        <td>Overview context</td>
+        <td>Overview trunk, typically ~1.4–2.8k characters; digest capped at
+          16k characters (~4k estimated tokens).</td>
+      </tr>
+      <tr>
+        <td>Section context</td>
+        <td>Depth 12, 8,192 estimated tokens, one section's paragraphs plus
+          summary and neighbors.</td>
+      </tr>
+      <tr>
+        <td>Narrow context</td>
+        <td>Default depth 20, 6,144 estimated tokens.</td>
+      </tr>
+      <tr>
+        <td>Iterative context</td>
+        <td>Up to 4 rounds × 4 new paragraphs; 16,000 estimated-token cap; one
+          summary per represented section.</td>
+      </tr>
+      <tr>
+        <td>Answer model window</td>
+        <td>32,768 tokens requested from Ollama.</td>
+      </tr>
+      <tr>
+        <td>Answer cache</td>
+        <td>32 complete answers per book session.</td>
+      </tr>
+      <tr>
+        <td>Conversation</td>
+        <td>Last 8 turns kept for follow-up resolution.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Why this is memory-efficient</h3>
+  <p>
+    The model never sees the full book. Retrieval selects paragraphs first, and
+    only those paragraphs plus a small number of extractive section summaries
+    reach the prompt. Even the largest locally cached example
+    (<em>60 years of best sellers</em>, 5,536 paragraphs) contributes a bounded
+    digest or a small evidence set, not 482k characters of book text.
+  </p>
+  <p>
+    The in-memory footprint is dominated by the BM25 index, not the model
+    context. A rough order-of-magnitude measurement from the cached trunks:
+  </p>
+  <table>
+    <thead>
+      <tr><th>Book index</th><th>Paragraphs</th><th>Tokens</th><th>Vocabulary</th><th>Rough index memory</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><em>The Time Machine</em></td><td>584</td><td>~38k</td><td>~4.3k</td>
+        <td>~3 MB (token lists/strings + vocab + document frequencies)</td>
+      </tr>
+      <tr>
+        <td><em>60 years of best sellers</em></td><td>5,536</td><td>~149k</td><td>~7.8k</td>
+        <td>~10–12 MB</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="small muted">
+    These are estimates from tokenizing the cached trunks; actual BM25 counters
+    add some overhead. They still show that three resident book indexes are
+    small compared with the 35B answer model itself.
+  </p>
+
+  <h3>Latency profile</h3>
+  <ul>
+    <li>
+      <strong>Modal open:</strong> one plaintext cache read and a JSON response.
+      Indexing is deferred until the first question.
+    </li>
+    <li>
+      <strong>First question:</strong> download if necessary, paragraph split,
+      structure load/build, BM25 build. The structure is cached on disk, so later
+      opens skip the expensive split.
+    </li>
+    <li>
+      <strong>Later questions:</strong> reuse the cached BM25 index and
+      structure. The iterative loop's dominant extra cost is the small-model
+      sufficiency call, which is skipped when the evidence already contains every
+      question term.
+    </li>
+    <li>
+      <strong>Answer time:</strong> dominated by <code>ornith:35b</code>
+      generation. Retrieval is lexical and local.
+    </li>
+  </ul>
+</section>
+
+<section id="frontend">
+  <h2><span class="num">11</span>Browser UI behavior</h2>
+  <div class="grid">
+    <div class="card">
+      <h4>Two-column modal</h4>
+      <ul>
+        <li>Centered overlay; left pane is the cached plaintext, right pane is
+          the per-book chat.</li>
+        <li>Header shows title, authors, languages, and download count, plus an
+          “Open on Gutenberg ↗” link.</li>
+        <li>Escape closes the modal, but smaller overlays (dictionary, line help,
+          help) get Escape first.</li>
+        <li>Clicking the backdrop closes it.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Plaintext word lookup</h4>
+      <ul>
+        <li>The book stays one text node, avoiding millions of DOM nodes for a
+          large novel.</li>
+        <li>Pointer-to-caret mapping finds the word under the cursor and walks
+          only that word's boundaries.</li>
+        <li>Hover uses the CSS Custom Highlight API; dragging to select text does
+          not trigger a lookup.</li>
+        <li>Clicking sends the word plus a ~900-character surrounding excerpt to
+          the streaming <code>/api/dict</code> popup.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Per-book chat</h4>
+      <ul>
+        <li>Enter sends; Shift+Enter inserts a newline.</li>
+        <li>SSE deltas render Markdown progressively with a “thinking…” state.</li>
+        <li>Generation counters and <code>AbortController</code> discard stale
+          responses when the book changes or the modal closes.</li>
+        <li>Every word in the answer opens the same dictionary popup used by the
+          main chat; selecting text is never treated as a word click.</li>
+        <li>The chat scrolls to the latest content while streaming.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Search cards</h4>
+      <ul>
+        <li>Book results are rendered as a responsive card grid.</li>
+        <li>Each card shows title, authors, and metadata; clicking it opens the
+          reader modal immediately.</li>
+        <li>The left pane shows the plaintext character count; errors are shown
+          inline.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="limits">
+  <h2><span class="num">12</span>Design limits and failure modes</h2>
+  <table>
+    <thead>
+      <tr><th>Situation</th><th>Behavior</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Open Library has no Gutenberg id for a work</td>
+        <td>Fall back to the Gutenberg catalogue search page for the remaining
+          slots.</td>
+      </tr>
+      <tr>
+        <td>Book has no plaintext edition or download fails</td>
+        <td>Return a JSON error / SSE <code>error</code>; the left pane shows the
+          failure instead of hanging.</td>
+      </tr>
+      <tr>
+        <td>Book is larger than 30 MiB</td>
+        <td>Refuse to cache it and report the limit.</td>
+      </tr>
+      <tr>
+        <td>Chapter headings do not match the promotion regex</td>
+        <td>The book may become one section; paragraph retrieval still works,
+          but section routing and parent summaries are coarser.</td>
+      </tr>
+      <tr>
+        <td>No paragraph matches a question</td>
+        <td>Return no evidence rather than fabricating context; the UI receives
+          an error or an empty answer path.</td>
+      </tr>
+      <tr>
+        <td>Small model unavailable or returns malformed JSON/text</td>
+        <td>Routing and sufficiency checks fall back to regex/lexical behavior;
+          retrieval still runs.</td>
+      </tr>
+      <tr>
+        <td>More than three books open over time</td>
+        <td>The oldest in-memory session is evicted; disk caches remain.</td>
+      </tr>
+      <tr>
+        <td>Two simultaneous questions for one book</td>
+        <td>Serialized by the session lock; the UI also blocks a second send
+          while busy.</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="callout warn">
+    <strong>No embeddings, by design.</strong> The book chat inherits the
+    project's lexical BM25 architecture. This keeps indexing cheap and
+    explainable, but it also means exact wording and normalization matter:
+    synonyms not present in the book will not match unless query expansion or
+    fuzzy correction bridges them. The small-model expansion/filter steps are the
+    mitigation, not a semantic vector index.
+  </div>
+</section>
+
+<section id="sources">
+  <h2><span class="num">13</span>Key source locations</h2>
+  <table>
+    <thead><tr><th>Area</th><th>Code</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Catalog search and cards</td>
+        <td><code>search_gutenberg_books</code>,
+          <code>_search_gutenberg_openlibrary</code>,
+          <code>_search_gutenberg_gutenberg_org</code>,
+          <code>_gutenberg_openlibrary_card</code>,
+          <code>_gutenberg_search_card</code></td>
+      </tr>
+      <tr>
+        <td>Download, clean, RAG text</td>
+        <td><code>ensure_gutenberg_book</code>,
+          <code>_clean_gutenberg_plaintext</code>,
+          <code>_gutenberg_rag_text</code></td>
+      </tr>
+      <tr>
+        <td>Article/trunk index</td>
+        <td><code>_load_article_chunks</code>,
+          <code>_article_build_structure</code>,
+          <code>_article_section_map</code>,
+          <code>_article_section_summary</code>,
+          <code>_article_overview</code>, <code>_article_digest</code></td>
+      </tr>
+      <tr>
+        <td>Routing</td>
+        <td><code>article_question_route</code>,
+          <code>_article_match_section</code>,
+          <code>_article_classify_with_model</code>,
+          <code>article_overview_question</code></td>
+      </tr>
+      <tr>
+        <td>Retrieval</td>
+        <td><code>chat.top_chunks</code>, <code>chat.get_bm25_index</code>,
+          <code>_iterative_evidence</code>,
+          <code>_article_iterative_evidence</code>,
+          <code>_article_sufficiency_check</code>,
+          <code>_make_article_expansion</code></td>
+      </tr>
+      <tr>
+        <td>Prompt / answer</td>
+        <td><code>chat.answer</code>, <code>chat.build_prompt</code>,
+          <code>research/100_trunks_prompt.txt</code>,
+          <code>_run_question</code></td>
+      </tr>
+      <tr>
+        <td>Session isolation</td>
+        <td><code>ChatState</code>, <code>get_gutenberg_chat_state</code>,
+          <code>_handle_gutenberg_chat</code>,
+          <code>GUTENBERG_BOOK_STATE_LIMIT</code>,
+          <code>GUTENBERG_BOOK_STATES</code></td>
+      </tr>
+      <tr>
+        <td>HTTP endpoints</td>
+        <td><code>GET /api/gutenberg_book</code>,
+          <code>POST /api/gutenberg_chat</code>,
+          <code>_command_gutenberg</code></td>
+      </tr>
+      <tr>
+        <td>Browser UI</td>
+        <td><code>openGutenbergModal</code>, <code>loadGutenbergText</code>,
+          <code>sendGutenbergChatMessage</code>,
+          <code>gutenbergWordAtPoint</code>, <code>renderMarkdown</code></td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+</main>
+
+<footer>
+  Generated for the persistent task in <code>prompts/project_gutenberg.prompt</code>.
+  File: <code>documents/project_gutenberg_book_specific_chat.html</code>.
+</footer>
+</body>
+</html>
