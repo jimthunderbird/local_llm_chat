@@ -5,11 +5,11 @@ Usage:
     python3 create_embeddings.py <youtube_video_hash>
 
 Reads:
-    ./youtube_transcript/<youtube_video_hash>.<index>.trunk
+    ./.chat/youtube_transcripts/<youtube_video_hash>.<index>.trunk
 
 Writes:
-    ./youtube_transcript/<youtube_video_hash>.<index>.embedding
-    ./youtube_transcript/<youtube_video_hash>.<index>.paragraph.embedding
+    ./.chat/youtube_transcripts/<youtube_video_hash>.<index>.embedding
+    ./.chat/youtube_transcripts/<youtube_video_hash>.<index>.paragraph.embedding
     (JSON arrays of floats; the paragraph file is used for retrieval so the
     shared video title does not bias the ranking)
 """
@@ -35,7 +35,7 @@ def normalize_argv(argv):
 
 MODEL = "embeddinggemma-2:570m"
 KEEP_ALIVE = "30m"
-OUTPUT_DIR = Path.cwd() / "youtube_transcript"
+OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
 PARAGRAPH_PATTERN = re.compile(
     r"<paragraph>(.*?)</paragraph>", re.DOTALL | re.IGNORECASE
 )
@@ -90,7 +90,7 @@ def extract_paragraph(content: str) -> str:
 
 
 def remove_existing_embeddings(video_id: str) -> int:
-    """Delete every ./youtube_transcript/<video_id>.*.embedding file."""
+    """Delete every ./.chat/youtube_transcripts/<video_id>.*.embedding file."""
     removed = 0
     for path in OUTPUT_DIR.glob(f"{video_id}.*.embedding"):
         try:

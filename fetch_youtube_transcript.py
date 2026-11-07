@@ -6,8 +6,8 @@ Usage:
     python3 fetch_youtube_transcript.py --force <youtube_video_hash>
 
 Outputs:
-    ./youtube_transcript/<youtube_video_hash>.transcript
-    ./youtube_transcript/<youtube_video_hash>.title
+    ./.chat/youtube_transcripts/<youtube_video_hash>.transcript
+    ./.chat/youtube_transcripts/<youtube_video_hash>.title
 
 Transcript providers, tried in order:
     1. youtube-transcript-api (fast when YouTube is not blocking this IP)
@@ -68,7 +68,7 @@ def normalize_argv(argv):
 
 
 MODEL = "ornith:35b"
-OUTPUT_DIR = Path.cwd() / "youtube_transcript"
+OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 if not OLLAMA_HOST.startswith(("http://", "https://")):

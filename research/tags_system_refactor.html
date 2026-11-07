@@ -934,8 +934,8 @@ string form for every tag even when one tag uses the object form.
 
 <h3>12.4 Reproduction commands</h3>
 <pre><code># Corpus size
-find youtube_transcript -name '*.trunk' | wc -l
-find youtube_transcript -name '*.title' | wc -l
+find .chat/youtube_transcripts -name '*.trunk' | wc -l
+find .chat/youtube_transcripts -name '*.title' | wc -l
 
 # Legacy tag counts (from git history)
 git ls-tree --name-only HEAD tags/

@@ -349,7 +349,7 @@ VIDEO_SUMMARY_PROMPT = """You summarize YouTube videos for a viewer who is decid
 # youtube_video_learn.py pipeline in a background thread, so the browser can
 # keep chatting while the transcript is fetched, rewritten, chunked, embedded,
 # and tagged.  Progress is reported as a percentage by the status endpoint.
-VIDEO_LEARN_TRANSCRIPT_DIR = SCRIPT_DIR / "youtube_transcript"
+VIDEO_LEARN_TRANSCRIPT_DIR = SCRIPT_DIR / ".chat" / "youtube_transcripts"
 # Weights match youtube_video_learn.STEPS: fetch, rewrite, trunks, embeddings.
 # They only make the progress bar move sensibly between steps; the embeddings
 # step refines its share from the subprocess output.
@@ -2578,7 +2578,7 @@ def build_answer_annotations(
 
 # Articles loaded with /article are split into the same one-knowledge-piece
 # paragraphs that the transcript pipeline uses. The generated trunk files live
-# outside ./youtube_transcript so they never become tagged videos or appear in
+# outside ./.chat/youtube_transcripts so they never become tagged videos or appear in
 # transcript autocomplete.
 ARTICLE_CACHE_DIR = APP_DIR / ".article_cache"
 ARTICLE_HTML_BLOCK_RE = re.compile(

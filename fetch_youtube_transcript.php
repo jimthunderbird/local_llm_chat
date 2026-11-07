@@ -12,8 +12,8 @@ declare(strict_types=1);
  *     php fetch_youtube_transcript.php <youtube_video_hash>
  *
  * Outputs:
- *     ./youtube_transcript/<youtube_video_hash>.transcript
- *     ./youtube_transcript/<youtube_video_hash>.title
+ *     ./.chat/youtube_transcripts/<youtube_video_hash>.transcript
+ *     ./.chat/youtube_transcripts/<youtube_video_hash>.title
  */
 
 const MODEL = 'ornith:35b';
@@ -699,7 +699,7 @@ function main(array $argv): int
     if ($cwd === false) {
         $cwd = __DIR__;
     }
-    $outputDir = $cwd . DIRECTORY_SEPARATOR . 'youtube_transcript';
+    $outputDir = $cwd . DIRECTORY_SEPARATOR . '.chat' . DIRECTORY_SEPARATOR . 'youtube_transcripts';
     if (!is_dir($outputDir) && !@mkdir($outputDir, 0777, true) && !is_dir($outputDir)) {
         fwrite(STDERR, "Error: could not create output directory: {$outputDir}\n");
         return 1;

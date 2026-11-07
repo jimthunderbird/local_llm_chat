@@ -59,7 +59,7 @@ main() in ./chat.py:
    off the critical path. Failure is ignored.
 
 3. load_all_chunks():
-     - globs ./youtube_transcript/*.trunk
+     - globs ./.chat/youtube_transcripts/*.trunk
      - keeps every <video_id>.<index>.trunk file (or only an explicit
        /transcript video set when that scope is active)
      - builds Chunk(video_id, index, trunk_path) objects and sorts them by
@@ -396,7 +396,7 @@ gemma3:1b) outside the Python memory footprint.
 Corpus in this checkout
 -----------------------
 
-    ./youtube_transcript/*.trunk files:        5,348
+    ./.chat/youtube_transcripts/*.trunk files:        5,348
     union of all tagged videos:                4,959 trunks / 211 videos
     tag japan:                                 2,916 trunks / 124 videos
     tag ai_and_coding:                         1,719 trunks /  76 videos

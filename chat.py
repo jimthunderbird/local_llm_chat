@@ -7,7 +7,7 @@ Usage:
 If --tag is given without a value, the available tags in ./tags.toml are
 listed and can be tab-completed at the interactive "Tag:" prompt.
 
-At startup every ./youtube_transcript/<youtube_video_hash>.<index>.trunk file
+At startup every ./.chat/youtube_transcripts/<youtube_video_hash>.<index>.trunk file
 is loaded into one global in-memory corpus. Tags are soft query-time scopes:
 --tag (default: auto) either selects a tag from ./tags.toml or asks the local
 router to choose one from the question, and retrieval keeps trunks that are
@@ -269,7 +269,7 @@ PROGRESSIVE_FIRST_PASS = 10
 # character (for example CJK) per token.
 CHARS_PER_TOKEN = 4
 SCRIPT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = Path.cwd() / "youtube_transcript"
+OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
 TAGS_PATH = Path.cwd() / "tags.toml"
 # ``auto`` is a scope mode, not a tag in tags.toml: the router chooses the
 # best soft tag from the question for each turn (or stays global when no tag
@@ -1650,7 +1650,7 @@ class CommandCompleter(Completer):
 
 
 def available_video_ids() -> list[str]:
-    """Return video ids that have trunk files in ./youtube_transcript."""
+    """Return video ids that have trunk files in ./.chat/youtube_transcripts."""
     try:
         entries = list(OUTPUT_DIR.glob("*.trunk"))
     except OSError:
@@ -5389,7 +5389,7 @@ def switch_transcript(
     """Handle /youtube transcript: pick one video's trunks and release the rest.
 
     The argument may be a video id, a YouTube URL, or a keyword. Keywords
-    are searched against ./youtube_transcript/*.title with ag, and the
+    are searched against ./.chat/youtube_transcripts/*.title with ag, and the
     matches are offered as a <hash> <title> hinting list to select from.
 
     Returns the new video id and chunks, or None when the switch was cancelled
@@ -5425,7 +5425,7 @@ def switch_transcript(
 
 
 def search_transcript_titles(keyword: str) -> list[TranscriptMatch]:
-    """Search ./youtube_transcript/*.title files with ag."""
+    """Search ./.chat/youtube_transcripts/*.title files with ag."""
     keyword = keyword.strip()
     if not keyword:
         return []

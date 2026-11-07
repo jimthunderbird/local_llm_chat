@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - optional optimization
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
-OUTPUT_DIR = PROJECT_DIR / "youtube_transcript"
+OUTPUT_DIR = PROJECT_DIR / ".chat" / "youtube_transcripts"
 TAG_DIR = PROJECT_DIR / "tags"
 PACK_DIR = PROJECT_DIR / ".chat" / "packs"
 

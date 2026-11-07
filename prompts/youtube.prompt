@@ -1,3 +1,18 @@
+task.refactor.youtube_transcripts_location (completed) {
+  currently, all youtube transcripts are located at ./youtube_transcript
+  - we need to move it to ./.chat/youtube_transcripts directory
+  - please change all related code to reflect this change
+
+  Implemented:
+  - Moved the transcript store from ./youtube_transcript to
+    ./.chat/youtube_transcripts and updated every reader/writer:
+    fetch_youtube_transcript.py, fetch_youtube_transcript.php, rewrite.py,
+    create_trunks.py, create_embeddings.py, get_videos_in_playlist.py,
+    chat.py, chat_gradual_context.py, app/chat_server.py, and the
+    research helper scripts. .chat/ was already runtime data and is
+    ignored by git; the old youtube_transcript/ ignore rule was removed.
+}
+
 task.bookmark_list_command_result_ui (completed) {
   after typing the command: /youtube bookmark list:
   - we should get a list of videos rendered the same as the result of /youtube search <keyword>

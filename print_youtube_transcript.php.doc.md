@@ -39,7 +39,7 @@ of `fetch_youtube_transcript.py` (and of
 `fetch_youtube_transcript.php`), with two intentional differences:
 
 * It **does not** call Ollama or produce a summary.
-* It **does not** create `./youtube_transcript/<id>.transcript` or
+* It **does not** create `./.chat/youtube_transcripts/<id>.transcript` or
   `<id>.title` files.
 
 It supports:
@@ -760,9 +760,9 @@ retries but many sequential attempts, a worst-case run can take roughly
 
 | File | Relationship |
 |---|---|
-| `fetch_youtube_transcript.php` | Shares the same caption-fetching function names and logic, but additionally summarizes with Ollama (`MODEL = 'ornith:35b'`) and writes `./youtube_transcript/<id>.transcript` and `<id>.title`. |
+| `fetch_youtube_transcript.php` | Shares the same caption-fetching function names and logic, but additionally summarizes with Ollama (`MODEL = 'ornith:35b'`) and writes `./.chat/youtube_transcripts/<id>.transcript` and `<id>.title`. |
 | `fetch_youtube_transcript.py` | The original Python implementation this logic mirrors. |
-| `youtube_transcript/` | Populated by `fetch_youtube_transcript.php`; **not** used or written by this script. |
+| `.chat/youtube_transcripts/` | Populated by `fetch_youtube_transcript.php`; **not** used or written by this script. |
 | `search_youtube.py`, `get_videos_in_playlist.py` | Can supply video IDs to feed into this script. |
 
 Because `print_youtube_transcript.php` and `fetch_youtube_transcript.php`

@@ -5,10 +5,10 @@ Usage:
     python3 rewrite.py <youtube_video_hash>
 
 Reads:
-    ./youtube_transcript/<youtube_video_hash>.transcript
+    ./.chat/youtube_transcripts/<youtube_video_hash>.transcript
 
 Writes:
-    ./youtube_transcript/<youtube_video_hash>.rewrite
+    ./.chat/youtube_transcripts/<youtube_video_hash>.rewrite
 """
 
 import argparse
@@ -33,7 +33,7 @@ def normalize_argv(argv):
 
 
 MODEL = "ornith:35b"
-OUTPUT_DIR = Path.cwd() / "youtube_transcript"
+OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 if not OLLAMA_HOST.startswith(("http://", "https://")):

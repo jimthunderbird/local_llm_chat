@@ -259,7 +259,7 @@ Two ways to expose it to a remote box:
 <ul>
   <li><strong>Tailscale exit node / subnet router:</strong> join the cloud box and the home Mac to the same tailnet, then route only the fetcher through the Mac. Per-process, no global VPN needed.</li>
   <li><strong>SSH SOCKS tunnel:</strong> <code>ssh -N -D 1080 home-mac</code>, then point the fetcher at <code>socks5h://127.0.0.1:1080</code>. Easy to script, dies with the connection.</li>
-  <li><strong>Fetch at home, sync the artifacts:</strong> run <code>fetch_youtube_transcript.py</code> on the Mac and copy <code>youtube_transcript/&lt;id&gt;.transcript</code> and <code>.title</code> to the worker. The downstream steps (rewrite, trunks, embeddings) can run anywhere because they only call Ollama.</li>
+  <li><strong>Fetch at home, sync the artifacts:</strong> run <code>fetch_youtube_transcript.py</code> on the Mac and copy <code>.chat/youtube_transcripts/&lt;id&gt;.transcript</code> and <code>.title</code> to the worker. The downstream steps (rewrite, trunks, embeddings) can run anywhere because they only call Ollama.</li>
 </ul>
 <p>
 Limit: a home IP gets rate-limited too if a playlist backfill fires hundreds of requests. Pace it (section 5.4).
@@ -380,7 +380,7 @@ Add:
 
 <h3>5.4 Pacing, caching, and batching</h3>
 <ul>
-  <li><strong>Cache first:</strong> if <code>youtube_transcript/&lt;id&gt;.transcript</code> exists, return it. <code>get_videos_in_playlist.py</code> already skips existing transcripts; mirror that check inside the fetchers so <code>/youtube learn</code> and retries are idempotent.</li>
+  <li><strong>Cache first:</strong> if <code>.chat/youtube_transcripts/&lt;id&gt;.transcript</code> exists, return it. <code>get_videos_in_playlist.py</code> already skips existing transcripts; mirror that check inside the fetchers so <code>/youtube learn</code> and retries are idempotent.</li>
   <li><strong>Negative cache:</strong> remember videos that genuinely have no English captions so a playlist backfill does not retry them forever.</li>
   <li><strong>Jitter:</strong> sleep 5–20&nbsp;s between videos in <code>learn_playlist</code>; randomise per request.</li>
   <li><strong>Batch size:</strong> guest sessions are roughly a few hundred requests/hour per IP. A 50-video playlist should be spread over time, not fired at once.</li>
@@ -449,7 +449,7 @@ yt-dlp --skip-download --write-subs --write-auto-subs \
   --js-runtimes node \
   --proxy "$YT_PROXY_URL" \
   --sleep-requests 0.75 --sleep-subtitles 5 \
-  -o "youtube_transcript/%(id)s.%(ext)s" \
+  -o ".chat/youtube_transcripts/%(id)s.%(ext)s" \
   "https://www.youtube.com/watch?v=&lt;video-id&gt;"
 </code></pre>
 

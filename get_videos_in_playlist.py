@@ -11,7 +11,7 @@ Outputs one 11-character YouTube video hash per line, e.g.:
     ...
 
 Videos are printed in playlist order with duplicates removed.  Videos whose
-``youtube_transcript/<hash>.transcript`` file already exists are skipped, as
+``.chat/youtube_transcripts/<hash>.transcript`` file already exists are skipped, as
 are playlist entries that are not videos (e.g. nested playlists or unavailable
 items).
 """
@@ -32,7 +32,7 @@ except ImportError as exc:  # pragma: no cover - dependency guard
 
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 LIST_PARAM_RE = re.compile(r"[?&]list=([^&#]+)")
-TRANSCRIPT_DIR = Path(__file__).resolve().parent / "youtube_transcript"
+TRANSCRIPT_DIR = Path(__file__).resolve().parent / ".chat" / "youtube_transcripts"
 
 
 def has_transcript(video_hash: str) -> bool:

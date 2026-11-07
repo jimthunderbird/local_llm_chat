@@ -5,8 +5,8 @@ Usage:
     python3 research/migrate_paragraph_embeddings.py [--tag japan]
     python3 research/migrate_paragraph_embeddings.py --video <hash> [--force]
 
-For every ./youtube_transcript/<video>.<index>.trunk this writes
-./youtube_transcript/<video>.<index>.paragraph.embedding containing the
+For every ./.chat/youtube_transcripts/<video>.<index>.trunk this writes
+./.chat/youtube_transcripts/<video>.<index>.paragraph.embedding containing the
 embedding of the <paragraph> body only. chat.py prefers that file for
 retrieval, which removes the old per-question paragraph re-embedding call and
 the shared-title bias at the same time.
@@ -33,7 +33,7 @@ MODEL = "embeddinggemma-2:570m"
 KEEP_ALIVE = "30m"
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
-OUTPUT_DIR = PROJECT_DIR / "youtube_transcript"
+OUTPUT_DIR = PROJECT_DIR / ".chat" / "youtube_transcripts"
 TAG_DIR = PROJECT_DIR / "tags"
 
 TRUNK_FILE = re.compile(r"^(?P<video>[A-Za-z0-9_-]+)\.(?P<index>\d+)\.trunk$")

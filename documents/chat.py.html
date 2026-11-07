@@ -125,7 +125,7 @@
 
 <section id="overview">
 <h2>1. High-level shape</h2>
-<p><code>chat.py</code> is a local chatbot over transcript “trunks”: one short paragraph of knowledge per <code>./youtube_transcript/&lt;video_id&gt;.&lt;index&gt;.trunk</code> file. It deliberately does <strong>not</strong> use embeddings, cosine similarity, or a vector database. Retrieval is lexical BM25; a small local model expands the query and filters candidates; a larger local model synthesizes the answer.</p>
+<p><code>chat.py</code> is a local chatbot over transcript “trunks”: one short paragraph of knowledge per <code>./.chat/youtube_transcripts/&lt;video_id&gt;.&lt;index&gt;.trunk</code> file. It deliberately does <strong>not</strong> use embeddings, cosine similarity, or a vector database. Retrieval is lexical BM25; a small local model expands the query and filters candidates; a larger local model synthesizes the answer.</p>
 
 <pre><code>question
   │
@@ -176,7 +176,7 @@
   <li><strong><code>load_all_chunks()</code></strong>:
     <ul>
       <li>validates the selected tag against <code>./tags.toml</code>;</li>
-      <li>globs every <code>./youtube_transcript/*.trunk</code> file into one global corpus;</li>
+      <li>globs every <code>./.chat/youtube_transcripts/*.trunk</code> file into one global corpus;</li>
       <li>creates lightweight <code>Chunk(video_id, index, trunk_path)</code> objects, sorted by <code>(video_id, index)</code>;</li>
       <li>reads <em>no</em> trunk text and builds <em>no</em> BM25 index yet;</li>
       <li><code>/tag</code> thereafter changes only metadata, not the corpus.</li>
@@ -410,7 +410,7 @@ tokenized_documents.append(tokenize(document))</code></pre>
 <h3>8.1 Corpus in this checkout</h3>
 <table>
   <tr><th>Item</th><th class="num">Count / size</th></tr>
-  <tr><td><code>./youtube_transcript/*.trunk</code> files</td><td class="num">5,348</td></tr>
+  <tr><td><code>./.chat/youtube_transcripts/*.trunk</code> files</td><td class="num">5,348</td></tr>
   <tr><td>Union of all tagged videos</td><td class="num">4,959 trunks / 211 videos</td></tr>
   <tr><td>Tag <code>japan</code></td><td class="num">2,916 trunks / 124 videos</td></tr>
   <tr><td>Tag <code>ai_and_coding</code></td><td class="num">1,719 trunks / 76 videos</td></tr>

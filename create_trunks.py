@@ -5,11 +5,11 @@ Usage:
     python3 create_trunks.py <youtube_video_hash>
 
 Reads:
-    ./youtube_transcript/<youtube_video_hash>.rewrite
-    ./youtube_transcript/<youtube_video_hash>.title
+    ./.chat/youtube_transcripts/<youtube_video_hash>.rewrite
+    ./.chat/youtube_transcripts/<youtube_video_hash>.title
 
 Writes:
-    ./youtube_transcript/<youtube_video_hash>.<paragraph_index>.trunk
+    ./.chat/youtube_transcripts/<youtube_video_hash>.<paragraph_index>.trunk
 """
 
 import argparse
@@ -27,7 +27,7 @@ def normalize_argv(argv):
     return argv
 
 
-OUTPUT_DIR = Path.cwd() / "youtube_transcript"
+OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
 
 TRUNK_TEMPLATE = "<article><title>{title}</title><paragraph>{paragraph}</paragraph></article>"
 

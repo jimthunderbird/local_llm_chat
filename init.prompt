@@ -157,7 +157,7 @@ group: generate_tags.py {
     create ./generate_tags.py:
     logic:
     - tags: examine all files in ./tags
-    - titles: execulte command "find youtube_transcript/*.title"
+    - titles: execulte command "find .chat/youtube_transcripts/*.title"
     for each {title} in {titles} {
       youtube_video_hash: youtube_video_hash_related_to_{title}
       for each {tag} in {tags} {
@@ -569,7 +569,7 @@ group chat.py {
   task (completed) {
     create chat.py:
     - it should behave like a chatbot
-    - all_embeddings: when the chatbot is started, load all the embeddings from ./youtube_transcript/<youtube_video_hash>.*.embedding into memory
+    - all_embeddings: when the chatbot is started, load all the embeddings from ./.chat/youtube_transcripts/<youtube_video_hash>.*.embedding into memory
     - main logic for answer generation for <question>
     - question_embedding: use ollama local model embeddinggemma-2:570m to create the embedding for <question>
     - top_embeddings:perform consine similarity between {question_embedding} and every single embedding in {all_embeddings}, pick the top 10 embeddings 
@@ -669,7 +669,7 @@ group chat.py {
 
   task (completed) {
     update command: /transcript 
-    - it should use ag to perform keyword search against "./youtube_transcript/*.title" files
+    - it should use ag to perform keyword search against "./.chat/youtube_transcripts/*.title" files
     - it should return list of <youtube_video_hash> <title> in the hinting list
     - once selected an entry in the list:
     reset in-memory embeddings to all the embeddings of this transcript only, then any subsequent question will only have answer from this specific transcript
@@ -763,36 +763,36 @@ task (completed) {
   create ./create_embeddings.py:
   - it should have one cil argument <youtube_video_hash>
   - logic:
-  - remove all existing ./youtube_transcript/<youtube_video_hash>.*.embedding files
-  - for all {trunk_file}, {trunk_file_index_starting_from_1} in ./youtube_transcript/<youtube_video_hash>.*.trunk:
+  - remove all existing ./.chat/youtube_transcripts/<youtube_video_hash>.*.embedding files
+  - for all {trunk_file}, {trunk_file_index_starting_from_1} in ./.chat/youtube_transcripts/<youtube_video_hash>.*.trunk:
   - embedding: use ollama local model embeddinggemma-2:570m to create an embedding for {the content of {trunk_file}}
-  - save {embedding} to ./youtube_transcript/<youtube_video_hash>.{trunk_file_index_starting_from_1}.embedding
+  - save {embedding} to ./.chat/youtube_transcripts/<youtube_video_hash>.{trunk_file_index_starting_from_1}.embedding
 }
 
 task (completed) {
   create ./create_trunks.py:
   - it should have one cil argument <youtube_video_hash>
   - logic:
-  - remove all existing ./youtube_transcript/<youtube_video_hash>.*.trunk files
-  - rewritten_content: read the content of ./youtube_transcript/<youtube_video_hash>.rewrite
+  - remove all existing ./.chat/youtube_transcripts/<youtube_video_hash>.*.trunk files
+  - rewritten_content: read the content of ./.chat/youtube_transcripts/<youtube_video_hash>.rewrite
   for each {paragraph}, {paragraph_index_starting_from_1} in {rewritten_content}:
   - paragraph: trim all spaces and new lines around {paragraph}
   - trunk: 
-  <article><title>{content of ./youtube_transcript/<youtube_video_hash>.title}</title><paragraph>{paragraph}</paragraph></article>
-  - save {trunk} to ./youtube_transcript/<youtube_video_hash>.{paragraph_index_starting_from_1}.trunk
+  <article><title>{content of ./.chat/youtube_transcripts/<youtube_video_hash>.title}</title><paragraph>{paragraph}</paragraph></article>
+  - save {trunk} to ./.chat/youtube_transcripts/<youtube_video_hash>.{paragraph_index_starting_from_1}.trunk
 }
 
 task (completed) {
   create ./rewrite.py:
   - it should have one cil argument <youtube_video_hash>
   - logic:
-  - transcript_content: take .youtube_transcript/<youtube_video_hash>.transcript 
+  - transcript_content: take ./.chat/youtube_transcripts/<youtube_video_hash>.transcript 
   - rewritten_content: use ollama model ornith:35b to rewrite {transcript_content}
   - note: 
   - during the transcript rewriting process, extract all the detail knowledges
   - during the transcript rewriting process, stream the rewritten content to the terminal
   - the rewritten_content should contain short paragraphs, each paragraph should serve as a piece of knowlege, the paragraph will be used as a trunk that will be used in RAG
-  - save {rewritten_content} to ./youtube_transcript/<youtube_video_hash>.rewrite 
+  - save {rewritten_content} to ./.chat/youtube_transcripts/<youtube_video_hash>.rewrite 
 }
 
 task (completed) {
@@ -801,6 +801,6 @@ task (completed) {
   example: FTwxtyOEGyM
   we then fetch the english transcript of https://www.youtube.com/watch?v=FTwxtyOEGyM
   - it should use free youtube api to fetch the transcript of a youtube video
-  - use ollama model ornith:35b to summarize transcript into 20 words and store into ./youtube_transcript/<youtube_video_hash>.title
-  - the transcript should be stored in ./youtube_transcript/<youtube_video_hash>.transcript
+  - use ollama model ornith:35b to summarize transcript into 20 words and store into ./.chat/youtube_transcripts/<youtube_video_hash>.title
+  - the transcript should be stored in ./.chat/youtube_transcripts/<youtube_video_hash>.transcript
 }

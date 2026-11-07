@@ -169,7 +169,7 @@ Goal: remove repeated titles and XML wrappers from the context.
 1. Rewrite `build_context()` (`chat.py`) to emit paragraphs, not raw trunks:
    - reuse `PARAGRAPH_PATTERN` / `paragraph_text()` to extract the body,
    - read each video's title once from
-     `youtube_transcript/<video_id>.title`,
+     `.chat/youtube_transcripts/<video_id>.title`,
    - emit the title once before that video's first paragraph:
 
      ```text
