@@ -432,8 +432,9 @@ def format_youtube_duration(seconds: int) -> str:
     return f"{minutes}:{secs:02d}"
 
 # Follow-up handling. The browser backend keeps a short server-side
-# conversation so a question such as "what does he think about AI?" can be
-# rewritten into a standalone retrieval question before BM25 runs.
+# conversation so a question such as "what does he think about AI?" or
+# "when does it open" can be rewritten into a standalone retrieval question
+# before BM25 runs. A completely unrelated question starts a fresh context.
 CONVERSATION_MAX_TURNS = 8
 CONVERSATION_ANSWER_CHARS = 900
 # A small instruct model with reliable pronoun resolution. If it is not
@@ -2240,7 +2241,7 @@ class TranslationPrefixFilter:
         )
 
 
-CONVERSATION_REWRITE_PROMPT = """Rewrite the latest user question as a standalone question that can be understood without the conversation.
+CONVERSATION_REWRITE_PROMPT = """Decide whether the latest user question depends on the conversation, then rewrite it as a standalone question.
 
 <conversation>
 {conversation}
@@ -2251,17 +2252,91 @@ CONVERSATION_REWRITE_PROMPT = """Rewrite the latest user question as a standalon
 </latest_question>
 
 Rules:
+- If the latest question is a follow-up that refers to the conversation, rewrite it as a standalone question.
 - Replace "he", "she", "him", "her", "his", or "hers" with the person named in the conversation.
 - Replace "it" or "its" with the thing or topic being discussed.
 - Replace "they" or "them" with the people or things being discussed.
 - Replace "this", "that", "these", or "those" with the specific thing or things they point to.
-- If the latest question is a short or elliptical follow-up (for example, "why?", "and his wife?", or "what about that?"), turn it into a complete question about the relevant topic in the conversation.
+- If the latest question is a short or elliptical follow-up (for example "why?", "and his wife?", "what about that?", or "what are the opening hours?"), turn it into a complete question about the relevant topic in the conversation.
+- A question is a follow-up only when it refers to the conversation or asks for another detail about the same subject. For example, after a conversation about Nijo Market, "what are the opening hours?" and "is there parking?" are follow-ups, but "how do I cook pasta?" is not.
+- If the latest question is already a complete standalone question, or it introduces a different subject or topic that is not part of the conversation (a new place, person, product, or event), output exactly UNRELATED.
+- Never add a conversation entity to a question that did not refer to the conversation or ask about the same subject. For example, do not turn "what is the weather in Tokyo?" into a question about the conversation's subject.
 - Keep the user's intent, wording, language, and constraints.
 - Use only names and topics stated in the conversation. Do not answer the question and do not add outside facts.
-- If the latest question is already standalone, return it unchanged.
-Output only the standalone question on one line, with no quotes, labels, or explanation.
+Output only the standalone question on one line, or the single word UNRELATED, with no quotes, labels, or explanation.
 
 Standalone question:"""
+
+CONVERSATION_UNRELATED = "unrelated"
+# A short question is ambiguous: it may be an elliptical follow-up even when it
+# contains no pronoun. Content words are counted without the words that almost
+# every question uses. Longer questions carry enough topic words to be treated
+# as standalone, which avoids a model call on every turn.
+FOLLOW_UP_MAX_CONTENT_WORDS = 6
+CONVERSATION_STOPWORDS = frozenset(
+    "a an the and or but if then than that this these those there here "
+    "what which who whom whose when where why how is are was were be been "
+    "being do does did done have has had can could should would will may "
+    "might must shall to of in on at for from with about into over after "
+    "before under between during any some all more most other another "
+    "such only just also very much many few own same so not no nor too "
+    "i me my we us you your he him his she her it its they them their "
+    "theirs please tell give show list find get".split()
+)
+
+
+class ConversationResolution(NamedTuple):
+    """Result of interpreting one question against the recent conversation."""
+
+    question: str
+    is_follow_up: bool = False
+    is_unrelated: bool = False
+
+
+def conversation_content_terms(text: str) -> set[str]:
+    """Return the topic-bearing terms of a question or answer."""
+    return {
+        token
+        for token in chat.tokenize(text)
+        if len(token) > 1 and token not in CONVERSATION_STOPWORDS
+    }
+
+
+def question_relates_to_conversation(question: str, turns: list[dict]) -> bool:
+    """Return True when a question shares a topic with recent turns.
+
+    Used for questions that do not need a rewrite. If a standalone-looking
+    question has no lexical link at all to the recent conversation (including
+    the last answers), it starts a fresh context instead of inheriting stale
+    pronouns/topics for later turns.
+    """
+    if not turns:
+        return False
+    question_terms = conversation_content_terms(question)
+    if not question_terms:
+        return True
+    context_terms: set[str] = set()
+    for turn in turns[-CONVERSATION_MAX_TURNS:]:
+        asked = str(
+            turn.get("resolved_question") or turn.get("question") or ""
+        )
+        context_terms.update(conversation_content_terms(asked))
+        context_terms.update(
+            conversation_content_terms(str(turn.get("answer") or ""))
+        )
+    return bool(question_terms & context_terms)
+
+
+def is_unrelated_response(response: str) -> bool:
+    """Return True when the conversation model flags a new topic."""
+    text = chat.THINK_PATTERN.sub("", response).strip().strip('"\'`“”')
+    normalized = re.sub(r"[^a-z]+", " ", text.lower()).strip()
+    return bool(normalized) and normalized.split()[0] == CONVERSATION_UNRELATED
+
+
+def normalize_question_for_comparison(text: str) -> str:
+    """Fold case and punctuation for rewrite/unchanged comparison."""
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
 def question_needs_context(question: str, turns: list[dict]) -> bool:
@@ -2273,10 +2348,11 @@ def question_needs_context(question: str, turns: list[dict]) -> bool:
         return False
     if FOLLOW_UP_PRONOUNS.search(text) or FOLLOW_UP_OPENERS.search(text):
         return True
-    # Very short questions such as "why?" or "how so?" usually depend on
-    # the previous turn even when they contain no explicit pronoun.
-    words = re.findall(r"[A-Za-z0-9']+", text)
-    return len(words) <= 2
+    # Very short or elliptical questions such as "why?", "how so?", or
+    # "what are the opening hours?" usually depend on the previous turn even
+    # when they contain no explicit pronoun. Longer questions have enough
+    # topic words to stand on their own and skip the model call.
+    return len(conversation_content_terms(text)) <= FOLLOW_UP_MAX_CONTENT_WORDS
 
 
 def format_conversation(turns: list[dict]) -> str:
@@ -2319,8 +2395,8 @@ def clean_standalone_question(response: str) -> str | None:
 def rewrite_follow_up(
     question: str,
     turns: list[dict],
-) -> str | None:
-    """Resolve references in a follow-up question into a standalone query."""
+) -> ConversationResolution | None:
+    """Resolve references in a follow-up or detect a completely new topic."""
     if not turns:
         return None
     prompt = CONVERSATION_REWRITE_PROMPT.format(
@@ -2340,13 +2416,33 @@ def rewrite_follow_up(
             )
         except RuntimeError:
             continue
+        if is_unrelated_response(response):
+            return ConversationResolution(
+                question, is_follow_up=False, is_unrelated=True
+            )
         cleaned = clean_standalone_question(response)
         if not cleaned:
             continue
-        if cleaned != question:
-            return cleaned
+        if (
+            normalize_question_for_comparison(cleaned)
+            != normalize_question_for_comparison(question)
+        ):
+            return ConversationResolution(cleaned, is_follow_up=True)
         unchanged = cleaned
-    return unchanged
+    if unchanged is not None:
+        # The model returned the question unchanged. It is a follow-up only
+        # when it still shares a topic with the recent conversation; otherwise
+        # it is a fresh question and the stale context must be dropped.
+        related = question_relates_to_conversation(question, turns)
+        return ConversationResolution(
+            question, is_follow_up=related, is_unrelated=not related
+        )
+    # No conversation model was available. Fall back to a lexical decision so
+    # an unrelated question still gets a fresh context.
+    related = question_relates_to_conversation(question, turns)
+    return ConversationResolution(
+        question, is_follow_up=related, is_unrelated=not related
+    )
 
 
 class ClientDisconnected(Exception):
@@ -4501,14 +4597,29 @@ class ChatState:
         self.conversation.clear()
         self.conversation_revision += 1
 
-    def resolve_question(self, question: str) -> str:
-        """Resolve follow-up references with the local small model."""
+    def resolve_question(self, question: str) -> ConversationResolution:
+        """Interpret a question against the recent conversation.
+
+        A related follow-up is rewritten into a standalone retrieval question.
+        A question that is completely unrelated to the previous turns starts a
+        fresh context, so stale names and pronouns cannot leak into later
+        retrieval or tag routing.
+        """
+        if not self.conversation:
+            return ConversationResolution(question)
         if not question_needs_context(question, self.conversation):
-            return question
-        resolved = rewrite_follow_up(question, self.conversation)
-        if not resolved or resolved == question:
-            return question
-        return resolved
+            if question_relates_to_conversation(question, self.conversation):
+                return ConversationResolution(question)
+            self.reset_conversation()
+            return ConversationResolution(
+                question, is_follow_up=False, is_unrelated=True
+            )
+        resolution = rewrite_follow_up(question, self.conversation)
+        if resolution is None:
+            return ConversationResolution(question)
+        if resolution.is_unrelated:
+            self.reset_conversation()
+        return resolution
 
     def record_turn(
         self, question: str, resolved_question: str, answer: str
@@ -5825,18 +5936,23 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 # warning if this pre-translation failed.
                 retrieval_question = question
 
-        context_sensitive = question_needs_context(
-            retrieval_question, state.conversation
-        )
-        if context_sensitive:
-            resolved_question = state.resolve_question(retrieval_question)
-            if resolved_question != retrieval_question:
+        context_sensitive = False
+        if state.conversation:
+            resolution = state.resolve_question(retrieval_question)
+            if resolution.is_unrelated:
+                self._sse_text(
+                    "log",
+                    "[conversation: the question is unrelated to the "
+                    "previous turns; starting a fresh context]",
+                )
+            if resolution.question != retrieval_question:
                 self._sse_text(
                     "log",
                     "[conversation: interpreting the follow-up as: "
-                    f"{resolved_question}]",
+                    f"{resolution.question}]",
                 )
-                retrieval_question = resolved_question
+                retrieval_question = resolution.question
+            context_sensitive = resolution.is_follow_up
 
         auto_route: chat.TagRoute | None = None
         if (

@@ -199,6 +199,10 @@ group app/chat.html and app/chat_server.py {
   }
 
   task (persistent) {
+    complete tasks in ./prompts/chat_common.prompt  
+  }
+
+  task (persistent) {
     complete tasks in ./prompts/project_gutenberg.prompt
   }
 

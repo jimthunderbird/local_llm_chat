@@ -1,0 +1,32 @@
+task.subsequent_questions (completed) {
+  after a question is asked:
+  - if the following is a sub question, correctly detect it
+    example:
+    question 1: where is nijo market
+    expect: answer the location information of nijo market
+    question 2: when does it open
+    expect: answer the open time for nijo market
+  - if  the following sub question is completely unrelated to the previous questions, refresh the context and do a fetch answer fetching
+
+  Implemented:
+  app/chat_server.py
+  - Short or elliptical questions now count as possible follow-ups even
+    without an explicit pronoun, so "what are the opening hours?" is
+    resolved against the prior topic.
+  - The conversation model now classifies the latest question as a related
+    follow-up or as a completely new topic (UNRELATED). Related questions are
+    rewritten into standalone retrieval questions (e.g. "when does it open"
+    -> "When are the opening hours of Nijo Market?").
+  - An unrelated question resets the conversation before retrieval, so stale
+    names/pronouns cannot leak into tag routing, caching, or later turns, and
+    the answer is fetched fresh. Standalone questions with no lexical link to
+    the recent turns also start a fresh context without a model call.
+  - Added ConversationResolution and lexical relatedness helpers; case and
+    punctuation-only rewrites are treated as unchanged.
+
+  Verified through the live server:
+  - "where is nijo market" -> "when does it open" was rewritten to Nijo
+    Market opening hours and answered 7am.
+  - A later "how do i cook pasta" logged a fresh-context reset, routed to the
+    global scope, and did not inherit the Nijo Market conversation.
+}
