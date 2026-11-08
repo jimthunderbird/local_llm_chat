@@ -2302,29 +2302,48 @@ def conversation_content_terms(text: str) -> set[str]:
     }
 
 
-def question_relates_to_conversation(question: str, turns: list[dict]) -> bool:
-    """Return True when a question shares a topic with recent turns.
+def conversation_overlap_ratio(question: str, turns: list[dict]) -> float:
+    """Return the strongest topic overlap between a question and recent questions.
 
-    Used for questions that do not need a rewrite. If a standalone-looking
-    question has no lexical link at all to the recent conversation (including
-    the last answers), it starts a fresh context instead of inheriting stale
-    pronouns/topics for later turns.
+    The ratio is measured against the smaller of the two questions, so a single
+    generic shared word (for example "market" in an unrelated question) does
+    not dominate a longer question.
     """
     if not turns:
-        return False
+        return 0.0
     question_terms = conversation_content_terms(question)
     if not question_terms:
-        return True
-    context_terms: set[str] = set()
+        return 1.0
+    best = 0.0
     for turn in turns[-CONVERSATION_MAX_TURNS:]:
         asked = str(
             turn.get("resolved_question") or turn.get("question") or ""
         )
-        context_terms.update(conversation_content_terms(asked))
-        context_terms.update(
-            conversation_content_terms(str(turn.get("answer") or ""))
+        asked_terms = conversation_content_terms(asked)
+        if not asked_terms:
+            continue
+        shared = question_terms & asked_terms
+        if not shared:
+            continue
+        best = max(
+            best, len(shared) / min(len(question_terms), len(asked_terms))
         )
-    return bool(question_terms & context_terms)
+    return best
+
+
+def question_relates_to_conversation(question: str, turns: list[dict]) -> bool:
+    """Return True when a question shares a substantial topic with recent turns.
+
+    The comparison deliberately uses the previous *questions*, not the previous
+    answers. Answers are long, so almost any new question shares some word with
+    them (for example a Nijo Market answer mentions "Japan", which would make a
+    later visa question look related). A question starts a fresh context unless
+    it shares more than half of the smaller side of the comparison with one of
+    the last asked questions, which keeps genuine same-topic questions (for
+    example "is nijo market open on sunday?" after "where is nijo market?") in
+    the same context while a different subject refreshes it.
+    """
+    return conversation_overlap_ratio(question, turns) > 0.5
 
 
 def is_unrelated_response(response: str) -> bool:
@@ -2417,6 +2436,12 @@ def rewrite_follow_up(
         except RuntimeError:
             continue
         if is_unrelated_response(response):
+            # A model may call a standalone question on the same subject a new
+            # topic. Keep the conversation when the question still shares its
+            # subject with an earlier question; there is nothing to rewrite,
+            # but a later follow-up must still be able to refer back to it.
+            if question_relates_to_conversation(question, turns):
+                return ConversationResolution(question, is_follow_up=False)
             return ConversationResolution(
                 question, is_follow_up=False, is_unrelated=True
             )
@@ -2431,8 +2456,8 @@ def rewrite_follow_up(
         unchanged = cleaned
     if unchanged is not None:
         # The model returned the question unchanged. It is a follow-up only
-        # when it still shares a topic with the recent conversation; otherwise
-        # it is a fresh question and the stale context must be dropped.
+        # when it still shares a topic with the recent questions; otherwise it
+        # is a fresh question and the stale context must be dropped.
         related = question_relates_to_conversation(question, turns)
         return ConversationResolution(
             question, is_follow_up=related, is_unrelated=not related
@@ -4608,12 +4633,18 @@ class ChatState:
         if not self.conversation:
             return ConversationResolution(question)
         if not question_needs_context(question, self.conversation):
-            if question_relates_to_conversation(question, self.conversation):
+            overlap = conversation_overlap_ratio(question, self.conversation)
+            if overlap > 0.5:
                 return ConversationResolution(question)
-            self.reset_conversation()
-            return ConversationResolution(
-                question, is_follow_up=False, is_unrelated=True
-            )
+            if overlap == 0.0:
+                # No shared topic at all: confidently a fresh question.
+                self.reset_conversation()
+                return ConversationResolution(
+                    question, is_follow_up=False, is_unrelated=True
+                )
+            # Partial overlap is ambiguous: ask the conversation model instead
+            # of guessing, so a longer follow-up is not dropped and a longer
+            # unrelated question does not inherit stale context.
         resolution = rewrite_follow_up(question, self.conversation)
         if resolution is None:
             return ConversationResolution(question)

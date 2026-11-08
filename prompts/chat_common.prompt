@@ -1,3 +1,39 @@
+task.always_compare_previous_question_and_reset_context_as_needed (completed) {
+  always compare the current question with the previous question that has been asked in the chat:
+  - if current question is a follow-up question of the previous question:
+    keep current context and give the answer based on the previous context
+  - if current question is very different from the prevous question:
+    refresh the context and give the answer based on the refreshed context
+
+  Implemented:
+  app/chat_server.py
+  - Follow-up detection and context refresh now run for every question while a
+    conversation exists (resolve_question is called on each turn).
+  - Topic relatedness now compares the current question with the previous
+    *questions* only, using the overlap ratio against the smaller of the two
+    questions. Previously it compared against the previous answers too, so a
+    long answer mentioning "Japan" made a completely new visa question look
+    related and kept stale context alive.
+  - resolve_question has three outcomes: decisive overlap (> 0.5) keeps the
+    context; no overlap (0.0) refreshes it immediately; partial overlap asks
+    the conversation model, so a longer follow-up is not dropped and a longer
+    unrelated question does not inherit stale context.
+  - A model that wrongly returns UNRELATED for a standalone question on the
+    same subject no longer clears the conversation when the question still
+    shares its topic with an earlier question.
+
+  Verified (deterministic checks plus live ministral-3:3b calls):
+  - "where is nijo market" -> "when does it open" / "what are the opening
+    hours?" -> rewritten to Nijo Market questions, context kept.
+  - "where is nijo market" -> "is nijo market open on sunday" -> rewritten,
+    context kept.
+  - "where is nijo market" -> "how do i cook pasta" / "what is the best
+    stock market strategy" / "what is the capital of france" -> fresh context.
+  - "where is nijo market" -> "please give me a detailed comparison of the
+    different long stay visa types available in japan" -> fresh context with
+    no model call (zero topic overlap with the previous question).
+}
+
 task.subsequent_questions (completed) {
   after a question is asked:
   - if the following is a sub question, correctly detect it
