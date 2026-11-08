@@ -2354,8 +2354,16 @@ def is_unrelated_response(response: str) -> bool:
 
 
 def normalize_question_for_comparison(text: str) -> str:
-    """Fold case and punctuation for rewrite/unchanged comparison."""
-    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    """Fold wording that does not change a question's meaning.
+
+    Case, punctuation, and articles are ignored so a model that only re-adds
+    "a" or "the" (for example "what is git worktree?" -> "What is a Git
+    worktree?") is not mistaken for a rewritten follow-up. That mistake kept
+    a stale tag/conversation alive and sent the new topic to the previous
+    tag's scope.
+    """
+    tokens = re.findall(r"[a-z0-9]+", text.lower())
+    return " ".join(token for token in tokens if token not in {"a", "an", "the"})
 
 
 def question_needs_context(question: str, turns: list[dict]) -> bool:
@@ -6858,6 +6866,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         ):
             candidates = state.fallback_tag_order(retrieval_question)
             attempted: list[str] = []
+            global_attempted = False
             visible = bool(first_response and first_response.strip())
 
             for number, tag in enumerate(candidates, start=1):
@@ -6921,6 +6930,65 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "log", f"[tag {tag!r} could not answer either]"
                 )
 
+            # Soft tags are only evidence filters over the one global corpus.
+            # If every tag-scoped attempt failed (or no tag cleared the
+            # fallback score floor), retry once with no tag filter. Without
+            # this, a genuine answer in a topic whose tag description does not
+            # match the question's wording is hidden by the active tag, and a
+            # chain such as "... does nijo market open on sunday?" followed by
+            # "what is git worktree?" can only report that the active tag
+            # (for example japan) had no knowledge.
+            if not switched and original_tag not in {"", chat.AUTO_TAG}:
+                global_attempted = True
+                self._sse_text(
+                    "log",
+                    "[no tag-scoped answer; searching the global corpus "
+                    "across all tags]",
+                )
+                if visible:
+                    self._sse(
+                        "reset", {"reason": "global corpus fallback"}
+                    )
+                    visible = False
+                global_chunks = state.global_chunks or state.chunks
+                (
+                    global_response,
+                    global_sources,
+                    global_stats,
+                    global_error,
+                ) = attempt(
+                    original_tag,
+                    global_chunks,
+                    "global corpus (all tags)",
+                    report_errors=False,
+                    # Keep a distinct cache entry: the failed tag-scoped
+                    # answer is cached under the same tag and question.
+                    cache_variant="global-fallback",
+                    tag_profile=None,
+                )
+                if global_error:
+                    self._sse_text(
+                        "log",
+                        f"[global corpus fallback failed: {global_error}]",
+                    )
+                elif global_response and global_response.strip():
+                    visible = True
+                    if not answer_is_insufficient(global_response):
+                        response = global_response
+                        sources = global_sources
+                        stats = global_stats
+                        stats["global_fallback"] = {
+                            "from": original_tag,
+                            "to": "global",
+                            "attempts": attempted,
+                        }
+                        switched = True
+                        self._sse_text(
+                            "log",
+                            "[answer found in the global corpus; the active "
+                            "tag filter was bypassed]",
+                        )
+
             if not switched:
                 # Restore the original tag's answer so the visible text and
                 # the active tag/state stay consistent.
@@ -6928,13 +6996,16 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     self._sse("reset", {"reason": "restoring original answer"})
                 self._sse_text(
                     "log",
-                    f"[no other tag could answer; keeping tag "
-                    f"{original_tag!r}]",
+                    f"[no tag-scoped{' or global' if global_attempted else ''} "
+                    f"answer; keeping tag {original_tag!r}]",
                 )
                 if first_response and first_response.strip():
                     self._sse_text("delta", first_response)
                 else:
-                    tried = ", ".join([original_tag, *attempted])
+                    tried = ", ".join(
+                        [original_tag, *attempted]
+                        + (["global corpus"] if global_attempted else [])
+                    )
                     self._sse_text(
                         "delta",
                         "No tagged knowledge could answer this question "

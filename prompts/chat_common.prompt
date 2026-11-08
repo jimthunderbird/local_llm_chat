@@ -1,3 +1,44 @@
+task (completed) {
+  bug: question chain:
+  1. where is nijo market
+     (answer correctly)
+  2. is it a seafood place?
+     (answer correctly)
+  3. what time does it open?
+     (answer correctly)
+  4. does it open on sunday?
+     (answer correctly)
+  5. what is git worktree?
+     (No tagged knowledge could answer this question (tried: japan).)
+
+  for question number 5:what is git worktree?
+
+  it should be able to figure out the answer by switching to other tags!
+
+  please fix it in a systematic way
+
+  Implemented:
+  app/chat_server.py
+  - Cross-tag fallback now ends with one unfiltered global-corpus attempt
+    when no tag-scoped attempt answers (including when no tag clears the
+    fallback score floor). Soft tags only filter evidence over the one global
+    corpus, so this finds a genuine answer even when its tag description does
+    not match the question's wording. It uses a distinct cache variant so the
+    cached tag-scoped refusal is never replayed.
+  - Follow-up comparison now ignores case, punctuation, and articles. A model
+    that only re-adds "a" ("what is git worktree?" -> "What is a Git
+    worktree?") is treated as unchanged instead of a rewritten follow-up, so
+    the unrelated question resets the conversation/tag context instead of
+    keeping the previous topic's tag.
+
+  Verified through the live server (manual tag "japan") with the full chain:
+  questions 1-4 answer Nijo Market correctly; question 5 logs "the question
+  is unrelated to the previous turns; starting a fresh context" and returns
+  the Git worktree answer. In auto mode the same question routes to global
+  and answers. The global fallback also produced the answer when the japan
+  tag filter rejected every worktree paragraph.
+}
+
 task.always_compare_previous_question_and_reset_context_as_needed (completed) {
   always compare the current question with the previous question that has been asked in the chat:
   - if current question is a follow-up question of the previous question:
