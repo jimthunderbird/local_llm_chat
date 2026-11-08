@@ -1,4 +1,52 @@
 task (completed) {
+  all questions should, by default, use the global scope
+  - remove ./tags.toml
+  - remove tags related statistics completely
+  - remove all related code that is associated with tags, tags feature is deprecated
+
+  Implemented:
+  - Deleted ./tags.toml. Every question now searches the one global trunk
+    corpus; there is no tag registry, tag scope, tag router, cross-tag
+    fallback, tag filter, or tag completion.
+  - chat.py
+    - Removed --tag, the interactive Tag prompt, /tag, TagProfile, TagRoute,
+      load_tags/get_tag/available_tags, tag filtering, auto routing, fallback,
+      tag cache keys, and all tag fields in /status. load_chunks() now only
+      loads the global corpus (or an explicit transcript set).
+    - make_cache_key(), answer(), and chat_status_report() no longer take tag
+      arguments or tag scope state.
+  - app/chat_server.py
+    - ChatState no longer has tag/tag_mode/resolved_tags/route/tag_profile
+      fields. Every question uses state.chunks (the global corpus unless the
+      user explicitly entered /article or /youtube transcript).
+    - Removed /tag, the tag autocomplete kind, tag metadata in /api/state,
+      and every tag-scoped answer/fallback branch.
+    - Go, Rust, and PHP documentation support now keys off the programming
+      language named in the question (detect_code_language), not a tag.
+  - app/chat.html
+    - Removed the tag status item, tag labels, /tag completion, tag-pinned
+      language text, and the tag-based code-line-help check. Scope now shows
+      "global corpus", or the active article/transcript.
+  - youtube_video_learn.py: documented that ingestion always targets the one
+    global corpus.
+
+  Verified: chat.py and app/chat_server.py start with tags.toml absent;
+  /api/state contains no tag fields and no /tag or /new command; the server
+  loads all 11,406 trunks into the global corpus; /tag and /new now return the
+  unknown-command response.
+}
+
+task (completed) {
+  remove the /new command
+
+  Implemented:
+  - Removed /new from chat.py's command table, the server dispatch and
+    _command_new handler, the browser command list, and the browser's
+    clear-on-success logic and welcome hint. Follow-up context is still kept
+    automatically by the conversation resolver.
+}
+
+task (completed) {
   perform the changes based on {directory_of_this_prompt}/../research/no_more_default_tag.html
 
   Implemented the recommended query-time auto-routing design (the global

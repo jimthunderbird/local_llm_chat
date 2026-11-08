@@ -2080,7 +2080,6 @@
     </div>
     <div id="completion-box" hidden></div>
     <div id="statusbar">
-      <span class="status-item"><strong>tag</strong> <span id="status-tag">…</span></span>
       <span class="status-item"><strong>scope</strong> <span id="status-scope">…</span></span>
       <span class="status-item"><strong>depth</strong> <span id="status-depth">…</span></span>
       <span class="status-item"><strong>trunks</strong> <span id="status-chunks">…</span></span>
@@ -2287,7 +2286,7 @@
       <span class="k">d / x in visual</span><span class="d">delete selection</span>
       <span class="k">y / p</span><span class="d">yank selection / paste internal clipboard</span>
       <span class="k">u</span><span class="d">undo</span>
-      <span class="k">Tab</span><span class="d">complete commands, tags, transcripts (repeat to cycle); on a bare /news it opens source checkboxes</span>
+      <span class="k">Tab</span><span class="d">complete commands or transcripts (repeat to cycle); on a bare /news it opens source checkboxes</span>
       <span class="k">Enter in /news picker</span><span class="d">load the checked news sources (all are checked by default)</span>
       <span class="k">↑ / ↓ or k / j</span><span class="d">move between composer lines, then previous / next history at the edges</span>
       <span class="k">Enter</span><span class="d">insert a newline in the composer (any mode)</span>
@@ -3313,7 +3312,7 @@ function makeCodeSearchControls(codeLines, lineTextEls) {
  * box above the snippet; the question and the full snippet are sent to the
  * code-generation model and the answer streams in under the question.
  */
-function makeCodeAskControls(codeLines, language, tag) {
+function makeCodeAskControls(codeLines, language) {
   const toggle = document.createElement("button");
   toggle.type = "button";
   toggle.className = "code-copy code-ask-toggle";
@@ -3490,7 +3489,6 @@ function makeCodeAskControls(codeLines, language, tag) {
     streamSSE(
       "/api/snippet_question",
       {
-        tag,
         language,
         code: codeLines.join("\n"),
         question,
@@ -3578,7 +3576,7 @@ function codeCommentFlags(codeLines, lang) {
   return flags;
 }
 
-function makeLineHelpButton(codeLines, lineIndex, language, tag) {
+function makeLineHelpButton(codeLines, lineIndex, language) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "line-help";
@@ -3594,7 +3592,6 @@ function makeLineHelpButton(codeLines, lineIndex, language, tag) {
       codeLines: codeLines.slice(),
       lineNumber: lineIndex + 1,
       language,
-      tag,
     });
   });
   return button;
@@ -3602,7 +3599,6 @@ function makeLineHelpButton(codeLines, lineIndex, language, tag) {
 
 function renderMarkdown(text, clickable = true, annotations = null, options = null) {
   const lineHelpEnabled = Boolean(options && options.lineHelp);
-  const lineHelpTag = lineHelpEnabled ? String(options.tag || appState?.tag || "") : "";
   const container = document.createDocumentFragment();
   const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
   const annotationsByIndex = new Map();
@@ -3690,8 +3686,7 @@ function renderMarkdown(text, clickable = true, annotations = null, options = nu
             makeLineHelpButton(
               codeLines,
               lineIndex,
-              options?.language || fenceLang,
-              lineHelpTag
+              options?.language || fenceLang
             )
           );
         }
@@ -3703,8 +3698,7 @@ function renderMarkdown(text, clickable = true, annotations = null, options = nu
       const searchControls = makeCodeSearchControls(codeLines, lineTextEls);
       const askControls = makeCodeAskControls(
         codeLines,
-        snippetLanguage,
-        String(options?.tag || appState?.tag || "")
+        snippetLanguage
       );
       searchControls.toolbar.appendChild(askControls.toggle);
       searchControls.toolbar.appendChild(makeCodeCopyButton(codeLines));
@@ -3877,10 +3871,12 @@ function copySelectedText(text) {
   writeClipboardText(text, "Copied selection.");
 }
 
-const DOCUMENT_BACKED_TAGS = new Set(["golang", "rust", "php"]);
+const DOCUMENTATION_LANGUAGES = new Set(["go", "rust", "php"]);
 
-function isDocumentBackedTag(tag) {
-  return DOCUMENT_BACKED_TAGS.has(String(tag || "").trim().toLowerCase());
+function isDocumentationLanguage(language) {
+  return DOCUMENTATION_LANGUAGES.has(
+    String(language || "").trim().toLowerCase()
+  );
 }
 
 function hasFencedCodeSample(text) {
@@ -3897,7 +3893,7 @@ function hasFencedCodeSample(text) {
 function makeEntry(kind, options = {}) {
   const entry = {
     kind,
-    tag: options.tag || "",
+    language: options.language || "",
     thinking: false,
     logs: [],
     text: "",
@@ -4106,10 +4102,10 @@ function renderEntry(entry) {
       entry.text,
       entry.clickable,
       entry.annotations,
-      appState?.code_language && entry.kind === "assistant"
+      isDocumentationLanguage(appState?.code_language) &&
+      entry.kind === "assistant"
         ? {
             lineHelp: true,
-            tag: appState.tag,
             language: appState.code_language,
           }
         : null
@@ -6693,19 +6689,16 @@ function applyState(state, loadHistory = false) {
     historyIndex = history.length;
     historyDraft = "";
   }
-  $("#status-tag").textContent = state.tag_label || state.tag || "—";
   $("#status-scope").textContent = state.article
     ? `article ${state.article}`
     : state.transcript
       ? `transcript ${state.transcript}`
-      : (state.tag_mode === "auto"
-          ? `soft tag · ${state.tag_label || "auto"}`
-          : "soft tag · global corpus");
+      : "global corpus";
   $("#status-scope").title = state.article
     ? `Only ${state.article} is used as context`
     : state.transcript
       ? "Only this transcript is used as context"
-      : (state.tag_description || "The tag is a soft query-time scope over all learned trunks");
+      : "All learned trunks are searched for every question";
   $("#status-depth").textContent = state.depth_label || "—";
   $("#status-chunks").textContent = `${state.chunks ?? "?"} / ${state.videos ?? "?"} videos`;
   $("#status-conversation").textContent =
@@ -6718,13 +6711,13 @@ function applyState(state, loadHistory = false) {
     const language = state.code_language || "";
     codeLanguageEl.textContent = language || "auto";
     codeLanguageEl.title = language
-      ? `Code generated while this tag is active is always ${language}`
-      : "The coding model chooses the language (no tag pins one)";
+      ? `Code generated for the current question is ${language}`
+      : "The coding model chooses the language";
   }
   const modelLabel = displayModelName(state.models?.chat);
   $("#top-tagline").textContent = state.article
     ? `article ${state.article_title || state.article} · ${state.chunks ?? "?"} paragraphs · ${modelLabel} · /help`
-    : `tag ${state.tag_label ?? state.tag ?? "—"} · ${state.chunks ?? "?"} trunks · ${modelLabel} · /help`;
+    : `global corpus · ${state.chunks ?? "?"} trunks · ${modelLabel} · /help`;
   updateModeUI();
   if (helpPanel.hidden === false) renderHelp();
 }
@@ -7050,19 +7043,15 @@ function submitText(text, fromChoice = false) {
   hideNewsSourcePicker();
   setMode("insert", { moveCaret: false });
 
-  // /new resets the server conversation; once it confirms, also drop every
-  // earlier line from the screen so the UI starts as fresh as the context.
   const commandName = trimmed.startsWith("/")
     ? trimmed.slice(1).split(/\s+/, 1)[0].toLowerCase()
     : "";
-  const clearOnSuccess = commandName === "new";
-  const previousOutput = clearOnSuccess ? Array.from(outputEl.childNodes) : [];
 
   addUserEcho(trimmed);
   const isCommand = trimmed.startsWith("/");
   const entry = makeEntry(isCommand ? "command" : "assistant", {
     clickable: !isCommand,
-    tag: appState?.tag || "",
+    language: appState?.code_language || "",
     wikiArticle: commandName === "wiki_article",
     label: commandName === "news"
       ? "News"
@@ -7104,18 +7093,17 @@ function submitText(text, fromChoice = false) {
       if (data?.language) {
         const languageEl = $("#status-code-language");
         languageEl.textContent = data.language;
-        languageEl.title =
-          `Code for this answer is generated in ${data.language} because the active tag pins the language`;
+        languageEl.title = `Code for this answer is generated in ${data.language}`;
       }
     },
     log: (data) => {
       // /wiki_article is an article reader: progress logs would push the
       // pinned title around while the article streams, so keep them hidden.
       if (entry.pinToTop) return;
-      // Documentation-backed tags emit a lot of retrieval/progress detail.
+      // Documentation-backed answers emit a lot of retrieval/progress detail.
       // Keep the answer clean: show a single "thinking..." indicator until
       // the answer itself starts streaming.
-      if (entry.kind === "assistant" && isDocumentBackedTag(entry.tag)) {
+      if (entry.kind === "assistant" && isDocumentationLanguage(entry.language)) {
         if (!entry.thinking) {
           entry.thinking = true;
           scheduleRender(entry);
@@ -7134,15 +7122,15 @@ function submitText(text, fromChoice = false) {
       scheduleRender(entry);
     },
     reset: () => {
-      // Automatic tag fallback discards a refusal before streaming the next
-      // tag's answer, so clear the answer body (and any stale inline error)
-      // while keeping the logs. Documentation-backed answers are different:
+      // A documentation answer may replace a refusal, so clear the answer
+      // body (and any stale inline error) while keeping the logs.
+      // Documentation-backed answers are different:
       // the official documentation streams before any follow-up generation.
       // Never erase a code sample that already reached the screen; keep it
       // and separate any continuation from it instead.
       if (
         entry.kind === "assistant" &&
-        isDocumentBackedTag(entry.tag) &&
+        isDocumentationLanguage(entry.language) &&
         hasFencedCodeSample(entry.text)
       ) {
         const kept = entry.text.replace(/\s+$/, "");
@@ -7191,11 +7179,6 @@ function submitText(text, fromChoice = false) {
       entry.thinking = false;
       entry.complete = true;
       renderEntry(entry);
-      if (clearOnSuccess && !entry.error) {
-        for (const node of previousOutput) {
-          if (node.parentNode === outputEl) node.remove();
-        }
-      }
     },
   };
 
@@ -7357,8 +7340,7 @@ function completionContext() {
   const name = value.slice(0, firstSpace).toLowerCase();
   let kind = null;
   let start = firstSpace + 1;
-  if (name === "/tag") kind = "tags";
-  else if (name === "/youtube") {
+  if (name === "/youtube") {
     // First argument: complete the subcommand.  After "transcript" or
     // "search_transcript", complete the learned video hashes.
     const args = value.slice(firstSpace + 1, caret);
@@ -8699,7 +8681,7 @@ window.addEventListener("resize", () => {
 /* ------------------------------------------------------------------ *
  *  Code-line explanation modal (rust / golang / php answers)
  * ------------------------------------------------------------------ */
-function openLineHelp({ codeLines, lineNumber, language, tag }) {
+function openLineHelp({ codeLines, lineNumber, language }) {
   const source = codeLines[lineNumber - 1] ?? "";
   lineHelpTitleEl.textContent = `Line ${lineNumber}`;
   lineHelpLangEl.textContent = language || appState?.code_language || "";
@@ -8768,7 +8750,6 @@ function openLineHelp({ codeLines, lineNumber, language, tag }) {
   streamSSE(
     "/api/explain_line",
     {
-      tag,
       language,
       code: codeLines.join("\n"),
       line: lineNumber,
@@ -8856,17 +8837,16 @@ function renderWelcome(state) {
   const banner = document.createElement("div");
   banner.className = "banner";
   const pre = document.createElement("pre");
-  const tag = state?.tag_label ?? state?.tag ?? "—";
   const chunks = state?.chunks ?? "?";
   const videos = state?.videos ?? "?";
   const model = displayModelName(state?.models?.chat);
   const historyCount = state?.history_count ?? 0;
   pre.innerHTML =
     `<span class="accent">Personal Chatbot</span>  <span class="dim">— lexical BM25 RAG over transcript trunks</span>\n` +
-    `tag <span class="accent">${escapeText(tag)}</span> · ${escapeText(String(chunks))} trunks from ${escapeText(String(videos))} videos · model <span class="accent">${escapeText(model)}</span>\n` +
+    `global corpus · ${escapeText(String(chunks))} trunks from ${escapeText(String(videos))} videos · model <span class="accent">${escapeText(model)}</span>\n` +
     `history ${escapeText(String(historyCount))} entries · depth ${escapeText(String(state?.depth_label ?? "—"))} · scope ${escapeText(state?.scope ?? "—")}\n\n` +
     `<span class="dim">Type a question and press ⌘/Ctrl+Enter (or click Send) to send. Enter adds a newline, so questions and code blocks can span several lines. Type /help for commands and vim shortcuts.\n` +
-    `Follow-up questions keep conversation context (for example, "what does he think?"); /new starts over.\n` +
+    `Follow-up questions keep conversation context (for example, "what does he think?").\n` +
     `Click any word in an answer for a streaming /dict popup. Ctrl+C cancels a stream.</span>`;
   banner.appendChild(pre);
   entry.bodyEl.insertBefore(banner, entry.bodyEl.firstChild);

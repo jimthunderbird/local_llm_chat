@@ -2,49 +2,46 @@
 """HTTP API server for the browser front end in app/chat.html.
 
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
-Ollama streaming, tag/transcript/article scoping, history, /memory,
+Ollama streaming, transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /youtube, /news, /medium, /gutenberg,
 /wiki, /wiki_article, /article, /dict, and /ask. The browser is a pure
 HTML/CSS/JavaScript single-page app served from ./app/chat.html.
 
+Every question searches the one global trunk corpus. Tags are no longer a
+user-facing scope; the corpus is never partitioned by topic.
+
 Usage:
-    python3 app/chat_server.py [--host 127.0.0.1] [--port 8765] [--tag auto]
+    python3 app/chat_server.py [--host 127.0.0.1] [--port 8765]
                                   [--max-context-tokens N] [--progressive]
 
 Endpoints:
     GET  /                       app/chat.html
     GET  /api/state              current chat state + command list + history
-    GET  /api/autocomplete       ?kind=commands|tags|transcripts|paths&q=...
+    GET  /api/autocomplete       ?kind=commands|transcripts|paths&q=...
     GET  /api/wiki?word=...      JSON Wikipedia summary
     GET  /api/transcripts?q=...  ag title search results
     GET  /api/gutenberg_book     ?id=<book_id>&url=<plaintext_url>&title=...
                                   the cached plaintext used by the book modal
     POST /api/ask                SSE: question or slash-command stream
                                   (answers include a per-paragraph
-                                  source-video annotation event; tags other
-                                  than "rust", "golang", and "php" automatically
-                                  retry other tags when the active tag cannot
-                                  answer, while "rust", "golang", and "php"
-                                  consult the official documentation instead. For
-                                  those tags a code question consults the
-                                  official documentation first, before any local
-                                  code generation; a "source" event says whether
-                                  the currently streaming answer is coming from
-                                  the local Ollama model or the official docs.
-                                  The tag also pins the generated language:
-                                  code in the "rust" tag is always Rust, code in
-                                  the "golang" tag is always Go, and code in the
-                                  "php" tag is always PHP. /news streams
-                                  "news" events from CNN, Yahoo Finance,
+                                  source-video annotation event. A question that
+                                  names Rust, Go, or PHP uses the official
+                                  documentation for that language; a code question
+                                  consults the documentation first, before any
+                                  local code generation. A "source" event says
+                                  whether the currently streaming answer is
+                                  coming from the local Ollama model or the
+                                  official docs. /news streams "news" events
+                                  from CNN, Yahoo Finance,
                                   KQED, SFGATE, SF Bay View, Mission Local,
                                   Richmond Review, and TechCrunch).
     POST /api/dict               SSE: dictionary + latest-answer usage stream
     POST /api/translate          SSE: paragraph-by-paragraph Simplified Chinese
                                   translation of an answer
     POST /api/explain_line       SSE: explain one line of a code snippet from a
-                                  documentation-backed tag (rust/golang/php)
+                                  Go, Rust, or PHP
     POST /api/snippet_question   SSE: answer a free-form question about a whole
-                                  code snippet (all tags)
+                                  code snippet
     POST /api/video_summary      SSE: fetch a YouTube video's English transcript
                                   and stream an AI summary for the /youtube
                                   search result modal
@@ -112,7 +109,6 @@ PATH_COMPLETION_LIMIT = 50
 WEB_COMMANDS = {
     **chat.COMMANDS,
     "/help": "show commands and keyboard shortcuts",
-    "/new": "start a fresh conversation (clears follow-up context)",
     "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
     "learn_playlist <playlist> | search <keyword> | bookmark list",
     "/news": "list the latest news from wsj, cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count])",
@@ -153,7 +149,6 @@ def medium_username() -> str:
     return value.lstrip("@").strip()
 
 COMMAND_ARGUMENTS = {
-    "/tag",
     "/youtube",
     "/ask",
     "/wiki",
@@ -267,9 +262,9 @@ TRANSLATION_LABEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# In the documentation-backed tags, every code line gets a "?" affordance in
-# the browser. Clicking it streams a short explanation of that one line from
-# the tag's programming model, using the surrounding snippet as context.
+# For Go, Rust, and PHP code, every line gets a "?" affordance in the browser.
+# Clicking it streams a short explanation of that one line from the programming
+# model, using the surrounding snippet as context.
 LINE_EXPLAIN_NUM_CTX = 16384
 MAX_LINE_EXPLAIN_CODE_CHARS = 60_000
 LINE_EXPLAIN_PROMPT = """You are an expert {language} developer. Explain exactly one line from a code snippet.
@@ -291,7 +286,7 @@ Line {line_number}: {line}
 - If the line is only a comment or blank, say so briefly.
 """
 
-# In every tag, a code snippet in the browser also gets an "Ask" affordance.
+# Every code snippet in the browser also gets an "Ask" affordance.
 # The question and the full snippet are sent to the code-generation model and
 # the answer streams back inline, directly under the snippet.
 SNIPPET_QUESTION_NUM_CTX = 32768
@@ -348,7 +343,7 @@ VIDEO_SUMMARY_PROMPT = """You summarize YouTube videos for a viewer who is decid
 # /youtube search cards also have a "Learn" button.  Learning runs the
 # youtube_video_learn.py pipeline in a background thread, so the browser can
 # keep chatting while the transcript is fetched, rewritten, chunked, embedded,
-# and tagged.  Progress is reported as a percentage by the status endpoint.
+# Progress is reported as a percentage by the status endpoint.
 VIDEO_LEARN_TRANSCRIPT_DIR = SCRIPT_DIR / ".chat" / "youtube_transcripts"
 # Weights match youtube_video_learn.STEPS: fetch, rewrite, trunks, embeddings.
 # They only make the progress bar move sensibly between steps; the embeddings
@@ -442,13 +437,13 @@ CONVERSATION_ANSWER_CHARS = 900
 CONVERSATION_MODEL = "ministral-3:3b"
 
 # Code-generation model from ./prompts/programming_language_tips.prompt.
-# Every code snippet the browser produces uses this model, in every tag.
+# Every code snippet the browser produces uses this model.
 CODE_GENERATION_MODEL = "ornith:35b"
 
-# In the documentation-backed tags, every chat answer and every generated
-# code sample uses the dedicated programming model instead of the general
-# transcript chat model. Keeping it in one constant makes the model visible in
-# the status bar, the benchmark line, and the answer-source badges.
+# For Go, Rust, and PHP, every chat answer and every generated code sample
+# uses the dedicated programming model instead of the general transcript chat
+# model. Keeping it in one constant makes the model visible in the status bar,
+# the benchmark line, and the answer-source badges.
 PROGRAMMING_MODEL = CODE_GENERATION_MODEL
 
 # Coding mode. Questions that ask for code samples about a programming
@@ -498,119 +493,83 @@ GITHUB_REPOSITORY_LIMIT = 6
 GITHUB_MAX_QUERY_TERMS = 8
 GITHUB_MAX_FILE_BYTES = 300_000
 
-# Go documentation fallback. When the active tag is "golang", coding
-# questions and questions the local knowledge base cannot answer consult
-# ./golang_doc_search.py instead of switching to another tag or calling the
-# GitHub API. The go.dev/doc/ answer is merged with whatever the local
-# knowledge base produced, so transcript context and authoritative
-# documentation complement each other.
-GOLANG_TAG = "golang"
+# Official documentation is used when a question names Go, Rust, or PHP.
+# The language is detected from the question itself instead of a tag, so
+# every question searches the one global corpus.
+GO_LANGUAGE = "Go"
+RUST_LANGUAGE = "Rust"
+PHP_LANGUAGE = "PHP"
 GOLANG_DOC_SEARCH_TIMEOUT = 900
-
-# Rust documentation fallback. When the active tag is "rust", coding
-# questions and questions the local knowledge base cannot answer consult
-# ./rust_doc_search.py instead of switching to another tag or calling the
-# GitHub API. The doc.rust-lang.org/ answer (plus docs.rs for named crates)
-# is merged with whatever the local knowledge base produced.
-RUST_TAG = "rust"
 RUST_DOC_SEARCH_TIMEOUT = 900
-
-# PHP documentation fallback. When the active tag is "php", coding questions
-# and questions the local knowledge base cannot answer consult
-# ./php_doc_search.py instead of switching to another tag or calling the
-# GitHub API. The www.php.net/manual/en/ answer is merged with whatever the
-# local knowledge base produced.
-PHP_TAG = "php"
 PHP_DOC_SEARCH_TIMEOUT = 900
 
 # The browser shows a live "answer source" badge while an answer streams. For
-# documentation-backed tags the answer starts in the local Ollama model and may
-# then be replaced or extended by the official language documentation, so the
-# server emits a "source" SSE event at each transition.
+# documentation-backed languages the answer starts in the local Ollama model
+# and may then be replaced or extended by the official language documentation,
+# so the server emits a "source" SSE event at each transition.
 SOURCE_OLLAMA = "ollama"
 SOURCE_DOCUMENTATION = "documentation"
 SOURCE_MERGED = "merged"
-DOCUMENTATION_TAGS = {GOLANG_TAG, RUST_TAG, PHP_TAG}
+DOCUMENTATION_LANGUAGES = {GO_LANGUAGE, RUST_LANGUAGE, PHP_LANGUAGE}
 
-# Documentation-backed tags also pin the language of every generated code
-# sample. A question such as "write a CLI that prints hello" does not name a
-# language, so without this mapping the coding model could answer in Python
-# while the user is working in the Rust or Go tag. The tag is the source of
-# truth: code is emitted in that tag's language even when the question names
-# another one or names none at all.
-TAG_CODE_LANGUAGES = {
-    GOLANG_TAG: "Go",
-    RUST_TAG: "Rust",
-    PHP_TAG: "PHP",
-}
-TAG_CODE_FENCES = {
-    GOLANG_TAG: "go",
-    RUST_TAG: "rust",
-    PHP_TAG: "php",
+# Documentation-backed languages also pin the language of every generated code
+# sample, even when the question does not name a language again.
+LANGUAGE_CODE_FENCES = {
+    GO_LANGUAGE: "go",
+    RUST_LANGUAGE: "rust",
+    PHP_LANGUAGE: "php",
 }
 
 
-def tag_uses_official_docs(tag: str | None) -> bool:
-    """Return True for tags whose code answers must come from official docs.
+def normalize_language(language: str | None) -> str:
+    """Return the canonical display name for a programming language."""
+    raw = (language or "").strip()
+    aliases = {
+        "go": GO_LANGUAGE,
+        "golang": GO_LANGUAGE,
+        "rust": RUST_LANGUAGE,
+        "php": PHP_LANGUAGE,
+    }
+    return aliases.get(raw.lower(), raw)
 
-    The "rust", "golang", and "php" tags are documentation-backed:
-    code-sample questions are answered from doc.rust-lang.org, go.dev/doc,
-    or www.php.net/manual/en/ (and docs.rs / pkg.go.dev for named
-    crates/packages), never from a general code search.
-    """
-    return (tag or "").strip().lower() in DOCUMENTATION_TAGS
+
+def language_uses_official_docs(language: str | None) -> bool:
+    """Return True when code answers must come from official docs."""
+    return normalize_language(language) in DOCUMENTATION_LANGUAGES
 
 
-def tag_chat_model(tag: str | None) -> str:
-    """Return the answer-generation model for ``tag``.
-
-    The documentation-backed tags (rust, golang, php) use the dedicated
-    programming model for ordinary chat answers as well as code, while every
-    other tag keeps the general transcript chat model.
-    """
+def language_chat_model(language: str | None) -> str:
+    """Return the answer-generation model for ``language``."""
     return (
         PROGRAMMING_MODEL
-        if tag_uses_official_docs(tag)
+        if language_uses_official_docs(language)
         else chat.CHAT_MODEL
     )
 
 
-def tag_coding_model(tag: str | None) -> str:
-    """Return the code-generation model for ``tag``."""
+def language_coding_model(language: str | None) -> str:
+    """Return the code-generation model for ``language``."""
     return (
         PROGRAMMING_MODEL
-        if tag_uses_official_docs(tag)
+        if language_uses_official_docs(language)
         else CODING_MODE_MODEL
     )
 
 
-def tag_code_language(tag: str | None) -> str | None:
-    """Return the programming language pinned by ``tag``, if any."""
-    return TAG_CODE_LANGUAGES.get((tag or "").strip().lower())
+def language_code_fence(language: str | None) -> str:
+    """Return the Markdown fence language for ``language`` code samples."""
+    return LANGUAGE_CODE_FENCES.get(normalize_language(language), "")
 
 
-def tag_code_fence(tag: str | None) -> str:
-    """Return the Markdown fence language for ``tag``'s code samples."""
-    return TAG_CODE_FENCES.get((tag or "").strip().lower(), "")
-
-
-def tag_coding_directive(tag: str | None) -> str:
-    """Build the language requirement for code generated under ``tag``.
-
-    Returns an empty string for tags that do not pin a language. For the
-    documentation-backed tags the directive is deliberately absolute so the
-    local coding model cannot fall back to the language it was trained on
-    most (usually Python) when the question omits the language.
-    """
-    language = tag_code_language(tag)
-    if not language:
+def language_coding_directive(language: str | None) -> str:
+    """Build the language requirement for generated code."""
+    language = normalize_language(language)
+    if not language_uses_official_docs(language):
         return ""
-    normalized = (tag or "").strip().lower()
-    fence = tag_code_fence(normalized) or language.lower()
-    return f"""### LANGUAGE REQUIREMENT (active tag: {normalized})
-The active knowledge tag is "{normalized}". The user is working in
-{language}. Every code sample, snippet, command, and API reference in the
-answer MUST be written in {language}.
+    fence = language_code_fence(language) or language.lower()
+    return f"""### LANGUAGE REQUIREMENT (active language: {language})
+The user is working in {language}. Every code sample, snippet, command, and
+API reference in the answer MUST be written in {language}.
 - Use complete, idiomatic {language} and fence every code block as
   ```{fence}.
 - If the question names another programming language or does not name any
@@ -621,24 +580,14 @@ answer MUST be written in {language}.
 """
 
 
-def coding_prompt_prefix(tag: str | None) -> str:
-    """Return the coding-mode prompt for the active tag.
-
-    The generic coding instructions are extended with a tag-specific language
-    requirement so that code generated in the "rust", "golang", or "php"
-    tag is always Rust, Go, or PHP.
-    """
-    return CODING_MODE_PROMPT_PREFIX + tag_coding_directive(tag)
+def coding_prompt_prefix(language: str | None) -> str:
+    """Return the coding-mode prompt for the detected language."""
+    return CODING_MODE_PROMPT_PREFIX + language_coding_directive(language)
 
 
-def github_code_fallback_allowed(tag: str | None) -> bool:
-    """Return False when GitHub code search must not be used for ``tag``.
-
-    This is the single source of truth for the Rust/PHP requirement: with
-    those tags the server must never fall back to GitHub for sample code.
-    Go is covered by the same documentation-backed rule.
-    """
-    return not tag_uses_official_docs(tag)
+def github_code_fallback_allowed(language: str | None) -> bool:
+    """Return False when GitHub code search must not be used."""
+    return not language_uses_official_docs(language)
 
 # GitHub's search API takes a language name ("Python"), not the spelling used
 # in a question ("python3"). Frameworks map to the language they are written
@@ -954,6 +903,28 @@ def github_query_terms(
         if token not in terms:
             terms.append(token)
     return terms[:GITHUB_MAX_QUERY_TERMS], language, extensions
+
+
+def detect_code_language(question: str, fallback: str = "") -> str:
+    """Return the programming language named by a question, if any.
+
+    The GitHub language map already recognizes Rust, PHP, and "golang". A
+    separate check covers the short name "go" when it is used in a code
+    context. ``fallback`` keeps the previous language for a follow-up such as
+    "now add error handling" when the new question does not name one.
+    """
+    text = " ".join(str(question or "").split())
+    _terms, language, _extensions = github_query_terms(text)
+    if language in DOCUMENTATION_LANGUAGES:
+        return language
+    if re.search(
+        r"\b(?:in|with|using)\s+go\b|\bgo\s+(?:program|code|script|cli|"
+        r"function|package|module|programming)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return GO_LANGUAGE
+    return fallback if fallback in DOCUMENTATION_LANGUAGES else ""
 
 
 def _github_headers(text_match: bool = False) -> dict[str, str]:
@@ -1273,7 +1244,7 @@ def github_code_snippets(
     question: str,
     limit: int = GITHUB_SNIPPET_LIMIT,
     log: Callable[[str], None] | None = None,
-    tag: str | None = None,
+    language_guard: str | None = None,
 ) -> list[dict]:
     """Return up to ``limit`` GitHub code snippets related to ``question``.
 
@@ -1282,7 +1253,7 @@ def github_code_snippets(
     raw-content endpoints provide the same fallback using only anonymous
     requests. Results are deduplicated by URL.
 
-    ``tag`` is a hard safety guard: documentation-backed tags such as "rust"
+    ``language_guard`` is a hard safety guard: Go, Rust, and PHP questions
     never reach GitHub, even if a future caller forgets to check first.
     """
 
@@ -1290,9 +1261,9 @@ def github_code_snippets(
         if log is not None:
             log(message)
 
-    if not github_code_fallback_allowed(tag):
+    if not github_code_fallback_allowed(language_guard):
         emit(
-            f"[github: code search disabled for tag {tag!r}; "
+            f"[github: code search disabled for {language_guard}; "
             "official language documentation is used instead]"
         )
         return []
@@ -1444,8 +1415,8 @@ def rust_crate_docs_request(question: str) -> bool:
 def rust_code_docs_request(question: str) -> bool:
     """Return True for any Rust code-sample question.
 
-    In the "rust" tag, code samples must come from the official Rust
-    documentation (doc.rust-lang.org and docs.rs), never from the GitHub
+    Rust code samples must come from the official Rust documentation
+    (doc.rust-lang.org and docs.rs), never from the GitHub
     code-search fallback. This check does not require a crate name, so a
     question such as "show me how to iterate over a HashMap" is routed to
     ``rust_doc_search.py`` as well.
@@ -1489,17 +1460,16 @@ def php_symbol_docs_request(question: str) -> bool:
     return bool(php_docs.candidate_symbols(text))
 
 
-def documentation_code_request(tag: str | None, question: str) -> bool:
-    """Return True when a documentation-backed tag asks for code.
+def documentation_code_request(language: str | None, question: str) -> bool:
+    """Return True when a documentation-backed language asks for code.
 
     The language documentation scripts use their own ``CODE_SAMPLE_RE``,
     which recognises requests such as "write a CLI" that the generic server
     detector may miss. Mirroring that check here guarantees every code
-    request in the "rust", "golang", or "php" tag enters coding mode, which
-    then pins the language to the tag (see ``tag_coding_directive``).
+    request in Go, Rust, or PHP enters coding mode.
     """
-    normalized = (tag or "").strip().lower()
-    if normalized not in DOCUMENTATION_TAGS:
+    normalized = normalize_language(language)
+    if not language_uses_official_docs(normalized):
         return False
     text = " ".join(str(question or "").split())
     if not text:
@@ -1509,9 +1479,9 @@ def documentation_code_request(tag: str | None, question: str) -> bool:
     ):
         return True
     try:
-        if normalized == GOLANG_TAG:
+        if normalized == GO_LANGUAGE:
             import golang_doc_search as docs
-        elif normalized == RUST_TAG:
+        elif normalized == RUST_LANGUAGE:
             import rust_doc_search as docs
         else:
             import php_doc_search as docs
@@ -1806,17 +1776,17 @@ def merge_php_doc_answer(
     )
 
 
-def documentation_descriptor(tag: str | None) -> dict | None:
-    """Return the official-documentation configuration for a tag.
+def documentation_descriptor(language: str | None) -> dict | None:
+    """Return the official-documentation configuration for a language.
 
-    Go, Rust, and PHP are documentation-backed tags. Their code answers must
-    be grounded in go.dev/doc, doc.rust-lang.org, or www.php.net/manual/en/
-    before the general local model is allowed to generate code.
+    Go, Rust, and PHP code answers must be grounded in go.dev/doc,
+    doc.rust-lang.org, or www.php.net/manual/en/ before the general local
+    model is allowed to generate code.
     """
-    normalized = (tag or "").strip().lower()
-    if normalized == GOLANG_TAG:
+    normalized = normalize_language(language)
+    if normalized == GO_LANGUAGE:
         return {
-            "name": "golang",
+            "name": "go",
             "source_label": "go.dev/doc",
             "source_name": "Go documentation (go.dev/doc)",
             "source_url": "https://go.dev/doc/",
@@ -1824,7 +1794,7 @@ def documentation_descriptor(tag: str | None) -> dict | None:
             "runner": run_golang_doc_search,
             "merge": merge_golang_doc_answer,
         }
-    if normalized == RUST_TAG:
+    if normalized == RUST_LANGUAGE:
         return {
             "name": "rust",
             "source_label": "doc.rust-lang.org",
@@ -1834,7 +1804,7 @@ def documentation_descriptor(tag: str | None) -> dict | None:
             "runner": run_rust_doc_search,
             "merge": merge_rust_doc_answer,
         }
-    if normalized == PHP_TAG:
+    if normalized == PHP_LANGUAGE:
         return {
             "name": "php",
             "source_label": "www.php.net/manual/en",
@@ -1927,7 +1897,7 @@ def documentation_reference_excerpt(answer: str) -> str:
 
 
 def documentation_code_rescue_prompt(
-    tag: str | None, question: str, doc_answer: str, descriptor: dict
+    language: str | None, question: str, doc_answer: str, descriptor: dict
 ) -> str:
     """Build a code-generation prompt from incomplete official excerpts.
 
@@ -1937,8 +1907,8 @@ def documentation_code_rescue_prompt(
     own general language knowledge, while still using only real APIs.
     """
     reference = documentation_reference_excerpt(doc_answer)
-    language = tag_code_language(tag) or "the requested programming language"
-    fence = tag_code_fence(tag) or ""
+    language = normalize_language(language) or "the requested programming language"
+    fence = language_code_fence(language) or ""
     fence_tag = fence or language.lower()
     reference_block = reference or "(no usable excerpt text was retrieved)"
     return f"""### CODE GENERATION FROM LIMITED EXCERPTS (highest priority)
@@ -1968,12 +1938,12 @@ Rules:
 - If part of the code is not covered by the excerpts, you may add one short
   note saying so, but still provide the full working code.
 
-{tag_coding_directive(tag)}"""
+{language_coding_directive(language)}"""
 
 
 def stream_code_rescue(
     question: str,
-    tag: str | None,
+    language: str | None,
     doc_answer: str,
     descriptor: dict,
     emit: Callable[[str], None],
@@ -1986,7 +1956,7 @@ def stream_code_rescue(
     complete, runnable solution.
     """
     prompt = documentation_code_rescue_prompt(
-        tag, question, doc_answer, descriptor
+        language, question, doc_answer, descriptor
     )
     metrics: dict = {}
     # The rescue prompt forbids refusals, but small models sometimes still
@@ -2005,7 +1975,7 @@ def stream_code_rescue(
 
     response = chat.stream_answer(
         prompt,
-        model=tag_coding_model(tag),
+        model=language_coding_model(language),
         think=False,
         metrics=metrics,
         emit=emit_filtered,
@@ -2034,15 +2004,6 @@ FOLLOW_UP_OPENERS = re.compile(
     re.IGNORECASE,
 )
 
-# Automatic tag fallback. When the active tag cannot answer a question, the
-# server ranks the other tags and tries them one at a time. A response is
-# treated as a refusal when the answer model says the retrieved context is
-# insufficient (the answer prompt asks it to use a specific phrase for that).
-MAX_TAG_FALLBACK_ATTEMPTS = 6
-# Tags whose lexical fit to the question is below this value are not worth a
-# full retrieval + small-model scope check. Without a floor, an unanswerable
-# question could spend 20-30 seconds trying arbitrarily ordered tags.
-FALLBACK_TAG_MIN_SCORE = 0.05
 INSUFFICIENT_ANSWER_PATTERN = re.compile(
     r"(?:"
     r"(?:the\s+)?(?:provided|available|given\s+)?context\s+"
@@ -2359,8 +2320,8 @@ def normalize_question_for_comparison(text: str) -> str:
     Case, punctuation, and articles are ignored so a model that only re-adds
     "a" or "the" (for example "what is git worktree?" -> "What is a Git
     worktree?") is not mistaken for a rewritten follow-up. That mistake kept
-    a stale tag/conversation alive and sent the new topic to the previous
-    tag's scope.
+    a stale conversation alive and sent the new topic to the previous topic's
+    context.
     """
     tokens = re.findall(r"[a-z0-9]+", text.lower())
     return " ".join(token for token in tokens if token not in {"a", "an", "the"})
@@ -2499,7 +2460,7 @@ def load_chunks_captured(**kwargs):
 
 
 def load_all_chunks_captured():
-    """Load the global soft-tag corpus without leaking prints."""
+    """Load the global corpus without leaking prints."""
     return capture_call(chat.load_all_chunks)
 
 
@@ -2707,7 +2668,7 @@ def build_answer_annotations(
 
 # Articles loaded with /article are split into the same one-knowledge-piece
 # paragraphs that the transcript pipeline uses. The generated trunk files live
-# outside ./.chat/youtube_transcripts so they never become tagged videos or appear in
+# outside ./.chat/youtube_transcripts so they never become corpus videos or appear in
 # transcript autocomplete.
 ARTICLE_CACHE_DIR = APP_DIR / ".article_cache"
 ARTICLE_HTML_BLOCK_RE = re.compile(
@@ -2796,20 +2757,16 @@ ARTICLE_ITERATIVE_EVIDENCE_TOKENS = 16000
 ARTICLE_ITERATIVE_BATCH = 4
 ARTICLE_ITERATIVE_CANDIDATES = 50
 ARTICLE_ROUTER_MODEL = chat.FILTER_MODEL
-# Normal tag questions reuse the /article iterative evidence loop. YouTube
-# transcripts are shorter per paragraph but a tag can span many videos, so the
-# same bounded-round design applies. Enumeration questions need wider coverage.
+# Normal transcript questions reuse the /article iterative evidence loop.
+# YouTube transcripts are shorter per paragraph, but the global corpus spans
+# many videos, so the same bounded-round design applies. Enumeration questions
+# need wider coverage.
 YOUTUBE_ITERATIVE_MAX_ROUNDS = 3
 YOUTUBE_ITERATIVE_ENUMERATIVE_ROUNDS = 5
 YOUTUBE_ITERATIVE_EVIDENCE_TOKENS = 16000
 YOUTUBE_ITERATIVE_BATCH = 4
 YOUTUBE_ITERATIVE_ENUMERATIVE_BATCH = 6
 YOUTUBE_ITERATIVE_CANDIDATES = 50
-# When the soft-tag filter leaves only a thin context, read deeper into the
-# video(s) that supplied the surviving evidence instead of answering from a
-# few isolated snippets. A context already this large is left untouched to
-# avoid slowing narrow questions with unnecessary extra reading.
-YOUTUBE_DEEP_DIVE_TRIGGER_TOKENS = 1200
 YOUTUBE_ITERATIVE_PROMPT_PREFIX = """### RETRIEVED EVIDENCE
 The context below was gathered in several retrieval rounds from the knowledge
 base and is sufficient for the complete question. Answer every part of the
@@ -3679,7 +3636,6 @@ def _iterative_evidence(
     require_sufficient: bool = False,
     accept_insufficient: bool = False,
     apply_filter: bool = True,
-    tag_profile: chat.TagProfile | None = None,
     check_every: int = 1,
 ) -> list[tuple[chat.Chunk, float]]:
     """Gather evidence in small rounds, stopping when it is sufficient.
@@ -3688,7 +3644,7 @@ def _iterative_evidence(
     a few new paragraphs, ask the small model whether they answer the question,
     and search again with the missing terms. It is capped by both the number of
     rounds and a hard evidence-token budget. ``/article`` adds section summaries
-    through ``structure``; YouTube tag questions call it without a structure.
+    through ``structure``.
     """
     seen: set[tuple[str, int]] = set()
     evidence: list[tuple[chat.Chunk, float]] = []
@@ -3700,7 +3656,7 @@ def _iterative_evidence(
     # Later rounds append the sufficiency checker's ``missing`` terms to the
     # BM25 query, which already gives those terms full weight; expanding the
     # whole question again only repeated a small-model call. ``expand_query``
-    # is also cached, so tag routing and /article reuse this result.
+    # is also cached, so /article and normal retrieval reuse this result.
     try:
         expansion = chat.expand_query(question)
     except RuntimeError:
@@ -3726,14 +3682,9 @@ def _iterative_evidence(
             break
 
         # Run the small relevance filter once, when the candidate pool is in
-        # its effective range, instead of on every round. When a soft tag is
-        # active, ``tag_filter_candidates`` already screens the final evidence
-        # for both question and tag relevance, so this earlier filter is pure
-        # duplicate work. Without a tag (for example /transcript or /article),
-        # keep one filter to remove off-topic BM25 matches.
+        # its effective range, instead of on every round.
         if (
             apply_filter
-            and tag_profile is None
             and not filter_done
             and chat.FILTER_MIN_CANDIDATES
             <= len(candidates)
@@ -3817,8 +3768,7 @@ def _iterative_evidence(
     if require_sufficient and not sufficient:
         if not accept_insufficient:
             # The gathered paragraphs never answered the question. Fall back
-            # to the normal retrieval path, which still applies its own filter
-            # and soft-tag routing rules, instead of forcing unrelated
+            # to the normal retrieval path instead of forcing unrelated
             # evidence into the prompt.
             log(
                 f"[{label} iterative: evidence stayed insufficient after "
@@ -3827,30 +3777,14 @@ def _iterative_evidence(
             return []
         # The checker is intentionally conservative (especially for list
         # questions). We already have question-ranked paragraphs, so use them
-        # and let the soft-tag filter and the answer model decide. Falling back
-        # to a second BM25 pass repeated roughly two seconds of work and
-        # replaced broader evidence with a much smaller context.
+        # and let the answer model decide. Falling back to a second BM25 pass
+        # repeated roughly two seconds of work and replaced broader evidence
+        # with a much smaller context.
         log(
             f"[{label} iterative: checker still wanted more after "
             f"{max_rounds} round(s); using the {len(evidence)} gathered "
             "paragraph(s)]"
         )
-
-    if tag_profile is not None and evidence:
-        scoped = chat.tag_filter_candidates(question, evidence, tag_profile)
-        if scoped.status == "none":
-            log(
-                f"[{label} iterative: no evidence fits soft tag "
-                f"{tag_profile.name!r}; using normal retrieval]"
-            )
-            return []
-        if scoped.candidates:
-            log(
-                f"[{label} iterative: soft tag {tag_profile.name!r} kept "
-                f"{len(scoped.candidates)} of {len(evidence)} evidence "
-                "paragraph(s)]"
-            )
-            evidence = scoped.candidates
 
     if not evidence or not structure:
         return evidence
@@ -3909,23 +3843,20 @@ def _youtube_iterative_evidence(
     budget: int,
     log: Callable[[str], None],
     depth: int | None = None,
-    tag_profile: chat.TagProfile | None = None,
     cache: dict | None = None,
 ) -> list[tuple[chat.Chunk, float]]:
     """Iteratively gather YouTube transcript evidence for a normal question.
 
     ``/article`` already answers by retrieving a few paragraphs at a time and
-    asking the small model whether the evidence is sufficient. Questions asked
-    against a tag use the same loop here: the YouTube knowledge base is searched
-    in rounds, and retrieval stops as soon as the gathered paragraphs can answer
+    asking the small model whether the evidence is sufficient. All transcript
+    questions use the same loop here: the global knowledge base is searched in
+    rounds, and retrieval stops as soon as the gathered paragraphs can answer
     the whole question. List/enumeration questions get more rounds and a larger
     budget because they need broader coverage.
 
-    Retrieval and the sufficiency checks are independent of the soft tag: only
-    the final ``tag_filter_candidates`` call depends on it. ``cache`` stores the
-    tag-independent evidence for the current question so cross-tag fallback can
-    reuse it instead of rerunning expansion, BM25, and the small-model
-    sufficiency loop once per candidate tag.
+    ``cache`` stores the evidence for the current question so repeated scopes
+    can reuse it instead of rerunning expansion, BM25, and the small-model
+    sufficiency loop.
     """
     enumerative = bool(chat.LIST_QUERY_PATTERN.search(question))
     effective_budget = budget
@@ -3936,10 +3867,8 @@ def _youtube_iterative_evidence(
     candidate_limit = (
         depth if depth is not None and depth > 0 else YOUTUBE_ITERATIVE_CANDIDATES
     )
-    # A tag-scoped answer is screened once by tag_filter_candidates below, so
-    # the generic relevance filter inside the loop is redundant. For a
-    # transcript scope (no tag) keep it to remove off-topic BM25 matches.
-    base_apply_filter = tag_profile is None and not enumerative
+    # Keep the generic relevance filter to remove off-topic BM25 matches.
+    base_apply_filter = not enumerative
     cache_key = (
         question,
         id(chunks),
@@ -3972,67 +3901,12 @@ def _youtube_iterative_evidence(
             # question-ranked evidence and trigger a second retrieval pass.
             accept_insufficient=True,
             apply_filter=base_apply_filter,
-            tag_profile=None,
             check_every=2 if enumerative else 1,
         )
         if cache is not None:
             cache[cache_key] = base
 
-    if not base:
-        return []
-    if tag_profile is None:
-        return base
-
-    scoped = chat.tag_filter_candidates(question, base, tag_profile)
-    if scoped.status == "none":
-        log(
-            f"[youtube iterative: no evidence fits soft tag "
-            f"{tag_profile.name!r}; using normal retrieval]"
-        )
-        return []
-    if scoped.candidates:
-        log(
-            f"[youtube iterative: soft tag {tag_profile.name!r} kept "
-            f"{len(scoped.candidates)} of {len(base)} evidence paragraph(s)]"
-        )
-        # A soft tag classifies videos, not isolated paragraphs. Keep the
-        # other question-ranked paragraphs from any video the tag filter
-        # accepted, then read deeper into the best related video(s) instead of
-        # answering from only the handful of paragraphs that survived.
-        restored = chat.restore_video_scope(base, scoped.candidates)
-        if len(restored) > len(scoped.candidates):
-            log(
-                "[youtube iterative: video-level tag scope restored "
-                f"{len(restored) - len(scoped.candidates)} paragraph(s)]"
-            )
-        scoped_counts: dict[str, int] = {}
-        for chunk, _score in scoped.candidates:
-            scoped_counts[chunk.video_id] = (
-                scoped_counts.get(chunk.video_id, 0) + 1
-            )
-        restored_tokens = sum(
-            chat.estimate_tokens(chat.paragraph_text(chunk)) + 16
-            for chunk, _score in restored
-        )
-        if restored_tokens >= YOUTUBE_DEEP_DIVE_TRIGGER_TOKENS:
-            log(
-                "[youtube iterative: context already has "
-                f"~{restored_tokens:,} token(s); not deep-diving further]"
-            )
-            return restored
-        return chat.deep_dive_video_evidence(
-            question,
-            restored,
-            chunks,
-            effective_budget,
-            additional_videos={
-                video_id
-                for video_id, count in scoped_counts.items()
-                if count >= 2
-            },
-            log=log,
-        )
-    return []
+    return base
 
 
 def _decode_article_bytes(data: bytes) -> str:
@@ -4536,34 +4410,18 @@ class ChatState:
 
     def __init__(
         self,
-        tag: str,
         max_context_tokens: int = chat.MAX_CONTEXT_TOKENS,
         progressive: bool = False,
         chunks: list[chat.Chunk] | None = None,
     ) -> None:
         self.lock = threading.RLock()
-        self.tag_mode = (
-            chat.AUTO_TAG if chat.is_auto_tag(tag) else "manual"
-        )
-        # ``tag`` is the effective tag used by the current question. In auto
-        # mode it starts as the auto scope mode and is replaced by the router
-        # before the first answer attempt; ``resolved_tags`` records the tags
-        # that router selected for the latest question.
-        self.tag = chat.AUTO_TAG if self.tag_mode == chat.AUTO_TAG else tag
-        self.resolved_tags: list[str] = []
-        self.route_scores: dict[str, float] = {}
-        self.route_source: str = ""
-        self.route_question: str = ""
-        if self.tag_mode == chat.AUTO_TAG:
-            self.tag_profile = None
-        else:
-            try:
-                self.tag_profile = chat.get_tag(tag)
-            except KeyError as exc:
-                raise SystemExit(str(exc.args[0]) if exc.args else str(exc))
         self.max_context_tokens = max_context_tokens
         self.progressive = progressive
         self.depth: int | None = chat.DEFAULT_DEPTH
+        # The language of the most recent code question, when one was named.
+        # It lets a follow-up such as "now add error handling" keep using the
+        # same official documentation.
+        self.code_language: str = ""
         self.transcript: str | None = None
         self.article_path: str | None = None
         self.article_title: str = ""
@@ -4594,9 +4452,9 @@ class ChatState:
                 raise SystemExit(error or "No trunks found in the global corpus")
         self.chunks = chunks
         # The global corpus stays loaded even while /transcript or /article uses
-        # a narrower in-memory scope; switching back to a tag is metadata-only.
+        # a narrower in-memory scope.
         # An explicitly supplied corpus (the in-video chat) is also used as the
-        # fallback corpus, though transcript scope disables tag fallback.
+        # fallback corpus.
         self.global_chunks = chunks
         self.history: list[str] = self.read_history()
         self.started_at = __import__("time").time()
@@ -4636,7 +4494,7 @@ class ChatState:
         A related follow-up is rewritten into a standalone retrieval question.
         A question that is completely unrelated to the previous turns starts a
         fresh context, so stale names and pronouns cannot leak into later
-        retrieval or tag routing.
+        retrieval.
         """
         if not self.conversation:
             return ConversationResolution(question)
@@ -4685,9 +4543,9 @@ class ChatState:
     ) -> None:
         """Install a new knowledge scope and drop the current conversation.
 
-        Switching tags, transcripts, or articles starts a fresh chain of
-        questions. Passing an ``article_path`` enters article mode; every
-        other caller leaves article mode.
+        Switching transcripts or articles starts a fresh chain of questions.
+        Passing an ``article_path`` enters article mode; every other caller
+        leaves article mode.
         """
         self.chunks = chunks
         self.article_path = article_path
@@ -4698,96 +4556,6 @@ class ChatState:
         self.reset_conversation()
         gc.collect()
 
-    def adopt_tag(self, tag: str, chunks: list[chat.Chunk] | None = None) -> None:
-        """Switch to a tag that successfully answered, keeping conversation."""
-        self.tag = tag
-        try:
-            self.tag_profile = chat.get_tag(tag)
-        except KeyError:
-            pass
-        if self.tag_mode == chat.AUTO_TAG:
-            self.resolved_tags = [tag]
-            self.route_source = "fallback"
-        self.chunks = chunks if chunks is not None else self.global_chunks
-        self.transcript = None
-        self.article_path = None
-        self.article_title = ""
-        self.article_structure = None
-        self.article_iterative = False
-        chat.clear_bm25_cache()
-        gc.collect()
-
-    def resolve_auto_scope(
-        self, question: str, *, follow_up: bool = False
-    ) -> chat.TagRoute:
-        """Choose the soft tag for this question when the session is in auto.
-
-        This is metadata-only: the global corpus and its cached BM25 index are
-        reused. Manual tags, /youtube transcript, and /article scopes bypass
-        routing entirely. A follow-up keeps the previously resolved tag.
-        """
-        if (
-            self.tag_mode != chat.AUTO_TAG
-            or self.transcript is not None
-            or self.article_path is not None
-        ):
-            return chat.TagRoute(
-                (self.tag,) if self.tag not in {"", chat.AUTO_TAG} else (),
-                {},
-                "manual",
-            )
-        active = self.resolved_tags[0] if self.resolved_tags else None
-        route = chat.route_tags_for_question(
-            question,
-            self.global_chunks or self.chunks,
-            active_tag=active,
-            follow_up=follow_up,
-        )
-        if route.primary is not None:
-            try:
-                profile = chat.get_tag(route.primary)
-            except KeyError:
-                self.tag = chat.AUTO_TAG
-                self.tag_profile = None
-            else:
-                self.tag = route.primary
-                self.tag_profile = profile
-        else:
-            self.tag = chat.AUTO_TAG
-            self.tag_profile = None
-        self.resolved_tags = list(route.tags)
-        self.route_scores = dict(route.scores)
-        self.route_source = route.source
-        self.route_question = question
-        return route
-
-    def fallback_tag_order(self, question: str) -> list[str]:
-        """Rank other registry tags by lexical fit to the question.
-
-        Tags are soft, so the router inspects the top question matches over
-        the one global corpus and scores each tag description. This replaces
-        the old union-of-tag-files BM25 ranking.
-        """
-        other_tags = [tag for tag in chat.available_tags() if tag != self.tag]
-        if not other_tags:
-            return []
-        try:
-            # The score floor removes clearly unrelated tags before any
-            # retrieval or small-model call. If every tag is below the floor,
-            # returning an empty list is correct: there is no plausible scope
-            # to try, so the caller can stop immediately.
-            ranked = chat.rank_tags_for_question(
-                question,
-                self.global_chunks or self.chunks,
-                exclude=self.tag,
-                limit=MAX_TAG_FALLBACK_ATTEMPTS,
-                min_score=FALLBACK_TAG_MIN_SCORE,
-            )
-        except Exception:
-            # Keep the previous conservative behavior if ranking itself fails.
-            return other_tags[:MAX_TAG_FALLBACK_ATTEMPTS]
-        return ranked
-
     @property
     def depth_label(self) -> str:
         if self.depth is None:
@@ -4796,35 +4564,7 @@ class ChatState:
 
     def snapshot(self, include_history: bool = False) -> dict:
         video_ids = {chunk.video_id for chunk in self.chunks}
-        auto_mode = self.tag_mode == chat.AUTO_TAG
-        effective_tag = self.tag if self.tag not in {"", chat.AUTO_TAG} else None
-        if auto_mode:
-            tag_value = effective_tag or chat.AUTO_TAG
-            tag_label = (
-                f"{chat.AUTO_TAG} → {effective_tag}"
-                if effective_tag
-                else f"{chat.AUTO_TAG} → global"
-            )
-        else:
-            tag_value = self.tag
-            tag_label = self.tag
         data = {
-            "tag": tag_value,
-            "tag_label": tag_label,
-            "tag_mode": self.tag_mode,
-            "resolved_tags": list(self.resolved_tags),
-            "route_source": self.route_source,
-            "tag_description": (
-                self.tag_profile.description
-                if self.tag_profile is not None
-                else (
-                    "Auto: choose the best soft tag from each question, or "
-                    "use the global scope (no tag filter) when no tag is "
-                    "confident."
-                    if auto_mode
-                    else ""
-                )
-            ),
             "transcript": self.transcript,
             "depth": self.depth,
             "depth_label": self.depth_label,
@@ -4833,19 +4573,14 @@ class ChatState:
             "progressive": self.progressive,
             "chunks": len(self.chunks),
             "videos": len(video_ids),
-            "code_language": tag_code_language(self.tag) or "",
+            "code_language": self.code_language or "",
             "scope": (
                 f"article {self.article_path!r}"
                 if self.article_path is not None
                 else (
                     f"transcript {self.transcript!r}"
                     if self.transcript is not None
-                    else (
-                        f"auto tag routing over the global corpus "
-                        f"({tag_label})"
-                        if auto_mode
-                        else f"soft tag {self.tag!r} over the global corpus"
-                    )
+                    else "global corpus (all learned trunks)"
                 )
             ),
             "article": self.article_path,
@@ -4855,9 +4590,9 @@ class ChatState:
                 (self.article_structure or {}).get("sections", [])
             ),
             "models": {
-                "chat": tag_chat_model(self.tag),
-                "coding": tag_coding_model(self.tag),
-                "line_explain": tag_coding_model(self.tag),
+                "chat": language_chat_model(self.code_language),
+                "coding": language_coding_model(self.code_language),
+                "line_explain": language_coding_model(self.code_language),
                 "expansion": chat.EXPANSION_MODEL,
                 "filter": chat.FILTER_MODEL,
                 "translation": chat.TRANSLATION_MODEL,
@@ -4889,12 +4624,11 @@ class ChatState:
         question: str,
         answer_language: str | None,
         conversation_revision: int | None = None,
-        tag: str | None = None,
+        language: str | None = None,
         coding_mode: bool = False,
         prompt_variant: str = "",
     ) -> tuple:
         key = chat.make_cache_key(
-            tag if tag is not None else self.tag,
             self.transcript,
             self.depth,
             self.max_context_tokens,
@@ -4908,7 +4642,7 @@ class ChatState:
             key += (conversation_revision,)
         if self.article_path is not None:
             # Article answers depend on the section map and route, not only on
-            # the tag that happened to be active when /article was entered.
+            # the scope that happened to be active when /article was entered.
             key += (
                 "article",
                 self.article_path,
@@ -4917,11 +4651,11 @@ class ChatState:
             )
         if coding_mode:
             # The coding model and prompt differ from the regular RAG answer.
-            key += ("coding", tag_coding_model(tag or self.tag))
+            key += ("coding", language_coding_model(language))
         else:
-            # The model differs between transcript tags and the
-            # documentation-backed programming tags.
-            key += ("model", tag_chat_model(tag or self.tag))
+            # The model differs when a documentation-backed language is
+            # active.
+            key += ("model", language_chat_model(language))
         if prompt_variant:
             # Documentation-first answers use the official docs as prompt
             # context, so they must not reuse a plain coding-mode answer.
@@ -4939,7 +4673,7 @@ def video_is_learned(video_id: str) -> bool:
 
 # The "Chat" button inside a /youtube search video modal keeps its own
 # conversation scoped to that one transcript. It must not disturb the main
-# chat's tag/transcript scope, so each video gets a lightweight ChatState with
+# chat's transcript scope, so each video gets a lightweight ChatState with
 # only its own trunks loaded.
 VIDEO_CHAT_STATES: dict[str, ChatState] = {}
 VIDEO_CHAT_LOCK = threading.Lock()
@@ -4962,10 +4696,10 @@ def get_video_chat_state(video_id: str) -> ChatState:
                 error
                 or f"No trunk files found for transcript {video_id!r}."
             )
-        # Use the neutral default tag: the transcript scope overrides tag
-        # retrieval, and a documentation-backed tag would wrongly divert
-        # questions to the official language docs.
-        session = ChatState(chat.DEFAULT_TAG, chunks=chunks)
+        # The transcript scope supplies its own corpus; language detection
+        # still decides whether an official language documentation answer is
+        # appropriate for a code question.
+        session = ChatState(chunks=chunks)
         session.transcript = video_id
         session.global_chunks = chunks
         VIDEO_CHAT_STATES[video_id] = session
@@ -5012,7 +4746,7 @@ def get_gutenberg_chat_state(
         chunks, loaded_title, structure = _load_article_chunks(rag_path)
         if not chunks:
             raise RuntimeError("The book has no readable paragraphs.")
-        session = ChatState(chat.DEFAULT_TAG, chunks=chunks)
+        session = ChatState(chunks=chunks)
         session.transcript = None
         session.article_path = str(rag_path)
         session.article_title = loaded_title or book_title
@@ -5209,8 +4943,8 @@ def _refresh_knowledge_after_learn(state: ChatState, video_id: str) -> None:
             state.global_chunks = chunks
             if state.article_path is not None or state.transcript is not None:
                 return
-            # Tags are soft, so the new video is immediately in scope for the
-            # active tag; no membership check or classification pass is needed.
+            # A new video is immediately part of the global corpus; no
+            # membership check or classification pass is needed.
             state.replace_chunks(chunks)
     except Exception:
         # A failed cache refresh must not turn a successful learn into an
@@ -5292,7 +5026,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     def _sse_answer_source(
         self,
         *,
-        tag: str | None,
+        language: str = "",
         source: str,
         label: str,
         model: str = "",
@@ -5303,7 +5037,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         self._sse(
             "source",
             {
-                "tag": tag,
+                "language": language,
                 "source": source,
                 "label": label,
                 "model": model,
@@ -5441,26 +5175,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 for name, description in actions.items()
                 if name.startswith(lowered)
             ]
-
-        if kind == "tags":
-            profiles = chat.load_tags()
-            items = [
-                {"value": tag, "description": profiles[tag].description}
-                for tag in sorted(profiles)
-                if tag.startswith(query)
-            ]
-            if chat.AUTO_TAG.startswith(query):
-                items.insert(
-                    0,
-                    {
-                        "value": chat.AUTO_TAG,
-                        "description": (
-                            "choose the best soft tag from each question; "
-                            "use the global scope when no tag is confident"
-                        ),
-                    },
-                )
-            return items
 
         if kind == "news_sources":
             lowered = query.lower()
@@ -5955,8 +5669,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     def _run_question(self, question: str) -> None:
         state = self.state
         article_mode = state.article_path is not None
-        # Tag-independent iterative evidence is reused across the original
-        # tag attempt and every cross-tag fallback attempt for this question.
+        # Iterative evidence is reused within this question.
         iterative_cache: dict = {}
         answer_language: str | None = None
         retrieval_question = question
@@ -5992,25 +5705,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
                 retrieval_question = resolution.question
             context_sensitive = resolution.is_follow_up
-
-        auto_route: chat.TagRoute | None = None
-        if (
-            not article_mode
-            and state.transcript is None
-            and state.tag_mode == chat.AUTO_TAG
-        ):
-            auto_route = state.resolve_auto_scope(
-                retrieval_question, follow_up=context_sensitive
-            )
-            resolved_label = auto_route.primary or "global"
-            self._sse_text(
-                "log",
-                f"[auto tag router: {resolved_label} "
-                f"({auto_route.source})]",
-            )
-            # Publish the resolved scope immediately so the status bar shows
-            # "auto → japan" (or "auto → global") while the answer streams.
-            self._sse("meta", state.snapshot())
 
         article_route: ArticleRoute | None = None
         article_prepare_selected: Callable | None = None
@@ -6223,29 +5917,41 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "sections)]",
                 )
 
+        detected_language = detect_code_language(retrieval_question)
+        if (
+            not detected_language
+            and question_requests_coding(retrieval_question)
+        ):
+            # A follow-up such as "now add error handling" may not repeat the
+            # language. Keep the previous one only for code questions.
+            detected_language = state.code_language
+        if detected_language:
+            state.code_language = detected_language
+            self._sse("meta", state.snapshot())
+        code_language = detected_language
         golang_package_docs = (
             not article_mode
-            and (state.tag or "").lower() == GOLANG_TAG
+            and code_language == GO_LANGUAGE
             and golang_package_docs_request(retrieval_question)
         )
         rust_crate_docs = (
             not article_mode
-            and (state.tag or "").lower() == RUST_TAG
+            and code_language == RUST_LANGUAGE
             and rust_crate_docs_request(retrieval_question)
         )
         rust_code_docs = (
             not article_mode
-            and (state.tag or "").lower() == RUST_TAG
+            and code_language == RUST_LANGUAGE
             and rust_code_docs_request(retrieval_question)
         )
         php_symbol_docs = (
             not article_mode
-            and (state.tag or "").lower() == PHP_TAG
+            and code_language == PHP_LANGUAGE
             and php_symbol_docs_request(retrieval_question)
         )
         documentation_code = (
             not article_mode
-            and documentation_code_request(state.tag, retrieval_question)
+            and documentation_code_request(code_language, retrieval_question)
         )
         coding_mode = (
             question_requests_coding(retrieval_question)
@@ -6255,21 +5961,20 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             or php_symbol_docs
             or documentation_code
         )
-        code_language = tag_code_language(state.tag)
-        # Documentation-backed tags answer with the dedicated programming
-        # model for both chat and code generation.
-        coding_model = tag_coding_model(state.tag)
-        chat_model = tag_chat_model(state.tag)
+        # Go, Rust, and PHP answer with the dedicated programming model for
+        # both chat and code generation.
+        coding_model = language_coding_model(code_language)
+        chat_model = language_chat_model(code_language)
         if golang_package_docs:
             self._sse_text(
                 "log",
-                "[golang: code-sample question references or implies a Go "
+                "[go: code-sample question references or implies a Go "
                 "package; pkg.go.dev package documentation will be searched]",
             )
-        elif documentation_code and code_language == "Go":
+        elif documentation_code and code_language == GO_LANGUAGE:
             self._sse_text(
                 "log",
-                "[golang: code-sample question detected; searching the "
+                "[go: code-sample question detected; searching the "
                 "official Go documentation and answering in Go]",
             )
         if rust_crate_docs:
@@ -6291,7 +5996,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "class, or extension; the dedicated manual page will be "
                 "searched]",
             )
-        elif documentation_code and code_language == "PHP":
+        elif documentation_code and code_language == PHP_LANGUAGE:
             self._sse_text(
                 "log",
                 "[php: code-sample question detected; searching the "
@@ -6314,8 +6019,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 },
             )
             language_note = (
-                f"; all generated code will be {code_language} because the "
-                f"active tag is {state.tag!r}"
+                f"; all generated code will be {code_language}"
                 if code_language
                 else ""
             )
@@ -6326,7 +6030,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
 
         def attempt(
-            tag: str,
             chunks: list[chat.Chunk],
             scope_label: str,
             report_errors: bool = True,
@@ -6337,27 +6040,24 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             max_context_tokens_override: int | None = None,
             prepare_selected: Callable | None = None,
             prepare_stats: dict | None = None,
-            tag_profile: chat.TagProfile | None = None,
         ):
-            """Answer once from a single tag; no union fallback inside this."""
+            """Answer once from the supplied corpus scope."""
             attempt_stats: dict = {}
-            # Every answer produced under a documentation-backed tag must use
-            # that tag's language for any code it contains, not only answers
-            # classified as coding questions. A normal explanation may still
-            # include a snippet; without this directive the model could emit
-            # Python while the active tag is "rust", "golang", or "php".
+            # A documentation-backed language must use that language for any
+            # code in the answer, not only for answers classified as coding
+            # questions. A normal explanation may still include a snippet.
             prompt_prefix = (
                 prompt_prefix_override
                 if prompt_prefix_override is not None
                 else (
-                    coding_prompt_prefix(tag)
+                    coding_prompt_prefix(code_language)
                     if coding_mode
-                    else tag_coding_directive(tag)
+                    else language_coding_directive(code_language)
                 )
             )
             # /article gathers evidence in small rounds and stops as soon as
             # the small model says the gathered paragraphs are sufficient.
-            # Apply the same loop to normal tag questions. Article mode
+            # Apply the same loop to normal transcript questions. Article mode
             # already did this above; coding questions keep their
             # documentation-first path. A cached iterative answer is reused
             # without repeating the retrieval rounds.
@@ -6379,7 +6079,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                             if context_sensitive
                             else None
                         ),
-                        tag=tag,
+                        language=code_language,
                         coding_mode=coding_mode,
                         prompt_variant=iterative_variant,
                     )
@@ -6401,7 +6101,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                             if depth_override is not None
                             else state.depth
                         ),
-                        tag_profile=tag_profile,
                         cache=iterative_cache,
                     )
                     if evidence:
@@ -6412,7 +6111,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                             YOUTUBE_ITERATIVE_PROMPT_PREFIX + prompt_prefix
                         )
             emit_delta = lambda text: self._sse("delta", {"text": text})
-            docs_backed = tag_uses_official_docs(tag)
+            docs_backed = language_uses_official_docs(code_language)
             answer_filter = InsufficientContextFilter(enabled=docs_backed)
             fence_filter = CodeFenceRepairFilter(enabled=docs_backed)
 
@@ -6448,20 +6147,19 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                             if context_sensitive
                             else None
                         ),
-                        tag=tag,
+                        language=code_language,
                         coding_mode=coding_mode,
                         prompt_variant=cache_variant,
                     ),
                     stats=attempt_stats,
                     progressive=state.progressive,
                     prompt_prefix=prompt_prefix,
-                    model=tag_coding_model(tag) if coding_mode else tag_chat_model(tag),
+                    model=(
+                        language_coding_model(code_language)
+                        if coding_mode
+                        else language_chat_model(code_language)
+                    ),
                     think=False,
-                    # Fallback is handled below one tag at a time so that a
-                    # successful answer also switches the active tag.
-                    cross_tag_fallback=False,
-                    scope_label=scope_label,
-                    tag_profile=tag_profile,
                     use_all_chunks=use_all_chunks,
                     prepare_selected=prepare_selected,
                     emit=emit_answer_delta,
@@ -6496,22 +6194,23 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 attempt_stats["article_expansion"] = dict(prepare_stats)
             return response, sources or [], attempt_stats, None
 
-        original_tag = state.tag
-        original_scope = (
+        scope_label = (
             f"article {state.article_path!r}"
             if article_mode
             else (
-                (
-                    f"auto tag {original_tag!r}"
-                    if state.tag_mode == chat.AUTO_TAG
-                    else f"tag {original_tag!r}"
-                )
-                if state.transcript is None
-                else f"transcript {state.transcript!r}"
+                f"transcript {state.transcript!r}"
+                if state.transcript is not None
+                else "global corpus"
             )
         )
-        documentation_tag = (
-            False if article_mode else tag_uses_official_docs(original_tag)
+        documentation_language = (
+            None
+            if article_mode
+            else (
+                code_language
+                if language_uses_official_docs(code_language)
+                else None
+            )
         )
         local_model = coding_model if coding_mode else chat_model
         documentation_first_done = False
@@ -6522,18 +6221,18 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         sources: list[tuple[chat.Chunk, float]] = []
         stats: dict = {}
 
-        # Documentation-backed tags ("golang", "rust", and "php") must
-        # consult the official documentation before the general local model
-        # generates any code. The docs answer is streamed first; only then is
-        # the local model called, with that answer inserted in its prompt as
-        # the authoritative reference. This prevents a code sample being
-        # invented before the corresponding documentation has been retrieved.
-        if documentation_tag and coding_mode:
+        # A Go, Rust, or PHP code question must consult the official
+        # documentation before the general local model generates any code.
+        # The docs answer is streamed first; only then is the local coding
+        # model called, with that answer inserted in its prompt as the
+        # authoritative reference. This prevents a code sample being invented
+        # before the corresponding documentation has been retrieved.
+        if documentation_language and coding_mode:
             documentation_first_done = True
-            descriptor = documentation_descriptor(original_tag)
+            descriptor = documentation_descriptor(documentation_language)
             assert descriptor is not None
             self._sse_answer_source(
-                tag=original_tag,
+                language=documentation_language,
                 source=SOURCE_DOCUMENTATION,
                 label=(
                     f"official docs {descriptor['source_label']} via "
@@ -6574,7 +6273,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "refusing]",
                 )
                 self._sse_answer_source(
-                    tag=original_tag,
+                    language=documentation_language,
                     source=SOURCE_OLLAMA,
                     label=f"local LLM {coding_model} (code rescue)",
                     model=coding_model,
@@ -6590,7 +6289,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
                 rescue_response, rescue_metrics = stream_code_rescue(
                     retrieval_question,
-                    original_tag,
+                    documentation_language,
                     doc_answer,
                     descriptor,
                     emit=lambda text: self._sse("delta", {"text": text}),
@@ -6654,7 +6353,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 response = doc_answer + "\n"
                 sources = []
                 self._sse_answer_source(
-                    tag=original_tag,
+                    language=documentation_language,
                     source=SOURCE_DOCUMENTATION,
                     label=(
                         f"official docs {descriptor['source_label']} via "
@@ -6677,7 +6376,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "falling back to the local coding model]",
                 )
                 self._sse_answer_source(
-                    tag=original_tag,
+                    language=documentation_language,
                     source=SOURCE_OLLAMA,
                     label=f"local LLM {local_model}",
                     model=local_model,
@@ -6692,9 +6391,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     first_stats,
                     error,
                 ) = attempt(
-                    original_tag,
                     answer_chunks,
-                    original_scope,
+                    scope_label,
                     prompt_prefix_override=(
                         article_overview_prefix
                         if article_overview_prefix is not None
@@ -6709,11 +6407,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     max_context_tokens_override=article_attempt_budget,
                     prepare_selected=article_prepare_selected,
                     prepare_stats=article_prepare_stats,
-                    tag_profile=(
-                        None
-                        if article_mode or state.transcript is not None
-                        else state.tag_profile
-                    ),
                 )
                 if error:
                     return
@@ -6724,9 +6417,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
 
         if not documentation_first_done:
-            if documentation_tag:
+            if documentation_language:
                 self._sse_answer_source(
-                    tag=original_tag,
+                    language=documentation_language,
                     source=SOURCE_OLLAMA,
                     label=f"local LLM {local_model}",
                     model=local_model,
@@ -6736,9 +6429,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     ),
                 )
             first_response, first_sources, first_stats, error = attempt(
-                original_tag,
                 answer_chunks,
-                original_scope,
+                scope_label,
                 prompt_prefix_override=(
                     article_overview_prefix
                     if article_overview_prefix is not None
@@ -6752,11 +6444,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 max_context_tokens_override=article_attempt_budget,
                 prepare_selected=article_prepare_selected,
                 prepare_stats=article_prepare_stats,
-                tag_profile=(
-                    None
-                    if article_mode or state.transcript is not None
-                    else state.tag_profile
-                ),
             )
             if error:
                 return
@@ -6766,33 +6453,25 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 first_stats,
             )
 
-        switched = False
-
-        # For non-coding questions on the documentation-backed tags, the
+        # For non-coding questions in a documentation-backed language, the
         # local knowledge base still answers first and the official docs are
         # consulted when it cannot. Coding questions already took the
         # documentation-first path above, so they are never retried here.
-        # The "golang", "rust", and "php" tags never switch to another tag
-        # and never call the GitHub API; their code answers come from
-        # ./golang_doc_search.py, ./rust_doc_search.py, or
-        # ./php_doc_search.py.
-        documentation_backed_tag = documentation_tag
         local_answer_insufficient = answer_is_insufficient(first_response)
         documentation = None
         if (
             not documentation_first_done
-            and documentation_backed_tag
+            and documentation_language
             and (coding_mode or local_answer_insufficient)
         ):
-            documentation = documentation_descriptor(original_tag)
+            documentation = documentation_descriptor(documentation_language)
 
         if documentation is not None:
             if not coding_mode:
                 self._sse_text(
                     "log",
-                    f"[tag {original_tag!r} could not answer; consulting "
-                    f"{documentation['source_label']} with "
-                    f"{coding_model} instead of switching tags]",
+                    "the local knowledge base could not answer; consulting "
+                    f"{documentation['source_label']} with {coding_model}",
                 )
             response, sources, stats = attach_documentation_answer(
                 first_response,
@@ -6807,14 +6486,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 emit_source=self._sse_doc_source,
                 **documentation,
             )
-        # For every other tag, an unusable coding answer falls back to
+        # For every other language, an unusable coding answer falls back to
         # GitHub's public API and an answer built from code snippets. Go,
         # Rust, and PHP never take this path: their code samples come from
         # the official documentation above.
         elif (
             coding_mode
             and not article_mode
-            and github_code_fallback_allowed(original_tag)
+            and github_code_fallback_allowed(code_language)
             and answer_is_insufficient(first_response)
         ):
             self._sse_text(
@@ -6826,7 +6505,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 retrieval_question,
                 limit=GITHUB_SNIPPET_LIMIT,
                 log=lambda text: self._sse_text("log", text),
-                tag=original_tag,
+                language_guard=code_language,
             )
             if snippets:
                 if first_response and first_response.strip():
@@ -6857,169 +6536,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "[github fallback: no related code snippets found]",
                 )
 
-        if (
-            chat.CROSS_TAG_FALLBACK_ENABLED
-            and not documentation_backed_tag
-            and not article_mode
-            and state.transcript is None
-            and local_answer_insufficient
-        ):
-            candidates = state.fallback_tag_order(retrieval_question)
-            attempted: list[str] = []
-            global_attempted = False
-            visible = bool(first_response and first_response.strip())
-
-            for number, tag in enumerate(candidates, start=1):
-                self._sse_text(
-                    "log",
-                    f"[tag {original_tag!r} could not answer; trying "
-                    f"tag {tag!r} ({number}/{len(candidates)})]",
-                )
-                if visible:
-                    # The previous refusal is already on screen. Clear it so
-                    # the next tag's stream does not append to it.
-                    self._sse("reset", {"reason": f"retrying in tag {tag!r}"})
-                    visible = False
-
-                attempted.append(tag)
-                new_chunks = state.global_chunks or state.chunks
-                try:
-                    candidate_profile = chat.get_tag(tag)
-                except KeyError:
-                    continue
-
-                (
-                    candidate_response,
-                    candidate_sources,
-                    candidate_stats,
-                    error,
-                ) = attempt(
-                    tag,
-                    new_chunks,
-                    f"soft tag {tag!r}",
-                    report_errors=False,
-                    tag_profile=candidate_profile,
-                )
-                if error:
-                    self._sse_text(
-                        "log", f"[tag {tag!r} could not answer: {error}]"
-                    )
-                    continue
-                if candidate_response and candidate_response.strip():
-                    visible = True
-
-                if not answer_is_insufficient(candidate_response):
-                    state.adopt_tag(tag, new_chunks)
-                    response = candidate_response
-                    sources = candidate_sources
-                    stats = candidate_stats
-                    stats["tag_fallback"] = {
-                        "from": original_tag,
-                        "to": tag,
-                        "attempts": attempted,
-                    }
-                    switched = True
-                    self._sse_text(
-                        "log",
-                        f"[answer found in tag {tag!r}; switched from "
-                        f"{original_tag!r}]",
-                    )
-                    break
-
-                self._sse_text(
-                    "log", f"[tag {tag!r} could not answer either]"
-                )
-
-            # Soft tags are only evidence filters over the one global corpus.
-            # If every tag-scoped attempt failed (or no tag cleared the
-            # fallback score floor), retry once with no tag filter. Without
-            # this, a genuine answer in a topic whose tag description does not
-            # match the question's wording is hidden by the active tag, and a
-            # chain such as "... does nijo market open on sunday?" followed by
-            # "what is git worktree?" can only report that the active tag
-            # (for example japan) had no knowledge.
-            if not switched and original_tag not in {"", chat.AUTO_TAG}:
-                global_attempted = True
-                self._sse_text(
-                    "log",
-                    "[no tag-scoped answer; searching the global corpus "
-                    "across all tags]",
-                )
-                if visible:
-                    self._sse(
-                        "reset", {"reason": "global corpus fallback"}
-                    )
-                    visible = False
-                global_chunks = state.global_chunks or state.chunks
-                (
-                    global_response,
-                    global_sources,
-                    global_stats,
-                    global_error,
-                ) = attempt(
-                    original_tag,
-                    global_chunks,
-                    "global corpus (all tags)",
-                    report_errors=False,
-                    # Keep a distinct cache entry: the failed tag-scoped
-                    # answer is cached under the same tag and question.
-                    cache_variant="global-fallback",
-                    tag_profile=None,
-                )
-                if global_error:
-                    self._sse_text(
-                        "log",
-                        f"[global corpus fallback failed: {global_error}]",
-                    )
-                elif global_response and global_response.strip():
-                    visible = True
-                    if not answer_is_insufficient(global_response):
-                        response = global_response
-                        sources = global_sources
-                        stats = global_stats
-                        stats["global_fallback"] = {
-                            "from": original_tag,
-                            "to": "global",
-                            "attempts": attempted,
-                        }
-                        switched = True
-                        self._sse_text(
-                            "log",
-                            "[answer found in the global corpus; the active "
-                            "tag filter was bypassed]",
-                        )
-
-            if not switched:
-                # Restore the original tag's answer so the visible text and
-                # the active tag/state stay consistent.
-                if visible:
-                    self._sse("reset", {"reason": "restoring original answer"})
-                self._sse_text(
-                    "log",
-                    f"[no tag-scoped{' or global' if global_attempted else ''} "
-                    f"answer; keeping tag {original_tag!r}]",
-                )
-                if first_response and first_response.strip():
-                    self._sse_text("delta", first_response)
-                else:
-                    tried = ", ".join(
-                        [original_tag, *attempted]
-                        + (["global corpus"] if global_attempted else [])
-                    )
-                    self._sse_text(
-                        "delta",
-                        "No tagged knowledge could answer this question "
-                        f"(tried: {tried}).",
-                    )
-                response, sources, stats = (
-                    first_response,
-                    first_sources,
-                    first_stats,
-                )
-
         if response is None:
             return
-        if documentation_tag and response is not None:
+        if documentation_language and response is not None:
             # Final safety net: whatever path produced the answer (local,
             # documentation merge, or code rescue), never persist or annotate
             # a leading "provided context is insufficient" refusal.
@@ -7028,18 +6547,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         state.latest_sources = sources
         stats["coding_mode"] = coding_mode
         stats["model"] = coding_model if coding_mode else chat_model
-        if auto_route is not None:
-            stats["auto_tag"] = {
-                "tags": list(auto_route.tags),
-                "source": auto_route.source,
-                "scores": {
-                    name: round(score, 4)
-                    for name, score in sorted(
-                        auto_route.scores.items(),
-                        key=lambda item: -item[1],
-                    )[:5]
-                },
-            }
         state.latest_benchmark = stats
         annotations = build_answer_annotations(response, sources)
         if article_mode:
@@ -7059,8 +6566,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
         self._sse("annotations", {"items": annotations})
         state.record_turn(question, retrieval_question, response)
-        if switched:
-            self._sse("meta", state.snapshot())
         if state.benchmark_mode:
             self._sse_text("log", chat.format_benchmark_line(stats))
 
@@ -7078,8 +6583,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 self.state.chunks, article=self.state.article_path
             )
             self._sse_text("output", "\n" + report + "\n")
-        elif name == "/tag":
-            self._command_tag(argument)
         elif name == "/refresh":
             self._command_refresh()
         elif name == "/youtube":
@@ -7105,11 +6608,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         elif name == "/status":
             state = self.state
             report = chat.chat_status_report(
-                (
-                    chat.AUTO_TAG
-                    if state.tag_mode == chat.AUTO_TAG
-                    else state.tag
-                ),
                 state.transcript,
                 state.chunks,
                 state.depth,
@@ -7117,18 +6615,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 len(state.cache),
                 article=state.article_path,
             )
-            if state.tag_mode == chat.AUTO_TAG:
-                report += (
-                    f"\n  auto route:  {state.snapshot()['tag_label']}"
-                    f" ({state.route_source or 'not resolved yet'})"
-                )
             report += (
                 f"\n  conversation: {len(state.conversation)} turn(s) "
                 f"(kept: last {CONVERSATION_MAX_TURNS})"
             )
             self._sse_text("output", "\n" + report + "\n")
-        elif name == "/new":
-            self._command_new()
         elif name == "/sources":
             self._command_sources()
         elif name == "/benchmark":
@@ -7140,24 +6631,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "commands.\n",
             )
 
-    def _command_new(self) -> None:
-        self.state.reset_conversation()
-        self._sse_text(
-            "output",
-            "\nStarted a new conversation (follow-up context cleared; "
-            "knowledge scope unchanged).\n",
-        )
-        self._sse("meta", self.state.snapshot())
-
     def _command_help(self) -> None:
         lines = ["", "Commands:"]
         for name, description in sorted(WEB_COMMANDS.items()):
             lines.append(f"  {name:<20} {description}")
         lines.extend(
             [
-                "",
-                "If the current tag cannot answer, other tags are tried",
-                "automatically and the chat switches to the one that can.",
                 "",
                 "Keyboard:",
                 "  Esc          normal mode        i / a / A     insert",
@@ -7166,87 +6645,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "  x / dw / dd / D              delete char / word / line / to end",
                 "  v / V                        visual / visual-line mode",
                 "  u                            undo",
-                "  Tab                          complete command, tag, or transcript",
+                "  Tab                          complete command or transcript",
                 "  Up / Down, or k / j          previous / next history entry",
                 "  Click any word in an answer  open a streaming /dict popup",
                 "",
             ]
         )
         self._sse_text("output", "\n".join(lines))
-
-    def _command_tag(self, argument: str) -> None:
-        state = self.state
-        tags = chat.available_tags()
-        auto_requested = chat.is_auto_tag(argument)
-        if not argument:
-            self._sse_text(
-                "output",
-                "\nAvailable tags: "
-                + ", ".join([chat.AUTO_TAG, *tags])
-                + "\nUsage: /tag <tag|auto> (Tab completes tag names)\n",
-            )
-            return
-        if not auto_requested and argument not in tags:
-            self._sse_text(
-                "output",
-                f"\nUnknown tag: {argument!r}. Choose one of: "
-                + ", ".join([chat.AUTO_TAG, *tags])
-                + "\n",
-            )
-            return
-        profile = None
-        if not auto_requested:
-            try:
-                profile = chat.get_tag(argument)
-            except KeyError as exc:
-                message = str(exc.args[0]) if exc.args else str(exc)
-                self._sse_text("output", "\n" + message + "\n")
-                return
-
-        # Tags are soft scopes, not corpus partitions. If the current scope is
-        # an article or a single transcript, restore the global corpus first;
-        # otherwise this is a metadata-only switch.
-        if (
-            state.transcript is not None
-            or state.article_path is not None
-            or state.chunks is not state.global_chunks
-        ):
-            state.replace_chunks(state.global_chunks)
-        else:
-            state.reset_conversation()
-        if auto_requested:
-            state.tag_mode = chat.AUTO_TAG
-            state.tag = chat.AUTO_TAG
-            state.tag_profile = None
-            state.resolved_tags = []
-            state.route_scores = {}
-            state.route_source = ""
-            state.route_question = ""
-            description = (
-                "Choose the best soft tag from each question; use the global "
-                "scope (no tag filter) when no tag is confident."
-            )
-            label = chat.AUTO_TAG
-        else:
-            state.tag_mode = "manual"
-            state.tag = argument
-            state.tag_profile = profile
-            state.resolved_tags = [argument]
-            state.route_scores = {}
-            state.route_source = "manual"
-            state.route_question = ""
-            description = profile.description if profile else ""
-            label = argument
-        state.transcript = None
-        state.cache.clear()
-        self._sse_text(
-            "output",
-            f"\nNow using soft tag {label!r}.\n"
-            f"{description}\n"
-            + chat.index_memory_report(state.chunks, build_index=False)
-            + "\n",
-        )
-        self._sse("meta", state.snapshot())
 
     def _command_refresh(self) -> None:
         state = self.state
@@ -7268,7 +6673,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             "output",
             "\n" + (printed + "\n" if printed else "")
             + chat.index_memory_report(new_chunks, build_index=False)
-            + f"\nNow using soft tag {state.tag!r} (global corpus refreshed).\n",
+            + "\nGlobal corpus refreshed.\n",
         )
         self._sse("meta", state.snapshot())
 
@@ -8336,7 +7741,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         return True
 
     def _finish_learn(self, video_ids: list[str], label: str = "/youtube learn") -> None:
-        """Invalidate caches and refresh the global soft-tag corpus."""
+        """Invalidate caches and refresh the global corpus."""
         state = self.state
         chat.clear_bm25_cache()
         state.cache.clear()
@@ -8350,7 +7755,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         reloaded = False
 
         # Keep the global corpus current even when an article or transcript
-        # scope is active, so a later /tag or /refresh sees the new video.
+        # scope is active, so a later /refresh sees the new video.
         global_chunks, _global_printed, global_error = load_all_chunks_captured()
         if not global_error and global_chunks is not None:
             state.global_chunks = global_chunks
@@ -8374,8 +7779,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     f"{state.transcript!r}; the loaded trunks are unchanged.\n",
                 )
         else:
-            # Tags are soft: a newly learned video belongs to the global corpus
-            # immediately, without a tag membership check or classifier pass.
+            # A newly learned video belongs to the global corpus immediately,
+            # without a membership check or classifier pass.
             new_chunks, printed, error = global_chunks, _global_printed, global_error
             reloaded = True
 
@@ -8670,7 +8075,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "output",
                 "\nUsage: /article [--simple] <path_to_an_article>\n"
                 "The file becomes the only context; follow-up questions keep "
-                "the article scope until /tag or /youtube transcript is used.\n"
+                "the article scope until /youtube transcript is used.\n"
                 "The capped multi-round evidence loop is enabled by default "
                 "(--simple or --fast disables it).\n",
             )
@@ -8698,7 +8103,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 f"\nCannot use article {path}: {exc}\n",
             )
             return
-        # /article replaces the tag/transcript scope for subsequent questions.
+        # /article replaces the transcript scope for subsequent questions.
         state.transcript = None
         state.replace_chunks(
             new_chunks,
@@ -8935,17 +8340,19 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
     # ---- SSE: single code-line explanation ---------------------------
     def _handle_explain_line(self, payload: dict) -> None:
-        """Explain one line of a code snippet from a documentation-backed tag."""
-        tag = str(payload.get("tag") or self.state.tag or "").strip().lower()
+        """Explain one line of a Go, Rust, or PHP code snippet."""
+        language = normalize_language(
+            str(payload.get("language") or self.state.code_language or "")
+        )
         code = payload.get("code")
         try:
             line_number = int(payload.get("line") or 0)
         except (TypeError, ValueError):
             line_number = 0
 
-        if not tag_uses_official_docs(tag):
+        if not language_uses_official_docs(language):
             self._send_error_json(
-                "Line explanations are available for rust, golang, and php tags.",
+                "Line explanations are available for Go, Rust, and PHP.",
                 400,
             )
             return
@@ -8968,16 +8375,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        language = tag_code_language(tag) or "the programming language"
-        fence = tag_code_fence(tag) or "text"
-        model = tag_coding_model(tag)
+        fence = language_code_fence(language) or "text"
+        model = language_coding_model(language)
         self._begin_sse()
         try:
             self._sse(
                 "start",
                 {
                     "model": model,
-                    "tag": tag,
                     "language": language,
                     "line": line_number,
                 },
@@ -9056,11 +8461,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     # ---- SSE: ask a question about a whole code snippet -----------------
     def _handle_snippet_question(self, payload: dict) -> None:
         """Answer a free-form question about one code snippet."""
-        tag = str(payload.get("tag") or self.state.tag or "").strip().lower()
         code = payload.get("code")
         question = str(payload.get("question") or "").strip()
         raw_language = str(
-            payload.get("language") or tag_code_language(tag) or ""
+            payload.get("language") or self.state.code_language or ""
         ).strip()
 
         if not question:
@@ -9090,7 +8494,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         try:
             self._sse(
                 "start",
-                {"model": model, "tag": tag, "language": language},
+                {"model": model, "language": language},
             )
             self._stream_snippet_question(
                 code, question, language, fence, model
@@ -9336,11 +8740,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
-        "--tag",
-        default=chat.DEFAULT_TAG,
-        help=f"tag to load at startup (default: {chat.DEFAULT_TAG})",
-    )
-    parser.add_argument(
         "--max-context-tokens",
         type=int,
         default=chat.MAX_CONTEXT_TOKENS,
@@ -9377,7 +8776,6 @@ def main() -> None:
 
     try:
         state = ChatState(
-            args.tag,
             max_context_tokens=args.max_context_tokens,
             progressive=args.progressive,
         )
@@ -9405,7 +8803,7 @@ def main() -> None:
     server.daemon_threads = True
     address = f"http://{args.host}:{args.port}/"
     print(
-        f"Loaded {len(state.chunks)} trunks for soft tag {state.tag!r}.",
+        f"Loaded {len(state.chunks)} trunks into the global corpus.",
         flush=True,
     )
     print(f"YouTube local chat server running at {address}", flush=True)

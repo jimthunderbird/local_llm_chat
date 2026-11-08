@@ -2,15 +2,12 @@
 """Interactive RAG chatbot over the YouTube transcript embeddings.
 
 Usage:
-    python3 chat_gradual_context.py [--tag <tag>]
+    python3 chat_gradual_context.py
 
-If --tag is given without a value, the available tags in ./tags are listed
-and can be tab-completed at the interactive "Tag:" prompt.
-
-At startup, the video ids listed in ./tags/<tag> (default: japan) are read,
-and only their ./.chat/youtube_transcripts/<youtube_video_hash>.<index>.embedding
-files are loaded into memory and paired with their
-./.chat/youtube_transcripts/<youtube_video_hash>.<index>.trunk file.
+At startup, every ./.chat/youtube_transcripts/<youtube_video_hash>.<index>.embedding
+file is loaded into memory and paired with its
+./.chat/youtube_transcripts/<youtube_video_hash>.<index>.trunk file. Every
+question searches the whole global corpus; there is no tag scope.
 
 For each question:
     1. Embed the question with Ollama model embeddinggemma-2:570m.
@@ -28,55 +25,26 @@ For each question:
             can see whether the list is complete.
          b. Ask qwen3:1.7b to build a small checklist of what a complete
             answer requires and to state whether the accumulated context
-            supports every item, ending with an explicit YES/NO verdict.
-            Partial lists do not count as sufficient.
-         c. Stop when the model's verdict is yes, when no trunks remain, or
-            when the context reaches 100 trunks (the /depth limit is the cap).
-    6. Stream an answer from Ollama model qwen3:1.7b using that context. When
-       the context contains conflicting statements, the answer states the
-       general rule and the specific exception instead of picking one at
-       random.
+            contains enough of that checklist.
+         c. Stop when the checklist is covered or the context cap is reached.
+    6. Stream the answer from Ollama model ornith:35b.
 
-Simplified Chinese questions are detected automatically. They are translated
-into English with qwen3:1.7b before retrieval, and the streamed English answer
-is translated back into Simplified Chinese sentence group by sentence group
-while it is being generated.
-
-The prompt uses vi key bindings (press Esc for normal mode):
-    i / a / A          Insert mode before / after / at end of line
-    h / l / 0 / $      Move left / right / to start / to end
-    w / b              Move by word
-    v / V              Visual / visual-line mode, then d or x to delete
-    dd / dw            Delete a line / word
-    u                  Undo
-    Tab                Complete commands (repeat to cycle matches)
-    Up / Down          Previous / next saved question
-
-Questions and slash commands are persisted to ./.chat/question_history.txt
-and reloaded on every start, so Up/Down can walk the full chat history
-(questions and commands).
+Simplified Chinese questions are translated into English before retrieval;
+answers are translated back into Simplified Chinese while they stream.
 
 Commands:
     /memory            Show memory used by the loaded embeddings.
-    /tag [tag]         Switch to another tag (reloads embeddings).
-    /refresh           Reload all embeddings for the current tag.
+    /refresh           Reload the global embedding corpus.
     /transcript <hash|keyword>
                        Use one video's transcript (reloads embeddings).
-                       A keyword searches the .title files with ag and shows
-                       a hinting list of <hash> <title> matches to pick from.
     /search_transcript <keyword>
                        Alias for /transcript <keyword>.
     /youtube learn <hash|url>
-                       Fetch, rewrite, chunk, embed, and tag a video.
-    /wiki <word>       Look up a Wikipedia summary for <word>.
-    /dict <word>       Show English dictionary definitions for <word> from a
-                       local Ollama model, plus an explanation of its use and
-                       meaning in the latest answer (when the word appears
-                       there).
-    /depth <n|auto>    Set the maximum number of gradually gathered trunks
-                       (default: 100). Use "auto" to restore the default.
-    /status            Show the current chat status (tag, scope, loaded
-                       chunks, retrieval depth, models, and history size).
+                       Fetch, rewrite, chunk, and embed a video.
+    /wiki <word>       Look up a Wikipedia summary.
+    /dict <word>       Show English dictionary definitions for <word>.
+    /depth <n|auto>    Set the maximum gradually gathered trunks.
+    /status            Show the current chat status.
     /sources           Show the source list for the latest answer.
     /exit, /quit, /q   Leave the chatbot.
 """
@@ -89,7 +57,6 @@ import os
 import re
 import subprocess
 import sys
-import tomllib
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -154,10 +121,6 @@ LIST_PATTERN = re.compile(
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
-TAGS_PATH = Path.cwd() / "tags.toml"
-DEFAULT_TAG = "japan"
-# Sentinel used by --tag with no value: ask for the tag interactively.
-INTERACTIVE_TAG = "\0__interactive_tag__"
 CHAT_DIR = Path.cwd() / ".chat"
 HISTORY_FILE = CHAT_DIR / "question_history.txt"
 
@@ -174,7 +137,7 @@ PARAGRAPH_PATTERN = re.compile(
 # Alphabetic words used for question normalization and compound-word splitting.
 WORD_PATTERN = re.compile(r"[A-Za-z]+")
 # Cache of word frequencies for the currently loaded chunks. The cache key is
-# the tuple of chunk labels, so switching tags or transcripts invalidates it.
+# the tuple of chunk labels, so switching transcripts invalidates it.
 _WORD_COUNTS_KEY: tuple[str, ...] | None = None
 _WORD_COUNTS: Counter[str] = Counter()
 # Output of `ag --vimgrep`: <path>:<line>:<column>:<matching text>.
@@ -288,8 +251,7 @@ LIST_PREFIX = re.compile(r"^(\s*(?:\d+[.)]|[-*+]))\s+")
 # Every chatbot command, with the help text shown next to its completion.
 COMMANDS = {
     "/memory": "show memory used by the loaded embeddings",
-    "/tag": "switch to another tag (reloads embeddings)",
-    "/refresh": "reload all embeddings for the current tag",
+    "/refresh": "reload the global embedding corpus",
     "/transcript": "use one transcript by hash/URL or search titles with ag",
     "/search_transcript": "alias for /transcript <keyword> (ag title search)",
     "/youtube": "YouTube video commands: /youtube learn <hash|url>",
@@ -305,7 +267,7 @@ COMMANDS = {
 
 # Subcommands grouped under /youtube.
 YOUTUBE_SUBCOMMANDS = {
-    "learn": "fetch, rewrite, chunk, embed, and tag one video",
+    "learn": "fetch, rewrite, chunk, and embed one video",
 }
 
 
@@ -331,33 +293,19 @@ class TranscriptMatch:
     title: str
 
 
-def load_tag_video_ids(tag: str) -> set[str]:
-    """Validate a soft tag and return every learned video id.
-
-    This legacy gradual-context clone keeps its embedding-based retrieval, but
-    tags are now soft query-time scopes from ./tags.toml rather than physical
-    membership files.
-    """
-    if tag not in available_tags():
-        sys.exit(f"Unknown tag: {tag!r}. Choose one of: {', '.join(available_tags())}")
-    return set(available_video_ids())
-
-
-def load_embeddings(
-    tag: str = DEFAULT_TAG, video_ids: set[str] | None = None
-) -> list[Chunk]:
+def load_embeddings(video_ids: set[str] | None = None) -> list[Chunk]:
     """Load embeddings and pair them with their trunk files.
 
-    By default the video ids come from ./tags/<tag>. When ``video_ids`` is
-    given (the /transcript command), only those videos are loaded.
+    By default every learned video is loaded. When ``video_ids`` is given
+    (the /transcript command), only those videos are loaded.
     """
     if not OUTPUT_DIR.is_dir():
         sys.exit(f"Embedding directory not found: {OUTPUT_DIR}")
 
     if video_ids is None:
-        selected_video_ids = load_tag_video_ids(tag)
-        scope = f"tag {tag!r}"
-        outside_scope = f"outside tag {tag!r}"
+        selected_video_ids = set(available_video_ids())
+        scope = "the global corpus"
+        outside_scope = "outside the global corpus"
     else:
         selected_video_ids = set(video_ids)
         scope = "transcript " + ", ".join(sorted(selected_video_ids))
@@ -483,7 +431,6 @@ def embedding_memory_report(chunks: list[Chunk]) -> str:
 
 
 def chat_status_report(
-    tag: str,
     transcript: str | None,
     chunks: list[Chunk],
     depth: int | None,
@@ -493,7 +440,7 @@ def chat_status_report(
     if transcript is not None:
         scope = f"single transcript {transcript!r}"
     else:
-        scope = f"tag {tag!r}"
+        scope = "global corpus (all learned trunks)"
 
     cap = retrieval_cap(depth)
     retrieval = (
@@ -508,7 +455,6 @@ def chat_status_report(
         f"  models:      {CHAT_MODEL} (chat), {EMBED_MODEL} (embeddings), "
         f"{TRANSLATION_MODEL} (translation)",
         f"  Ollama host: {OLLAMA_HOST}",
-        f"  tag:         {tag}",
         f"  scope:       {scope}",
         f"  loaded:      {len(chunks):,} chunks from "
         f"{len(video_ids):,} video(s)",
@@ -526,15 +472,11 @@ class CommandCompleter(Completer):
         if not text.startswith("/"):
             return
         # Commands are always the first word; once an argument is typed,
-        # only /tag gets completions (the tag names from ./tags).
+        # /transcript gets completions.
         if any(ch.isspace() for ch in text):
             name, _, argument = text.partition(" ")
             prefix = argument.lstrip()
-            if name.lower() == "/tag":
-                for tag in available_tags():
-                    if tag.startswith(prefix):
-                        yield Completion(tag, start_position=-len(prefix))
-            elif name.lower() == "/transcript":
+            if name.lower() == "/transcript":
                 for video_id in available_video_ids():
                     if video_id.startswith(prefix):
                         yield Completion(video_id, start_position=-len(prefix))
@@ -558,17 +500,6 @@ class CommandCompleter(Completer):
                 )
 
 
-def available_tags() -> list[str]:
-    """Return the tag names defined in ./tags.toml."""
-    try:
-        raw = tomllib.loads(TAGS_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    if not isinstance(raw, dict):
-        return []
-    return sorted(str(name) for name in raw)
-
-
 def available_video_ids() -> list[str]:
     """Return video ids that have embeddings in ./.chat/youtube_transcripts."""
     try:
@@ -581,16 +512,6 @@ def available_video_ids() -> list[str]:
         if match:
             video_ids.add(match.group("video"))
     return sorted(video_ids)
-
-
-class TagCompleter(Completer):
-    """Tab-complete tag names from ./tags."""
-
-    def get_completions(self, document, complete_event):
-        prefix = document.text_before_cursor
-        for tag in available_tags():
-            if tag.startswith(prefix):
-                yield Completion(tag, start_position=-len(prefix))
 
 
 class VideoCompleter(Completer):
@@ -649,35 +570,6 @@ def prompt_for_video_id() -> str:
         )
 
 
-def prompt_for_tag() -> str:
-    """Prompt for a tag, tab-completing the names in ./tags.toml."""
-    tags = available_tags()
-    if not tags:
-        sys.exit(f"No tags found in {TAGS_PATH}")
-
-    print(f"Available tags: {', '.join(tags)}")
-    session = PromptSession(
-        completer=TagCompleter(),
-        complete_while_typing=True,
-        multiline=False,
-    )
-    # Keep prompting until a real tag file is selected.
-    while True:
-        try:
-            tag = session.prompt("Tag: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            sys.exit("No tag selected.")
-        if not tag:
-            continue
-        if tag in tags:
-            return tag
-        print(
-            f"Unknown tag: {tag!r}. "
-            f"Choose one of: {', '.join(tags)}"
-        )
-
-
 class PlainFileHistory(History):
     """One chat entry per line in ./.chat/question_history.txt.
 
@@ -721,14 +613,8 @@ class PlainFileHistory(History):
             )
 
 
-def make_prompt_session(
-    history: PlainFileHistory, tag_state: dict[str, str]
-) -> PromptSession:
-    """Create a vi-mode prompt with history and a mode-aware toolbar.
-
-    ``tag_state`` holds the currently selected tag (under the ``"tag"`` key)
-    so the toolbar always reflects the latest /tag switch.
-    """
+def make_prompt_session(history: PlainFileHistory) -> PromptSession:
+    """Create a vi-mode prompt with history and a mode-aware toolbar."""
     bindings = KeyBindings()
 
     @bindings.add("up", filter=vi_insert_mode)
@@ -767,7 +653,7 @@ def make_prompt_session(
         else:
             mode = "NORMAL"
         return (
-            f" tag: {tag_state['tag']}  |  {mode}  |  Esc normal  i insert  "
+            f" {mode}  |  Esc normal  i insert  "
             "v/V visual  dd/dw delete  u undo  Tab complete  Up/Down history "
         )
 
@@ -786,7 +672,6 @@ def make_prompt_session(
     # text-changed event) so deleting characters never triggers it again.
     def _auto_space(buffer) -> None:
         if buffer.text in {
-            "/tag",
             "/transcript",
             "/search_transcript",
             "/youtube",
@@ -1431,65 +1316,14 @@ def learn_video(value: str) -> str | None:
     return video_id
 
 
-def video_is_tagged(video_id: str, tag: str) -> bool:
-    """Compatibility helper for soft tags: every learned video fits a tag."""
-    return tag in available_tags() and video_id in set(available_video_ids())
-
-
-def switch_tag(
-    argument: str, current_chunks: list[Chunk]
-) -> tuple[str, list[Chunk]] | None:
-    """Handle /tag: load another tag and release the old embeddings.
-
-    Returns the new tag and chunks, or None when the switch was cancelled or
-    failed (in which case the current embeddings stay loaded).
-    """
-    tags = available_tags()
-    if not tags:
-        print(f"No tags found in {TAGS_PATH}.", file=sys.stderr)
-        return None
-
-    new_tag = argument.strip()
+def refresh_embeddings(current_chunks: list[Chunk]) -> list[Chunk] | None:
+    """Handle /refresh: reload the global embedding corpus."""
+    print("Refreshing the global embedding corpus...")
     try:
-        if not new_tag:
-            new_tag = prompt_for_tag()
-        elif new_tag not in tags:
-            print(
-                f"Unknown tag: {new_tag!r}. Choose one of: {', '.join(tags)}"
-            )
-            return None
+        new_chunks = load_embeddings()
     except SystemExit as exc:
-        print(f"Tag switch cancelled: {exc}", file=sys.stderr)
+        print(f"Cannot refresh embeddings: {exc}", file=sys.stderr)
         return None
-
-    print(f"Switching to tag {new_tag!r}, reloading embeddings...")
-    try:
-        new_chunks = load_embeddings(new_tag)
-    except SystemExit as exc:
-        print(f"Cannot switch to tag {new_tag!r}: {exc}", file=sys.stderr)
-        return None
-
-    # Drop the old embeddings only after the new tag loaded successfully.
-    current_chunks.clear()
-    gc.collect()
-    print(embedding_memory_report(new_chunks))
-    return new_tag, new_chunks
-
-
-def refresh_tag(tag: str, current_chunks: list[Chunk]) -> list[Chunk] | None:
-    """Handle /refresh: reload the embeddings for the current tag.
-
-    Returns the freshly loaded chunks, or None when loading failed (in which
-    case the current embeddings stay loaded).
-    """
-    print(f"Refreshing tag {tag!r}, reloading embeddings...")
-    try:
-        new_chunks = load_embeddings(tag)
-    except SystemExit as exc:
-        print(f"Cannot refresh tag {tag!r}: {exc}", file=sys.stderr)
-        return None
-
-    # Drop the old embeddings only after the reload succeeded.
     current_chunks.clear()
     gc.collect()
     print(embedding_memory_report(new_chunks))
@@ -1869,24 +1703,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Interactive RAG chatbot over YouTube transcript embeddings."
     )
-    parser.add_argument(
-        "--tag",
-        nargs="?",
-        const=INTERACTIVE_TAG,
-        default=DEFAULT_TAG,
-        help="soft tag context from ./tags.toml "
-        f"(default: {DEFAULT_TAG}); omit the value to pick a tag "
-        "interactively with tab completion",
-    )
     return parser.parse_args(argv)
 
 
 def main() -> None:
-    args = parse_args()
-    tag = args.tag
-    if tag == INTERACTIVE_TAG or not tag:
-        tag = prompt_for_tag()
-    chunks = load_embeddings(tag)
+    parse_args()
+    chunks = load_embeddings()
     print(embedding_memory_report(chunks))
     transcript: str | None = None
     latest_answer: str | None = None
@@ -1898,11 +1720,10 @@ def main() -> None:
         f"Chat history: {history_count(HISTORY_FILE)} saved entries "
         f"(questions + commands) in {HISTORY_FILE}"
     )
-    tag_state = {"tag": tag}
-    session = make_prompt_session(history, tag_state)
+    session = make_prompt_session(history)
     print(
         f"RAG chatbot ready ({EMBED_MODEL} + {CHAT_MODEL}, "
-        f"tag {tag!r}, gradual context up to {retrieval_cap(depth)} trunks). "
+        f"global corpus, gradual context up to {retrieval_cap(depth)} trunks). "
         f"Type /exit to quit."
     )
     print(
@@ -1915,7 +1736,7 @@ def main() -> None:
         "dd/dw = delete, u = undo. Up/Down = question + command history."
     )
     print(
-        "Commands: /tag [tag], /refresh, /transcript <hash|keyword>, "
+        "Commands: /refresh, /transcript <hash|keyword>, "
         "/youtube learn <hash|url>, /wiki <word>, /dict <word>, "
         "/depth <n|auto>, "
         "/memory, /status, /sources, /exit. Tab completes them."
@@ -1938,19 +1759,12 @@ def main() -> None:
             name = name.lower()
             if name == "/memory":
                 print(embedding_memory_report(chunks))
-            elif name == "/tag":
-                switched = switch_tag(argument, chunks)
-                if switched is not None:
-                    tag, chunks = switched
-                    tag_state["tag"] = tag
-                    transcript = None
-                    print(f"Now using tag {tag!r}.")
             elif name == "/refresh":
-                refreshed = refresh_tag(tag, chunks)
+                refreshed = refresh_embeddings(chunks)
                 if refreshed is not None:
                     chunks = refreshed
                     transcript = None
-                    print(f"Now using tag {tag!r} (embeddings refreshed).")
+                    print("Global embedding corpus refreshed.")
             elif name == "/transcript":
                 switched = switch_transcript(argument, chunks)
                 if switched is not None:
@@ -2017,10 +1831,10 @@ def main() -> None:
                             f"{transcript!r}; the loaded embeddings are "
                             "unchanged."
                         )
-                elif video_is_tagged(video_id, tag):
-                    print(f"Reloading embeddings for tag {tag!r}...")
+                else:
+                    print("Reloading the global embedding corpus...")
                     try:
-                        new_chunks = load_embeddings(tag)
+                        new_chunks = load_embeddings()
                     except SystemExit as exc:
                         print(
                             f"Could not reload embeddings: {exc}",
@@ -2031,11 +1845,6 @@ def main() -> None:
                         chunks = new_chunks
                         gc.collect()
                         print(embedding_memory_report(chunks))
-                else:
-                    print(
-                        f"{video_id} was not added to tag {tag!r}; "
-                        "the loaded embeddings are unchanged."
-                    )
             elif name == "/wiki":
                 lookup_wikipedia(argument)
             elif name == "/dict":
@@ -2043,7 +1852,7 @@ def main() -> None:
                 show_latest_answer_usage(argument, latest_answer)
             elif name == "/status":
                 print(
-                    chat_status_report(tag, transcript, chunks, depth)
+                    chat_status_report(transcript, chunks, depth)
                 )
             elif name == "/sources":
                 show_sources(latest_sources)
@@ -2082,7 +1891,7 @@ def main() -> None:
             else:
                 print(
                     f"Unknown command: {name}. "
-                    "Try /tag [tag], /refresh, /transcript <hash|keyword>, "
+                    "Try /refresh, /transcript <hash|keyword>, "
                     "/youtube learn <hash|url>, /wiki <word>, "
                     "/dict <word>, "
                     "/depth <n|auto>, /memory, /status, /sources, /exit."

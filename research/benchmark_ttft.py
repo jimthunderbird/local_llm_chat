@@ -3,7 +3,7 @@
 
 Usage:
     python3 research/benchmark_ttft.py
-    python3 research/benchmark_ttft.py --tag japan --show-answers
+    python3 research/benchmark_ttft.py --show-answers
     python3 research/benchmark_ttft.py --depth 30 --max-context-tokens 4096
 
 The script calls the same retrieval and streaming path as the chatbot, with
@@ -50,7 +50,6 @@ def parse_depth(value: str) -> int | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark chat.py TTFT.")
-    parser.add_argument("--tag", default=chat.DEFAULT_TAG)
     parser.add_argument(
         "--depth",
         default="auto",
@@ -95,9 +94,9 @@ def main() -> None:
     depth = parse_depth(args.depth)
     questions = args.question or DEFAULT_QUESTIONS
 
-    chunks = chat.load_embeddings(args.tag)
+    chunks = chat.load_embeddings()
     print(
-        f"Benchmark: tag={args.tag!r}, depth="
+        f"Benchmark: global corpus, depth="
         f"{'auto' if depth is None else depth}, "
         f"budget={args.max_context_tokens:,}, chunks={len(chunks):,}, "
         f"questions={len(questions)}\n"

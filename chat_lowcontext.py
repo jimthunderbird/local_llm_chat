@@ -2,12 +2,12 @@
 """Interactive low-context, streaming RAG chatbot over YouTube transcripts.
 
 Usage:
-    python3 chat_lowcontext.py [--tag <tag>]
+    python3 chat_lowcontext.py
 
-This is a drop-in clone of chat.py: it supports the same CLI flag, commands,
-history file, vi key bindings, tag/transcript scoping, /youtube learn,
-/wiki, /dict,
-/depth, /status, /sources, and Simplified Chinese question/answer translation.
+This is a drop-in clone of chat.py: it supports the same CLI flags, commands,
+history file, vi key bindings, global-corpus and transcript scoping,
+/youtube learn, /wiki, /dict, /depth, /status, /sources, and Simplified
+Chinese question/answer translation.
 
 The difference is the answer architecture. Instead of packing every matching
 trunk into one large prompt, chat_lowcontext.py implements the low-context
@@ -61,8 +61,7 @@ and reloaded on every start, so Up/Down can walk the full chat history
 
 Commands:
     /memory            Show memory used by the loaded embeddings.
-    /tag [tag]         Switch to another tag (reloads embeddings).
-    /refresh           Reload all embeddings for the current tag.
+    /refresh           Reload the global embedding corpus.
     /transcript <hash|keyword>
                        Use one video's transcript (reloads embeddings).
                        A keyword searches the .title files with ag and shows
@@ -70,7 +69,7 @@ Commands:
     /search_transcript <keyword>
                        Alias for /transcript <keyword>.
     /youtube learn <hash|url>
-                       Fetch, rewrite, chunk, embed, and tag a video.
+                       Fetch, rewrite, chunk, and embed a video.
     /wiki <word>       Look up a Wikipedia summary for <word>.
     /dict <word>       Show English dictionary definitions for <word> from a
                        local Ollama model, plus an explanation of its use and
@@ -79,8 +78,8 @@ Commands:
     /depth <n|auto>    Set how many top matching trunks are used as context
                        (default: 100). Use "auto" to restore the
                        similarity-threshold rule.
-    /status            Show the current chat status (tag, scope, loaded
-                       chunks, retrieval depth, models, and history size).
+    /status            Show the current chat status (scope, loaded chunks,
+                       retrieval depth, models, and history size).
     /sources           Show the source list for the latest answer.
     /exit, /quit, /q   Leave the chatbot.
 
@@ -1211,14 +1210,13 @@ def answer(
 
 
 def status_report(
-    tag: str,
     transcript: str | None,
     chunks: list[base.Chunk],
     depth: int | None,
     batch_size: int = BATCH_SIZE,
 ) -> str:
     """Show chat.py's status plus the low-context architecture details."""
-    report = base.chat_status_report(tag, transcript, chunks, depth)
+    report = base.chat_status_report(transcript, chunks, depth)
     calls = math.ceil(len(chunks) / max(1, batch_size)) if chunks else 0
     return "\n".join(
         [
@@ -1232,11 +1230,8 @@ def status_report(
 
 
 def main() -> None:
-    args = base.parse_args()
-    tag = args.tag
-    if tag == base.INTERACTIVE_TAG or not tag:
-        tag = base.prompt_for_tag()
-    chunks = base.load_embeddings(tag)
+    base.parse_args()
+    chunks = base.load_embeddings()
     print(base.embedding_memory_report(chunks))
     transcript: str | None = None
     latest_answer: str | None = None
@@ -1248,11 +1243,10 @@ def main() -> None:
         f"Chat history: {base.history_count(base.HISTORY_FILE)} saved entries "
         f"(questions + commands) in {base.HISTORY_FILE}"
     )
-    tag_state = {"tag": tag}
-    session = base.make_prompt_session(history, tag_state)
+    session = base.make_prompt_session(history)
     print(
         f"Low-context RAG chatbot ready ({base.EMBED_MODEL} + "
-        f"{base.CHAT_MODEL}, tag {tag!r}, cosine similarity > "
+        f"{base.CHAT_MODEL}, global corpus, cosine similarity > "
         f"{base.MIN_SIMILARITY}). Type /exit to quit."
     )
     print(
@@ -1269,7 +1263,7 @@ def main() -> None:
         "dd/dw = delete, u = undo. Up/Down = question + command history."
     )
     print(
-        "Commands: /tag [tag], /refresh, /transcript <hash|keyword>, "
+        "Commands: /refresh, /transcript <hash|keyword>, "
         "/youtube learn <hash|url>, /wiki <word>, /dict <word>, "
         "/depth <n|auto>, "
         "/memory, /status, /sources, /exit. Tab completes them."
@@ -1292,19 +1286,12 @@ def main() -> None:
             name = name.lower()
             if name == "/memory":
                 print(base.embedding_memory_report(chunks))
-            elif name == "/tag":
-                switched = base.switch_tag(argument, chunks)
-                if switched is not None:
-                    tag, chunks = switched
-                    tag_state["tag"] = tag
-                    transcript = None
-                    print(f"Now using tag {tag!r}.")
             elif name == "/refresh":
-                refreshed = base.refresh_tag(tag, chunks)
+                refreshed = base.refresh_corpus(chunks)
                 if refreshed is not None:
                     chunks = refreshed
                     transcript = None
-                    print(f"Now using tag {tag!r} (embeddings refreshed).")
+                    print("Global embedding corpus refreshed.")
             elif name == "/transcript":
                 switched = base.switch_transcript(argument, chunks)
                 if switched is not None:
@@ -1371,10 +1358,10 @@ def main() -> None:
                             f"{transcript!r}; the loaded embeddings are "
                             "unchanged."
                         )
-                elif base.video_is_tagged(video_id, tag):
-                    print(f"Reloading embeddings for tag {tag!r}...")
+                else:
+                    print("Reloading the global embedding corpus...")
                     try:
-                        new_chunks = base.load_embeddings(tag)
+                        new_chunks = base.load_embeddings()
                     except SystemExit as exc:
                         print(
                             f"Could not reload embeddings: {exc}",
@@ -1385,18 +1372,13 @@ def main() -> None:
                         chunks = new_chunks
                         gc.collect()
                         print(base.embedding_memory_report(chunks))
-                else:
-                    print(
-                        f"{video_id} was not added to tag {tag!r}; "
-                        "the loaded embeddings are unchanged."
-                    )
             elif name == "/wiki":
                 base.lookup_wikipedia(argument)
             elif name == "/dict":
                 base.lookup_dictionary(argument)
                 base.show_latest_answer_usage(argument, latest_answer)
             elif name == "/status":
-                print(status_report(tag, transcript, chunks, depth))
+                print(status_report(transcript, chunks, depth))
             elif name == "/sources":
                 base.show_sources(latest_sources)
             elif name == "/depth":
@@ -1431,7 +1413,7 @@ def main() -> None:
             else:
                 print(
                     f"Unknown command: {name}. "
-                    "Try /tag [tag], /refresh, /transcript <hash|keyword>, "
+                    "Try /refresh, /transcript <hash|keyword>, "
                     "/youtube learn <hash|url>, /wiki <word>, "
                     "/dict <word>, "
                     "/depth <n|auto>, /memory, /status, /sources, /exit."
