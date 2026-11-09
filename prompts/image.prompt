@@ -2,7 +2,6 @@ image_llm: ollama local model ornith:35b
 
 task (completed) {
   in the chat message box, allow me to drag an image and then ask a question about this image using {image_llm}
-}
 
   Implemented:
   app/chat.html
@@ -25,3 +24,4 @@ task (completed) {
     vision capability, so if Ollama rejects the image as multimodal the server
     automatically retries with a local vision model (gemma3:latest by default,
     configurable with OLLAMA_IMAGE_MODEL / OLLAMA_IMAGE_FALLBACK_MODELS).
+}
