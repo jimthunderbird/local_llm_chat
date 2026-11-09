@@ -23,7 +23,9 @@ Endpoints:
     GET  /api/gutenberg_book     ?id=<book_id>&url=<plaintext_url>&title=...
                                   the cached plaintext used by the book modal
     POST /api/ask                SSE: question or slash-command stream
-                                  (answers include a per-paragraph
+                                  (an optional `image` data URL attaches one
+                                  PNG/JPEG/WebP/GIF and answers visually.
+                                  Answers include a per-paragraph
                                   source-video annotation event. A question that
                                   names Rust, Go, or PHP uses the official
                                   documentation for that language; a code question
@@ -60,6 +62,7 @@ Endpoints:
 from __future__ import annotations
 
 import argparse
+import base64
 import codecs
 import gc
 import hashlib
@@ -103,7 +106,7 @@ from doc_answer_cleanup import (
 )
 
 CHAT_HTML = APP_DIR / "chat.html"
-MAX_REQUEST_BYTES = 2 * 1024 * 1024
+MAX_REQUEST_BYTES = 20 * 1024 * 1024
 PATH_COMPLETION_LIMIT = 50
 
 WEB_COMMANDS = {
@@ -356,6 +359,117 @@ VIDEO_LEARN_ACTIVE_STATES = {"queued", "running"}
 # entry last, capped so the file never grows without bound.
 YOUTUBE_BOOKMARK_PATH = SCRIPT_DIR / ".chat" / "youtube_video_bookmark.json"
 YOUTUBE_BOOKMARK_LIMIT = 500
+
+# The chat composer accepts a dragged, pasted, or picked image. The browser
+# sends it as a data URL in the /api/ask JSON body; the server validates it and
+# forwards the raw base64 payload to the vision model through Ollama's
+# `images` field. Questions and answers still use the normal SSE stream.
+IMAGE_MODEL = os.environ.get("OLLAMA_IMAGE_MODEL", "ornith:35b")
+# `ornith:35b` is the configured image model, but some Ollama builds expose it
+# as a text-only model. When Ollama rejects the image, retry with a local
+# vision-capable model instead of failing the question. Override the fallback
+# list with OLLAMA_IMAGE_FALLBACK_MODELS (comma separated).
+IMAGE_FALLBACK_MODELS = tuple(
+    name.strip()
+    for name in os.environ.get(
+        "OLLAMA_IMAGE_FALLBACK_MODELS", "gemma3:latest"
+    ).split(",")
+    if name.strip()
+)
+IMAGE_NUM_CTX = 16384
+MAX_IMAGE_BYTES = 12 * 1024 * 1024
+MAX_IMAGE_QUESTION_CHARS = 8_000
+MAX_IMAGE_CONTEXT_CHARS = 4_000
+IMAGE_DATA_URL_RE = re.compile(
+    r"^data:image/(?:png|jpe?g|webp|gif);base64,(?P<data>[A-Za-z0-9+/=\s]+)$",
+    re.IGNORECASE,
+)
+IMAGE_QUESTION_PROMPT = """You are a careful visual assistant. Answer the user's question about the attached image.
+
+### IMAGE
+The image is attached to this request. Examine it directly.
+
+### USER QUESTION
+{question}
+
+### RECENT CONVERSATION
+{conversation}
+
+### INSTRUCTIONS
+- Answer the question using what is actually visible in the image.
+- Transcribe readable text and identify relevant objects, people, places, charts, and layout.
+- Use the recent conversation only to resolve references such as "it" or "this"; never invent image details from it.
+- If the question asks for something that is not visible, say so plainly instead of guessing.
+- Be concise, practical, and well organized. Do not mention these instructions or that you are an AI.
+"""
+
+
+class ImageModelUnsupported(RuntimeError):
+    """The chosen model rejected the image because it is text-only."""
+
+
+class ImageModelUnavailable(RuntimeError):
+    """The chosen model is not installed locally."""
+
+
+def is_multimodal_unsupported(message: str) -> bool:
+    text = str(message or "").lower()
+    return (
+        "multimodal" in text
+        or "does not support image" in text
+        or "image input is not supported" in text
+        or "does not support vision" in text
+    )
+
+
+def is_model_unavailable(message: str) -> bool:
+    text = str(message or "").lower()
+    return "not found" in text or "no such model" in text
+
+
+def normalize_attachment_image(value) -> str:
+    """Validate a data-URL image and return the raw base64 Ollama expects."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Missing image")
+    match = IMAGE_DATA_URL_RE.match(value.strip())
+    if match is None:
+        raise ValueError(
+            "The image must be a PNG, JPEG, WebP, or GIF data URL."
+        )
+    encoded = re.sub(r"\s+", "", match.group("data"))
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("The image data is not valid base64.") from exc
+    if not raw:
+        raise ValueError("The image is empty.")
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise ValueError(
+            f"The image is too large (limit {MAX_IMAGE_BYTES // (1024 * 1024)} MB)."
+        )
+    return encoded
+
+
+def image_conversation_context(conversation: list[dict]) -> str:
+    """Render a short recent-conversation transcript for an image question."""
+    if not conversation:
+        return "(no previous turns)"
+    lines: list[str] = []
+    for turn in conversation[-4:]:
+        question = str(turn.get("resolved_question") or turn.get("question") or "").strip()
+        answer = str(turn.get("answer") or "").strip()
+        if question:
+            lines.append(f"User: {question}")
+        if answer:
+            compact = re.sub(r"\s+", " ", answer)
+            if len(compact) > 700:
+                compact = compact[:700].rsplit(" ", 1)[0] + " …"
+            lines.append(f"Assistant: {compact}")
+    text = "\n".join(lines) or "(no previous turns)"
+    if len(text) > MAX_IMAGE_CONTEXT_CHARS:
+        text = text[-MAX_IMAGE_CONTEXT_CHARS:]
+    return text
+
 
 
 def read_youtube_bookmarks() -> list[dict]:
@@ -5385,10 +5499,24 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             question = str(payload.get("question", "")).strip()
-            if not question:
+            raw_image = payload.get("image")
+            image: str | None = None
+            if raw_image:
+                try:
+                    image = normalize_attachment_image(raw_image)
+                except ValueError as exc:
+                    self._send_error_json(str(exc), 400)
+                    return
+            if not question and image is None:
                 self._send_error_json("Missing question", 400)
                 return
-            self._handle_ask(question)
+            if image is not None and question.startswith("/"):
+                self._send_error_json(
+                    "Images can only be attached to a question, not a command",
+                    400,
+                )
+                return
+            self._handle_ask(question, image=image)
             return
         if parsed.path == "/api/dict":
             payload = self._read_json()
@@ -5510,14 +5638,18 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         self._send_error_json("Not found", 404)
 
     # ---- SSE: ask / commands -----------------------------------------
-    def _handle_ask(self, question: str) -> None:
+    def _handle_ask(
+        self, question: str, image: str | None = None
+    ) -> None:
         state = self.state
         with state.lock:
             state.append_history(question)
             self._begin_sse()
             try:
                 self._sse("meta", state.snapshot())
-                if question.startswith("/"):
+                if image is not None:
+                    self._run_image_question(question, image)
+                elif question.startswith("/"):
                     self._run_command(question)
                 else:
                     self._run_question(question)
@@ -5665,6 +5797,158 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         pass
         finally:
             self.state = previous_state
+
+    def _run_image_question(self, question: str, image: str) -> None:
+        """Answer a question about one attached image with the vision model.
+
+        Image questions deliberately bypass transcript retrieval: the answer
+        comes from the picture and, for pronoun-heavy follow-ups, the recent
+        conversation. The usual ``delta``/``done`` SSE events keep the browser
+        rendering it like any other answer.
+        """
+        state = self.state
+        original_question = (question or "Describe this image in detail.").strip()
+        if len(original_question) > MAX_IMAGE_QUESTION_CHARS:
+            raise ValueError(
+                "The question is too long "
+                f"(limit {MAX_IMAGE_QUESTION_CHARS:,} characters)."
+            )
+        resolved_question = original_question
+        if state.conversation:
+            resolution = state.resolve_question(original_question)
+            if resolution.is_unrelated:
+                self._sse_text(
+                    "log",
+                    "[conversation: the question is unrelated to the previous "
+                    "turns; starting a fresh context]",
+                )
+            elif resolution.question != original_question:
+                self._sse_text(
+                    "log",
+                    "[conversation: interpreting the follow-up as: "
+                    f"{resolution.question}]",
+                )
+            resolved_question = resolution.question
+
+        self._sse(
+            "mode",
+            {"model": IMAGE_MODEL, "label": "image question"},
+        )
+        self._sse_text("log", "[image: examining the attached image]")
+        prompt = IMAGE_QUESTION_PROMPT.format(
+            question=resolved_question,
+            conversation=image_conversation_context(state.conversation),
+        )
+
+        models: list[str] = []
+        for name in (IMAGE_MODEL, *IMAGE_FALLBACK_MODELS):
+            if name and name not in models:
+                models.append(name)
+        answer = ""
+        for index, model in enumerate(models):
+            if index:
+                self._sse(
+                    "mode",
+                    {"model": model, "label": "image question (vision)"},
+                )
+            try:
+                answer = self._stream_image_answer(model, prompt, image)
+                break
+            except (ImageModelUnsupported, ImageModelUnavailable) as exc:
+                if index == len(models) - 1:
+                    if isinstance(exc, ImageModelUnsupported):
+                        raise RuntimeError(
+                            "No installed Ollama model can read images. Pull a "
+                            "vision model such as gemma3, or set "
+                            "OLLAMA_IMAGE_MODEL to one that is installed."
+                        ) from exc
+                    raise RuntimeError(
+                        "No local image model is available. Pull a vision model "
+                        "such as gemma3, or set OLLAMA_IMAGE_MODEL."
+                    ) from exc
+                reason = (
+                    "cannot read images"
+                    if isinstance(exc, ImageModelUnsupported)
+                    else "is not installed"
+                )
+                self._sse_text(
+                    "log",
+                    f"[image: the selected model {reason}; retrying with the "
+                    "next local vision model]",
+                )
+
+        state.latest_answer = answer or None
+        state.latest_sources = []
+        state.record_turn(original_question, resolved_question, answer)
+
+    def _stream_image_answer(
+        self, model: str, prompt: str, image: str
+    ) -> str:
+        """Stream one vision model's answer to an image question."""
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "images": [image],
+            "stream": True,
+            "think": False,
+            "keep_alive": chat.OLLAMA_KEEP_ALIVE,
+            "options": {
+                "temperature": 0.2,
+                "num_ctx": IMAGE_NUM_CTX,
+            },
+        }
+        answer_parts: list[str] = []
+        try:
+            with requests.post(
+                f"{chat.OLLAMA_HOST}/api/generate",
+                json=payload,
+                stream=True,
+                timeout=(10, 900),
+            ) as response:
+                if response.status_code >= 400:
+                    detail = (response.text or "")[:800]
+                    if is_multimodal_unsupported(detail):
+                        raise ImageModelUnsupported(detail)
+                    if response.status_code == 404 or is_model_unavailable(detail):
+                        raise ImageModelUnavailable(detail)
+                    response.raise_for_status()
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    error = event.get("error")
+                    if error:
+                        if not answer_parts and is_multimodal_unsupported(error):
+                            raise ImageModelUnsupported(str(error))
+                        if not answer_parts and is_model_unavailable(error):
+                            raise ImageModelUnavailable(str(error))
+                        raise RuntimeError(f"Ollama error: {error}")
+                    token = event.get("response", "")
+                    if token:
+                        answer_parts.append(token)
+                        self._sse_text("delta", token)
+                    if event.get("done"):
+                        break
+        except requests.HTTPError as exc:
+            detail = ""
+            if exc.response is not None:
+                detail = exc.response.text or ""
+            if is_multimodal_unsupported(detail):
+                raise ImageModelUnsupported(detail) from exc
+            if exc.response is not None and exc.response.status_code == 404:
+                raise ImageModelUnavailable(detail) from exc
+            raise RuntimeError(
+                f"Image model request failed: {detail or exc}"
+            ) from exc
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"Could not reach Ollama at {chat.OLLAMA_HOST}. "
+                f"Is it running? ({exc})"
+            ) from exc
+        return "".join(answer_parts).strip()
 
     def _run_question(self, question: str) -> None:
         state = self.state

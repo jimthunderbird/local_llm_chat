@@ -198,6 +198,10 @@ group app/chat.html and app/chat_server.py {
     change the chat window title from "YouTube Local Chat" to "Personal Chatbot"
   }
 
+  task (completed) {
+    complete tasks in ./prompts/image.prompt
+  }
+
   task (persistent) {
     complete tasks in ./prompts/chat_common.prompt  
   }

@@ -835,6 +835,99 @@
   #send-btn:hover:not(:disabled) { color: #fff; border-color: var(--accent-2); background: #16314d; }
   #send-btn:disabled { opacity: .45; cursor: default; }
 
+  #image-btn {
+    flex: 0 0 auto;
+    align-self: flex-start;
+    margin-top: 1px;
+    background: #14212f;
+    color: var(--dim);
+    border: 1px solid #263648;
+    border-radius: 5px;
+    padding: 4px 9px;
+    font-family: var(--mono);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #image-btn:hover { color: #fff; border-color: var(--accent-2); background: #1a2c40; }
+
+  /* Image attachment preview for drag/drop, paste, or the Image button. */
+  #image-attachment {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 8px 16px 0;
+    padding: 7px 9px;
+    background: #101b26;
+    border: 1px solid #22394f;
+    border-radius: 7px;
+  }
+  #image-attachment[hidden] { display: none; }
+  #image-attachment img {
+    width: 54px;
+    height: 54px;
+    object-fit: cover;
+    border-radius: 5px;
+    border: 1px solid #2b4057;
+    background: #0a1118;
+  }
+  .image-attachment-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+    font-size: 11.5px;
+    color: var(--dim);
+  }
+  #image-attachment-name {
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #image-attachment-remove {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+  #image-attachment-remove:hover { color: #fff; }
+
+  #composer.drag-image { background: #0d1a26; }
+  #image-drop-hint {
+    position: absolute;
+    inset: 3px;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: rgba(7, 16, 24, .86);
+    border: 2px dashed #2f6088;
+    border-radius: 6px;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+    pointer-events: none;
+  }
+  #image-drop-hint[hidden] { display: none; }
+
+  .user-line.has-image { flex-wrap: wrap; }
+  .user-line .user-image { flex: 0 0 100%; margin: 2px 0 0 34px; }
+  .user-line .user-image img {
+    display: block;
+    max-width: min(260px, 60vw);
+    max-height: 160px;
+    border-radius: 7px;
+    border: 1px solid #2b4057;
+    background: #0a1118;
+  }
+
   /* Fenced-code colours rendered in the composer overlay. */
   .tok-fence { color: #66809a; }
   .tok-code { color: #d8e6f3; }
@@ -2064,6 +2157,16 @@
   </div>
 
   <div id="composer">
+    <div id="image-drop-hint" hidden>Drop an image to ask a question about it</div>
+    <div id="image-attachment" hidden>
+      <img id="image-attachment-thumb" alt="Attached image preview">
+      <div class="image-attachment-info">
+        <span id="image-attachment-name"></span>
+        <span id="image-attachment-meta"></span>
+      </div>
+      <button id="image-attachment-remove" type="button" title="Remove attached image" aria-label="Remove attached image">×</button>
+    </div>
+    <input id="image-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
     <div id="news-source-picker" hidden>
       <div class="news-source-picker-head">
         <span class="news-source-picker-title">News sources</span>
@@ -2102,8 +2205,9 @@
         <textarea id="input" rows="6" autocomplete="off" autocapitalize="off" spellcheck="false"
                   placeholder="Ask a question, or type /help — Tab completes, Esc enters normal mode"></textarea>
       </div>
+      <button id="image-btn" type="button" title="Attach an image (you can also drag or paste one here)">Image</button>
       <button id="send-btn" type="button" title="Send question (Ctrl/⌘+Enter)">Send</button>
-      <span id="prompt-hint">Esc normal · Tab complete · ⏎ newline · ⌘/Ctrl+⏎ send</span>
+      <span id="prompt-hint">Esc normal · Tab complete · ⏎ newline · ⌘/Ctrl+⏎ send · drag image</span>
     </div>
   </div>
 </div>
@@ -2293,6 +2397,7 @@
       <span class="k">Ctrl/⌘+Enter</span><span class="d">send question or command (or click Send)</span>
       <span class="k">Ctrl+C</span><span class="d">cancel a streaming answer (or copy a selection)</span>
       <span class="k">Ctrl+L / ⌘K</span><span class="d">clear the console</span>
+      <span class="k">Drag an image</span><span class="d">attach a PNG, JPEG, WebP, or GIF to the composer (paste or use the Image button too), then ask a question about it</span>
       <span class="k">Drag text</span><span class="d">select output text, then Ctrl+C / ⌘C to copy</span>
       <span class="k">Click a word</span><span class="d">open a streaming /dict popup (drag instead to select); also works in /news, /medium, video summaries, and Project Gutenberg book text</span>
       <span class="k">Click a video</span><span class="d">play it in a centered modal; the right column offers Learn or Chat, and the Summary button streams an AI overview</span>
@@ -2320,6 +2425,15 @@ const inputEl = $("#input");
 const inputWrapEl = $("#input-wrap");
 const inputHighlightEl = $("#input-highlight");
 const sendBtn = $("#send-btn");
+const composerEl = $("#composer");
+const imageBtn = $("#image-btn");
+const imageFileInput = $("#image-file");
+const imageAttachmentEl = $("#image-attachment");
+const imageAttachmentThumbEl = $("#image-attachment-thumb");
+const imageAttachmentNameEl = $("#image-attachment-name");
+const imageAttachmentMetaEl = $("#image-attachment-meta");
+const imageAttachmentRemoveEl = $("#image-attachment-remove");
+const imageDropHintEl = $("#image-drop-hint");
 const modeBadge = $("#mode-badge");
 const statusMode = $("#status-mode");
 const busyEl = $("#busy-indicator");
@@ -7011,7 +7125,89 @@ function insertTextAtCaret(text) {
 /* ------------------------------------------------------------------ *
  *  Running a question or slash command
  * ------------------------------------------------------------------ */
-function addUserEcho(text) {
+const MAX_ATTACHMENT_IMAGE_BYTES = 12 * 1024 * 1024;
+let pendingImage = null;
+let composerDragDepth = 0;
+
+function formatImageBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderPendingImage() {
+  if (!pendingImage) {
+    imageAttachmentEl.hidden = true;
+    imageAttachmentThumbEl.removeAttribute("src");
+    imageAttachmentNameEl.textContent = "";
+    imageAttachmentMetaEl.textContent = "";
+    return;
+  }
+  imageAttachmentThumbEl.src = pendingImage.dataUrl;
+  imageAttachmentNameEl.textContent = pendingImage.name;
+  imageAttachmentMetaEl.textContent =
+    `${pendingImage.type || "image"} · ${formatImageBytes(pendingImage.size)} · ask a question below`;
+  imageAttachmentEl.hidden = false;
+}
+
+function clearPendingImage() {
+  pendingImage = null;
+  renderPendingImage();
+}
+
+function setPendingImageFile(file) {
+  if (!file) return;
+  const type = String(file.type || "").toLowerCase();
+  if (!type.startsWith("image/")) {
+    toast("Attach a PNG, JPEG, WebP, or GIF image.");
+    return;
+  }
+  if (file.size > MAX_ATTACHMENT_IMAGE_BYTES) {
+    toast(
+      `That image is too large (limit ${MAX_ATTACHMENT_IMAGE_BYTES / (1024 * 1024)} MB).`
+    );
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = String(reader.result || "");
+    const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,/i.exec(dataUrl);
+    if (!match) {
+      toast("Attach a PNG, JPEG, WebP, or GIF image.");
+      return;
+    }
+    pendingImage = {
+      name: file.name || "pasted image",
+      type: match[1].toLowerCase(),
+      size: file.size,
+      dataUrl,
+    };
+    renderPendingImage();
+  };
+  reader.onerror = () => toast("Could not read that image.");
+  reader.readAsDataURL(file);
+}
+
+function showImageDropHint() {
+  composerEl.classList.add("drag-image");
+  imageDropHintEl.hidden = false;
+}
+
+function hideImageDropHint() {
+  composerDragDepth = 0;
+  composerEl.classList.remove("drag-image");
+  imageDropHintEl.hidden = true;
+}
+
+function dragHasFiles(event) {
+  const transfer = event.dataTransfer;
+  if (!transfer) return false;
+  if (Array.from(transfer.types || []).includes("Files")) return true;
+  return Array.from(transfer.items || []).some((item) => item.kind === "file");
+}
+
+function addUserEcho(text, image = null) {
   const line = document.createElement("div");
   line.className = "user-line";
   const who = document.createElement("span");
@@ -7022,18 +7218,34 @@ function addUserEcho(text) {
   value.textContent = text;
   line.appendChild(who);
   line.appendChild(value);
+  if (image?.dataUrl) {
+    line.classList.add("has-image");
+    const wrap = document.createElement("span");
+    wrap.className = "user-image";
+    const thumb = document.createElement("img");
+    thumb.src = image.dataUrl;
+    thumb.alt = image.name || "Attached image";
+    wrap.appendChild(thumb);
+    line.appendChild(wrap);
+  }
   outputEl.appendChild(line);
   scrollToBottom();
 }
 
 function submitText(text, fromChoice = false) {
   const trimmed = String(text || "").trim();
-  if (!trimmed) return;
+  const image = fromChoice ? null : pendingImage;
+  const question = trimmed || (image ? "Describe this image in detail." : "");
+  if (!question) return;
+  if (image && question.startsWith("/")) {
+    toast("Remove the attached image to run a command, or ask a question about it.");
+    return;
+  }
   if (busy) {
     toast("Wait for the current answer to finish, or press Ctrl+C to cancel.");
     return;
   }
-  if (!fromChoice) rememberHistory(trimmed);
+  if (!fromChoice) rememberHistory(question);
   inputEl.value = "";
   syncInputDisplay();
   vim.lastValue = "";
@@ -7043,26 +7255,29 @@ function submitText(text, fromChoice = false) {
   hideNewsSourcePicker();
   setMode("insert", { moveCaret: false });
 
-  const commandName = trimmed.startsWith("/")
-    ? trimmed.slice(1).split(/\s+/, 1)[0].toLowerCase()
+  const commandName = question.startsWith("/")
+    ? question.slice(1).split(/\s+/, 1)[0].toLowerCase()
     : "";
 
-  addUserEcho(trimmed);
-  const isCommand = trimmed.startsWith("/");
+  addUserEcho(question, image);
+  const isCommand = question.startsWith("/");
   const entry = makeEntry(isCommand ? "command" : "assistant", {
     clickable: !isCommand,
     language: appState?.code_language || "",
     wikiArticle: commandName === "wiki_article",
-    label: commandName === "news"
-      ? "News"
-      : commandName === "medium"
-        ? "Medium"
-        : commandName === "gutenberg"
-          ? "Project Gutenberg"
-          : undefined,
+    label: image
+      ? "Image"
+      : commandName === "news"
+        ? "News"
+        : commandName === "medium"
+          ? "Medium"
+          : commandName === "gutenberg"
+            ? "Project Gutenberg"
+            : undefined,
   });
   appendEntry(entry);
   resetAnswerSourceStatus();
+  if (image) clearPendingImage();
 
   if (commandName === "wiki_article") {
     pinEntryToTop(entry);
@@ -7182,7 +7397,12 @@ function submitText(text, fromChoice = false) {
     },
   };
 
-  streamSSE("/api/ask", { question: trimmed }, handlers, controller.signal)
+  streamSSE(
+    "/api/ask",
+    image ? { question, image: image.dataUrl } : { question },
+    handlers,
+    controller.signal
+  )
     .catch((error) => {
       if (error?.name === "AbortError") {
         addError(entry, "Cancelled.");
@@ -8081,6 +8301,67 @@ inputEl.addEventListener("input", () => {
   }
 });
 inputEl.addEventListener("keydown", handleKeyDown);
+
+/* Drag an image anywhere over the composer, paste it into the question box,
+ * or use the Image button. The attachment preview stays until it is sent or
+ * removed, so the question can be typed after attaching the picture. */
+composerEl.addEventListener("dragenter", (event) => {
+  if (!dragHasFiles(event)) return;
+  event.preventDefault();
+  composerDragDepth += 1;
+  showImageDropHint();
+});
+composerEl.addEventListener("dragover", (event) => {
+  if (!dragHasFiles(event)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  showImageDropHint();
+});
+composerEl.addEventListener("dragleave", () => {
+  composerDragDepth = Math.max(0, composerDragDepth - 1);
+  if (composerDragDepth === 0) {
+    composerEl.classList.remove("drag-image");
+    imageDropHintEl.hidden = true;
+  }
+});
+composerEl.addEventListener("drop", (event) => {
+  if (!dragHasFiles(event)) return;
+  event.preventDefault();
+  hideImageDropHint();
+  const files = Array.from(event.dataTransfer?.files || []);
+  const file = files.find((item) => String(item.type || "").startsWith("image/"));
+  if (!file) {
+    toast("Drop a PNG, JPEG, WebP, or GIF image.");
+    return;
+  }
+  setPendingImageFile(file);
+  inputEl.focus({ preventScroll: true });
+});
+window.addEventListener("dragend", hideImageDropHint);
+window.addEventListener("drop", () => {
+  if (composerDragDepth) hideImageDropHint();
+});
+inputEl.addEventListener("paste", (event) => {
+  if (event.defaultPrevented) return;
+  const items = Array.from(event.clipboardData?.items || []);
+  const imageItem = items.find(
+    (item) => item.kind === "file" && String(item.type || "").startsWith("image/")
+  );
+  const file = imageItem?.getAsFile();
+  if (!file) return;
+  event.preventDefault();
+  setPendingImageFile(file);
+});
+imageBtn.addEventListener("click", () => imageFileInput.click());
+imageFileInput.addEventListener("change", () => {
+  const file = imageFileInput.files?.[0];
+  if (file) setPendingImageFile(file);
+  imageFileInput.value = "";
+});
+imageAttachmentRemoveEl.addEventListener("click", () => {
+  clearPendingImage();
+  inputEl.focus({ preventScroll: true });
+});
 
 /* The Send button next to the composer sends the same text as Enter. */
 sendBtn.addEventListener("click", () => {
