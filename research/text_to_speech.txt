@@ -1,0 +1,12 @@
+To feed arbitrary text directly from your terminal or shell pipelines, you can run a one-liner reading from stdin
+```bash
+echo "All systems operational. Local synthesis completed." | python3 -c '
+import sys, sounddevice as sd
+from kokoro import KPipeline
+pipeline = KPipeline(lang_code="a")
+text = sys.stdin.read()
+for _, _, audio in pipeline(text, voice="af_heart"):
+    sd.play(audio, 24000)
+    sd.wait()
+'
+```

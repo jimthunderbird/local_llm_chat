@@ -40,6 +40,8 @@ Endpoints:
     POST /api/dict               SSE: dictionary + latest-answer usage stream
     POST /api/translate          SSE: paragraph-by-paragraph Simplified Chinese
                                   translation of an answer
+    POST /api/tts                one article paragraph -> local text-to-speech
+                                  WAV (used by the news modal's read-aloud icon)
     POST /api/explain_line       SSE: explain one line of a code snippet from a
                                   Go, Rust, or PHP
     POST /api/snippet_question   SSE: answer a free-form question about a whole
@@ -81,9 +83,11 @@ import math
 import os
 import re
 import selectors
+import shutil
 import subprocess
 import sys
 import threading
+import wave
 import time
 from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -156,6 +160,194 @@ NEWS_SOURCE_USAGE = "|".join(NEWS_SOURCES)
 NEWS_CACHE_DIR = chat.NEWS_DIR
 NEWS_CACHE_LOCK = threading.Lock()
 NEWS_ID_PATTERN = re.compile(r"news_[A-Za-z0-9]+")
+
+# The news modal's read-aloud button sends one article paragraph at a time to
+# /api/tts. The local engine returns a small WAV so playback starts as soon as
+# the first paragraph is ready while the browser prefetches the next one.
+# research/text_to_speech.txt uses Kokoro; it is used when installed, with the
+# operating system's voice as a fast fallback (macOS `say`, Linux espeak).
+TTS_CACHE_DIR = SCRIPT_DIR / ".chat" / "tts_cache"
+TTS_ENGINE = os.environ.get("TTS_ENGINE", "auto").strip().lower()
+TTS_MAX_CHARS = 12_000
+TTS_CACHE_LOCK = threading.Lock()
+TTS_KEY_LOCKS: dict[str, threading.Lock] = {}
+KOKORO_PIPELINE = None
+KOKORO_PIPELINE_LOCK = threading.Lock()
+KOKORO_SYNTH_LOCK = threading.Lock()
+
+
+def _tts_voice() -> str:
+    return os.environ.get("TTS_VOICE", "").strip()
+
+
+def _tts_cache_path(text: str) -> Path:
+    voice = _tts_voice() or os.environ.get("KOKORO_VOICE", "").strip()
+    digest = hashlib.sha256(
+        f"{TTS_ENGINE}\0{voice}\0{text}".encode("utf-8")
+    ).hexdigest()
+    return TTS_CACHE_DIR / f"{digest}.wav"
+
+
+def _tts_key_lock(key: str) -> threading.Lock:
+    with TTS_CACHE_LOCK:
+        return TTS_KEY_LOCKS.setdefault(key, threading.Lock())
+
+
+def _synthesize_kokoro(text: str, out_path: Path) -> None:
+    """Render one paragraph with the local Kokoro pipeline from the research."""
+    global KOKORO_PIPELINE
+    try:
+        import numpy as np  # type: ignore
+        from kokoro import KPipeline  # type: ignore
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError("kokoro is not installed") from exc
+
+    with KOKORO_PIPELINE_LOCK:
+        if KOKORO_PIPELINE is None:
+            lang_code = os.environ.get("KOKORO_LANG_CODE", "a")
+            KOKORO_PIPELINE = KPipeline(lang_code=lang_code)
+        pipeline = KOKORO_PIPELINE
+
+    voice = os.environ.get("KOKORO_VOICE", "af_heart")
+    parts = []
+    # The pipeline owns a single model instance; serialize inference when the
+    # browser prefetches the next paragraph concurrently.
+    with KOKORO_SYNTH_LOCK:
+        for _graphemes, _phonemes, audio in pipeline(text, voice=voice):
+            samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+            if samples.size:
+                parts.append(samples)
+    if not parts:
+        raise RuntimeError("Kokoro produced no audio")
+    samples = np.concatenate(parts) if len(parts) > 1 else parts[0]
+    pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2")
+    with wave.open(str(out_path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(24_000)
+        wav.writeframes(pcm.tobytes())
+
+
+def _synthesize_macos(text: str, out_path: Path) -> None:
+    executable = shutil.which("say")
+    if not executable:
+        raise RuntimeError("macOS 'say' is not available")
+    command = [
+        executable,
+        "-o",
+        str(out_path),
+        "--file-format=WAVE",
+        "--data-format=LEI16@22050",
+    ]
+    voice = _tts_voice()
+    if voice:
+        command.extend(["-v", voice])
+    command.append(text)
+    subprocess.run(
+        command,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=120,
+    )
+
+
+def _synthesize_espeak(text: str, out_path: Path) -> None:
+    executable = shutil.which("espeak-ng") or shutil.which("espeak")
+    if not executable:
+        raise RuntimeError("espeak-ng/espeak is not available")
+    command = [executable, "-w", str(out_path)]
+    voice = _tts_voice()
+    if voice:
+        command.extend(["-v", voice])
+    command.append(text)
+    subprocess.run(
+        command,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=120,
+    )
+
+
+def _synthesize_to_file(text: str, out_path: Path) -> None:
+    engine = TTS_ENGINE
+    errors: list[str] = []
+
+    if engine in {"auto", "kokoro"}:
+        try:
+            _synthesize_kokoro(text, out_path)
+            return
+        except Exception as exc:
+            errors.append(f"kokoro: {exc}")
+            if engine == "kokoro":
+                raise RuntimeError("; ".join(errors)) from exc
+
+    if engine in {"auto", "say"}:
+        if sys.platform == "darwin" or engine == "say":
+            try:
+                _synthesize_macos(text, out_path)
+                return
+            except Exception as exc:
+                errors.append(f"say: {exc}")
+
+    if engine in {"auto", "espeak"}:
+        try:
+            _synthesize_espeak(text, out_path)
+            return
+        except Exception as exc:
+            errors.append(f"espeak: {exc}")
+
+    detail = "; ".join(errors) or f"unknown TTS_ENGINE {engine!r}"
+    raise RuntimeError(f"No local text-to-speech engine is available ({detail})")
+
+
+def _prewarm_tts() -> None:
+    """Load the local TTS model in the background so the first click is fast."""
+    if os.environ.get("TTS_PREWARM", "1").strip() == "0":
+        return
+    try:
+        synthesize_speech("Text to speech is ready.")
+    except Exception:
+        # TTS is optional; a missing engine must not affect chat startup.
+        pass
+
+
+def synthesize_speech(text: str) -> bytes:
+    """Return a cached WAV for one article paragraph, synthesizing if needed."""
+    text = " ".join(str(text or "").split())
+    if not text:
+        raise ValueError("Missing text to read aloud")
+    if len(text) > TTS_MAX_CHARS:
+        raise ValueError(
+            f"That paragraph is too long to read aloud (limit "
+            f"{TTS_MAX_CHARS:,} characters)."
+        )
+
+    TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = _tts_cache_path(text)
+    with _tts_key_lock(cache_path.name):
+        try:
+            cached = cache_path.read_bytes()
+            if len(cached) > 44:
+                return cached
+        except OSError:
+            pass
+
+        temp_path = cache_path.with_name(
+            f".{cache_path.stem}.{os.getpid()}.{threading.get_ident()}.tmp.wav"
+        )
+        try:
+            _synthesize_to_file(text, temp_path)
+            if not temp_path.exists() or temp_path.stat().st_size <= 44:
+                raise RuntimeError("The text-to-speech engine produced no audio")
+            os.replace(temp_path, cache_path)
+            return cache_path.read_bytes()
+        finally:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 # /medium reads the Medium author handle from this file and asks
 # news_fetch.php for that author's RSS feed (https://medium.com/feed/@handle).
@@ -5475,6 +5667,18 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     def _send_error_json(self, message: str, status: int = 400) -> None:
         self._send_json({"error": message}, status)
 
+    def _send_wav(self, data: bytes) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "private, max-age=86400")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def _read_json(self) -> dict | None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -5968,6 +6172,23 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 self._send_error_json("Missing text to translate", 400)
                 return
             self._handle_translate(text)
+            return
+        if parsed.path == "/api/tts":
+            payload = self._read_json()
+            if payload is None:
+                return
+            text = payload.get("text")
+            if not isinstance(text, str) or not text.strip():
+                self._send_error_json("Missing text to read aloud", 400)
+                return
+            try:
+                self._send_wav(synthesize_speech(text))
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+            except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+                self._send_error_json(
+                    f"Could not read the text aloud: {exc}", 502
+                )
             return
         if parsed.path == "/api/explain_line":
             payload = self._read_json()
@@ -9670,6 +9891,10 @@ def main() -> None:
     )
     print(f"YouTube local chat server running at {address}", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
+    # Warm the optional text-to-speech engine (Kokoro when installed) after the
+    # chat server is ready. The news read-aloud button then responds quickly
+    # on its first paragraph instead of paying the model-load cost.
+    threading.Thread(target=_prewarm_tts, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -88,6 +88,34 @@ task (persistent) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
+task.news_voice_text_to_speech (completed) {
+  please reference {directory_of_this_prompt}/../research/text_to_speech.txt:
+  - in the news article popup, add a text_to_speech image icon, when click {
+    read the content of the news article, paragraph by paragraph
+    one paragraph will be sent per time so that we can have a fast response from the text to speech
+  }
+
+  Implemented:
+  app/chat_server.py
+  - Added POST /api/tts. It accepts one article paragraph and returns a cached
+    WAV. The local Kokoro pipeline from research/text_to_speech.txt is used
+    when installed; otherwise the server falls back to macOS `say`, Linux
+    espeak-ng/espeak, and the same cache. The model is warmed in the background
+    after startup so the first read-aloud click does not pay the load cost.
+  - Audio is cached under .chat/tts_cache by engine, voice, and paragraph text,
+    with per-paragraph locks so concurrent prefetches do not synthesize twice.
+  app/chat.html
+  - Added a speaker icon to the story modal header. Clicking it reads the
+    article paragraph by paragraph, prefetching the next paragraph while the
+    current one plays, and clicking again stops playback.
+  - Very long paragraphs are split at sentence/comma boundaries for fast first
+    audio. Read-aloud stops when the story modal closes or another story opens.
+
+  Verified: POST /api/tts returns audio/wav (Kokoro engine, cached on the
+  second request); the empty-text request returns HTTP 400; Python compile and
+  the browser script syntax check pass.
+}
+
 task (completed) {
   please fix the following news article loading {
 [news: news_fetch (googlenews): could not load article https://www.reuters.com/world/china/nvidia-ceos-affair-aided-75-billion-chip-shipments-china-information-reports-2026-11-10/ (HTTP 401)][news: news_fetch (googlenews): could not load article https://www.ft.com/content/afb6c960-a910-4d67-9588-73ba3bea5b06?syn-25a6b1a6=1 (HTTP 403)][news: news_fetch (googlenews): could not load article https://www.nytimes.com/2026/11/10/business/nvidia-wachtell-lipton-jensen-huang.html (HTTP 403)][news: news_fetch (googlenews): could not load article https://www.nytimes.com/2026/11/10/us/politics/trump-china-trip-nvidia.html (HTTP 403)][news: news_fetch (googlenews): could not load article https://www.newsnationnow.com/politics/jensen-huang-alice-spy-honey-trap-aliia-roza-nvidia/ (HTTP 403)][news: news_fetch (googlenews): could not load article https://apnews.com/article/nvidia-jensen-huang-chinese-spy-investigation-df45d21030691f59c67bc0b35adb89a2 (HTTP 403)][news: news_fetch (googlenews): could not load images from https://www.reuters.com/world/china/nvidia-ceos-affair-aided-75-billion-chip-shipments-china-information-reports-2026-11-10/ (HTTP 401)][news: news_fetch (googlenews): could not load images from https://www.ft.com/content/afb6c960-a910-4d67-9588-73ba3bea5b06?syn-25a6b1a6=1 (HTTP 403)][news: news_fetch (googlenews): could not load images from https://www.nytimes.com/2026/11/10/business/nvidia-wachtell-lipton-jensen-huang.html (HTTP 403)][news: news_fetch (googlenews): could not load images from https://www.nytimes.com/2026/11/10/us/politics/trump-china-trip-nvidia.html (HTTP 403)][news: news_fetch (googlenews): could not load images from https://www.newsnationnow.com/politics/jensen-huang-alice-spy-honey-trap-aliia-roza-nvidia/ (HTTP 403)]

@@ -1783,6 +1783,39 @@
   }
   #learn-close:hover { color: var(--text); }
   .news-translate { flex: 0 0 auto; margin-top: 2px; }
+  .news-tts {
+    flex: 0 0 auto;
+    margin-top: 2px;
+    width: 30px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    color: #d7ecff;
+    background: #172433;
+    border: 1px solid #2d4d68;
+    border-radius: 5px;
+    cursor: pointer;
+  }
+  .news-tts:hover:not(:disabled) {
+    background: #20364a;
+    border-color: #3d6b8f;
+  }
+  .news-tts:disabled { opacity: .45; cursor: default; }
+  .news-tts svg { display: block; width: 15px; height: 15px; }
+  .news-tts.is-playing {
+    color: #fff;
+    background: #20364a;
+    border-color: #4d87b3;
+  }
+  .news-tts.is-loading .tts-wave { opacity: .3; }
+  .news-tts.is-playing .tts-wave { animation: tts-wave 1s ease-in-out infinite; }
+  .news-tts.is-playing .tts-wave:nth-of-type(2) { animation-delay: .15s; }
+  @keyframes tts-wave {
+    0%, 100% { opacity: .25; }
+    50% { opacity: 1; }
+  }
   #news-translation {
     margin-top: 15px;
     padding: 8px 0 0 11px;
@@ -2284,6 +2317,16 @@
         <div id="news-meta" class="news-modal-meta"></div>
       </div>
       <a id="news-link" class="news-link" href="#" target="_blank" rel="noopener noreferrer">Open article ↗</a>
+      <button id="news-tts" class="news-tts" type="button" disabled
+              title="Read this story aloud" aria-label="Read this story aloud">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/>
+          <path class="tts-wave" d="M16 8.6a4.8 4.8 0 0 1 0 6.8" fill="none"
+                stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+          <path class="tts-wave" d="M18.6 6a8.4 8.4 0 0 1 0 12" fill="none"
+                stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+      </button>
       <button id="news-translate" class="translate-btn news-translate" type="button" disabled
               title="Translate this story into Simplified Chinese with the local LLM">中文</button>
       <button id="news-close" type="button" title="Close (Esc)">×</button>
@@ -2529,6 +2572,7 @@ const newsTitleEl = $("#news-title");
 const newsMetaEl = $("#news-meta");
 const newsLinkEl = $("#news-link");
 const newsBodyEl = $("#news-body");
+const newsTtsBtn = $("#news-tts");
 const newsTranslateBtn = $("#news-translate");
 const newsTranslationEl = $("#news-translation");
 const newsTranslationLabelEl = $("#news-translation-label");
@@ -2638,6 +2682,8 @@ let popupAnchorRect = null;
 let newsItem = null;
 let newsTranslationGeneration = 0;
 let newsTranslationRenderPending = false;
+let newsTtsGeneration = 0;
+let newsTtsRun = null;
 const newsTranslation = {
   text: "",
   sourceText: "",
@@ -6412,6 +6458,235 @@ function appendNewsParagraph(text, className) {
   newsBodyEl.appendChild(p);
 }
 
+/* ------------------------------------------------------------------ *
+ *  Read a news story aloud, one paragraph at a time
+ * ------------------------------------------------------------------ */
+const NEWS_TTS_MAX_SEGMENT_CHARS = 1400;
+
+function newsTtsSegments(item) {
+  if (!item) return [];
+  const paragraphs = Array.isArray(item.paragraphs) ? item.paragraphs : [];
+  const summary = String(item.summary || "").trim();
+  const parts = [];
+  if (summary && summary !== String(paragraphs[0] || "").trim()) {
+    parts.push(summary);
+  }
+  for (const value of paragraphs) {
+    const text = String(value || "").trim();
+    if (text) parts.push(text);
+  }
+
+  // A normal paragraph is one request. Very long paragraphs are split at a
+  // sentence (or comma) boundary so the first audio still starts quickly.
+  const segments = [];
+  for (const paragraph of parts) {
+    let rest = paragraph;
+    while (rest.length > NEWS_TTS_MAX_SEGMENT_CHARS) {
+      const windowText = rest.slice(0, NEWS_TTS_MAX_SEGMENT_CHARS);
+      const sentences = [...windowText.matchAll(/[.!?](?=\s|$)/g)];
+      let cut = sentences.length
+        ? sentences[sentences.length - 1].index + 1
+        : -1;
+      if (cut < 400) {
+        const comma = windowText.lastIndexOf(", ");
+        cut = comma > 400 ? comma + 1 : NEWS_TTS_MAX_SEGMENT_CHARS;
+      }
+      segments.push(rest.slice(0, cut).trim());
+      rest = rest.slice(cut).trim();
+    }
+    if (rest) segments.push(rest);
+  }
+  return segments.filter(Boolean);
+}
+
+function syncNewsTtsButton() {
+  const button = newsTtsBtn;
+  if (!button) return;
+  const run = newsTtsRun;
+  const playing = Boolean(run && !run.cancelled);
+  const hasText = newsTtsSegments(newsItem).length > 0;
+  button.disabled = !playing && !hasText;
+  button.classList.toggle("is-playing", playing);
+  button.classList.toggle(
+    "is-loading",
+    Boolean(playing && !run.audioStarted)
+  );
+  button.title = playing
+    ? "Stop reading this story"
+    : hasText
+      ? "Read this story aloud"
+      : "Waiting for the story text…";
+  button.setAttribute(
+    "aria-label",
+    playing ? "Stop reading this story" : "Read this story aloud"
+  );
+}
+
+function resetNewsTts() {
+  newsTtsGeneration += 1;
+  const run = newsTtsRun;
+  newsTtsRun = null;
+  if (!run) {
+    syncNewsTtsButton();
+    return;
+  }
+  run.cancelled = true;
+  for (const controller of run.controllers) controller.abort();
+  run.controllers.clear();
+  if (run.audioResolve) {
+    run.audioResolve();
+    run.audioResolve = null;
+  }
+  if (run.audio) {
+    run.audio.onended = null;
+    run.audio.onerror = null;
+    run.audio.pause();
+    run.audio.removeAttribute("src");
+    run.audio.load();
+  }
+  for (const url of run.urls.values()) URL.revokeObjectURL(url);
+  run.urls.clear();
+  run.pending.clear();
+  syncNewsTtsButton();
+}
+
+function fetchNewsTtsSegment(run, index) {
+  if (run.urls.has(index)) return Promise.resolve(run.urls.get(index));
+  if (run.pending.has(index)) return run.pending.get(index);
+
+  const controller = new AbortController();
+  run.controllers.add(controller);
+  const promise = fetch("/api/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: run.segments[index] }),
+    signal: controller.signal,
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        let detail = `HTTP ${response.status}`;
+        try {
+          const text = await response.text();
+          if (text) {
+            try {
+              detail = JSON.parse(text).error || detail;
+            } catch {
+              detail = text.slice(0, 200);
+            }
+          }
+        } catch { /* ignore */ }
+        throw new Error(detail);
+      }
+      const blob = await response.blob();
+      if (run.cancelled) {
+        throw new DOMException("Cancelled", "AbortError");
+      }
+      const url = URL.createObjectURL(blob);
+      run.urls.set(index, url);
+      return url;
+    })
+    .finally(() => {
+      run.pending.delete(index);
+      run.controllers.delete(controller);
+    });
+  run.pending.set(index, promise);
+  return promise;
+}
+
+function prefetchNewsTts(run, index) {
+  if (run.cancelled || index < 0 || index >= run.segments.length) return;
+  if (run.urls.has(index) || run.pending.has(index)) return;
+  fetchNewsTtsSegment(run, index).catch(() => {});
+}
+
+function playNewsTtsSegment(run, url) {
+  return new Promise((resolve, reject) => {
+    const audio = run.audio || new Audio();
+    run.audio = audio;
+    run.audioStarted = true;
+    audio.onended = null;
+    audio.onerror = null;
+    audio.pause();
+    audio.src = url;
+    audio.onended = () => {
+      run.audioResolve = null;
+      resolve();
+    };
+    audio.onerror = () => {
+      run.audioResolve = null;
+      reject(new Error("Could not play the generated audio."));
+    };
+    run.audioResolve = resolve;
+    const playback = audio.play();
+    if (playback?.catch) {
+      playback.catch((error) => {
+        run.audioResolve = null;
+        reject(error);
+      });
+    }
+    syncNewsTtsButton();
+  });
+}
+
+async function startNewsTts() {
+  if (newsTtsRun) {
+    resetNewsTts();
+    return;
+  }
+  const item = newsItem;
+  const segments = newsTtsSegments(item);
+  if (!segments.length) {
+    toast("There is no article text to read aloud yet.");
+    return;
+  }
+
+  resetNewsTts();
+  const run = {
+    item,
+    segments,
+    generation: newsTtsGeneration,
+    cancelled: false,
+    audioStarted: false,
+    audio: null,
+    audioResolve: null,
+    urls: new Map(),
+    pending: new Map(),
+    controllers: new Set(),
+  };
+  newsTtsRun = run;
+  syncNewsTtsButton();
+  // Keep one paragraph playing and the next one ready in the background.
+  prefetchNewsTts(run, 0);
+  prefetchNewsTts(run, 1);
+
+  try {
+    for (let index = 0; index < segments.length; index += 1) {
+      if (run.cancelled) return;
+      const url = await fetchNewsTtsSegment(run, index);
+      if (run.cancelled) return;
+      await playNewsTtsSegment(run, url);
+      if (run.cancelled) return;
+      prefetchNewsTts(run, index + 2);
+    }
+  } catch (error) {
+    if (!run.cancelled && error?.name !== "AbortError") {
+      toast(`Read aloud failed: ${error?.message || String(error)}`);
+    }
+  } finally {
+    if (newsTtsRun === run) {
+      newsTtsRun = null;
+      for (const url of run.urls.values()) URL.revokeObjectURL(url);
+      run.urls.clear();
+      run.pending.clear();
+      if (run.audio) {
+        run.audio.onended = null;
+        run.audio.onerror = null;
+      }
+      syncNewsTtsButton();
+    }
+  }
+}
+
 function syncNewsTranslateButton() {
   const button = newsTranslateBtn;
   if (!button) return;
@@ -6654,11 +6929,13 @@ function renderNewsModal(item) {
   }
   // Keep the (possibly streaming) translation after the article body.
   renderNewsTranslation();
+  syncNewsTtsButton();
   newsBodyEl.scrollTop = 0;
 }
 
 function openNewsModal(item) {
   newsItem = item;
+  resetNewsTts();
   resetNewsTranslation();
   resetNewsChat();
   renderNewsModal(item);
@@ -6779,6 +7056,7 @@ function openNewsStory(newsId, fallbackUrl = "", fallbackTitle = "") {
 
 function closeNewsModal() {
   newsItem = null;
+  resetNewsTts();
   resetNewsTranslation();
   resetNewsChat();
   resetNewsAction();
@@ -7169,6 +7447,11 @@ $("#news-chat-close").addEventListener("click", (event) => {
 });
 
 $("#news-close").addEventListener("click", closeNewsModal);
+newsTtsBtn.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  startNewsTts();
+});
 newsTranslateBtn.addEventListener("click", (event) => {
   event.preventDefault();
   event.stopPropagation();
