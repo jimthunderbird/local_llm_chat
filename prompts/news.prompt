@@ -86,6 +86,48 @@ task (persistent) {
   complete tasks in ./news/medium.prompt
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////
+
+task.bug.news_list_loading_2 (completed) {
+  please make sure the following news articles load {
+    http://web.archive.org/web/20260211100204id_/https://www.hollywoodintoto.com/clifford-the-big-red-dog-review-2021/
+  }
+  please make sure to fix it in the systematic way
+
+  Root cause:
+  A story whose link is already a Wayback Machine URL was only fetched as the
+  archive page. When that request failed (for example archive.org returned 404
+  for a snapshot URL carrying an extra query, or rate-limited a burst), the
+  existing archive fallback asked the availability API about the archive URL
+  itself instead of the publisher URL embedded in its path, so nothing could
+  recover and the detail modal stayed empty.
+
+  Implemented:
+  news_fetch.php
+  - Added parseWaybackUrl(), which recognizes
+  /web/<timestamp>[modifier]/<original-url> links, normalizes them to the raw
+  "id_" snapshot form, and recovers the embedded publisher URL (including a
+  query string that parse_url() attaches to the archive URL).
+  - fetchArticleArchiveFallback() now retries the normalized snapshot directly.
+  If that still fails, it looks up a snapshot for the embedded original URL
+  instead of querying the availability API about the archive URL itself.
+  - The snapshot normalizer now also handles modifiers other than "id_" and
+  keeps working when the publisher URL already appears in raw form.
+  - An empty cached body for a Wayback story is no longer served for the
+  failure-cache TTL; the list fetch retries it, so an earlier failed attempt
+  cannot keep the story blank.
+
+  Verified:
+  - The reported URL loads 20 paragraphs / 1 image through /news and
+  `news_fetch.php --json --article`.
+  - The same article still loads from the live publisher URL and from a
+  non-raw /web/<timestamp>/ form.
+  - Simulated a stale empty cache for an archive URL: the list path retried,
+  the direct archive request failed with HTTP 404, and the embedded-original
+  snapshot fallback recovered all 20 paragraphs.
+  - php -l passes.
+}
+
 task.bug.news_list_loading (completed) {
   please make sure the following news articles load {
     https://www.hollywoodintoto.com/clifford-the-big-red-dog-review-2021/
@@ -99,51 +141,51 @@ task.bug.news_list_loading (completed) {
   Implemented:
   news_fetch.php
   - Added a generic Wayback Machine fallback after the article-page, feed, and
-    reader-mirror paths. When a publisher blocks both the live page and reader
-    mirrors (Hollywood in Toto and RogerEbert.com both return Cloudflare/403
-    responses), the availability API finds the closest archived snapshot and
-    the "id_" raw form is fetched so the archive toolbar is not parsed as
-    article prose.
+  reader-mirror paths. When a publisher blocks both the live page and reader
+  mirrors (Hollywood in Toto and RogerEbert.com both return Cloudflare/403
+  responses), the availability API finds the closest archived snapshot and
+  the "id_" raw form is fetched so the archive toolbar is not parsed as
+  article prose.
   - The fallback applies to any blocked article URL, not just these two hosts,
-    and reuses the existing paragraph/image extraction and placeholder checks.
+  and reuses the existing paragraph/image extraction and placeholder checks.
   - Bumped ARTICLE_EXTRACTOR_VERSION to 6 so empty cached bodies from the old
-    extractor are refetched instead of served from the failure cache.
+  extractor are refetched instead of served from the failure cache.
 
   Verified:
   - The Hollywood in Toto review loads 20 paragraphs / 4,212 characters plus
-    its lead image.
+  its lead image.
   - The RogerEbert.com review loads 7 paragraphs / 4,203 characters plus its
-    lead image (from a 2026 snapshot of the 2021 review).
+  lead image (from a 2026 snapshot of the 2021 review).
   - The duplicate URLs in the task resolve to the same complete article bodies;
-    php -l passes.
+  php -l passes.
 }
 
 task.news_search_command_option (completed) {
   add new option "search":
   - /news search jensen huang 
-    should be the same as:
-    /googlenews jensen huang
+  should be the same as:
+  /googlenews jensen huang
 
   Implemented:
   app/chat_server.py
   - /news now recognizes a leading "search" subcommand and runs
-    news_fetch.php with --source googlenews --search <keywords>, exactly like
-    /googlenews. The result streams through the normal /news story-list and
-    detail rendering, and a keyword-less "/news search" prints usage.
+  news_fetch.php with --source googlenews --search <keywords>, exactly like
+  /googlenews. The result streams through the normal /news story-list and
+  detail rendering, and a keyword-less "/news search" prints usage.
   - The /news help text documents the new form, and tab completion offers
-    "search" only as the first argument; sources are completed for later
-    arguments. Once "search " is typed, completion steps aside so keywords
-    are free text.
+  "search" only as the first argument; sources are completed for later
+  arguments. Once "search " is typed, completion steps aside so keywords
+  are free text.
   app/chat.html
   - /news completion uses a first-argument subcommand kind (search + sources)
-    and a sources-only kind after the first argument.
+  and a sources-only kind after the first argument.
 
   Verified:
   - "/news search jensen huang" dispatches
-    [--source googlenews --search jensen huang]; "cnn 3" still dispatches
-    [--limit 3 --source cnn]; "/news search" prints usage.
+  [--source googlenews --search jensen huang]; "cnn 3" still dispatches
+  [--limit 3 --source cnn]; "/news search" prints usage.
   - ./news_fetch.php --json --source googlenews --search 'jensen huang'
-    returns the matching Google News story.
+  returns the matching Google News story.
   - py_compile, php -l, and node --check pass.
 }
 
@@ -161,33 +203,33 @@ task.bug."https://medium.com/@chrisdunlop_37984/so-shall-we-give-up-then-2d095fa
   Implemented:
   news_fetch.php
   - Medium is now a full-article source for both the static site:medium.com
-    feed and the dynamic /medium author feed, so a feed preview is never
-    trusted as the complete body.
+  feed and the dynamic /medium author feed, so a feed preview is never
+  trusted as the complete body.
   - Reader-mirror recovery now retries each mirror URL twice, also retries a
-    tracking-parameter-free URL (Medium feeds append ?source=rss-...), and
-    keeps an empty mirror result out of the long-lived cache path.
+  tracking-parameter-free URL (Medium feeds append ?source=rss-...), and
+  keeps an empty mirror result out of the long-lived cache path.
   - Empty cached bodies for reader-mirror publishers expire after 120 seconds
-    instead of one hour, and a detail request explicitly ignores an empty
-    cached failure so the next attempt can recover.
+  instead of one hour, and a detail request explicitly ignores an empty
+  cached failure so the next attempt can recover.
   - Added `news_fetch.php --json --article <url>` for fetching one article
-    body on demand.
+  body on demand.
   app/chat_server.py
   - Added GET /api/news_article?url=<article_url>, which runs the on-demand
-    article fetch and returns the paragraphs and images as JSON.
+  article fetch and returns the paragraphs and images as JSON.
   app/chat.html
   - When a completed story opens in the detail modal without paragraphs, the
-    modal now fetches the body on demand, shows a "loading full article…"
-    state, and fills the same story in place. Reopening retries a transient
-    failure instead of leaving the article permanently empty.
+  modal now fetches the body on demand, shows a "loading full article…"
+  state, and fills the same story in place. Reopening retries a transient
+  failure instead of leaving the article permanently empty.
 
   Verified:
   - `./news_fetch.php --json --article` loads 31 paragraphs / 6,993 characters
-    for the reported URL and 25 paragraphs / 4,904 characters for the other
-    previously-cached-empty Medium story, both with cover images.
+  for the reported URL and 25 paragraphs / 4,904 characters for the other
+  previously-cached-empty Medium story, both with cover images.
   - A cold-cache `--source medium --limit 8` run loads every story, including
-    the reported one, through the reader mirror.
+  the reported one, through the reader mirror.
   - `php -l`, the Python compile check, and `node --check` on the browser
-    script all pass.
+  script all pass.
 }
 
 task.bug."https://medium.com/@RetroTechShow/1993-before-mp3-and-spotify-the-bizarre-90s-battle-between-three-digital-audio-formats-4a3ba7a4f8ce" (completed) {
@@ -206,23 +248,23 @@ task.bug."https://medium.com/@RetroTechShow/1993-before-mp3-and-spotify-the-biza
   Implemented:
   news_fetch.php
   - Added feedBodyIsPreview(): detects publisher-preview bodies from a
-    "Continue reading", "Read the full story", or "Read on" continuation
-    marker, including in the raw feed HTML before boilerplate filtering.
+  "Continue reading", "Read the full story", or "Read on" continuation
+  marker, including in the raw feed HTML before boilerplate filtering.
   - RSS parsing now records an internal feed_preview flag, and
-    storyNeedsArticleContent() forces article enrichment when it is set.
+  storyNeedsArticleContent() forces article enrichment when it is set.
   - Added the continuation-line patterns to isBoilerplate() so a leftover
-    preview line is never emitted as article prose.
+  preview line is never emitted as article prose.
   - The existing Medium reader-mirror fallback then loads the complete body, so
-    the same fix covers the /news detail modal (Google News Medium items) and
-    the /medium command without source-specific branching.
+  the same fix covers the /news detail modal (Google News Medium items) and
+  the /medium command without source-specific branching.
 
   Verified:
   - `HOME=<temp> news_fetch.php --json --source medium_author --limit 3` with
-    @RetroTechShow now emits 84-106 paragraphs / 15-24k characters per story
-    (including the reported 1993 DAT/DCC/MiniDisc article) instead of one
-    38-75 character teaser paragraph.
+  @RetroTechShow now emits 84-106 paragraphs / 15-24k characters per story
+  (including the reported 1993 DAT/DCC/MiniDisc article) instead of one
+  38-75 character teaser paragraph.
   - The reported medium.com URL still loads through /googlenews and the
-    reader mirror; php -l passes.
+  reader mirror; php -l passes.
 }
 
 task.bug."https://medium.com/@adnanmasood/when-llms-edit-other-llms-weight-space-programming-and-the-conditions-for-recursive-2dceaec05403" (completed) {
@@ -237,15 +279,15 @@ task.bug."https://medium.com/@adnanmasood/when-llms-edit-other-llms-weight-space
   Implemented:
   news_fetch.php
   - Added ARTICLE_READER_FALLBACKS and fetchArticleReaderFallback(). When a
-    fetched article page yields no readable paragraphs, a publisher-specific
-    public reader mirror is tried as a last resort after the feed fallback.
-    For medium.com the mirror is https://freedium-mirror.cfd/{url}, which
-    renders the complete story even though the page itself is challenged.
+  fetched article page yields no readable paragraphs, a publisher-specific
+  public reader mirror is tried as a last resort after the feed fallback.
+  For medium.com the mirror is https://freedium-mirror.cfd/{url}, which
+  renders the complete story even though the page itself is challenged.
   - Reader-mirror bodies reuse the normal paragraph and image extractors. The
-    mirror URL is passed as the base URL so relative image paths resolve
-    through the mirror's image proxy instead of the blocked publisher host.
+  mirror URL is passed as the base URL so relative image paths resolve
+  through the mirror's image proxy instead of the blocked publisher host.
   - Bumped ARTICLE_EXTRACTOR_VERSION to 5 so previously cached empty Medium
-    entries are refetched instead of being served from the failure cache.
+  entries are refetched instead of being served from the failure cache.
 
   Verified: the reported URL now streams 122 paragraphs / 37,744 characters
   (subtitle, TL;DR, every section, and all 30 references) plus its lead image.
@@ -264,16 +306,16 @@ task.bug."https://www.axios.com/2026/11/09/alice-huang-nvidia-jensen-megaspeed" 
   Implemented:
   news_fetch.php
   - Added ARTICLE_FEED_FALLBACKS and fetchArticleFeedFallback(). When a fetched
-    article page yields no readable paragraphs (for example a bot challenge),
-    the publisher's public RSS feed is fetched once per batch and the matching
-    item is located by canonical URL.
-    Axios publishes the complete story (paragraphs, bullets, section headings,
-    and lead image) in https://api.axios.com/feed/, so its full text is restored
-    without bypassing the site's protection with a scraper.
+  article page yields no readable paragraphs (for example a bot challenge),
+  the publisher's public RSS feed is fetched once per batch and the matching
+  item is located by canonical URL.
+  Axios publishes the complete story (paragraphs, bullets, section headings,
+  and lead image) in https://api.axios.com/feed/, so its full text is restored
+  without bypassing the site's protection with a scraper.
   - Feed bodies are parsed in document order from p, li, and h2-h4 elements,
-    with the same CSS/boilerplate/duplicate filtering as page extraction.
+  with the same CSS/boilerplate/duplicate filtering as page extraction.
   - Bumped ARTICLE_EXTRACTOR_VERSION to 4 so previously cached empty Axios
-    entries are refetched.
+  entries are refetched.
 
   Verified: /googlenews "site:axios.com alice huang jensen" now emits 37
   paragraphs (5,477 characters) for the reported URL, including every section
@@ -292,15 +334,15 @@ task.bug."https://en.fnnews.com/news/202611071101376017" (completed) {
   Implemented:
   news_fetch.php
   - Added collectLineSegmentNodes(), which walks a semantic body container and
-    collects prose split by <br> and block elements while keeping inline markup
-    in its line. It skips scripts, styles, ads, sharing controls, related-story
-    rails, navigation, sidebars, footers, and bylines.
+  collects prose split by <br> and block elements while keeping inline markup
+  in its line. It skips scripts, styles, ads, sharing controls, related-story
+  rails, navigation, sidebars, footers, and bylines.
   - extractArticleParagraphs() now also evaluates semantic containers
-    (articleBody, article-body, paragraphs-container, <article>, article/content
-    classes, view_cont, <main>) with the line-segment collector. Existing <p>
-    extraction still comes first, so sites with normal paragraphs are unchanged.
+  (articleBody, article-body, paragraphs-container, <article>, article/content
+  classes, view_cont, <main>) with the line-segment collector. Existing <p>
+  extraction still comes first, so sites with normal paragraphs are unchanged.
   - Bumped ARTICLE_EXTRACTOR_VERSION to 3 so previously cached partial bodies
-    are refetched.
+  are refetched.
 
   Verified: the reported URL now extracts 18 paragraphs / 3,773 characters
   (headline, intro, every body section, and the closing ETF section) plus its
@@ -315,17 +357,17 @@ task.refactor.news_trunk_and_news_article_loading (completed) {
   Implemented:
   app/chat_server.py
   - Added `GET /api/news_item?id=<news_id>`, which returns a learned story's
-    cached metadata (title, link, source, section, published, summary,
-    paragraphs, images) together with its learned/complete flags.
+  cached metadata (title, link, source, section, published, summary,
+  paragraphs, images) together with its learned/complete flags.
   app/chat.html
   - `makeVideoLink()` now renders news citations as in-app controls: the icon
-    keeps its news styling, prevents the default navigation, and opens the
-    story modal through the new endpoint. Video citations still link out to
-    YouTube as before.
+  keeps its news styling, prevents the default navigation, and opens the
+  story modal through the new endpoint. Video citations still link out to
+  YouTube as before.
   - Added `openNewsStory()`, which loads the story by id and feeds it to the
-    existing `openNewsModal()`; the modal's "Open article" link still reaches
-    the original source. If the cached story cannot be loaded, the click falls
-    back to opening the original article URL.
+  existing `openNewsModal()`; the modal's "Open article" link still reaches
+  the original source. If the cached story cannot be loaded, the click falls
+  back to opening the original article URL.
 
   Verified: `python3 -m py_compile app/chat_server.py` and the browser script
   (`node --check`) both pass.
@@ -334,8 +376,8 @@ task.refactor.news_trunk_and_news_article_loading (completed) {
 task.bug.news_article_loading_problem (completed) {
   bug:
   - news article: https://www.theinfatuation.com/san-francisco/guides/best-hot-pot-restaurants-san-francisco
-    expect: the full news text content should appear in the news detail modal
-    actual: only part of the article content is loaded
+  expect: the full news text content should appear in the news detail modal
+  actual: only part of the article content is loaded
 
   Root cause:
   extractArticleParagraphs() returned the first XPath candidate with at least
@@ -348,16 +390,16 @@ task.bug.news_article_loading_problem (completed) {
   Implemented:
   news_fetch.php
   - Article extraction now collects every candidate container first and picks
-    the one with the greatest readable prose volume. A semantic container in
-    the preferred order still wins when it holds a real body (at least
-    ARTICLE_MIN_BODY_CHARS) or accounts for most of the best candidate, so
-    pages with comments/related links do not lose their clean article
-    container, while a byline-only <article> is skipped.
+  the one with the greatest readable prose volume. A semantic container in
+  the preferred order still wins when it holds a real body (at least
+  ARTICLE_MIN_BODY_CHARS) or accounts for most of the best candidate, so
+  pages with comments/related links do not lose their clean article
+  container, while a byline-only <article> is skipped.
   - collectParagraphNodes() drops bare CSS/JS payloads (selector-prefixed text
-    or text with multiple brace pairs) so they no longer count as prose.
+  or text with multiple brace pairs) so they no longer count as prose.
   - Added an ARTICLE_EXTRACTOR_VERSION marker to cached article entries;
-    entries from the old extractor are refetched instead of serving a stale
-    partial body for up to six hours.
+  entries from the old extractor are refetched instead of serving a stale
+  partial body for up to six hours.
 
   Verified: the reported Infatuation URL now extracts 39 paragraphs / 9,048
   characters (intro, every restaurant entry, and related links) instead of 5
@@ -369,22 +411,22 @@ task.bug.news_article_loading_problem (completed) {
 task.search (completed) {
   add new command: /googlenews <keywords>
   - example: keywords are "open source llm"
-    underneath, hook up to https://news.google.com/rss/search?q=open+source+llm&hl=en-US&gl=US&ceid=US:en
+  underneath, hook up to https://news.google.com/rss/search?q=open+source+llm&hl=en-US&gl=US&ceid=US:en
 
   Implemented:
   app/chat_server.py
   - Added /googlenews <keywords> to the command table and argument commands.
-    It streams the same "news" SSE events as /news, so the browser story list,
-    detail modal, Learn/Chat actions, images, and Google News link resolution
-    all work unchanged.
+  It streams the same "news" SSE events as /news, so the browser story list,
+  detail modal, Learn/Chat actions, images, and Google News link resolution
+  all work unchanged.
   news_fetch.php
   - Added a dynamic googlenews source built from --search <keywords>, using
-    https://news.google.com/rss/search?q=<urlencoded keywords>&hl=en-US&gl=US&ceid=US:en.
-    It accepts an optional --limit, is selected automatically when --search is
-    given without --source, and does not change the default /news source list.
+  https://news.google.com/rss/search?q=<urlencoded keywords>&hl=en-US&gl=US&ceid=US:en.
+  It accepts an optional --limit, is selected automatically when --search is
+  given without --source, and does not change the default /news source list.
   app/chat.html
   - No renderer change was needed; /googlenews appears in the command list and
-    completion from the server-provided command metadata.
+  completion from the server-provided command metadata.
 
   Verified: ./news_fetch.php --json --search "open source llm" --limit 2
   returns Google News stories, resolved publisher links, images, and article

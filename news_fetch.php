@@ -1958,12 +1958,61 @@ function articleArchiveSnapshotUrl(string $url, string $sourceKey): string
 
     // Prefer the raw archived document (no injected banner/toolbar).
     $rawUrl = preg_replace(
-        '#^(https?://web\.archive\.org/web/\d+)/#',
+        '#^(https?://web\.archive\.org/web/\d+[a-z_]*?)/#i',
         '$1id_/',
         $snapshotUrl,
         1
     );
     return is_string($rawUrl) && $rawUrl !== '' ? $rawUrl : $snapshotUrl;
+}
+
+/**
+ * Split a Wayback Machine URL into a raw snapshot URL and the original URL.
+ *
+ * A feed can point directly at an archived copy (for example
+ * http://web.archive.org/web/20260211100204id_/https://example.com/story).
+ * Such a URL must be fetched as-is; asking the availability API about the
+ * archive URL itself either returns nothing or nests one archive page inside
+ * another, so a transient fetch failure never recovers. Parsing the Wayback
+ * shape lets us retry the snapshot and, if needed, the embedded original URL.
+ *
+ * @return array{snapshot:string, original:string}|null
+ */
+function parseWaybackUrl(string $url): ?array
+{
+    $parts = parse_url(trim($url));
+    if (!is_array($parts)) {
+        return null;
+    }
+    $host = strtolower((string)($parts['host'] ?? ''));
+    if ($host !== 'web.archive.org') {
+        return null;
+    }
+
+    $path = (string)($parts['path'] ?? '');
+    if (!preg_match('#^/web/(\d{4,14})[a-z_]*/(.+)$#i', $path, $match)) {
+        return null;
+    }
+    $timestamp = $match[1];
+    $original = $match[2];
+    // Some archived links use /http:/example.com or /http:///example.com.
+    $original = preg_replace('#^(https?):/*#i', '$1://', $original);
+    if (!is_string($original) || !preg_match('#^https?://#i', $original)) {
+        return null;
+    }
+
+    // parse_url() treats a query after the embedded URL as the archive URL's
+    // own query, so put it back on the original before rebuilding the link.
+    $query = isset($parts['query']) ? '?' . $parts['query'] : '';
+    $scheme = strtolower((string)($parts['scheme'] ?? 'https')) === 'http'
+        ? 'http'
+        : 'https';
+
+    return [
+        'snapshot' => $scheme . '://web.archive.org/web/' . $timestamp
+            . 'id_/' . $original . $query,
+        'original' => $original . $query,
+    ];
 }
 
 /**
@@ -1977,32 +2026,50 @@ function fetchArticleArchiveFallback(string $url, string $sourceKey): ?array
         return null;
     }
 
-    $snapshotUrl = articleArchiveSnapshotUrl($url, $sourceKey);
-    if ($snapshotUrl === '') {
-        return null;
-    }
-
-    for ($attempt = 0; $attempt < 2; $attempt++) {
-        $body = fetchUrl(
-            $snapshotUrl,
-            'text/html, application/xhtml+xml;q=0.9, */*;q=0.8',
+    // When the story already points at a Wayback URL, retry that snapshot
+    // directly. If it is unavailable, also look up a snapshot of the URL
+    // embedded in the archive path instead of querying the archive URL itself.
+    $candidates = [];
+    $wayback = parseWaybackUrl($url);
+    if ($wayback !== null) {
+        $candidates[] = $wayback['snapshot'];
+        $embeddedSnapshot = articleArchiveSnapshotUrl(
+            $wayback['original'],
             $sourceKey
         );
-        if (!is_string($body) || trim($body) === '') {
+        if ($embeddedSnapshot !== '') {
+            $candidates[] = $embeddedSnapshot;
+        }
+    } else {
+        $snapshotUrl = articleArchiveSnapshotUrl($url, $sourceKey);
+        if ($snapshotUrl !== '') {
+            $candidates[] = $snapshotUrl;
+        }
+    }
+
+    foreach (array_values(array_unique($candidates)) as $snapshotUrl) {
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            $body = fetchUrl(
+                $snapshotUrl,
+                'text/html, application/xhtml+xml;q=0.9, */*;q=0.8',
+                $sourceKey
+            );
+            if (!is_string($body) || trim($body) === '') {
+                if ($attempt === 0) {
+                    usleep(300000);
+                }
+                continue;
+            }
+            $paragraphs = extractArticleParagraphs($body, $snapshotUrl);
+            if ($paragraphs && !articleBodyIsPlaceholder($paragraphs)) {
+                return [
+                    'paragraphs' => $paragraphs,
+                    'image' => extractArticleImageFromHtml($body, $snapshotUrl),
+                ];
+            }
             if ($attempt === 0) {
                 usleep(300000);
             }
-            continue;
-        }
-        $paragraphs = extractArticleParagraphs($body, $snapshotUrl);
-        if ($paragraphs && !articleBodyIsPlaceholder($paragraphs)) {
-            return [
-                'paragraphs' => $paragraphs,
-                'image' => extractArticleImageFromHtml($body, $snapshotUrl),
-            ];
-        }
-        if ($attempt === 0) {
-            usleep(300000);
         }
     }
 
@@ -2303,6 +2370,12 @@ function enrichStoryContent(
             $cacheIsUsable = $cacheIsUsable
                 && !$placeholderCache
                 && (int)($entry['extractor'] ?? 0) === ARTICLE_EXTRACTOR_VERSION;
+            // A Wayback story that previously failed before the archive-aware
+            // fallback existed must be retried instead of serving an empty
+            // failure entry for the rest of the hour.
+            if (!$paragraphs && parseWaybackUrl($link) !== null) {
+                $cacheIsUsable = false;
+            }
             // A detail request explicitly asks for the article body, so an
             // empty cached failure must not suppress a fresh mirror retry.
             if ($retryFailedCache && !$paragraphs) {
