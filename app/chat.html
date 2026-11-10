@@ -6702,7 +6702,7 @@ function ensureNewsArticle(item) {
   item.articleLoading = true;
   item.articleError = "";
   if (newsItem === item) renderNewsModal(item);
-  fetch(`/api/news_article?url=${encodeURIComponent(link)}`)
+  fetch(`/api/news_article?url=${encodeURIComponent(link)}&title=${encodeURIComponent(item.title || "")}`)
     .then((response) => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return response.json();

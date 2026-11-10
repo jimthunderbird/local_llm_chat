@@ -88,6 +88,52 @@ task (persistent) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
+task (completed) {
+  please fix the following news article loading {
+[news: news_fetch (googlenews): could not load article https://www.reuters.com/world/china/nvidia-ceos-affair-aided-75-billion-chip-shipments-china-information-reports-2026-11-10/ (HTTP 401)][news: news_fetch (googlenews): could not load article https://www.ft.com/content/afb6c960-a910-4d67-9588-73ba3bea5b06?syn-25a6b1a6=1 (HTTP 403)][news: news_fetch (googlenews): could not load article https://www.nytimes.com/2026/11/10/business/nvidia-wachtell-lipton-jensen-huang.html (HTTP 403)][news: news_fetch (googlenews): could not load article https://www.nytimes.com/2026/11/10/us/politics/trump-china-trip-nvidia.html (HTTP 403)][news: news_fetch (googlenews): could not load article https://www.newsnationnow.com/politics/jensen-huang-alice-spy-honey-trap-aliia-roza-nvidia/ (HTTP 403)][news: news_fetch (googlenews): could not load article https://apnews.com/article/nvidia-jensen-huang-chinese-spy-investigation-df45d21030691f59c67bc0b35adb89a2 (HTTP 403)][news: news_fetch (googlenews): could not load images from https://www.reuters.com/world/china/nvidia-ceos-affair-aided-75-billion-chip-shipments-china-information-reports-2026-11-10/ (HTTP 401)][news: news_fetch (googlenews): could not load images from https://www.ft.com/content/afb6c960-a910-4d67-9588-73ba3bea5b06?syn-25a6b1a6=1 (HTTP 403)][news: news_fetch (googlenews): could not load images from https://www.nytimes.com/2026/11/10/business/nvidia-wachtell-lipton-jensen-huang.html (HTTP 403)][news: news_fetch (googlenews): could not load images from https://www.nytimes.com/2026/11/10/us/politics/trump-china-trip-nvidia.html (HTTP 403)][news: news_fetch (googlenews): could not load images from https://www.newsnationnow.com/politics/jensen-huang-alice-spy-honey-trap-aliia-roza-nvidia/ (HTTP 403)]
+  }
+
+  please fix it in a systematic way
+
+  Implemented:
+  news_fetch.php
+  - Article recovery now runs a layered fallback chain instead of stopping at
+  the first blocked publisher page: publisher RSS (image + preview),
+  Medium reader mirror, WordPress REST API, generic reader proxies (Google
+  Translate and Jina Reader), syndicated-copy matching, then Wayback.
+  - Added a generic syndication fallback: when a blocked story has a headline,
+  search Google News for the same report, match the headline, and use a
+  directly accessible partner copy. A short time budget and per-candidate
+  timeout keep a burst of blocked stories fast; reader proxies are a second
+  pass only when the direct copies are incomplete.
+  - Added WordPress REST recovery (`/wp-json/wp/v2/posts?slug=...`), which
+  restores NewsNation and other WordPress sites even when the page itself is
+  challenged.
+  - Added Google Translate and Jina Reader recovery, which restore AP and other
+  bot-challenged pages from a different network.
+  - Article extraction now rejects bot-challenge/paywall/footer pages, trims
+  navigation, ad rails, related-story lists, and legal footers, and keeps the
+  longest preview as a last resort instead of showing an empty modal. This also
+  restores lead images from feeds/proxies, so the image errors disappear.
+  - Added `--title <headline>` to `--article` so an on-demand detail request can
+  use the syndication matcher. Bumped `ARTICLE_EXTRACTOR_VERSION` to 8 so old
+  failure-cache entries are refetched.
+  app/chat_server.py
+  - `/api/news_article` accepts `title` and passes it to `news_fetch.php`.
+  app/chat.html
+  - The detail-modal retry sends the story headline with the article URL.
+
+  Verified with the six reported URLs (cold cache, no stderr diagnostics):
+  - Reuters: 12 paragraphs / 2,714 chars + lead image.
+  - FT: 15 paragraphs / 4,339 chars + lead image.
+  - NYT (Wachtell article): 9 paragraphs / 3,683 chars + lead image.
+  - NYT (Trump China trip article): 23 paragraphs / 6,601 chars + lead image.
+  - NewsNation: 12 paragraphs / 2,317 chars + lead image.
+  - AP: 32 paragraphs / 7,097 chars + lead image.
+  `php -l news_fetch.php`, the Python compile check, and the browser script
+  syntax check all pass.
+}
+
 task.news_chat_do_not_scroll_to_bottom (completed) {
   please learn from task.news_article_scrolled_to_bottom:
   - in the news chat on the right column, after typing a question, the answer should show without scrolling to the answer's bottom

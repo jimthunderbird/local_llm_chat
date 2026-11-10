@@ -2636,24 +2636,30 @@ def news_link(news_id: str) -> str:
     return str(meta.get("link") or "").strip()
 
 
-def fetch_news_article(url: str) -> dict:
+def fetch_news_article(url: str, title: str = "") -> dict:
     """Fetch one article body on demand for the news detail modal.
 
     The list feed uses the same fetcher, but a reader mirror can transiently
     rate-limit a burst of stories. Retrying on demand keeps the detail modal
     usable instead of showing an empty article until the failure cache expires.
+    The headline lets the fetcher find a syndicated full-text copy when the
+    original publisher is paywalled or bot-challenged.
     """
     url = str(url or "").strip()
     if not re.match(r"^https?://", url, re.IGNORECASE):
         raise ValueError("Missing or invalid article URL")
+    command = [
+        "php",
+        str(SCRIPT_DIR / "news_fetch.php"),
+        "--json",
+        "--article",
+        url,
+    ]
+    title = str(title or "").strip()
+    if title:
+        command.extend(["--title", title])
     result = subprocess.run(
-        [
-            "php",
-            str(SCRIPT_DIR / "news_fetch.php"),
-            "--json",
-            "--article",
-            url,
-        ],
+        command,
         cwd=SCRIPT_DIR,
         capture_output=True,
         text=True,
@@ -5620,8 +5626,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/news_article":
             params = parse_qs(parsed.query)
             url = (params.get("url") or [""])[0].strip()
+            title = (params.get("title") or [""])[0].strip()
             try:
-                article = fetch_news_article(url)
+                article = fetch_news_article(url, title)
             except ValueError as exc:
                 self._send_error_json(str(exc), 400)
                 return
@@ -7704,10 +7711,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         Usage: /youtube search "<keyword>"
         Google News RSS is queried with ``site:youtube.com <keyword>``. Only
-        feed items whose source is YouTube are kept, and each result is
-        reduced to a watch url and title (no thumbnail or duration lookup).
-        Each card opens a centered player, and its Summary/Learn buttons keep
-        working from the video id.
+        feed items whose source is YouTube are kept, and each result carries
+        its watch url, title, and maxres YouTube thumbnail (no duration
+        lookup). Each card opens a centered player, and its Summary/Learn
+        buttons keep working from the video id.
         """
         keyword = argument.strip()
         if len(keyword) >= 2 and keyword[0] == keyword[-1] and keyword[0] in "\"'":

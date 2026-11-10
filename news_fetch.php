@@ -38,12 +38,14 @@ declare(strict_types=1);
  * Usage:
  *   ./news_fetch.php [--json] [--source SOURCE ...] [--limit N]
  *   ./news_fetch.php [--json] --search <keywords> [--limit N]
- *   ./news_fetch.php [--json] --article <url>
+ *   ./news_fetch.php [--json] --article <url> [--title <headline>]
  *
  * --source accepts wsj, cnn, cbslite, nprtext, yahoo_finance, medium, kqed,
  * sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia,
  * wccftech, hackernews, medium_author, or googlenews and may be repeated (or
  * given as a comma separated list).
+ * --article fetches one story body on demand; --title lets it match a
+ * syndicated full-text copy when the publisher page is blocked.
  * --search creates the dynamic googlenews source for the given keywords. It
  * is selected automatically when no --source is given.
  * Without --source, every static source is fetched and emitted as its own
@@ -408,14 +410,24 @@ const ARTICLE_CACHE_FAILURE_TTL = 3600; // one hour for articles we could not lo
 // failed mirror lookup on the next news request instead of hiding the story
 // for a full hour.
 const ARTICLE_READER_FAILURE_TTL = 120;
-const ARTICLE_EXTRACTOR_VERSION = 6;   // bump when article extraction logic changes
+const ARTICLE_EXTRACTOR_VERSION = 8;   // bump when article extraction logic changes
 const ARTICLE_MIN_BODY_CHARS = 1200;   // a container this large is a real body, not metadata
+const ARTICLE_PARTIAL_BODY_CHARS = 1200; // shorter fallback bodies may be previews
 const ARTICLE_FETCH_CONCURRENCY = 6;
 const MAX_ARTICLE_CACHE_ENTRIES = 500;
 // Some publishers put the complete story in a public RSS feed while the
-// article page itself is behind a bot challenge. Keyed by host suffix.
+// article page itself is behind a bot challenge. Feeds also give us the lead
+// image and a usable summary when the full body stays blocked. Keyed by host
+// suffix; every domain may expose more than one feed.
 const ARTICLE_FEED_FALLBACKS = [
-    'axios.com' => 'https://api.axios.com/feed/',
+    'axios.com' => ['https://api.axios.com/feed/'],
+    'nytimes.com' => [
+        'https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml',
+        'https://rss.nytimes.com/services/xml/rss/nyt/Business.xml',
+        'https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml',
+    ],
+    'ft.com' => ['https://www.ft.com/rss/home'],
+    'newsnationnow.com' => ['https://www.newsnationnow.com/feed/'],
 ];
 // Some publishers block article pages entirely (Cloudflare) and their public
 // feeds only carry a preview, so a reader mirror that renders the full story
@@ -453,7 +465,14 @@ function emitEvent(array $event): void
  * exponential backoff. The same retry policy also covers transient network
  * failures from the other sources.
  */
-function fetchUrl(string $url, string $accept, string $sourceKey, int $attempt = 0): ?string
+function fetchUrl(
+    string $url,
+    string $accept,
+    string $sourceKey,
+    int $attempt = 0,
+    bool $quiet = false,
+    int $timeout = 30
+): ?string
 {
     $context = stream_context_create([
         'http' => [
@@ -462,7 +481,7 @@ function fetchUrl(string $url, string $accept, string $sourceKey, int $attempt =
                 . 'Accept: ' . $accept . "\r\n"
                 . "Accept-Language: en-US,en;q=0.9\r\n",
             'ignore_errors' => true,
-            'timeout' => 30,
+            'timeout' => $timeout,
         ],
     ]);
 
@@ -479,12 +498,23 @@ function fetchUrl(string $url, string $accept, string $sourceKey, int $attempt =
     $retryable = $status === 429 || $status >= 500 || $body === false;
     if ($retryable && $attempt + 1 < MAX_ATTEMPTS) {
         $wait = 2 ** ($attempt + 1); // 2s, 4s, 8s
-        diag("news_fetch ({$sourceKey}): {$url} returned HTTP {$status}; retrying in {$wait}s");
+        if (!$quiet) {
+            diag("news_fetch ({$sourceKey}): {$url} returned HTTP {$status}; retrying in {$wait}s");
+        }
         sleep($wait);
-        return fetchUrl($url, $accept, $sourceKey, $attempt + 1);
+        return fetchUrl(
+            $url,
+            $accept,
+            $sourceKey,
+            $attempt + 1,
+            $quiet,
+            $timeout
+        );
     }
 
-    diag("news_fetch ({$sourceKey}): could not download {$url} (HTTP {$status})");
+    if (!$quiet) {
+        diag("news_fetch ({$sourceKey}): could not download {$url} (HTTP {$status})");
+    }
     return null;
 }
 
@@ -1686,20 +1716,23 @@ function extractArticleParagraphs(string $html, string $pageUrl = ''): array
 }
 
 /**
- * Return the public feed that carries full story bodies for a publisher.
+ * Return the public feeds that may carry full story bodies for a publisher.
+ *
+ * @return list<string>
  */
-function articleFeedFallbackUrl(string $url): string
+function articleFeedFallbackUrls(string $url): array
 {
     $host = strtolower((string)parse_url($url, PHP_URL_HOST));
     if ($host === '') {
-        return '';
+        return [];
     }
-    foreach (ARTICLE_FEED_FALLBACKS as $domain => $feedUrl) {
+    foreach (ARTICLE_FEED_FALLBACKS as $domain => $feedUrls) {
         if ($host === $domain || str_ends_with($host, '.' . $domain)) {
-            return $feedUrl;
+            $feeds = is_array($feedUrls) ? $feedUrls : [$feedUrls];
+            return array_values(array_filter(array_map('strval', $feeds)));
         }
     }
-    return '';
+    return [];
 }
 
 /**
@@ -1792,6 +1825,16 @@ function extractFeedArticleParagraphs(string $html): array
         $seen[$text] = true;
         $paragraphs[] = $text;
     }
+    // Some feeds expose a plain-text description with no <p>/<li> markup.
+    if (!$paragraphs) {
+        $text = normalizeText(strip_tags($html));
+        if ($text !== ''
+            && mb_strlen($text) >= 25
+            && !isArticleBoilerplate($text)
+        ) {
+            $paragraphs[] = $text;
+        }
+    }
     return $paragraphs;
 }
 
@@ -1881,7 +1924,9 @@ function fetchArticleReaderFallback(string $url, string $sourceKey): ?array
             }
             // Resolve relative image URLs against the mirror, which proxies
             // the story's images, rather than the blocked publisher page.
-            $paragraphs = extractArticleParagraphs($body, $readerUrl);
+            $paragraphs = trimArticleChrome(
+                extractArticleParagraphs($body, $readerUrl)
+            );
             if ($paragraphs && !articleBodyIsPlaceholder($paragraphs)) {
                 return [
                     'paragraphs' => $paragraphs,
@@ -1895,6 +1940,707 @@ function fetchArticleReaderFallback(string $url, string $sourceKey): ?array
     }
 
     return null;
+}
+
+/**
+ * Total readable prose length of a paragraph list.
+ *
+ * @param list<string> $paragraphs
+ */
+function articleParagraphsLength(array $paragraphs): int
+{
+    $length = 0;
+    foreach ($paragraphs as $paragraph) {
+        $length += mb_strlen(trim((string)$paragraph));
+    }
+    return $length;
+}
+
+/**
+ * A short feed/mirror body is usually a publisher preview rather than the
+ * complete story, even when it does not contain an explicit "continue
+ * reading" marker.
+ *
+ * @param list<string> $paragraphs
+ */
+function articleFallbackIsPreview(array $paragraphs): bool
+{
+    if (articleParagraphsLength($paragraphs) < ARTICLE_PARTIAL_BODY_CHARS) {
+        return true;
+    }
+    return feedBodyIsPreview($paragraphs);
+}
+
+/**
+ * Detect bot-challenge / paywall pages that a reader proxy returned as HTTP
+ * 200. These must not be cached as the article body.
+ *
+ * @param list<string> $paragraphs
+ */
+function articleBodyLooksBlocked(array $paragraphs): bool
+{
+    if (!$paragraphs) {
+        return false;
+    }
+    $text = strtolower(implode(' ', array_slice($paragraphs, 0, 4)));
+    if ($text === '') {
+        return false;
+    }
+    $needles = [
+        'just a moment',
+        'security verification',
+        'access to this page has been denied',
+        'please enable js and disable any ad blocker',
+        'enable javascript and cookies',
+        'verify you are human',
+        'px-captcha',
+        'attention required',
+        'you have been blocked',
+        'the action you just performed triggered the security solution',
+        'this page is not available',
+        'request id',
+        'error code cg',
+        'accessibility help',
+        'skip to navigation',
+        'skip to main content',
+        'open side navigation menu',
+        'barrier-page',
+        'subscription required',
+        'already a subscriber',
+        'sign in to continue',
+        'create a free account to continue',
+        'register to continue reading',
+        'this content is unavailable',
+        'get unlimited access',
+        'to continue reading',
+        'already a subscriber',
+        'subscribers only',
+        'premium content',
+        'register to continue',
+        'sign in to continue',
+        'keep reading for',
+        'complete digital access',
+        'cancel anytime during your trial',
+        'what’s included',
+        "what's included",
+        'first ft:',
+        'follow topics & set alerts',
+        'ft journalism on any device',
+    ];
+    foreach ($needles as $needle) {
+        if (str_contains($text, $needle)) {
+            return true;
+        }
+    }
+    // Footer/legal pages are sometimes served instead of the story. Only
+    // treat them as blocked when there is almost no prose around them.
+    if (articleParagraphsLength($paragraphs) < ARTICLE_PARTIAL_BODY_CHARS) {
+        foreach ([
+            'all rights reserved',
+            'select market data',
+            'provided by ice data',
+            'terms of service',
+            'privacy policy',
+            'subscribe to continue',
+            'sign in to continue',
+        ] as $needle) {
+            if (str_contains($text, $needle)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * Significant words in a headline, used to match syndicated copies.
+ *
+ * @return list<string>
+ */
+function articleTitleWords(string $title): array
+{
+    $title = html_entity_decode(strip_tags($title), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $title = strtolower($title);
+    $title = preg_replace('/[^a-z0-9]+/', ' ', $title) ?? '';
+    $stop = array_flip([
+        'the', 'a', 'an', 'and', 'or', 'for', 'to', 'of', 'in', 'on',
+        'with', 'as', 'at', 'by', 'from', 'is', 'are', 'was', 'were',
+        'be', 'been', 'being', 'it', 'its', 'this', 'that', 'these',
+        'those', 'his', 'her', 'their', 'he', 'she', 'they', 'we', 'you',
+        'i', 'not', 'no', 'new', 'says', 'said', 'after', 'before', 'over',
+        'under', 'about', 'into', 'than', 'then', 'also', 'will', 'would',
+        'can', 'could', 'may', 'might', 'has', 'have', 'had', 'do', 'does',
+        'did', 'but', 'if', 'so', 'up', 'out', 'more', 'most', 'least',
+        'one', 'two', 'three', 'first', 'last', 'year', 'years', 'day',
+        'days', 'update', 'updated', 'report', 'reports', 'reportedly',
+    ]);
+    $words = [];
+    foreach (preg_split('/\s+/', trim($title)) ?: [] as $word) {
+        if (strlen($word) < 3 || isset($stop[$word]) || ctype_digit($word)) {
+            continue;
+        }
+        $words[$word] = true;
+    }
+    return array_keys($words);
+}
+
+/**
+ * Similarity between an original headline and a possible syndicated copy.
+ */
+function articleTitleSimilarity(string $original, string $candidate): float
+{
+    $a = articleTitleWords($original);
+    $b = articleTitleWords($candidate);
+    if (!$a || !$b) {
+        return 0.0;
+    }
+    $common = count(array_intersect($a, $b));
+    if ($common === 0) {
+        return 0.0;
+    }
+    $containment = $common / max(1, min(count($a), count($b)));
+    $union = count(array_unique(array_merge($a, $b)));
+    $jaccard = $common / max(1, $union);
+    return max($containment, $jaccard);
+}
+
+/**
+ * Convert a Jina Reader markdown response (or an HTML response) into
+ * article paragraphs.
+ *
+ * @return list<string>
+ */
+function articleMarkdownParagraphs(string $body, string $pageUrl = ''): array
+{
+    if (trim($body) === '') {
+        return [];
+    }
+    if (str_starts_with(ltrim($body), '{')) {
+        $error = json_decode($body, true);
+        if (is_array($error) && isset($error['code'])) {
+            return [];
+        }
+    }
+    if (preg_match('/<(?:p|article|main|div)\b/i', $body)) {
+        $paragraphs = extractArticleParagraphs($body, $pageUrl);
+        if ($paragraphs) {
+            return $paragraphs;
+        }
+    }
+
+    $marker = strpos($body, 'Markdown Content:');
+    if ($marker !== false) {
+        $body = substr($body, $marker + strlen('Markdown Content:'));
+    }
+
+    $paragraphs = [];
+    $seen = [];
+    foreach (preg_split('/\R/u', $body) ?: [] as $line) {
+        $line = trim($line);
+        if ($line === '') {
+            continue;
+        }
+        if (preg_match('/^(?:Title|URL Source|Published Time|Warning|Markdown Content):/i', $line)) {
+            continue;
+        }
+        if (preg_match('/^#{1,6}\s/', $line)) {
+            continue;
+        }
+        if (preg_match('/^!\[[^\]]*\]\([^)]+\)\s*$/', $line)
+            || preg_match('/^\[[^\]]*\]\([^)]+\)\s*$/', $line)
+        ) {
+            continue;
+        }
+        $line = preg_replace('/!\[[^\]]*\]\([^)]*\)/u', '', $line) ?? $line;
+        $line = preg_replace('/\[([^\]]*)\]\([^)]+\)/u', '$1', $line) ?? $line;
+        $line = strip_tags($line);
+        $line = preg_replace('/[*_`~]+/u', '', $line) ?? $line;
+        $line = preg_replace('/^\s*(?:[-*+]|\d+[.)])\s+/u', '', $line) ?? $line;
+        $line = normalizeText($line);
+        if ($line === '' || mb_strlen($line) < 30) {
+            continue;
+        }
+        if (preg_match('/^(?:share|advertisement|sign up|subscribe|follow us|cookie|privacy policy|terms of|all rights reserved|read more|continue reading)/i', $line)) {
+            continue;
+        }
+        if (isset($seen[$line])) {
+            continue;
+        }
+        $seen[$line] = true;
+        $paragraphs[] = $line;
+    }
+    return trimArticleChrome($paragraphs);
+}
+
+/**
+ * Pick the lead image from a markdown reader response.
+ */
+function extractMarkdownImage(string $body, string $baseUrl = ''): string
+{
+    if (preg_match_all('/!\[[^\]]*\]\((https?:\/\/[^)\s]+)[^)]*\)/i', $body, $matches)) {
+        foreach ($matches[1] as $url) {
+            $url = normalizeImageUrl($url, $baseUrl);
+            if ($url !== '' && looksLikeImageUrl($url)) {
+                return $url;
+            }
+        }
+    }
+    return '';
+}
+
+/**
+ * Remove navigation, ad rails, related-link lists, and legal footers that
+ * broad paragraph extraction picks up on syndication/news aggregation pages.
+ *
+ * @param list<string> $paragraphs
+ * @return list<string>
+ */
+function trimArticleChrome(array $paragraphs): array
+{
+    $count = count($paragraphs);
+    if ($count < 4) {
+        return $paragraphs;
+    }
+
+    $start = 0;
+    foreach ($paragraphs as $index => $paragraph) {
+        $text = trim((string)$paragraph);
+        if (mb_strlen($text) >= 80 && preg_match('/[.!?][\"\']?$/u', $text)) {
+            $start = $index;
+            break;
+        }
+    }
+    if ($start > 0) {
+        $previous = trim((string)$paragraphs[$start - 1]);
+        if (mb_strlen($previous) > 0
+            && mb_strlen($previous) <= 100
+            && !preg_match('/^(?:price|brokers?|best |forex|tu score|#|advertisement)/i', $previous)
+        ) {
+            $start--;
+        }
+    }
+
+    $end = $count;
+    for ($index = $start; $index < $count; $index++) {
+        $text = trim((string)$paragraphs[$index]);
+        if (preg_match(
+            '/^(?:this material may contain|risk disclosure|disclaimer|all rights reserved|©|copyright|accept all cookies|by clicking|when you visit|strictly necessary cookies|our experts ranked|tu score|registration number|follow us|share this|related stories|more from|advertisement|by entering your email|sign up for our newsletter|this article originally appeared in|originally appeared in|this article was originally published|read more|related coverage|more coverage|you may also like|more stories|latest news)/iu',
+            $text
+        ) || preg_match('/\ball rights reserved\b/iu', $text)) {
+            $end = $index;
+            break;
+        }
+    }
+
+    $trimmed = array_values(array_slice($paragraphs, $start, $end - $start));
+    if (articleParagraphsLength($trimmed) < 300) {
+        return $paragraphs;
+    }
+    return $trimmed;
+}
+
+/**
+ * Turn a fetched HTML article page into the fallback result shape.
+ *
+ * @return array{paragraphs:list<string>, image:string}|null
+ */
+function articleResultFromBody(string $body, string $baseUrl): ?array
+{
+    $paragraphs = trimArticleChrome(extractArticleParagraphs($body, $baseUrl));
+    if (!$paragraphs
+        || articleBodyLooksBlocked($paragraphs)
+        || articleBodyIsPlaceholder($paragraphs)
+    ) {
+        return null;
+    }
+    return [
+        'paragraphs' => $paragraphs,
+        'image' => extractArticleImageFromHtml($body, $baseUrl),
+    ];
+}
+
+/**
+ * Generic public readers that render a blocked publisher page from a
+ * different network. Google Translate's proxy is especially useful for AP
+ * and other sites that block plain bot requests but allow the translate
+ * crawler; Jina Reader covers sites whose rendered content survives its
+ * extraction.
+ *
+ * @return list<array{url:string, kind:string, label:string}>
+ */
+function articleProxyFallbackUrls(string $url): array
+{
+    $parts = parse_url(trim($url));
+    if (!is_array($parts) || empty($parts['host'])) {
+        return [];
+    }
+    $host = strtolower((string)$parts['host']);
+    $path = (string)($parts['path'] ?? '/');
+    if ($path === '') {
+        $path = '/';
+    }
+    $query = isset($parts['query']) && $parts['query'] !== ''
+        ? '&' . $parts['query']
+        : '';
+    $translateHost = str_replace('.', '-', str_replace('-', '--', $host));
+    $translateUrl = 'https://' . $translateHost . '.translate.goog' . $path
+        . '?_x_tr_sl=auto&_x_tr_tl=en&_x_tr_hl=en&_x_tr_pto=wapp'
+        . $query;
+
+    return [
+        ['url' => $translateUrl, 'kind' => 'html', 'label' => 'google_translate'],
+        ['url' => 'https://r.jina.ai/' . $url, 'kind' => 'markdown', 'label' => 'jina_reader'],
+    ];
+}
+
+/**
+ * Recover a blocked article through a generic public reader proxy.
+ *
+ * @return array{paragraphs:list<string>, image:string}|null
+ */
+function fetchArticleProxyFallback(string $url, string $sourceKey): ?array
+{
+    foreach (articleProxyFallbackUrls($url) as $proxy) {
+        $accept = $proxy['kind'] === 'markdown'
+            ? 'text/plain, text/markdown;q=0.9, text/html;q=0.8, */*;q=0.7'
+            : 'text/html, application/xhtml+xml;q=0.9, */*;q=0.8';
+        $body = fetchUrl(
+            $proxy['url'],
+            $accept,
+            $sourceKey,
+            MAX_ATTEMPTS - 1,
+            true,
+            10
+        );
+        if (!is_string($body) || trim($body) === '') {
+            continue;
+        }
+
+        if ($proxy['kind'] === 'markdown') {
+            $paragraphs = articleMarkdownParagraphs($body, $url);
+            $image = extractMarkdownImage($body, $url);
+        } else {
+            $paragraphs = trimArticleChrome(
+                extractArticleParagraphs($body, $url)
+            );
+            $image = extractArticleImageFromHtml($body, $url);
+        }
+        if ($paragraphs
+            && !articleBodyLooksBlocked($paragraphs)
+            && !articleBodyIsPlaceholder($paragraphs)
+        ) {
+            return [
+                'paragraphs' => $paragraphs,
+                'image' => $image,
+            ];
+        }
+    }
+    return null;
+}
+
+/**
+ * Recover a story from a public WordPress REST endpoint. Many news sites
+ * (NewsNation among them) expose the full post body at /wp-json/wp/v2/posts
+ * even when the rendered page is guarded by a bot challenge.
+ *
+ * @return array{paragraphs:list<string>, image:string}|null
+ */
+function fetchArticleWordPressFallback(string $url, string $sourceKey): ?array
+{
+    $parts = parse_url(trim($url));
+    if (!is_array($parts) || empty($parts['host'])) {
+        return null;
+    }
+    $scheme = strtolower((string)($parts['scheme'] ?? 'https')) === 'http'
+        ? 'http'
+        : 'https';
+    $host = strtolower((string)$parts['host']);
+    $path = (string)($parts['path'] ?? '/');
+    $slug = basename(rtrim(rawurldecode($path), '/'));
+    $slug = preg_replace('/\.(?:html?|php|aspx?)$/i', '', $slug) ?? $slug;
+    if ($slug === ''
+        || in_array(strtolower($slug), ['index', 'article', 'news'], true)
+    ) {
+        return null;
+    }
+
+    $apiUrl = $scheme . '://' . $host
+        . '/wp-json/wp/v2/posts?slug=' . rawurlencode($slug)
+        . '&_fields=link,title,content,jetpack_featured_media_url,featured_media';
+    $body = fetchUrl(
+        $apiUrl,
+        'application/json, text/plain;q=0.9, */*;q=0.8',
+        $sourceKey,
+        MAX_ATTEMPTS - 1,
+        true,
+        10
+    );
+    if (!is_string($body) || trim($body) === '' || !str_starts_with(ltrim($body), '[')) {
+        return null;
+    }
+    $posts = json_decode($body, true);
+    if (!is_array($posts)) {
+        return null;
+    }
+
+    foreach ($posts as $post) {
+        if (!is_array($post)) {
+            continue;
+        }
+        $content = is_array($post['content'] ?? null)
+            ? (string)($post['content']['rendered'] ?? '')
+            : '';
+        if (trim($content) === '') {
+            continue;
+        }
+        $link = trim((string)($post['link'] ?? $url));
+        $paragraphs = trimArticleChrome(
+            extractArticleParagraphs($content, $link)
+        );
+        if (!$paragraphs
+            || articleBodyLooksBlocked($paragraphs)
+            || articleBodyIsPlaceholder($paragraphs)
+        ) {
+            continue;
+        }
+        $image = trim((string)($post['jetpack_featured_media_url'] ?? ''));
+        if ($image === '') {
+            $image = extractArticleImageFromHtml($content, $link);
+        }
+        return [
+            'paragraphs' => $paragraphs,
+            'image' => $image,
+        ];
+    }
+    return null;
+}
+
+/**
+ * Fetch one possible syndicated copy, trying the direct page and then the
+ * generic recovery paths. Used only after the original publisher failed.
+ *
+ * @return array{paragraphs:list<string>, image:string}|null
+ */
+function fetchArticleCopy(string $url, string $sourceKey): ?array
+{
+    // Syndicated copies are usually directly accessible. Keep this path fast:
+    // if a copy is blocked, try the next matching result instead of spending
+    // minutes on the full recovery chain for every candidate.
+    $page = fetchUrl(
+        $url,
+        'text/html, application/xhtml+xml;q=0.9, */*;q=0.8',
+        $sourceKey,
+        MAX_ATTEMPTS - 1,
+        true,
+        10
+    );
+    if (is_string($page) && trim($page) !== '') {
+        return articleResultFromBody($page, $url);
+    }
+    return null;
+}
+
+/**
+ * Recover a blocked story from a syndicated copy of the same report. Reuters,
+ * FT, and NYT articles are often republished in full by partners while the
+ * original page remains behind Cloudflare/Datadome or a paywall.
+ *
+ * @return array{paragraphs:list<string>, image:string}|null
+ */
+function fetchArticleSyndicationFallback(
+    string $url,
+    string $title,
+    string $sourceKey
+): ?array {
+    $title = normalizeText(strip_tags($title));
+    if (mb_strlen($title) < 15) {
+        $parts = parse_url(trim($url));
+        $slug = is_array($parts)
+            ? basename(rtrim((string)($parts['path'] ?? '/'), '/'))
+            : '';
+        $title = normalizeText(str_replace(['-', '_'], ' ', $slug));
+    }
+    $words = articleTitleWords($title);
+    if (count($words) < 3) {
+        return null;
+    }
+
+    $query = implode(' ', array_slice($words, 0, 14));
+    $feedUrl = 'https://news.google.com/rss/search?q=' . rawurlencode($query)
+        . '&hl=en-US&gl=US&ceid=US:en';
+    $feed = fetchUrl(
+        $feedUrl,
+        'application/rss+xml, application/xml;q=0.9, */*;q=0.8',
+        $sourceKey,
+        0,
+        true
+    );
+    if (!is_string($feed) || trim($feed) === '') {
+        return null;
+    }
+
+    $previous = libxml_use_internal_errors(true);
+    $document = new DOMDocument();
+    $loaded = $document->loadXML($feed, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+    if (!$loaded) {
+        return null;
+    }
+
+    $xpath = new DOMXPath($document);
+    $items = $xpath->query('//item');
+    if ($items === false) {
+        return null;
+    }
+
+    $originalKey = articleUrlKey($url);
+    $originalHost = strtolower((string)parse_url($url, PHP_URL_HOST));
+    $candidates = [];
+    foreach ($items as $item) {
+        $candidateTitle = normalizeText((string)$item->getElementsByTagName('title')->item(0)?->textContent);
+        $score = articleTitleSimilarity($title, $candidateTitle);
+        if ($score < 0.50) {
+            continue;
+        }
+        $link = trim((string)$item->getElementsByTagName('link')->item(0)?->textContent);
+        if ($link === '' || articleUrlKey($link) === $originalKey) {
+            continue;
+        }
+        $candidates[] = [
+            'score' => $score,
+            'link' => $link,
+            'title' => $candidateTitle,
+        ];
+    }
+    if (!$candidates) {
+        return null;
+    }
+    usort(
+        $candidates,
+        static fn(array $a, array $b): int => $b['score'] <=> $a['score']
+    );
+    $candidates = array_slice($candidates, 0, 5);
+
+    $links = [];
+    foreach ($candidates as $index => $candidate) {
+        $links[$index] = $candidate['link'];
+    }
+    $resolved = resolveGoogleNewsLinks($links, $sourceKey);
+    $bestPartial = null;
+    $deadline = microtime(true) + 35.0;
+
+    // First pass: direct pages. This is fast and finds most syndicated copies.
+    foreach ($candidates as $index => $candidate) {
+        if (microtime(true) > $deadline) {
+            break;
+        }
+        $candidateUrl = $resolved[$index] ?? '';
+        if ($candidateUrl === '' || isGoogleNewsLink($candidateUrl)) {
+            continue;
+        }
+        if (articleUrlKey($candidateUrl) === $originalKey) {
+            continue;
+        }
+        $candidateHost = strtolower((string)parse_url($candidateUrl, PHP_URL_HOST));
+        if ($candidateHost === $originalHost && $originalHost !== '') {
+            continue;
+        }
+        $result = fetchArticleCopy($candidateUrl, $sourceKey);
+        if ($result === null) {
+            continue;
+        }
+        if (!articleFallbackIsPreview($result['paragraphs'])) {
+            return $result;
+        }
+        $current = $bestPartial['paragraphs'] ?? [];
+        if ($bestPartial === null
+            || articleParagraphsLength($result['paragraphs'])
+                > articleParagraphsLength($current)
+        ) {
+            $bestPartial = $result;
+        }
+    }
+
+    // Second pass: the copy may itself be blocked to a plain request but still
+    // render through a reader proxy (Traders Union, for example). Only run this
+    // when the faster direct pass did not find a complete body.
+    $deadline = microtime(true) + 40.0;
+    foreach ($candidates as $index => $candidate) {
+        if (microtime(true) > $deadline) {
+            break;
+        }
+        $candidateUrl = $resolved[$index] ?? '';
+        if ($candidateUrl === '' || isGoogleNewsLink($candidateUrl)) {
+            continue;
+        }
+        if (articleUrlKey($candidateUrl) === $originalKey) {
+            continue;
+        }
+        $candidateHost = strtolower((string)parse_url($candidateUrl, PHP_URL_HOST));
+        if ($candidateHost === $originalHost && $originalHost !== '') {
+            continue;
+        }
+        $result = fetchArticleProxyFallback($candidateUrl, $sourceKey);
+        if ($result === null) {
+            continue;
+        }
+        if (!articleFallbackIsPreview($result['paragraphs'])) {
+            return $result;
+        }
+        $current = $bestPartial['paragraphs'] ?? [];
+        if ($bestPartial === null
+            || articleParagraphsLength($result['paragraphs'])
+                > articleParagraphsLength($current)
+        ) {
+            $bestPartial = $result;
+        }
+    }
+
+    return $bestPartial;
+}
+
+/**
+ * Keep the longest fallback body while later recovery strategies run. A feed
+ * preview or short mirror result is used only when no complete body can be
+ * recovered, so blocked stories still open with usable text and their image
+ * instead of showing a hard error.
+ */
+function considerArticleFallback(
+    array &$entry,
+    ?array $fallback,
+    ?array &$partial
+): void {
+    if ($fallback === null) {
+        return;
+    }
+    $image = trim((string)($fallback['image'] ?? ''));
+    if ($entry['image'] === '' && $image !== '') {
+        $entry['image'] = $image;
+    }
+    $paragraphs = [];
+    foreach (($fallback['paragraphs'] ?? []) as $paragraph) {
+        $paragraph = trim((string)$paragraph);
+        if ($paragraph !== '') {
+            $paragraphs[] = $paragraph;
+        }
+    }
+    if (!$paragraphs) {
+        return;
+    }
+    if (articleFallbackIsPreview($paragraphs)) {
+        $current = $partial['paragraphs'] ?? [];
+        if ($partial === null
+            || articleParagraphsLength($paragraphs) > articleParagraphsLength($current)
+        ) {
+            $partial = [
+                'paragraphs' => $paragraphs,
+                'image' => $image,
+            ];
+        }
+        return;
+    }
+    $entry['paragraphs'] = $paragraphs;
 }
 
 /**
@@ -2060,7 +2806,9 @@ function fetchArticleArchiveFallback(string $url, string $sourceKey): ?array
                 }
                 continue;
             }
-            $paragraphs = extractArticleParagraphs($body, $snapshotUrl);
+            $paragraphs = trimArticleChrome(
+                extractArticleParagraphs($body, $snapshotUrl)
+            );
             if ($paragraphs && !articleBodyIsPlaceholder($paragraphs)) {
                 return [
                     'paragraphs' => $paragraphs,
@@ -2085,71 +2833,75 @@ function fetchArticleFeedFallback(string $url, string $sourceKey): ?array
 {
     static $feeds = [];
 
-    $feedUrl = articleFeedFallbackUrl($url);
+    $feedUrls = articleFeedFallbackUrls($url);
     $targetKey = articleUrlKey($url);
-    if ($feedUrl === '' || $targetKey === '') {
+    if (!$feedUrls || $targetKey === '') {
         return null;
     }
 
-    if (!array_key_exists($feedUrl, $feeds)) {
-        $feeds[$feedUrl] = fetchUrl(
-            $feedUrl,
-            'application/rss+xml, application/xml;q=0.9, */*;q=0.8',
-            $sourceKey
-        );
-    }
-    $feed = $feeds[$feedUrl];
-    if (!is_string($feed) || trim($feed) === '') {
-        return null;
-    }
-
-    $previous = libxml_use_internal_errors(true);
-    $document = new DOMDocument();
-    $loaded = $document->loadXML($feed, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
-    libxml_clear_errors();
-    libxml_use_internal_errors($previous);
-    if (!$loaded) {
-        return null;
-    }
-
-    $xpath = new DOMXPath($document);
-    $items = $xpath->query('//item');
-    if ($items === false) {
-        return null;
-    }
-
-    foreach ($items as $item) {
-        $matches = false;
-        foreach ($item->childNodes as $child) {
-            if (!($child instanceof DOMElement)) {
-                continue;
-            }
-            $name = strtolower($child->localName);
-            if ($name !== 'link' && $name !== 'guid') {
-                continue;
-            }
-            if (articleUrlKey(trim((string)$child->textContent)) === $targetKey) {
-                $matches = true;
-                break;
-            }
+    foreach ($feedUrls as $feedUrl) {
+        if (!array_key_exists($feedUrl, $feeds)) {
+            $feeds[$feedUrl] = fetchUrl(
+                $feedUrl,
+                'application/rss+xml, application/xml;q=0.9, */*;q=0.8',
+                $sourceKey,
+                0,
+                true
+            );
         }
-        if (!$matches) {
+        $feed = $feeds[$feedUrl];
+        if (!is_string($feed) || trim($feed) === '') {
             continue;
         }
 
-        $bodyHtml = feedArticleBodyHtml($item);
-        $paragraphs = extractFeedArticleParagraphs($bodyHtml);
-        if (!$paragraphs) {
-            return null;
+        $previous = libxml_use_internal_errors(true);
+        $document = new DOMDocument();
+        $loaded = $document->loadXML($feed, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
+        libxml_clear_errors();
+        libxml_use_internal_errors($previous);
+        if (!$loaded) {
+            continue;
         }
-        $image = feedArticleImage($item, $url);
-        if ($image === '') {
-            $image = extractArticleImageFromHtml($bodyHtml, $url);
+
+        $xpath = new DOMXPath($document);
+        $items = $xpath->query('//item');
+        if ($items === false) {
+            continue;
         }
-        return [
-            'paragraphs' => $paragraphs,
-            'image' => $image,
-        ];
+
+        foreach ($items as $item) {
+            $matches = false;
+            foreach ($item->childNodes as $child) {
+                if (!($child instanceof DOMElement)) {
+                    continue;
+                }
+                $name = strtolower($child->localName);
+                if ($name !== 'link' && $name !== 'guid') {
+                    continue;
+                }
+                if (articleUrlKey(trim((string)$child->textContent)) === $targetKey) {
+                    $matches = true;
+                    break;
+                }
+            }
+            if (!$matches) {
+                continue;
+            }
+
+            $bodyHtml = feedArticleBodyHtml($item);
+            $paragraphs = extractFeedArticleParagraphs($bodyHtml);
+            if (!$paragraphs) {
+                continue;
+            }
+            $image = feedArticleImage($item, $url);
+            if ($image === '') {
+                $image = extractArticleImageFromHtml($bodyHtml, $url);
+            }
+            return [
+                'paragraphs' => $paragraphs,
+                'image' => $image,
+            ];
+        }
     }
 
     return null;
@@ -2334,6 +3086,7 @@ function enrichStoryContent(
     $requests = [];
     $googleLinks = [];
     $originals = [];
+    $titles = [];
 
     foreach ($stories as $index => &$story) {
         if (!storyNeedsArticleContent($story, $forceFullArticle)) {
@@ -2388,6 +3141,7 @@ function enrichStoryContent(
         }
 
         $originals[$index] = $link;
+        $titles[$index] = trim((string)($story['title'] ?? ''));
         $requests[$index] = $link;
         if (isGoogleNewsLink($link)) {
             $googleLinks[$index] = $link;
@@ -2425,6 +3179,7 @@ function enrichStoryContent(
 
     foreach ($originals as $index => $originalLink) {
         $finalLink = $resolved[$index] ?? $originalLink;
+        $storyTitle = $titles[$index] ?? '';
         $page = $pages[$index] ?? null;
         $entry = [
             'link' => $finalLink,
@@ -2434,6 +3189,7 @@ function enrichStoryContent(
             'extractor' => ARTICLE_EXTRACTOR_VERSION,
             'ts' => $now,
         ];
+        $partial = null;
 
         $pageFailed = false;
         $pageStatus = 0;
@@ -2441,54 +3197,92 @@ function enrichStoryContent(
             $pageStatus = (int)$page['status'];
             if ($pageStatus < 200 || $pageStatus >= 400) {
                 // A bot challenge can still be recovered by a feed or reader
-                // mirror, so report the failure only after both fallbacks.
+                // mirror, so report the failure only after all fallbacks.
                 $pageFailed = true;
             } else {
-                $entry['paragraphs'] = extractArticleParagraphs(
-                    $page['body'],
-                    $finalLink
-                );
-                $entry['image'] = extractArticleImageFromHtml(
-                    $page['body'],
-                    $finalLink
-                );
+                $direct = articleResultFromBody($page['body'], $finalLink);
+                if ($direct !== null) {
+                    $entry['paragraphs'] = $direct['paragraphs'];
+                    $entry['image'] = $direct['image'];
+                } else {
+                    // Some WAFs answer HTTP 200 with a challenge page.
+                    $pageFailed = true;
+                }
             }
         }
 
         // A bot challenge or paywall can hide the page body while the
-        // publisher's public feed still carries the full story (Axios).
+        // publisher's public feed still carries the full story (Axios) or at
+        // least its lead image and summary (NYT, FT, NewsNation).
         if (!$entry['paragraphs']) {
-            $fallback = fetchArticleFeedFallback($finalLink, $sourceKey);
-            if ($fallback !== null) {
-                $entry['paragraphs'] = $fallback['paragraphs'];
-                if ($entry['image'] === '' && $fallback['image'] !== '') {
-                    $entry['image'] = $fallback['image'];
-                }
-            }
+            considerArticleFallback(
+                $entry,
+                fetchArticleFeedFallback($finalLink, $sourceKey),
+                $partial
+            );
         }
 
         // Medium has no full-story feed and challenges direct page requests,
         // so a reader mirror is the only source of the complete article.
         if (!$entry['paragraphs']) {
-            $fallback = fetchArticleReaderFallback($finalLink, $sourceKey);
-            if ($fallback !== null) {
-                $entry['paragraphs'] = $fallback['paragraphs'];
-                if ($entry['image'] === '' && $fallback['image'] !== '') {
-                    $entry['image'] = $fallback['image'];
-                }
-            }
+            considerArticleFallback(
+                $entry,
+                fetchArticleReaderFallback($finalLink, $sourceKey),
+                $partial
+            );
+        }
+
+        // WordPress REST often exposes the full post even when the rendered
+        // page is blocked (NewsNation and many other news sites).
+        if (!$entry['paragraphs']) {
+            considerArticleFallback(
+                $entry,
+                fetchArticleWordPressFallback($finalLink, $sourceKey),
+                $partial
+            );
+        }
+
+        // Generic reader proxies render some blocked pages from a different
+        // network (Google Translate for AP, Jina Reader for other sites).
+        if (!$entry['paragraphs']) {
+            considerArticleFallback(
+                $entry,
+                fetchArticleProxyFallback($finalLink, $sourceKey),
+                $partial
+            );
+        }
+
+        // Paywalled/wire stories are often republished in full by partners.
+        // Match the headline through Google News and use an accessible copy.
+        if (!$entry['paragraphs'] && $storyTitle !== '') {
+            considerArticleFallback(
+                $entry,
+                fetchArticleSyndicationFallback(
+                    $finalLink,
+                    $storyTitle,
+                    $sourceKey
+                ),
+                $partial
+            );
         }
 
         // Cloudflare-protected publishers may block both the live page and
         // generic reader mirrors. Fall back to a public Wayback snapshot so
         // older review/archive links still open with their complete body.
         if (!$entry['paragraphs']) {
-            $fallback = fetchArticleArchiveFallback($finalLink, $sourceKey);
-            if ($fallback !== null) {
-                $entry['paragraphs'] = $fallback['paragraphs'];
-                if ($entry['image'] === '' && $fallback['image'] !== '') {
-                    $entry['image'] = $fallback['image'];
-                }
+            considerArticleFallback(
+                $entry,
+                fetchArticleArchiveFallback($finalLink, $sourceKey),
+                $partial
+            );
+        }
+
+        // A partial feed/mirror body is still far better than an empty story
+        // modal. Use it only after every full-body recovery path failed.
+        if (!$entry['paragraphs'] && $partial !== null) {
+            $entry['paragraphs'] = $partial['paragraphs'];
+            if ($entry['image'] === '' && !empty($partial['image'])) {
+                $entry['image'] = $partial['image'];
             }
         }
 
@@ -2518,10 +3312,10 @@ function enrichStoryContent(
  *
  * @return array{link:string, paragraphs:list<string>, images:list<string>}
  */
-function fetchArticleByUrl(string $url): array
+function fetchArticleByUrl(string $url, string $title = ''): array
 {
     $story = [
-        'title' => '',
+        'title' => trim($title),
         'link' => $url,
         'published' => '',
         'sort' => 0,
@@ -3295,6 +4089,7 @@ function main(array $argv): int
     $section = null;
     $sourceKeys = null;
     $articleUrl = '';
+    $articleTitle = '';
 
     // Pre-scan for --search so the dynamic googlenews source exists before
     // --source googlenews is validated below.
@@ -3376,12 +4171,16 @@ function main(array $argv): int
             $articleUrl = trim($argv[++$i]);
         } elseif (preg_match('/^--article=(.+)$/', $argument, $match)) {
             $articleUrl = trim($match[1]);
+        } elseif ($argument === '--title' && isset($argv[$i + 1])) {
+            $articleTitle = trim($argv[++$i]);
+        } elseif (preg_match('/^--title=(.+)$/', $argument, $match)) {
+            $articleTitle = trim($match[1]);
         } elseif ($argument === '--help' || $argument === '-h') {
             echo "Usage: news_fetch.php [--json] [--source "
                 . implode('|', array_keys(SOURCES)) . "|medium_author|googlenews"
                 . " ...] [--limit N]\n"
                 . "       news_fetch.php [--json] --search <keywords> [--limit N]\n"
-                . "       news_fetch.php [--json] --article <url>\n";
+                . "       news_fetch.php [--json] --article <url> [--title <headline>]\n";
             return 0;
         } else {
             diag("news_fetch: ignoring unknown argument: {$argument}");
@@ -3393,7 +4192,7 @@ function main(array $argv): int
             diag('news_fetch: --article needs an http(s) URL');
             return 2;
         }
-        $article = fetchArticleByUrl($articleUrl);
+        $article = fetchArticleByUrl($articleUrl, $articleTitle);
         if ($json) {
             echo json_encode(
                 $article,

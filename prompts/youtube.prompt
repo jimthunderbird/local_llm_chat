@@ -1,14 +1,22 @@
+task.load_youtube_image (completed) {
+  in youtube search result, load the video image from: https://img.youtube.com/vi/<VIDEO_ID>/maxresdefault.jpg
+
+  Implemented:
+  youtube_news_search.py
+  - Google News YouTube results now include a maxres thumbnail URL built
+    from the video id (https://img.youtube.com/vi/<VIDEO_ID>/maxresdefault.jpg)
+    and no longer set the no_thumbnail flag, so /youtube search cards render
+    the video image immediately. The frontend's existing image-error fallback
+    still handles videos without a maxres thumbnail.
+  app/chat_server.py
+  - Updated the /youtube search command documentation to describe the
+    thumbnail metadata.
+}
+
 task.youtube_search.sort_videos_by_date.descending (completed) {
   reference task.refactor.youtube_search_improvement_using_google_rss:
   - after fetching the search result, sort the youtube videos by date in descending order
 }
-
-  Implemented:
-  youtube_news_search.py
-  - _rss_items() now sorts YouTube feed entries by their published ISO
-    date in descending order after parsing and before link resolution, with
-    undated items last. This keeps /youtube search results, prefetched pages,
-    and the "More" button uniformly newest-first.
 
 task.refactor.youtube_search_improvement_using_google_rss (completed) {
   refactor the /youtube search command:

@@ -13,9 +13,9 @@ The search query is sent to Google News RSS:
 
 Only feed items whose ``<source>`` is YouTube are kept.  Google News hands
 out redirect links, so each item is resolved to its real publisher URL and
-only real YouTube video URLs are returned.  The result intentionally contains
-only the video id, title, and watch URL (plus a publish date when the feed
-provides one); no thumbnail or duration metadata is needed.
+only real YouTube video URLs are returned.  The result contains the video id,
+title, watch URL, publish date (when the feed provides one), and the video's
+maxres YouTube thumbnail.
 
 With ``--json`` one normalized JSON object is printed per line.  With
 ``--progressive-json`` a single final ``{"type": "videos", ...}`` event is
@@ -341,8 +341,11 @@ def search_google_news_videos(
                     "id": video_id,
                     "title": item["title"],
                     "url": f"https://www.youtube.com/watch?v={video_id}",
-                    "thumbnail": "",
-                    "no_thumbnail": True,
+                    "thumbnail": (
+                        f"https://img.youtube.com/vi/{video_id}/"
+                        "maxresdefault.jpg"
+                    ),
+                    "no_thumbnail": False,
                     "duration": 0,
                     "channel": "",
                     "published": item["published"],
