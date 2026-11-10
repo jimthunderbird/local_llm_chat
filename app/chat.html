@@ -4434,6 +4434,8 @@ function addNewsEvent(entry, data) {
         ? data.images.map((url) => String(url || "").trim()).filter(Boolean)
         : [],
       complete: false,
+      articleLoading: false,
+      articleError: "",
       titleTranslation: {
         text: "",
         sourceText: "",
@@ -4468,6 +4470,7 @@ function addNewsEvent(entry, data) {
       if (newsItem === item) {
         renderNewsModal(item);
         renderNewsAction(item);
+        ensureNewsArticle(item);
       }
       scheduleRender(entry);
     }
@@ -6630,11 +6633,19 @@ function renderNewsModal(item) {
   for (const text of paragraphs) {
     appendNewsParagraph(text, "");
   }
-  if (!item.complete) {
+  if (!item.complete || item.articleLoading) {
     const loading = document.createElement("div");
     loading.className = "news-loading";
-    loading.textContent = "loading paragraphs…";
+    loading.textContent = item.articleLoading
+      ? "loading full article…"
+      : "loading paragraphs…";
     newsBodyEl.appendChild(loading);
+  } else if (!paragraphs.length && item.articleError) {
+    const empty = document.createElement("div");
+    empty.className = "news-loading";
+    empty.textContent = "The full article could not be loaded. Use the article link above to open it directly.";
+    empty.title = item.articleError;
+    newsBodyEl.appendChild(empty);
   } else if (!paragraphs.length && !summary) {
     const empty = document.createElement("div");
     empty.className = "news-loading";
@@ -6653,6 +6664,54 @@ function openNewsModal(item) {
   renderNewsModal(item);
   renderNewsAction(item);
   newsPanelEl.hidden = false;
+  ensureNewsArticle(item);
+}
+
+/*
+ * Some feeds (notably Google News) only carry a headline, and the first
+ * list request can miss the article body when a publisher mirror is briefly
+ * rate-limited. When the modal opens without body text, fetch the article
+ * once on demand and fill the same item in place.
+ */
+function ensureNewsArticle(item) {
+  if (!item || !item.complete || item.articleLoading) return;
+  if (Array.isArray(item.paragraphs) && item.paragraphs.length) return;
+  const link = String(item.link || "").trim();
+  if (!/^https?:\/\//i.test(link)) return;
+  item.articleLoading = true;
+  item.articleError = "";
+  if (newsItem === item) renderNewsModal(item);
+  fetch(`/api/news_article?url=${encodeURIComponent(link)}`)
+    .then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    })
+    .then((data) => {
+      const paragraphs = Array.isArray(data.paragraphs)
+        ? data.paragraphs.map((text) => String(text || "").trim()).filter(Boolean)
+        : [];
+      if (paragraphs.length) item.paragraphs = paragraphs;
+      const images = Array.isArray(data.images)
+        ? data.images.map((url) => String(url || "").trim()).filter(Boolean)
+        : [];
+      if (images.length) {
+        item.images = [...new Set([...(item.images || []), ...images])].slice(0, 6);
+      }
+      if (data.link) item.link = String(data.link);
+      if (!item.summary && paragraphs.length) {
+        item.summary = paragraphs[0].slice(0, 400);
+      }
+    })
+    .catch((error) => {
+      item.articleError = error?.message || String(error);
+    })
+    .finally(() => {
+      item.articleLoading = false;
+      if (newsItem === item) {
+        renderNewsModal(item);
+        renderNewsAction(item);
+      }
+    });
 }
 
 /*
@@ -6686,6 +6745,8 @@ function openNewsStory(newsId, fallbackUrl = "", fallbackTitle = "") {
         paragraphs: Array.isArray(data.paragraphs) ? data.paragraphs : [],
         images: Array.isArray(data.images) ? data.images : [],
         complete: true,
+        articleLoading: false,
+        articleError: "",
       });
     })
     .catch(() => {

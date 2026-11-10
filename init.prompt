@@ -223,7 +223,7 @@ group app/chat.html and app/chat_server.py {
   }
 
   task (persistent) {
-    complete tasks in ./prompts/medium.prompt
+    complete tasks in ./prompts/news/medium.prompt
   }
 
   task (persistent) {

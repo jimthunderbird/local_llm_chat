@@ -48,6 +48,8 @@ Endpoints:
                                   trunks in .chat/news_cache
     GET  /api/news_status        ?id=<news_id> whether one story is learned
     GET  /api/news_item          ?id=<news_id> full learned story for the modal
+    GET  /api/news_article       ?url=<article_url> fetch a story body for the
+                                  detail modal when the list feed had no body
     POST /api/news_chat          SSE: answer a question from one learned news
                                   story in a session isolated from the main chat
     POST /api/video_summary      SSE: fetch a YouTube video's English transcript
@@ -120,7 +122,7 @@ WEB_COMMANDS = {
     "/help": "show commands and keyboard shortcuts",
     "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
     "learn_playlist <playlist> | search <keyword> | bookmark list",
-    "/news": "list the latest news from wsj, cnn, cbslite, nprtext, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count])",
+    "/news": "list the latest news from wsj, cnn, cbslite, nprtext, yahoo_finance, medium, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count])",
     "/googlenews": "search Google News for the latest stories: /googlenews <keywords>",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/gutenberg": "search Project Gutenberg books: /gutenberg search <keywords>; click a book to read it and ask questions",
@@ -134,6 +136,7 @@ NEWS_SOURCES = {
     "cbslite": "CBC Lite",
     "nprtext": "NPR (Text)",
     "yahoo_finance": "Yahoo Finance",
+    "medium": "Medium",
     "kqed": "KQED News",
     "sfgate": "SFGATE Bay Area News",
     "sfbayview": "SF Bay View",
@@ -2631,6 +2634,63 @@ def news_link(news_id: str) -> str:
     """Return a learned story's original article URL, or an empty string."""
     meta = _read_news_meta(news_id)
     return str(meta.get("link") or "").strip()
+
+
+def fetch_news_article(url: str) -> dict:
+    """Fetch one article body on demand for the news detail modal.
+
+    The list feed uses the same fetcher, but a reader mirror can transiently
+    rate-limit a burst of stories. Retrying on demand keeps the detail modal
+    usable instead of showing an empty article until the failure cache expires.
+    """
+    url = str(url or "").strip()
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        raise ValueError("Missing or invalid article URL")
+    result = subprocess.run(
+        [
+            "php",
+            str(SCRIPT_DIR / "news_fetch.php"),
+            "--json",
+            "--article",
+            url,
+        ],
+        cwd=SCRIPT_DIR,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    payload = None
+    for line in reversed(result.stdout.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and "paragraphs" in candidate:
+            payload = candidate
+            break
+    if payload is None:
+        detail = (result.stderr or result.stdout or "").strip()
+        detail = detail.splitlines()[-1] if detail else "no article data"
+        raise RuntimeError(f"Could not load the article: {detail}")
+
+    paragraphs = [
+        str(paragraph).strip()
+        for paragraph in (payload.get("paragraphs") or [])
+        if str(paragraph).strip()
+    ]
+    images = [
+        str(image).strip()
+        for image in (payload.get("images") or [])
+        if str(image).strip()
+    ]
+    return {
+        "link": str(payload.get("link") or url).strip(),
+        "paragraphs": paragraphs,
+        "images": images,
+    }
 
 
 def chunk_title(chunk: chat.Chunk) -> str:
@@ -5556,6 +5616,19 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             item["learned"] = news_is_learned(news_id)
             item["complete"] = True
             self._send_json(item)
+            return
+        if path == "/api/news_article":
+            params = parse_qs(parsed.query)
+            url = (params.get("url") or [""])[0].strip()
+            try:
+                article = fetch_news_article(url)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json(article)
             return
         if path == "/api/autocomplete":
             params = parse_qs(parsed.query)
@@ -8518,9 +8591,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         """Stream the latest news stories to the browser.
 
         Usage: /news [SOURCE ...] [number-of-stories]
-        Each SOURCE is one of wsj, cnn, cbslite, nprtext, yahoo_finance, kqed,
-        sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia,
-        wccftech, or hackernews.
+        Each SOURCE is one of wsj, cnn, cbslite, nprtext, yahoo_finance, medium,
+        kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch,
+        krasia, wccftech, or hackernews.
         Several sources may be selected.
         Without a source, every supported source is shown as its own section.
         """
@@ -8577,8 +8650,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         Usage: /medium [number-of-stories]
         The author handle is read from ~/.medium/username; news_fetch.php
-        fetches https://medium.com/feed/@<handle> and the browser reuses the
-        /news story-list and detail rendering.
+        fetches https://medium.com/feed/@<handle> through its medium_author
+        source and the browser reuses the /news story-list and detail rendering.
         """
         username = medium_username()
         if not username:
@@ -8589,7 +8662,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        argv: list[str] = ["--source", "medium"]
+        argv: list[str] = ["--source", "medium_author"]
         for part in argument.replace(",", " ").split():
             if part.isdigit():
                 if int(part) < 1:

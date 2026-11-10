@@ -16,6 +16,7 @@ declare(strict_types=1);
  *   nprtext       NPR's text-only homepage, with full article pages fetched
  *                 for the detail view
  *   yahoo_finance Yahoo Finance stock market news via Google News RSS
+ *   medium        Medium stories via the Google News RSS site:medium.com feed
  *   kqed          KQED News RSS feed
  *   sfgate        SFGATE Bay Area News RSS feed
  *   sfbayview     SF Bay View WordPress REST API
@@ -25,7 +26,7 @@ declare(strict_types=1);
  *   krasia        KrASIA RSS feed (Asian tech and startup news)
  *   wccftech      Wccftech RSS feed (hardware, mobile and gaming news)
  *   hackernews    Hacker News RSS feed (front-page technology stories)
- *   medium        The Medium author feed configured in ~/.medium/username
+ *   medium_author The Medium author feed configured in ~/.medium/username
  *                 (https://medium.com/feed/@username), used by /medium
  *   googlenews    A Google News RSS search created with --search <keywords>,
  *                 used by /googlenews <keywords>
@@ -37,15 +38,17 @@ declare(strict_types=1);
  * Usage:
  *   ./news_fetch.php [--json] [--source SOURCE ...] [--limit N]
  *   ./news_fetch.php [--json] --search <keywords> [--limit N]
+ *   ./news_fetch.php [--json] --article <url>
  *
- * --source accepts wsj, cnn, cbslite, nprtext, yahoo_finance, kqed, sfgate,
- * sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech,
- * hackernews, medium, or googlenews and may be repeated (or given as a comma
- * separated list).
+ * --source accepts wsj, cnn, cbslite, nprtext, yahoo_finance, medium, kqed,
+ * sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia,
+ * wccftech, hackernews, medium_author, or googlenews and may be repeated (or
+ * given as a comma separated list).
  * --search creates the dynamic googlenews source for the given keywords. It
  * is selected automatically when no --source is given.
  * Without --source, every static source is fetched and emitted as its own
- * section; medium and googlenews are only used when explicitly selected.
+ * section; medium_author and googlenews are only used when explicitly
+ * selected.
  * --limit caps the total number of stories across all selected sources (each
  * source has its own default when --limit is omitted).
  */
@@ -153,6 +156,21 @@ const SOURCES = [
             'latest' => [
                 'label' => 'Stock Market',
                 'url' => 'https://news.google.com/rss/search?q=site:finance.yahoo.com+stock+market&hl=en-US&gl=US&ceid=US:en',
+            ],
+        ],
+    ],
+    'medium' => [
+        'label' => 'Medium',
+        'kind' => 'rss',
+        // Google News only carries the headline, and Medium challenges direct
+        // page requests, so every story is completed through the reader
+        // mirror for the detail view.
+        'full_article' => true,
+        'default_limit' => 20,
+        'feeds' => [
+            'latest' => [
+                'label' => 'Medium stories',
+                'url' => 'https://news.google.com/rss/search?q=site:medium.com&hl=en-US&gl=US&ceid=US:en',
             ],
         ],
     ],
@@ -293,7 +311,7 @@ function mediumUsername(): string
 }
 
 /**
- * Build the dynamic Medium source used by /medium.
+ * Build the dynamic Medium author source used by /medium.
  *
  * Returns null when ~/.medium/username is missing or empty so that /news can
  * keep working with only the static sources.
@@ -307,6 +325,9 @@ function mediumSource(): ?array
     return [
         'label' => 'Medium',
         'kind' => 'rss',
+        // The author feed carries only a snippet plus a "Continue reading"
+        // link, so always complete the story from the reader mirror.
+        'full_article' => true,
         'default_limit' => 10,
         'feeds' => [
             'latest' => [
@@ -364,7 +385,7 @@ function newsSources(): array
         $sources = SOURCES;
         $medium = mediumSource();
         if ($medium !== null) {
-            $sources['medium'] = $medium;
+            $sources['medium_author'] = $medium;
         }
         $googleNews = googleNewsSource();
         if ($googleNews !== null) {
@@ -383,7 +404,11 @@ const IMAGE_CACHE_FAILURE_TTL = 86400; // one day for missing/broken images
 const IMAGE_FETCH_CONCURRENCY = 6;
 const ARTICLE_CACHE_TTL = 21600;       // six hours for successfully fetched articles
 const ARTICLE_CACHE_FAILURE_TTL = 3600; // one hour for articles we could not load
-const ARTICLE_EXTRACTOR_VERSION = 4;   // bump when article extraction logic changes
+// A reader mirror is a remote, occasionally rate-limited service. Retry a
+// failed mirror lookup on the next news request instead of hiding the story
+// for a full hour.
+const ARTICLE_READER_FAILURE_TTL = 120;
+const ARTICLE_EXTRACTOR_VERSION = 5;   // bump when article extraction logic changes
 const ARTICLE_MIN_BODY_CHARS = 1200;   // a container this large is a real body, not metadata
 const ARTICLE_FETCH_CONCURRENCY = 6;
 const MAX_ARTICLE_CACHE_ENTRIES = 500;
@@ -391,6 +416,14 @@ const MAX_ARTICLE_CACHE_ENTRIES = 500;
 // article page itself is behind a bot challenge. Keyed by host suffix.
 const ARTICLE_FEED_FALLBACKS = [
     'axios.com' => 'https://api.axios.com/feed/',
+];
+// Some publishers block article pages entirely (Cloudflare) and their public
+// feeds only carry a preview, so a reader mirror that renders the full story
+// is used as a last resort. Keyed by host suffix; {url} is the article URL.
+const ARTICLE_READER_FALLBACKS = [
+    'medium.com' => [
+        'https://freedium-mirror.cfd/{url}',
+    ],
 ];
 
 /**
@@ -1784,6 +1817,110 @@ function feedArticleImage(DOMElement $item, string $baseUrl): string
 }
 
 /**
+ * Return public reader-mirror URLs that render the full story for a blocked
+ * publisher page.
+ *
+ * @return list<string>
+ */
+function articleReaderFallbackUrls(string $url): array
+{
+    $host = strtolower((string)parse_url($url, PHP_URL_HOST));
+    if ($host === '') {
+        return [];
+    }
+    foreach (ARTICLE_READER_FALLBACKS as $domain => $templates) {
+        if ($host === $domain || str_ends_with($host, '.' . $domain)) {
+            $urls = [];
+            foreach ($templates as $template) {
+                $urls[] = str_replace('{url}', $url, $template);
+            }
+            return $urls;
+        }
+    }
+    return [];
+}
+
+/**
+ * Recover a blocked article through a public reader mirror.
+ *
+ * @return array{paragraphs:list<string>, image:string}|null
+ */
+function fetchArticleReaderFallback(string $url, string $sourceKey): ?array
+{
+    // Profile/landing pages have no story body for the mirror to render.
+    if (isNonArticleUrl($url)) {
+        return null;
+    }
+
+    // A mirror can be briefly rate-limited or return an interstitial page.
+    // Try every mirror URL twice, and also retry with tracking parameters
+    // stripped, because Medium links copied from feeds often carry an
+    // ?source=rss-... suffix that the mirror does not index.
+    $targets = articleReaderFallbackUrls($url);
+    $cleanUrl = articleUrlWithoutTracking($url);
+    if ($cleanUrl !== '' && $cleanUrl !== $url) {
+        $targets = array_merge(
+            $targets,
+            articleReaderFallbackUrls($cleanUrl)
+        );
+    }
+    $targets = array_values(array_unique($targets));
+
+    foreach ($targets as $readerUrl) {
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            $body = fetchUrl(
+                $readerUrl,
+                'text/html, application/xhtml+xml;q=0.9, */*;q=0.8',
+                $sourceKey
+            );
+            if (!is_string($body) || trim($body) === '') {
+                if ($attempt === 0) {
+                    usleep(300000);
+                }
+                continue;
+            }
+            // Resolve relative image URLs against the mirror, which proxies
+            // the story's images, rather than the blocked publisher page.
+            $paragraphs = extractArticleParagraphs($body, $readerUrl);
+            if ($paragraphs && !articleBodyIsPlaceholder($paragraphs)) {
+                return [
+                    'paragraphs' => $paragraphs,
+                    'image' => extractArticleImageFromHtml($body, $readerUrl),
+                ];
+            }
+            if ($attempt === 0) {
+                usleep(300000);
+            }
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Return an article URL without query/fragment noise, or an empty string when
+ * the URL cannot be normalized.
+ */
+function articleUrlWithoutTracking(string $url): string
+{
+    $parts = parse_url(trim($url));
+    if (!is_array($parts) || empty($parts['host'])) {
+        return '';
+    }
+    $scheme = strtolower((string)($parts['scheme'] ?? 'https'));
+    if ($scheme !== 'http' && $scheme !== 'https') {
+        $scheme = 'https';
+    }
+    $host = strtolower((string)$parts['host']);
+    $port = isset($parts['port']) ? ':' . (int)$parts['port'] : '';
+    $path = (string)($parts['path'] ?? '/');
+    if ($path === '') {
+        $path = '/';
+    }
+    return $scheme . '://' . $host . $port . $path;
+}
+
+/**
  * Recover a blocked article from its publisher's public feed.
  *
  * @return array{paragraphs:list<string>, image:string}|null
@@ -1863,8 +2000,108 @@ function fetchArticleFeedFallback(string $url, string $sourceKey): ?array
 }
 
 /**
- * A feed story needs a page fetch when it carries no usable body text, or
- * when its source explicitly asks for the complete article page.
+ * Detect a feed body that is only a publisher preview rather than the story.
+ *
+ * Many RSS feeds (Medium is the canonical case) publish a lead excerpt plus a
+ * "Continue reading ..." link while the article page itself is behind a bot
+ * challenge. Such a story must be enriched from the page/reader mirror even
+ * though the feed technically supplied a paragraph or two.
+ *
+ * @param list<string> $paragraphs
+ */
+function feedBodyIsPreview(array $paragraphs, string $rawHtml = ''): bool
+{
+    $text = '';
+    foreach ($paragraphs as $paragraph) {
+        $paragraph = trim((string)$paragraph);
+        if ($paragraph !== '') {
+            $text .= ($text === '' ? '' : ' ') . $paragraph;
+        }
+    }
+    if ($text === '') {
+        return true;
+    }
+    $pattern = '/\b(?:continue reading|read (?:the )?(?:full|rest(?: of the)?) '
+        . '(?:story|article)|read on)\b/iu';
+    if (preg_match($pattern, $text)) {
+        return true;
+    }
+    // The continuation link is often stripped as boilerplate before this
+    // check, so also inspect the raw feed HTML that carried the preview.
+    if ($rawHtml !== '') {
+        $rawText = html_entity_decode(strip_tags($rawHtml), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        if (preg_match($pattern, normalizeText($rawText))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Detect a reader-mirror "not found" page.
+ *
+ * Reader mirrors answer HTTP 200 for a deleted or moved story and render a
+ * short placeholder such as "We couldn't find the article you're looking for."
+ * That text must never be cached or shown as the article body.
+ *
+ * @param list<string> $paragraphs
+ */
+function articleBodyIsPlaceholder(array $paragraphs): bool
+{
+    $text = '';
+    foreach (array_slice($paragraphs, 0, 3) as $paragraph) {
+        $text .= ' ' . normalizeText((string)$paragraph);
+    }
+    $text = strtolower(trim($text));
+    if ($text === '') {
+        return false;
+    }
+    $needles = [
+        "couldn't find the article",
+        'could not find the article',
+        "can't find the article",
+        'cannot find the article',
+        "couldn't find that story",
+        "can't find that story",
+        'article not found',
+        'story not found',
+        'page not found',
+        'this story is no longer available',
+        'this article is no longer available',
+    ];
+    foreach ($needles as $needle) {
+        if (str_contains($text, $needle)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Detect a publisher URL that is a profile or landing page, not an article.
+ *
+ * Google News' site:medium.com feed occasionally indexes an author profile
+ * (for example https://medium.com/@handle). There is no story body to load and
+ * no point retrying the blocked page or a reader mirror.
+ */
+function isNonArticleUrl(string $url): bool
+{
+    $parts = parse_url(trim($url));
+    if (!is_array($parts) || empty($parts['host'])) {
+        return false;
+    }
+    $host = strtolower((string)$parts['host']);
+    $path = (string)($parts['path'] ?? '/');
+    if ($host === 'medium.com' || str_ends_with($host, '.medium.com')) {
+        return (bool)preg_match('{^/@[^/]+/?$}', $path);
+    }
+    return false;
+}
+
+/**
+ * A feed story needs a page fetch when it carries no usable body text, only a
+ * publisher preview, or when its source explicitly asks for the complete
+ * article page.
  */
 function storyNeedsArticleContent(
     array $story,
@@ -1876,12 +2113,13 @@ function storyNeedsArticleContent(
     if ($forceFullArticle) {
         return true;
     }
-    foreach (($story['paragraphs'] ?? []) as $paragraph) {
-        if (trim((string)$paragraph) !== '') {
-            return false;
-        }
+    if (!empty($story['feed_preview'])) {
+        return true;
     }
-    return true;
+    if (feedBodyIsPreview($story['paragraphs'] ?? [])) {
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -1924,8 +2162,11 @@ function applyArticleContent(array &$story, array $entry): void
  * page makes the "details" popup show the actual story instead of an empty
  * body. Successful pages are cached on disk to keep repeated /news calls fast.
  */
-function enrichStoryContent(array $stories, string $sourceKey): array
-{
+function enrichStoryContent(
+    array $stories,
+    string $sourceKey,
+    bool $retryFailedCache = false
+): array {
     if (!$stories) {
         return $stories;
     }
@@ -1950,13 +2191,34 @@ function enrichStoryContent(array $stories, string $sourceKey): array
         $entry = $cache[$link] ?? null;
         if (is_array($entry)) {
             $paragraphs = $entry['paragraphs'] ?? [];
+            // A reader-mirror placeholder cached by an older run is not a
+            // valid article body; refetch it instead of serving "not found".
+            $placeholderCache = $paragraphs && articleBodyIsPlaceholder($paragraphs);
+            if ($placeholderCache) {
+                $paragraphs = [];
+                $entry['paragraphs'] = [];
+            }
             $ttl = $paragraphs ? ARTICLE_CACHE_TTL : ARTICLE_CACHE_FAILURE_TTL;
+            if (!$paragraphs) {
+                $entryLink = trim((string)($entry['link'] ?? ''));
+                if (articleReaderFallbackUrls($link)
+                    || articleReaderFallbackUrls($entryLink)
+                ) {
+                    $ttl = min($ttl, ARTICLE_READER_FAILURE_TTL);
+                }
+            }
             // Do not reuse a feed-excerpt entry when the source requires the
             // full article body; let it be fetched once and cached again.
             $cacheIsUsable = !$forceFullArticle
                 || !empty($entry['full_article']);
             $cacheIsUsable = $cacheIsUsable
+                && !$placeholderCache
                 && (int)($entry['extractor'] ?? 0) === ARTICLE_EXTRACTOR_VERSION;
+            // A detail request explicitly asks for the article body, so an
+            // empty cached failure must not suppress a fresh mirror retry.
+            if ($retryFailedCache && !$paragraphs) {
+                $cacheIsUsable = false;
+            }
             if ($cacheIsUsable && (int)($entry['ts'] ?? 0) + $ttl > $now) {
                 applyArticleContent($story, $entry);
                 continue;
@@ -1986,6 +2248,12 @@ function enrichStoryContent(array $stories, string $sourceKey): array
         if (isGoogleNewsLink($fetchLink)) {
             continue;
         }
+        // A Google News entry that resolves to a profile/landing page is not
+        // a story; drop it instead of reporting a failed article fetch.
+        if (isNonArticleUrl($fetchLink)) {
+            unset($stories[$index], $originals[$index]);
+            continue;
+        }
         $pageRequests[$index] = ['url' => $fetchLink];
     }
 
@@ -2005,12 +2273,14 @@ function enrichStoryContent(array $stories, string $sourceKey): array
             'ts' => $now,
         ];
 
+        $pageFailed = false;
+        $pageStatus = 0;
         if (is_array($page) && $page['body'] !== '') {
-            if ($page['status'] < 200 || $page['status'] >= 400) {
-                diag(
-                    "news_fetch ({$sourceKey}): could not load article "
-                    . "{$finalLink} (HTTP {$page['status']})"
-                );
+            $pageStatus = (int)$page['status'];
+            if ($pageStatus < 200 || $pageStatus >= 400) {
+                // A bot challenge can still be recovered by a feed or reader
+                // mirror, so report the failure only after both fallbacks.
+                $pageFailed = true;
             } else {
                 $entry['paragraphs'] = extractArticleParagraphs(
                     $page['body'],
@@ -2035,6 +2305,25 @@ function enrichStoryContent(array $stories, string $sourceKey): array
             }
         }
 
+        // Medium has no full-story feed and challenges direct page requests,
+        // so a reader mirror is the only source of the complete article.
+        if (!$entry['paragraphs']) {
+            $fallback = fetchArticleReaderFallback($finalLink, $sourceKey);
+            if ($fallback !== null) {
+                $entry['paragraphs'] = $fallback['paragraphs'];
+                if ($entry['image'] === '' && $fallback['image'] !== '') {
+                    $entry['image'] = $fallback['image'];
+                }
+            }
+        }
+
+        if (!$entry['paragraphs'] && $pageFailed) {
+            diag(
+                "news_fetch ({$sourceKey}): could not load article "
+                . "{$finalLink} (HTTP {$pageStatus})"
+            );
+        }
+
         $cache[$originalLink] = $entry;
         if (isset($stories[$index])) {
             applyArticleContent($stories[$index], $entry);
@@ -2042,7 +2331,46 @@ function enrichStoryContent(array $stories, string $sourceKey): array
     }
 
     saveArticleCache($cache);
-    return $stories;
+    return array_values($stories);
+}
+
+/**
+ * Fetch one article on demand for the story-detail modal.
+ *
+ * The list feed may have failed transiently (the reader mirror can rate-limit
+ * a burst of requests), so a detail request ignores cached empty bodies and
+ * tries again. Good cached bodies are still reused.
+ *
+ * @return array{link:string, paragraphs:list<string>, images:list<string>}
+ */
+function fetchArticleByUrl(string $url): array
+{
+    $story = [
+        'title' => '',
+        'link' => $url,
+        'published' => '',
+        'sort' => 0,
+        'summary' => '',
+        'source' => 'Article',
+        'section' => '',
+        'paragraphs' => [],
+        'images' => [],
+        'feed_preview' => true,
+    ];
+    $stories = enrichStoryContent([$story], 'article', true);
+    $story = $stories[0] ?? $story;
+    $paragraphs = [];
+    foreach (($story['paragraphs'] ?? []) as $paragraph) {
+        $text = trim((string)$paragraph);
+        if ($text !== '') {
+            $paragraphs[] = $text;
+        }
+    }
+    return [
+        'link' => trim((string)($story['link'] ?? $url)),
+        'paragraphs' => $paragraphs,
+        'images' => array_values(($story['images'] ?? [])),
+    ];
 }
 
 /**
@@ -2051,7 +2379,8 @@ function enrichStoryContent(array $stories, string $sourceKey): array
 function isBoilerplate(string $text): bool
 {
     return (bool)preg_match(
-        '/^(?:read more|share|advertisement|ad feedback|sign up for|'
+        '/^(?:read more|continue reading.*|read (?:the )?(?:full|rest(?: of the)?) '
+        . '(?:story|article).*|share|advertisement|ad feedback|sign up for|'
         . 'click here to|watch:|\d+:\d+|\(?\s*photo(?:\s+by)?\s*:.*|'
         . 'image\s*:.*|caption\s*:.*)$/iu',
         $text
@@ -2156,6 +2485,7 @@ function parseRssStories(
         }
 
         $paragraphs = extractParagraphs($html);
+        $feedPreview = feedBodyIsPreview($paragraphs, $html);
         $summary = makeSummary($paragraphs[0] ?? $description);
         $images = mergeImageUrls(
             imageUrlsFromHtml($html, $link),
@@ -2174,6 +2504,7 @@ function parseRssStories(
             'section' => $sectionLabel,
             'paragraphs' => $paragraphs,
             'images' => $images,
+            'feed_preview' => $feedPreview,
         ];
     }
 
@@ -2422,6 +2753,7 @@ function parseWpJsonStories(
             'section' => $sectionLabel,
             'paragraphs' => $paragraphs,
             'images' => $images,
+            'feed_preview' => $feedPreview,
         ];
     }
 
@@ -2787,6 +3119,7 @@ function main(array $argv): int
     $limit = null;
     $section = null;
     $sourceKeys = null;
+    $articleUrl = '';
 
     // Pre-scan for --search so the dynamic googlenews source exists before
     // --source googlenews is validated below.
@@ -2810,9 +3143,11 @@ function main(array $argv): int
             if ($requested === '') {
                 continue;
             }
-            if ($requested === 'medium' && !isset($available['medium'])) {
-                diag('news_fetch: medium is not configured; write your Medium '
-                    . 'handle to ~/.medium/username');
+            if ($requested === 'medium_author'
+                && !isset($available['medium_author'])
+            ) {
+                diag('news_fetch: medium_author is not configured; write your '
+                    . 'Medium handle to ~/.medium/username');
                 return false;
             }
             if (!isset($available[$requested])) {
@@ -2862,15 +3197,41 @@ function main(array $argv): int
             $i++;
         } elseif (preg_match('/^--(?:search|query)=(.+)$/', $argument)) {
             // Already applied by the pre-scan above.
+        } elseif ($argument === '--article' && isset($argv[$i + 1])) {
+            $articleUrl = trim($argv[++$i]);
+        } elseif (preg_match('/^--article=(.+)$/', $argument, $match)) {
+            $articleUrl = trim($match[1]);
         } elseif ($argument === '--help' || $argument === '-h') {
             echo "Usage: news_fetch.php [--json] [--source "
-                . implode('|', array_keys(SOURCES)) . "|medium|googlenews"
+                . implode('|', array_keys(SOURCES)) . "|medium_author|googlenews"
                 . " ...] [--limit N]\n"
-                . "       news_fetch.php [--json] --search <keywords> [--limit N]\n";
+                . "       news_fetch.php [--json] --search <keywords> [--limit N]\n"
+                . "       news_fetch.php [--json] --article <url>\n";
             return 0;
         } else {
             diag("news_fetch: ignoring unknown argument: {$argument}");
         }
+    }
+
+    if ($articleUrl !== '') {
+        if (!preg_match('{^https?://}i', $articleUrl)) {
+            diag('news_fetch: --article needs an http(s) URL');
+            return 2;
+        }
+        $article = fetchArticleByUrl($articleUrl);
+        if ($json) {
+            echo json_encode(
+                $article,
+                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+            ) . "\n";
+        } else {
+            echo ($article['link'] !== '' ? $article['link'] : $articleUrl)
+                . "\n\n";
+            foreach ($article['paragraphs'] as $paragraph) {
+                echo $paragraph . "\n\n";
+            }
+        }
+        return $article['paragraphs'] ? 0 : 1;
     }
 
     if ($sourceKeys === null) {

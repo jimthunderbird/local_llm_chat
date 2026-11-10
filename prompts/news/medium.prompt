@@ -1,0 +1,38 @@
+task (completed) {
+  fix bugs:
+  [news: news_fetch (medium): could not load article https://medium.com/@japan.gently.told (HTTP 403)]
+  [news: news_fetch (medium): could not load article https://medium.com/@mahamaamirskz/why-are-nvidia-shareholders-suing-jensen-huang-7cddffb699a6 (HTTP 403)]
+  ...
+  
+  please also make sure we can load:
+  https://medium.com/@chrisdunlop_37984/so-shall-we-give-up-then-2d095fa8c410
+}
+
+Implemented:
+news_fetch.php
+- The HTTP 403 diagnostic is now emitted only when the article body is still
+  empty after the feed and reader-mirror fallbacks. Previously it was printed
+  as soon as Medium challenged the direct page request, even though the
+  freedium mirror recovered the complete story, so /news and /medium showed
+  false failures.
+- Added articleBodyIsPlaceholder(): a reader mirror answers HTTP 200 for a
+  deleted or moved story with a short "We couldn't find the article..." page.
+  Such a page is no longer cached or treated as an article body, and a
+  placeholder cached by an older run is refetched instead of served.
+- Added isNonArticleUrl(): Google News' site:medium.com feed occasionally
+  indexes an author profile (for example https://medium.com/@japan.gently.told).
+  Profile/landing links are recognized as non-articles, are not fetched, do not
+  produce a 403 error, and are dropped from the story list.
+- Empty bodies for reader-mirror publishers still use the short failure TTL, and
+  detail requests still retry them, so a transient mirror failure recovers on
+  the next open.
+
+Verified:
+- `news_fetch.php --json --source medium --limit 6` now prints no stderr
+  diagnostics; the profile entry is dropped and the remaining five stories
+  stream full bodies (12-74 paragraphs each).
+- The reported NVIDIA story loads 12 paragraphs / 1 image on demand with no
+  error.
+- The requested https://medium.com/@chrisdunlop_37984/so-shall-we-give-up-then-2d095fa8c410
+  loads 31 paragraphs / 1 image through the reader mirror with no error.
+- php -l passes.

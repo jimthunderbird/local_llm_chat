@@ -23,6 +23,9 @@ source: {
   yahoo_finance: {
     - https://news.google.com/rss/search?q=site:finance.yahoo.com+stock+market&hl=en-US&gl=US&ceid=US:en
   }
+  medium: {
+    - https://news.google.com/rss/search?q=site:medium.com&hl=en-US&gl=US&ceid=US:en
+  }
   kqed: {
     - https://ww2.kqed.org/news/feed/
   }
@@ -57,25 +60,136 @@ task (completed) {
 
   Implemented:
   news_fetch.php
-  - Added the `cbslite` source (https://www.cbc.ca/lite/news), parsed from
-    the CBC Lite Next.js `__NEXT_DATA__` story list, with each linked CBC
-    article page fetched and cached for the full detail view.
-  - Added the `nprtext` source (https://text.npr.org/). The text-only
-    homepage's `topic-title` links are parsed in listing order, and each
-    lightweight NPR article page is fetched and cached for the full body,
-    using the article's `paragraphs-container` prose (including the
-    broadcast transcript) without the headline/byline/timestamp lines.
-  - Both sources are full-article sources, so learned stories and the
-    detail popup always receive real article text rather than a headline.
+  - Added the static `medium` source from the {source} list: a Google News
+    RSS feed (https://news.google.com/rss/search?q=site:medium.com with
+    hl=en-US, gl=US, ceid=US:en), emitted as its own /news section. Google
+    News links are resolved and full article bodies are fetched through the
+    existing reader-mirror fallback, so Medium stories load completely.
+  - Renamed the dynamic author feed used by /medium to `medium_author` so it
+    no longer collides with the new static `medium` news source. The
+    ~/.medium/username feed, its usage guard, and the --help source list were
+    updated accordingly.
   app/chat_server.py
-  - Added cbslite and nprtext to NEWS_SOURCES, so /news accepts them, the
-    source picker and tab completion include them, and the /news help text
-    lists them.
+  - Added medium to NEWS_SOURCES and the /news help text, so /news accepts
+    `medium`, the source picker and tab completion include it, and /news with
+    no source fetches it as a section alongside the other sources.
+  - /medium now requests `--source medium_author`.
 
-  Verified: `./news_fetch.php --json --source cbslite --limit 2` and
-  `./news_fetch.php --json --source nprtext --limit 2` stream story cards
-  with dates, summaries, and full paragraphs; `php -l news_fetch.php` and
-  the Python syntax check both pass.
+  Verified: `./news_fetch.php --json --source medium --limit 2` streams
+  Medium stories with resolved medium.com links and full paragraph bodies
+  (the Nvidia/Jensen Huang article loaded through the freedium mirror);
+  `--source medium_author` still streams the configured author feed
+  (~/.medium/username); php -l and the Python syntax check pass.
+}
+
+task (persistent) {
+  complete tasks in ./news/medium.prompt
+}
+
+task.bug."https://medium.com/@chrisdunlop_37984/so-shall-we-give-up-then-2d095fa8c410" (completed) {
+  bug: similar to task.bug."https://medium.com/@RetroTechShow/1993-before-mp3-and-spotify-the-bizarre-90s-battle-between-three-digital-audio-formats-4a3ba7a4f8ce", news not loading properly
+
+  Root cause:
+  The story was listed without a body because its first article fetch hit
+  Medium's 403 page and the reader-mirror request transiently failed. The
+  empty result was cached for an hour, so every later /news and /medium
+  request (and the detail modal, which uses the already-streamed story) kept
+  showing only the Google News headline. Other Medium entries had the same
+  stale empty cache entries (for example the Cherry Red Cybertruck story).
+
+  Implemented:
+  news_fetch.php
+  - Medium is now a full-article source for both the static site:medium.com
+    feed and the dynamic /medium author feed, so a feed preview is never
+    trusted as the complete body.
+  - Reader-mirror recovery now retries each mirror URL twice, also retries a
+    tracking-parameter-free URL (Medium feeds append ?source=rss-...), and
+    keeps an empty mirror result out of the long-lived cache path.
+  - Empty cached bodies for reader-mirror publishers expire after 120 seconds
+    instead of one hour, and a detail request explicitly ignores an empty
+    cached failure so the next attempt can recover.
+  - Added `news_fetch.php --json --article <url>` for fetching one article
+    body on demand.
+  app/chat_server.py
+  - Added GET /api/news_article?url=<article_url>, which runs the on-demand
+    article fetch and returns the paragraphs and images as JSON.
+  app/chat.html
+  - When a completed story opens in the detail modal without paragraphs, the
+    modal now fetches the body on demand, shows a "loading full article…"
+    state, and fills the same story in place. Reopening retries a transient
+    failure instead of leaving the article permanently empty.
+
+  Verified:
+  - `./news_fetch.php --json --article` loads 31 paragraphs / 6,993 characters
+    for the reported URL and 25 paragraphs / 4,904 characters for the other
+    previously-cached-empty Medium story, both with cover images.
+  - A cold-cache `--source medium --limit 8` run loads every story, including
+    the reported one, through the reader mirror.
+  - `php -l`, the Python compile check, and `node --check` on the browser
+    script all pass.
+}
+
+task.bug."https://medium.com/@RetroTechShow/1993-before-mp3-and-spotify-the-bizarre-90s-battle-between-three-digital-audio-formats-4a3ba7a4f8ce" (completed) {
+  similar to task.bug."https://medium.com/@adnanmasood/when-llms-edit-other-llms-weight-space-programming-and-the-conditions-for-recursive-2dceaec05403", news not loading properly
+
+  apply systematic fix to in both news article modal and /medium command
+
+  Root cause:
+  Medium's author RSS feed (used by /medium) exposes only a short excerpt and
+  a "Continue reading on Medium »" link, unlike Google News items, which have
+  no body at all. storyNeedsArticleContent() treated any non-empty feed body as
+  complete, so the preview was shown and the full article was never fetched in
+  the detail modal or /medium. The continuation line was also rendered as a
+  story paragraph.
+
+  Implemented:
+  news_fetch.php
+  - Added feedBodyIsPreview(): detects publisher-preview bodies from a
+    "Continue reading", "Read the full story", or "Read on" continuation
+    marker, including in the raw feed HTML before boilerplate filtering.
+  - RSS parsing now records an internal feed_preview flag, and
+    storyNeedsArticleContent() forces article enrichment when it is set.
+  - Added the continuation-line patterns to isBoilerplate() so a leftover
+    preview line is never emitted as article prose.
+  - The existing Medium reader-mirror fallback then loads the complete body, so
+    the same fix covers the /news detail modal (Google News Medium items) and
+    the /medium command without source-specific branching.
+
+  Verified:
+  - `HOME=<temp> news_fetch.php --json --source medium_author --limit 3` with
+    @RetroTechShow now emits 84-106 paragraphs / 15-24k characters per story
+    (including the reported 1993 DAT/DCC/MiniDisc article) instead of one
+    38-75 character teaser paragraph.
+  - The reported medium.com URL still loads through /googlenews and the
+    reader mirror; php -l passes.
+}
+
+task.bug."https://medium.com/@adnanmasood/when-llms-edit-other-llms-weight-space-programming-and-the-conditions-for-recursive-2dceaec05403" (completed) {
+  bug: simplier to task.bug."https://www.axios.com/2026/11/09/alice-huang-nvidia-jensen-megaspeed", news not loading properly
+
+  Root cause:
+  Medium serves article pages behind a Cloudflare bot challenge (HTTP 403),
+  and unlike Axios its public author feed (https://medium.com/feed/@user)
+  carries only a short description, not the story body, so the existing feed
+  fallback could not recover the article.
+
+  Implemented:
+  news_fetch.php
+  - Added ARTICLE_READER_FALLBACKS and fetchArticleReaderFallback(). When a
+    fetched article page yields no readable paragraphs, a publisher-specific
+    public reader mirror is tried as a last resort after the feed fallback.
+    For medium.com the mirror is https://freedium-mirror.cfd/{url}, which
+    renders the complete story even though the page itself is challenged.
+  - Reader-mirror bodies reuse the normal paragraph and image extractors. The
+    mirror URL is passed as the base URL so relative image paths resolve
+    through the mirror's image proxy instead of the blocked publisher host.
+  - Bumped ARTICLE_EXTRACTOR_VERSION to 5 so previously cached empty Medium
+    entries are refetched instead of being served from the failure cache.
+
+  Verified: the reported URL now streams 122 paragraphs / 37,744 characters
+  (subtitle, TL;DR, every section, and all 30 references) plus its lead image.
+  Other Adnan Masood Medium stories in the same Google News batch also load
+  their complete bodies; php -l and the server Python syntax check pass.
 }
 
 task.bug."https://www.axios.com/2026/11/09/alice-huang-nvidia-jensen-megaspeed" (completed) {
