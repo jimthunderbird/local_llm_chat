@@ -1,3 +1,33 @@
+task.refactor_book_search (completed) {
+  refactor /gutenberg search <keywords>:
+  learn from the /news search <keywords>, use "https://news.google.com/rss/search?q=site:gutenberg.org&hl=en-US&gl=US&ceid=US:en" to search for the books using <keywords>
+}
+
+  Implemented:
+  app/chat_server.py
+  - /gutenberg search now reuses the same news_fetch.php googlenews path as
+    /news search. The query is `site:gutenberg.org <keywords>`, which
+    news_fetch.php sends to
+    https://news.google.com/rss/search?q=...&hl=en-US&gl=US&ceid=US:en and
+    resolves from Google News redirects back to the Gutenberg pages.
+  - Each NDJSON item becomes a normalized book card. Ebook ids are parsed from
+    /ebooks/<id>, /cache/epub/<id>/ and /files/<id>/ links; category,
+    author-search and homepage hits are ignored. Titles are cleaned of the
+    "- Project Gutenberg" suffix and split into title/author when they use the
+    "Title by Author" form. Duplicate cards (for example the reading page and
+    the canonical /ebooks page) are merged so a missing author is filled in.
+  - Cards are published to the browser progressively as Google News items
+    arrive, so /gutenberg search now renders results while the search is still
+    running, like /news search.
+  - The existing Open Library/catalogue search remains as a fallback only when
+    Google News returns no usable ebook links (or the news search cannot run).
+
+  Verified: helper tests map ebook/reading-page links to cards and reject
+  category/"also downloaded" links; live searches for `jane austen` and
+  `the time machine by h g wells` streamed 5 and 4 correct Gutenberg books,
+  with the Time Machine reading-page/canonical duplicate merged into ebook 35
+  and its author filled in. py_compile passes.
+
 task (completed) {
   find out how the chat works in the book specific chat, what kind of technique or algorithms does it use, save the findings to documents/project_gutenberg_book_specific_chat.html  
 }

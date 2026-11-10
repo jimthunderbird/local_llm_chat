@@ -382,13 +382,15 @@ GUTENBERG_SUBCOMMANDS = {
     "search": "search Project Gutenberg by title, author, or keyword",
 }
 
-# Project Gutenberg search and per-book chat. /gutenberg search resolves
-# matching books through the Open Library search API and reads each work's
-# `id_project_gutenberg` identifier. Open Library has not linked every work to
-# a Gutenberg text yet, so the Project Gutenberg catalogue search page remains
-# a fallback for those books. The chosen plaintext is downloaded once and
-# cached under .chat. Book chat reuses the /article section-aware RAG pipeline,
-# so a multi-megabyte novel never goes into the model's context at once.
+# Project Gutenberg search and per-book chat. /gutenberg search mirrors the
+# /news search flow: it asks news_fetch.php for a Google News RSS search
+# restricted to site:gutenberg.org, resolves each Google News redirect to its
+# gutenberg.org page, and turns the matching ebook links into book cards. The
+# Open Library search API and the Project Gutenberg catalogue search page stay
+# as a fallback when the news feed has no usable book links. The chosen
+# plaintext is downloaded once and cached under .chat. Book chat reuses the
+# /article section-aware RAG pipeline, so a multi-megabyte novel never goes
+# into the model's context at once.
 OPENLIBRARY_SEARCH_URL = "https://openlibrary.org/search.json"
 OPENLIBRARY_SEARCH_FIELDS = (
     "key,title,author_name,first_publish_year,language,subject,"
@@ -411,6 +413,21 @@ GUTENBERG_SEARCH_EXTRA_RE = re.compile(
     r'<span class="extra">(.*?)</span>', re.IGNORECASE | re.DOTALL
 )
 GUTENBERG_SEARCH_DOWNLOADS_RE = re.compile(r"([\d,]+)\s+downloads", re.IGNORECASE)
+GUTENBERG_NEWS_SITE_QUERY = "site:gutenberg.org"
+GUTENBERG_NEWS_BOOK_LINK_RE = re.compile(
+    r"gutenberg\.org/(?:"
+    r"ebooks/(?P<ebook>\d+)/?(?:[?#]|$)"
+    r"|cache/epub/(?P<cache>\d+)/"
+    r"|files/(?P<files>\d+)/"
+    r")",
+    re.IGNORECASE,
+)
+GUTENBERG_NEWS_TITLE_SUFFIX_RE = re.compile(
+    r"\s*[-–—|]\s*Project Gutenberg\s*$", re.IGNORECASE
+)
+GUTENBERG_NEWS_BY_RE = re.compile(
+    r"^(?P<title>.+)\s+by\s+(?P<authors>.+)$", re.IGNORECASE
+)
 GUTENBERG_BOOK_URL = "https://www.gutenberg.org/ebooks/{book_id}"
 GUTENBERG_BOOK_CACHE_DIR = SCRIPT_DIR / ".chat" / "gutenberg_cache"
 GUTENBERG_BOOK_RESULT_LIMIT = 12
@@ -4897,6 +4914,184 @@ def search_gutenberg_books(keyword: str, limit: int = GUTENBERG_BOOK_RESULT_LIMI
     return items[:limit]
 
 
+def _gutenberg_news_book_id(link: str) -> str:
+    """Extract a Gutenberg ebook id from a resolved Google News link."""
+    match = GUTENBERG_NEWS_BOOK_LINK_RE.search(link or "")
+    if match is None:
+        return ""
+    value = next((group for group in match.groups() if group), "")
+    return str(int(value)) if value else ""
+
+
+def _gutenberg_card_from_news_item(item: dict) -> dict | None:
+    """Turn one resolved Google News story into a normalized book card.
+
+    Google News indexes the public Gutenberg ebook pages, including their
+    ``/ebooks/<id>``, ``/cache/epub/<id>/`` and ``/files/<id>/`` URLs. Only
+    those links are books; category, author-search and site-homepage hits are
+    ignored. Titles commonly look like "Persuasion by Jane Austen - Project
+    Gutenberg", so the site suffix and author are split out when present.
+    """
+    if not isinstance(item, dict):
+        return None
+    book_id = _gutenberg_news_book_id(str(item.get("link") or ""))
+    if not book_id:
+        return None
+
+    title = html.unescape(str(item.get("title") or "")).strip()
+    title = GUTENBERG_NEWS_TITLE_SUFFIX_RE.sub("", title).strip()
+    authors = ""
+    by_match = GUTENBERG_NEWS_BY_RE.match(title)
+    if by_match is not None:
+        title = by_match.group("title").strip()
+        authors = by_match.group("authors").strip()
+    if not title:
+        title = f"Book {book_id}"
+
+    images = item.get("images")
+    cover_url = ""
+    if isinstance(images, list):
+        cover_url = next(
+            (str(value).strip() for value in images if str(value).strip()),
+            "",
+        )
+
+    return {
+        "id": book_id,
+        "title": title,
+        "authors": authors,
+        "languages": [],
+        "subjects": [],
+        "first_publish_year": 0,
+        "download_count": 0,
+        "url": GUTENBERG_BOOK_URL.format(book_id=book_id),
+        "text_url": f"{GUTENBERG_BOOK_URL.format(book_id=book_id)}.txt.utf-8",
+        "cover_url": cover_url,
+        "source": "google_news",
+    }
+
+
+def _merge_gutenberg_news_card(existing: dict, incoming: dict) -> bool:
+    """Fill gaps on a duplicate card (for example its missing author).
+
+    The same ebook can appear through both its reading page and its canonical
+    ``/ebooks/<id>`` page, and only one of those titles may include the author.
+    Returns True when the existing card was changed.
+    """
+    changed = False
+    for key in (
+        "authors",
+        "languages",
+        "subjects",
+        "first_publish_year",
+        "download_count",
+        "cover_url",
+    ):
+        if not existing.get(key) and incoming.get(key):
+            existing[key] = incoming[key]
+            changed = True
+    return changed
+
+
+def search_gutenberg_books_google_news(
+    keyword: str,
+    limit: int = GUTENBERG_BOOK_RESULT_LIMIT,
+    on_item: Callable[[list[dict]], None] | None = None,
+) -> list[dict]:
+    """Search Gutenberg books through the Google News RSS mechanism.
+
+    This deliberately reuses ``news_fetch.php``'s dynamic googlenews source so
+    the search behaves exactly like ``/news search``: the query is restricted
+    with ``site:gutenberg.org``, Google News redirect links are resolved by the
+    existing reader, and each NDJSON ``item`` event becomes a book card. The
+    callback receives the accumulated cards as they arrive so the browser can
+    render results progressively.
+    """
+    keyword = keyword.strip()
+    if not keyword:
+        return []
+    limit = max(1, limit)
+    script = SCRIPT_DIR / "news_fetch.php"
+    if not script.is_file():
+        raise RuntimeError(f"missing {script.name}")
+
+    query = f"{GUTENBERG_NEWS_SITE_QUERY} {keyword}"
+    # Some hits are category or search pages rather than books, so request
+    # more feed items than the number of cards we ultimately want.
+    argv = [
+        "php",
+        str(script),
+        "--json",
+        "--source",
+        "googlenews",
+        "--search",
+        query,
+        "--limit",
+        str(max(limit * 2, 20)),
+    ]
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=SCRIPT_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"could not run {script.name}: {exc}") from exc
+
+    assert process.stdout is not None
+    cards: dict[str, dict] = {}
+    stopped = False
+    try:
+        for raw_line in process.stdout:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict) or payload.get("type") != "item":
+                continue
+            card = _gutenberg_card_from_news_item(payload)
+            if card is None:
+                continue
+            existing = cards.get(card["id"])
+            if existing is not None:
+                if on_item is not None and _merge_gutenberg_news_card(
+                    existing, card
+                ):
+                    on_item(list(cards.values()))
+                continue
+            if len(cards) >= limit:
+                stopped = True
+                break
+            cards[card["id"]] = card
+            GUTENBERG_CATALOG_CACHE[card["id"]] = card
+            if on_item is not None:
+                on_item(list(cards.values()))
+        if stopped:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        else:
+            process.wait()
+    except BaseException:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        raise
+    return list(cards.values())[:limit]
+
+
 def _clean_gutenberg_plaintext(raw_text: str) -> str:
     """Remove the Project Gutenberg header/footer from one downloaded book."""
     text = raw_text.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
@@ -8953,28 +9148,54 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "click a book to read it and ask questions.\n",
             )
             return
+        heading = f"Project Gutenberg · {keyword}"
         self._sse_text(
-            "log", f"[gutenberg: searching the catalog for {keyword!r}]"
+            "log",
+            f"[gutenberg: searching Google News for "
+            f"{GUTENBERG_NEWS_SITE_QUERY} {keyword!r}]",
         )
+
+        def publish(cards: list[dict]) -> None:
+            self._sse(
+                "books",
+                {
+                    "keyword": keyword,
+                    "heading": heading,
+                    "items": cards,
+                },
+            )
+
+        items: list[dict] = []
         try:
-            items = search_gutenberg_books(keyword)
+            items = search_gutenberg_books_google_news(keyword, on_item=publish)
         except RuntimeError as exc:
-            self._sse_text("output", f"\n/gutenberg: {exc}\n")
-            return
+            self._sse_text(
+                "log", f"[gutenberg: Google News search failed: {exc}]"
+            )
+
+        if not items:
+            self._sse_text(
+                "log",
+                "[gutenberg: no book hits in Google News; "
+                "searching the catalogue]",
+            )
+            try:
+                items = search_gutenberg_books(keyword)
+            except RuntimeError as exc:
+                self._sse_text("output", f"\n/gutenberg: {exc}\n")
+                return
+
         if not items:
             self._sse_text(
                 "output",
                 f"\nNo Project Gutenberg books matched {keyword!r}.\n",
             )
             return
-        self._sse(
-            "books",
-            {
-                "keyword": keyword,
-                "heading": f"Project Gutenberg · {keyword}",
-                "items": items,
-            },
-        )
+
+        # Google News may have published partial results while it streamed;
+        # this final event also replaces them with the catalogue fallback when
+        # the news feed had no usable book links.
+        publish(items)
 
     def _stream_news_events(
         self, script_name: str, command: str, extra_argv: list[str]
