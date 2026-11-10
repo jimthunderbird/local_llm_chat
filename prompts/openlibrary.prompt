@@ -1,0 +1,80 @@
+restriction: please write the implementation summary inside the task {...} block, not outside!
+
+task (completed) {
+  in task.openlibrary_search, when searching keywords like "the rust programming language", the result should contain all the books that are around the whole "the rust programming language"
+
+  please make a systematic change
+
+  Implemented:
+  app/chat_server.py
+  - /openlibrary search now queries both Open Library's full-text
+    (search/inside) endpoint and its catalogue (search.json) endpoint in
+    parallel. The full-text endpoint matches query words independently, so
+    "the rust programming language" returned books about rust the metal or
+    the fungal disease; the catalogue endpoint matches the whole title/author
+    phrase and contributes works such as "The Rust Programming Language".
+  - Added _openlibrary_doc_card() to normalize catalogue works, and
+    _combine_openlibrary_cards() to merge catalogue and full-text cards by
+    work key, deduplicate, and rank them against the complete query phrase.
+  - Relevance now scores title/author coverage and an exact title phrase
+    highest. Excerpt relevance uses the best single passage that covers the
+    query terms, not terms scattered across unrelated passages, so a book that
+    merely mentions "rust", "programming", and "language" in separate
+    excerpts no longer outranks a book about the whole phrase.
+  - The result limit is 20 (catalogue candidates are fetched wider), so all
+    works around the queried phrase are shown rather than being cut off by
+    loose full-text matches. Work descriptions are still enriched in parallel
+    and the existing Open Library card UI is unchanged.
+
+  Verified:
+  - /openlibrary search "the rust programming language" returns The Rust
+    Programming Language first, followed by its other editions and related
+    Rust language books such as Best Practices of Rust Programming Language,
+    Rust Web Programming, Rust Cookbook, and Rust Standard Library Cookbook.
+  - /openlibrary search "rust programming language" also ranks the Rust
+    language books first and returns 20 cards.
+  - py_compile passes for app/chat_server.py.
+}
+
+task.openlibrary_search (completed) {
+  create new command: /openlibrary search <keywords>
+  example:
+  https://openlibrary.org/search/inside.json?q=rust+borrow+checker
+
+  learn from the current UI/UX of /news earch <keywords>
+
+  in the search result, i would like to have:
+  1. the book title/url/description
+  2. the related text
+
+  Implemented:
+  app/chat_server.py
+  - Added /openlibrary search <keywords>. It calls Open Library's full-text
+  inside-search endpoint
+  (https://openlibrary.org/search/inside.json?q=<keywords>) and normalizes
+  each hit into a book card with title, authors, Open Library URL, catalogue
+  metadata, a description, and up to three matched passages from the
+  highlight snippets. Duplicate editions of the same work are merged.
+  - Descriptions come from the work record when Open Library has one. They are
+  fetched in parallel (cached in memory) so the search itself stays fast; when
+  no catalogue description exists, a metadata description is used instead.
+  - Added /openlibrary to the command list, argument completion, /help, and the
+  autocomplete handler for its "search" subcommand.
+  app/chat.html
+  - Reused the /gutenberg book-card layout and the /news-style command result
+  flow. Each card shows the title, authors, description, related full-text
+  passages, and a link to the Open Library work page. Unlike /gutenberg cards,
+  these cards open the source page in a new tab because the books are not
+  downloaded into the local reader.
+  - Added "Open Library" as the command entry label and Tab completion for
+  /openlibrary search.
+
+  Verified:
+  - `search_openlibrary_inside("rust borrow checker", limit=3)` returns title,
+  authors, description, Open Library URL, and related-text passages for each
+  book.
+  - The command emits the same `books` SSE event used by /gutenberg, and the
+  usage message is shown when "search <keywords>" is missing.
+  - `py_compile` passes for app/chat_server.py and `node --check` passes for the
+  browser script.
+}

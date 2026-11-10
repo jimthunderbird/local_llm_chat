@@ -4,7 +4,7 @@
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /youtube, /news, /googlenews, /medium,
-/gutenberg, /wiki, /wiki_article, /article, /dict, and /ask. The browser is a
+/gutenberg, /openlibrary, /wiki, /wiki_article, /article, /dict, and /ask. The browser is a
 pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
 
 Every question searches the one global trunk corpus. Tags are no longer a
@@ -89,6 +89,7 @@ import sys
 import threading
 import wave
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -130,6 +131,7 @@ WEB_COMMANDS = {
     "/googlenews": "search Google News for the latest stories: /googlenews <keywords>",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/gutenberg": "search Project Gutenberg books: /gutenberg search <keywords>; click a book to read it and ask questions",
+    "/openlibrary": "search inside Open Library books: /openlibrary search <keywords>",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
 }
 
@@ -375,11 +377,16 @@ COMMAND_ARGUMENTS = {
     "/googlenews",
     "/medium",
     "/gutenberg",
+    "/openlibrary",
 }
 
-# Subcommands grouped under /gutenberg.
+# Subcommands grouped under /gutenberg and /openlibrary.
 GUTENBERG_SUBCOMMANDS = {
     "search": "search Project Gutenberg by title, author, or keyword",
+}
+
+OPENLIBRARY_SUBCOMMANDS = {
+    "search": "search inside Open Library books by keyword",
 }
 
 # Project Gutenberg search and per-book chat. /gutenberg search mirrors the
@@ -392,10 +399,19 @@ GUTENBERG_SUBCOMMANDS = {
 # /article section-aware RAG pipeline, so a multi-megabyte novel never goes
 # into the model's context at once.
 OPENLIBRARY_SEARCH_URL = "https://openlibrary.org/search.json"
+OPENLIBRARY_INSIDE_SEARCH_URL = "https://openlibrary.org/search/inside.json"
+OPENLIBRARY_BOOK_PAGE_URL = "https://openlibrary.org{key}"
+OPENLIBRARY_WORK_JSON_URL = "https://openlibrary.org{key}.json"
 OPENLIBRARY_SEARCH_FIELDS = (
     "key,title,author_name,first_publish_year,language,subject,"
     "id_project_gutenberg,cover_i,cover_edition_key,edition_count,ebook_access"
 )
+OPENLIBRARY_RESULT_LIMIT = 20
+OPENLIBRARY_METADATA_SEARCH_LIMIT = 60
+OPENLIBRARY_HIGHLIGHT_LIMIT = 3
+OPENLIBRARY_DESCRIPTION_LIMIT = 520
+OPENLIBRARY_DESCRIPTION_CACHE: dict[str, str] = {}
+OPENLIBRARY_DESCRIPTION_CACHE_LOCK = threading.Lock()
 GUTENBERG_SEARCH_URL = "https://www.gutenberg.org/ebooks/search/"
 GUTENBERG_SEARCH_BLOCK_RE = re.compile(
     r'<li class="booklink">(.*?)</li>', re.IGNORECASE | re.DOTALL
@@ -5013,6 +5029,473 @@ def _openlibrary_search_params(keyword: str) -> dict:
     return {"q": keyword}
 
 
+def _openlibrary_plain_text(value: object, limit: int = 0) -> str:
+    """Flatten an Open Library text field into readable plain text."""
+    if isinstance(value, dict):
+        value = value.get("value") or value.get("description") or ""
+    if isinstance(value, (list, tuple)):
+        parts = [_openlibrary_plain_text(item) for item in value]
+        value = " ".join(part for part in parts if part)
+    text = str(value or "")
+    text = text.replace("{{{", "").replace("}}}", "")
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = " ".join(text.split())
+    if limit > 0 and len(text) > limit:
+        shortened = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-")
+        text = (shortened or text[:limit].rstrip()) + "…"
+    return text
+
+
+def _openlibrary_key(value: object) -> str:
+    """Return a normalized Open Library key such as /works/OL123W."""
+    key = str(value or "").strip()
+    if not key:
+        return ""
+    if key.startswith(("http://", "https://")):
+        path = urlparse(key).path
+        key = path or ""
+    if key and not key.startswith("/"):
+        key = "/" + key
+    return key
+
+
+def _openlibrary_first_text(value: object) -> str:
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            text = _openlibrary_plain_text(item)
+            if text:
+                return text
+        return ""
+    return _openlibrary_plain_text(value)
+
+
+def _openlibrary_related_text(hit: dict, keyword: str) -> list[str]:
+    """Return the strongest full-text snippets for one search hit."""
+    highlight = hit.get("highlight") if isinstance(hit, dict) else None
+    raw_snippets = highlight.get("text") if isinstance(highlight, dict) else None
+    if not isinstance(raw_snippets, list):
+        return []
+    terms = {
+        token
+        for token in re.split(r"[^a-z0-9]+", keyword.casefold())
+        if len(token) > 1
+    }
+    snippets: list[tuple[float, int, str]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_snippets):
+        text = _openlibrary_plain_text(raw, limit=520)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        tokens = {
+            token
+            for token in re.split(r"[^a-z0-9]+", text.casefold())
+            if len(token) > 1
+        }
+        coverage = len(terms & tokens) / len(terms) if terms else 0.0
+        snippets.append((-coverage, index, text))
+    snippets.sort()
+    return [text for _coverage, _index, text in snippets[:OPENLIBRARY_HIGHLIGHT_LIMIT]]
+
+
+def _openlibrary_metadata_description(
+    authors: str,
+    first_publish_year: int,
+    publisher: str,
+    subjects: list[str],
+) -> str:
+    parts: list[str] = []
+    if authors:
+        parts.append(f"By {authors}")
+    if first_publish_year > 0:
+        parts.append(f"first published {first_publish_year}")
+    if publisher:
+        parts.append(f"published by {publisher}")
+    if subjects:
+        parts.append(f"subjects: {', '.join(subjects[:3])}")
+    return " · ".join(parts)
+
+
+def _openlibrary_doc_card(doc: dict, keyword: str) -> dict | None:
+    """Normalize one Open Library catalogue work into a book card.
+
+    Catalogue results carry no full-text excerpts, but they are the only place
+    where a title/series phrase such as "the rust programming language" is
+    matched as a whole. They are merged with the inside-search hits so books
+    about the complete phrase outrank books that merely mention its words.
+    """
+    if not isinstance(doc, dict):
+        return None
+    title = str(doc.get("title") or "").strip()
+    if not title:
+        return None
+    work_key = _openlibrary_key(doc.get("key"))
+    if not work_key:
+        return None
+    authors = ", ".join(
+        str(name).strip()
+        for name in (doc.get("author_name") or [])
+        if str(name).strip()
+    )
+    subjects = [
+        str(value).strip()
+        for value in (doc.get("subject") or [])
+        if str(value).strip()
+    ][:5]
+    languages = [
+        str(value).strip()
+        for value in (doc.get("language") or [])
+        if str(value).strip()
+    ]
+    try:
+        first_publish_year = int(doc.get("first_publish_year") or 0)
+    except (TypeError, ValueError):
+        first_publish_year = 0
+    try:
+        download_count = int(doc.get("download_count") or 0)
+    except (TypeError, ValueError):
+        download_count = 0
+    return {
+        "id": work_key.lstrip("/"),
+        "title": title,
+        "authors": authors,
+        "description": _openlibrary_metadata_description(
+            authors, first_publish_year, "", subjects
+        ),
+        "related_text": [],
+        "languages": languages,
+        "subjects": subjects,
+        "first_publish_year": first_publish_year,
+        "download_count": download_count,
+        "url": OPENLIBRARY_BOOK_PAGE_URL.format(key=work_key),
+        "text_url": "",
+        "source": "openlibrary",
+        "work_key": work_key,
+    }
+
+
+def _openlibrary_hit_card(hit: dict, keyword: str) -> dict | None:
+    """Normalize one Open Library full-text search hit into a book card."""
+    if not isinstance(hit, dict):
+        return None
+    edition = hit.get("edition") if isinstance(hit.get("edition"), dict) else {}
+    fields = hit.get("fields") if isinstance(hit.get("fields"), dict) else {}
+
+    title = _openlibrary_first_text(
+        edition.get("title") or fields.get("meta_title") or ""
+    )
+    if not title:
+        return None
+
+    authors = ", ".join(
+        str(author.get("name") or "").strip()
+        for author in (edition.get("authors") or [])
+        if isinstance(author, dict) and str(author.get("name") or "").strip()
+    )
+    if not authors:
+        authors = _openlibrary_first_text(fields.get("meta_creator"))
+
+    publisher = _openlibrary_first_text(fields.get("meta_publisher"))
+    subjects = [
+        _openlibrary_plain_text(value)
+        for value in (fields.get("meta_subject") or [])
+        if _openlibrary_plain_text(value)
+    ][:5]
+
+    first_publish_year = 0
+    for value in (
+        _openlibrary_first_text(fields.get("meta_year")),
+        str(edition.get("publish_date") or ""),
+        _openlibrary_first_text(fields.get("meta_date")),
+    ):
+        match = re.search(r"\b(\d{4})\b", value)
+        if match:
+            first_publish_year = int(match.group(1))
+            break
+
+    work_key = _openlibrary_key(edition.get("work_key"))
+    edition_key = _openlibrary_key(edition.get("key"))
+    page_key = work_key or edition_key
+    card_id = (page_key or str(hit.get("_id") or "")).lstrip("/")
+    if not card_id:
+        return None
+    url = (
+        OPENLIBRARY_BOOK_PAGE_URL.format(key=page_key)
+        if page_key
+        else f"https://openlibrary.org/search/inside?q={quote(keyword)}"
+    )
+    description = _openlibrary_metadata_description(
+        authors, first_publish_year, publisher, subjects
+    )
+    return {
+        "id": card_id,
+        "title": title,
+        "authors": authors,
+        "description": description,
+        "related_text": _openlibrary_related_text(hit, keyword),
+        "languages": [],
+        "subjects": subjects,
+        "first_publish_year": first_publish_year,
+        "download_count": 0,
+        "url": url,
+        "text_url": "",
+        "source": "openlibrary",
+        "work_key": work_key,
+    }
+
+
+def _openlibrary_work_description(work_key: str) -> str:
+    """Fetch a work description, caching both hits and misses in memory."""
+    work_key = _openlibrary_key(work_key)
+    if not work_key.startswith("/works/"):
+        return ""
+    with OPENLIBRARY_DESCRIPTION_CACHE_LOCK:
+        if work_key in OPENLIBRARY_DESCRIPTION_CACHE:
+            return OPENLIBRARY_DESCRIPTION_CACHE[work_key]
+    description = ""
+    try:
+        response = requests.get(
+            OPENLIBRARY_WORK_JSON_URL.format(key=work_key),
+            headers={**chat.HTTP_HEADERS, "Accept": "application/json"},
+            timeout=(4, 10),
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict):
+            description = _openlibrary_plain_text(
+                data.get("description") or data.get("first_sentence") or "",
+                limit=OPENLIBRARY_DESCRIPTION_LIMIT,
+            )
+    except (requests.RequestException, ValueError):
+        description = ""
+    with OPENLIBRARY_DESCRIPTION_CACHE_LOCK:
+        OPENLIBRARY_DESCRIPTION_CACHE[work_key] = description
+    return description
+
+
+def _openlibrary_attach_descriptions(cards: list[dict]) -> None:
+    """Add real work descriptions in parallel, keeping metadata fallbacks."""
+    pending = [
+        (card, str(card.get("work_key") or ""))
+        for card in cards
+        if str(card.get("work_key") or "").startswith("/works/")
+    ]
+    if not pending:
+        return
+    with ThreadPoolExecutor(max_workers=min(8, len(pending))) as executor:
+        futures = {
+            executor.submit(_openlibrary_work_description, work_key): card
+            for card, work_key in pending
+        }
+        for future in as_completed(futures):
+            card = futures[future]
+            try:
+                description = future.result()
+            except Exception:
+                description = ""
+            if description:
+                card["description"] = description
+    for card in cards:
+        card.pop("work_key", None)
+
+
+def _openlibrary_card_relevance(card: dict, keyword: str) -> float:
+    """Score a book card against the whole query phrase and its variants.
+
+    A full-text hit can match every word separately (for "the rust programming
+    language" that includes books about rust the metal or the fungal disease),
+    while the catalogue result matches the phrase as a title. Title/author
+    coverage and an exact phrase match therefore dominate, and excerpt coverage
+    only breaks ties between otherwise similar cards.
+    """
+    title_tokens = set(_gutenberg_tokens(str(card.get("title") or "")))
+    author_tokens = set(_gutenberg_tokens(str(card.get("authors") or "")))
+    subject_tokens = set(_gutenberg_tokens(" ".join(card.get("subjects") or [])))
+    excerpt_token_sets = [
+        set(_gutenberg_tokens(text))
+        for text in (card.get("related_text") or [])
+    ]
+    description_tokens = set(_gutenberg_tokens(str(card.get("description") or "")))
+    title_text = " ".join(sorted(title_tokens))
+    variant_texts = {
+        " ".join(sorted(_gutenberg_tokens(value)))
+        for value in _gutenberg_query_variants(keyword)
+    }
+    best = 0.0
+    for terms in _gutenberg_query_term_sets(keyword):
+        if not terms:
+            continue
+        total = len(terms)
+        title_coverage = len(terms & title_tokens) / total
+        author_coverage = len(terms & author_tokens) / total
+        score = title_coverage * 8.0 + author_coverage * 2.0
+        if terms <= title_tokens:
+            score += 4.0
+        if title_text in variant_texts:
+            score += 6.0
+        if excerpt_token_sets:
+            excerpt_coverage = max(
+                len(terms & tokens) / total for tokens in excerpt_token_sets
+            )
+            score += excerpt_coverage * 2.0
+        score += len(terms & description_tokens) / total * 1.0
+        score += len(terms & subject_tokens) / total * 1.0
+        best = max(best, score)
+    return best
+
+
+def _combine_openlibrary_cards(
+    keyword: str,
+    *groups: list[dict],
+    limit: int = OPENLIBRARY_RESULT_LIMIT,
+) -> list[dict]:
+    """Merge inside-search and catalogue cards, then rank by phrase match."""
+    by_id: dict[str, dict] = {}
+    order: list[str] = []
+    for group in groups:
+        for card in group or []:
+            if not isinstance(card, dict):
+                continue
+            card_id = str(card.get("id") or "")
+            if not card_id:
+                continue
+            existing = by_id.get(card_id)
+            if existing is None:
+                by_id[card_id] = dict(card)
+                order.append(card_id)
+                continue
+            if len(str(card.get("description") or "")) > len(
+                str(existing.get("description") or "")
+            ):
+                existing["description"] = card["description"]
+            for field in ("authors", "title"):
+                if not existing.get(field) and card.get(field):
+                    existing[field] = card[field]
+            if not existing.get("first_publish_year") and card.get("first_publish_year"):
+                existing["first_publish_year"] = card["first_publish_year"]
+            if not existing.get("work_key") and card.get("work_key"):
+                existing["work_key"] = card["work_key"]
+            for field in ("languages", "subjects"):
+                merged = list(existing.get(field) or [])
+                for value in card.get(field) or []:
+                    if value not in merged:
+                        merged.append(value)
+                existing[field] = merged
+            merged_text = list(existing.get("related_text") or [])
+            for snippet in card.get("related_text") or []:
+                if snippet not in merged_text:
+                    merged_text.append(snippet)
+            existing["related_text"] = merged_text[:OPENLIBRARY_HIGHLIGHT_LIMIT]
+    cards = [by_id[card_id] for card_id in order]
+    ranked = sorted(
+        enumerate(cards),
+        key=lambda pair: (-_openlibrary_card_relevance(pair[1], keyword), pair[0]),
+    )
+    return [card for _index, card in ranked[: max(1, limit)]]
+
+
+def _fetch_openlibrary_inside(keyword: str, limit: int) -> list[dict]:
+    """Fetch and normalize the full-text (inside) search hits."""
+    try:
+        response = requests.get(
+            OPENLIBRARY_INSIDE_SEARCH_URL,
+            params={"q": keyword, "limit": max(20, limit * 3)},
+            headers={**chat.HTTP_HEADERS, "Accept": "application/json"},
+            timeout=(10, 40),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"Open Library search failed: {exc}") from exc
+
+    hits = data.get("hits") if isinstance(data, dict) else None
+    raw_hits = hits.get("hits") if isinstance(hits, dict) else None
+    if not isinstance(raw_hits, list):
+        raise RuntimeError("Open Library returned an unexpected response.")
+
+    cards: list[dict] = []
+    for hit in raw_hits:
+        card = _openlibrary_hit_card(hit, keyword)
+        if card is not None:
+            cards.append(card)
+    return cards
+
+
+def _fetch_openlibrary_metadata(keyword: str, limit: int) -> list[dict]:
+    """Fetch catalogue works whose title/author matches the whole query."""
+    params = _openlibrary_search_params(keyword)
+    params["fields"] = OPENLIBRARY_SEARCH_FIELDS
+    params["limit"] = max(20, limit * 3)
+    try:
+        response = requests.get(
+            OPENLIBRARY_SEARCH_URL,
+            params=params,
+            headers={**chat.HTTP_HEADERS, "Accept": "application/json"},
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"Open Library catalogue search failed: {exc}") from exc
+    docs = data.get("docs") if isinstance(data, dict) else None
+    if not isinstance(docs, list):
+        return []
+    cards: list[dict] = []
+    for doc in docs:
+        card = _openlibrary_doc_card(doc, keyword)
+        if card is not None:
+            cards.append(card)
+    return cards
+
+
+def search_openlibrary_inside(
+    keyword: str, limit: int = OPENLIBRARY_RESULT_LIMIT
+) -> list[dict]:
+    """Search Open Library books and return cards for the whole query.
+
+    Full-text (inside) hits supply matching passages, while the catalogue
+    search supplies works whose title/author matches the complete phrase (for
+    example "the rust programming language"). Both sources are merged, ranked
+    by phrase/title relevance, and the remaining work descriptions are fetched
+    in parallel.
+    """
+    keyword = " ".join(str(keyword or "").split())
+    if not keyword:
+        return []
+    limit = max(1, min(int(limit), 50))
+
+    inside_cards: list[dict] = []
+    metadata_cards: list[dict] = []
+    errors: list[str] = []
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            executor.submit(_fetch_openlibrary_inside, keyword, limit): "inside",
+            executor.submit(_fetch_openlibrary_metadata, keyword, limit): "metadata",
+        }
+        for future in as_completed(futures):
+            try:
+                cards = future.result()
+            except RuntimeError as exc:
+                errors.append(str(exc))
+                continue
+            if futures[future] == "inside":
+                inside_cards = cards
+            else:
+                metadata_cards = cards
+    if not inside_cards and not metadata_cards and errors:
+        raise RuntimeError("; ".join(errors))
+
+    cards = _combine_openlibrary_cards(
+        keyword, metadata_cards, inside_cards, limit=limit
+    )
+    _openlibrary_attach_descriptions(cards)
+    for card in cards:
+        if not card.get("description"):
+            card["description"] = f"Open Library match for {keyword!r}."
+    return cards
+
+
 def _search_gutenberg_openlibrary(
     keyword: str, limit: int = GUTENBERG_BOOK_RESULT_LIMIT
 ) -> list[dict]:
@@ -6312,6 +6795,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return [
                 {"value": name, "description": description}
                 for name, description in GUTENBERG_SUBCOMMANDS.items()
+                if name.startswith(lowered)
+            ]
+
+        if kind == "openlibrary_subcommands":
+            lowered = query.lower()
+            return [
+                {"value": name, "description": description}
+                for name, description in OPENLIBRARY_SUBCOMMANDS.items()
                 if name.startswith(lowered)
             ]
 
@@ -8029,6 +8520,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_medium(argument)
         elif name == "/gutenberg":
             self._command_gutenberg(argument)
+        elif name == "/openlibrary":
+            self._command_openlibrary(argument)
         elif name == "/wiki":
             self._command_wiki(argument)
         elif name == "/wiki_article":
@@ -9407,6 +9900,50 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         # this final event replaces them with the merged, relevance-ranked
         # list so an exact catalogue hit is not hidden behind loose news hits.
         publish(items)
+
+    def _command_openlibrary(self, argument: str) -> None:
+        """Search inside Open Library books and stream clickable book cards.
+
+        Usage: /openlibrary search <keywords>
+        Open Library's inside-search endpoint matches the query against the
+        full text of digitized books. Each card shows the title, authors,
+        catalogue description, and the passages where the query matched. The
+        card links to the Open Library record; unlike /gutenberg these books
+        are not downloaded into the local reader.
+        """
+        subcommand, _, rest = argument.strip().partition(" ")
+        keyword = rest.strip()
+        if subcommand.lower() != "search" or not keyword:
+            self._sse_text(
+                "output",
+                "\nUsage: /openlibrary search <keywords>\n"
+                "Example: /openlibrary search rust borrow checker\n",
+            )
+            return
+
+        heading = f"Open Library · {keyword}"
+        self._sse_text(
+            "log", f"[openlibrary: searching inside books for {keyword!r}]"
+        )
+        try:
+            items = search_openlibrary_inside(keyword)
+        except RuntimeError as exc:
+            self._sse_text("error", f"\n{exc}\n")
+            return
+
+        self._sse(
+            "books",
+            {
+                "keyword": keyword,
+                "heading": heading,
+                "items": items,
+            },
+        )
+        if not items:
+            self._sse_text(
+                "output",
+                f"\n/openlibrary: no books matched {keyword!r}.\n",
+            )
 
     def _stream_news_events(
         self, script_name: str, command: str, extra_argv: list[str]

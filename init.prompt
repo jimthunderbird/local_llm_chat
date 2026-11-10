@@ -202,6 +202,10 @@ group app/chat.html and app/chat_server.py {
     complete tasks in ./prompts/image.prompt
   }
 
+  task (completed) {
+    complete tasks in ./prompts/openlibrary.prompt
+  }
+
   task (persistent) {
     complete tasks in ./prompts/chat_common.prompt  
   }

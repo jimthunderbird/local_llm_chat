@@ -2019,6 +2019,36 @@
     font-size: 10.5px;
     border-bottom: 1px dotted #3d6b8f;
   }
+  .book-card[href] {
+    color: inherit;
+    text-decoration: none;
+    user-select: text;
+  }
+  .book-description {
+    color: #b9cad9;
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+  .book-excerpts {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 2px;
+    padding-top: 6px;
+    border-top: 1px solid #1c2f40;
+  }
+  .book-excerpts-label {
+    color: var(--dimmer);
+    font-size: 10px;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+  }
+  .book-excerpt {
+    margin: 0;
+    color: #aebfce;
+    font-size: 11px;
+    line-height: 1.45;
+  }
   .book-results-error { color: var(--warn); font-size: 11px; margin-top: 6px; }
 
   #gutenberg-panel {
@@ -4866,6 +4896,10 @@ function normalizeBookItems(rawItems) {
         : [],
       downloadCount: Number(item?.download_count) || 0,
       firstPublishYear: Number(item?.first_publish_year) || 0,
+      description: String(item?.description || "").trim(),
+      relatedText: Array.isArray(item?.related_text)
+        ? item.related_text.map((value) => String(value || "").trim()).filter(Boolean)
+        : [],
       url: String(item?.url || "").trim(),
       textUrl: String(item?.text_url || "").trim(),
     }))
@@ -4889,7 +4923,10 @@ function renderBookResults(entry) {
   label.textContent = entry.booksHeading || "Project Gutenberg";
   const note = document.createElement("span");
   note.className = "book-list-note";
-  note.textContent = `${items.length} book${items.length === 1 ? "" : "s"} · click to read and ask questions`;
+  const canRead = items.some((item) => item.textUrl);
+  note.textContent = canRead
+    ? `${items.length} book${items.length === 1 ? "" : "s"} · click to read and ask questions`
+    : `${items.length} book${items.length === 1 ? "" : "s"} · full-text matches · open on Open Library`;
   head.appendChild(label);
   head.appendChild(note);
   container.appendChild(head);
@@ -4897,20 +4934,29 @@ function renderBookResults(entry) {
   const cards = document.createElement("div");
   cards.className = "book-cards";
   for (const item of items) {
-    const card = document.createElement("div");
+    const readable = Boolean(item.textUrl);
+    const card = document.createElement(readable ? "div" : "a");
     card.className = "book-card";
-    card.tabIndex = 0;
-    card.setAttribute("role", "button");
-    card.title = item.authors
+    const cardTitle = item.authors
       ? `${item.title} · ${item.authors}`
       : item.title;
-    const open = () => openGutenbergModal(item);
-    card.addEventListener("click", open);
-    card.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      open();
-    });
+    if (readable) {
+      card.tabIndex = 0;
+      card.setAttribute("role", "button");
+      card.title = cardTitle;
+      const open = () => openGutenbergModal(item);
+      card.addEventListener("click", open);
+      card.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        open();
+      });
+    } else {
+      card.href = item.url || "#";
+      card.target = "_blank";
+      card.rel = "noopener noreferrer";
+      card.title = `${cardTitle} · open on Open Library`;
+    }
 
     const title = document.createElement("div");
     title.className = "book-title";
@@ -4922,6 +4968,13 @@ function renderBookResults(entry) {
       authors.className = "book-authors";
       authors.textContent = item.authors;
       card.appendChild(authors);
+    }
+
+    if (item.description) {
+      const description = document.createElement("div");
+      description.className = "book-description";
+      description.textContent = item.description;
+      card.appendChild(description);
     }
 
     const metaParts = [];
@@ -4938,9 +4991,25 @@ function renderBookResults(entry) {
     meta.textContent = metaParts.join(" · ") || `Book #${item.id}`;
     card.appendChild(meta);
 
+    if (item.relatedText.length) {
+      const excerpts = document.createElement("div");
+      excerpts.className = "book-excerpts";
+      const excerptLabel = document.createElement("div");
+      excerptLabel.className = "book-excerpts-label";
+      excerptLabel.textContent = "Related text";
+      excerpts.appendChild(excerptLabel);
+      for (const text of item.relatedText) {
+        const excerpt = document.createElement("p");
+        excerpt.className = "book-excerpt";
+        excerpt.textContent = text;
+        excerpts.appendChild(excerpt);
+      }
+      card.appendChild(excerpts);
+    }
+
     const action = document.createElement("span");
     action.className = "book-action";
-    action.textContent = "Read & ask →";
+    action.textContent = readable ? "Read & ask →" : "Open on Open Library ↗";
     card.appendChild(action);
     cards.appendChild(card);
   }
@@ -8173,7 +8242,9 @@ function submitText(text, fromChoice = false) {
           ? "Medium"
           : commandName === "gutenberg"
             ? "Project Gutenberg"
-            : undefined,
+            : commandName === "openlibrary"
+              ? "Open Library"
+              : undefined,
   });
   appendEntry(entry);
   resetAnswerSourceStatus();
@@ -8485,11 +8556,13 @@ function completionContext() {
       }
     }
   }
-  else if (name === "/gutenberg") {
+  else if (name === "/gutenberg" || name === "/openlibrary") {
     const args = value.slice(firstSpace + 1, caret);
     const subSeparator = args.search(/\s/);
     if (subSeparator < 0) {
-      kind = "gutenberg_subcommands";
+      kind = name === "/gutenberg"
+        ? "gutenberg_subcommands"
+        : "openlibrary_subcommands";
       start = firstSpace + 1;
     } else {
       return null;
