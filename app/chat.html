@@ -6664,7 +6664,28 @@ function openNewsModal(item) {
   renderNewsModal(item);
   renderNewsAction(item);
   newsPanelEl.hidden = false;
+  // renderNewsModal() runs while the panel is still hidden, and a scrollTop
+  // assignment on a display:none subtree is ignored: the browser restores the
+  // body's previous offset when the panel is shown, so a new story could open
+  // at the end of the previous story. Re-apply the reset after the panel has
+  // a layout box (and once more after the first frame) so every story opens at
+  // its top.
+  resetNewsBodyScroll(item);
   ensureNewsArticle(item);
+}
+
+let newsBodyScrollFrame = 0;
+function resetNewsBodyScroll(item) {
+  const reset = () => {
+    if (newsItem !== item) return;
+    newsBodyEl.scrollTop = 0;
+  };
+  reset();
+  if (newsBodyScrollFrame) cancelAnimationFrame(newsBodyScrollFrame);
+  newsBodyScrollFrame = requestAnimationFrame(() => {
+    newsBodyScrollFrame = 0;
+    reset();
+  });
 }
 
 /*
@@ -6878,6 +6899,13 @@ let newsChatController = null;
 let newsChatFresh = true;
 let newsChatBusy = false;
 let newsChatGeneration = 0;
+// While an answer streams, stay anchored at its beginning instead of chasing
+// the newest token at the bottom. A reader scroll during the stream releases
+// the anchor so the view is not pulled back.
+let newsChatStickToBottom = true;
+let newsChatPinnedMessage = null;
+let newsChatUserScrolledAway = false;
+let newsChatProgrammaticScroll = false;
 
 function newsChatClearMessages() {
   newsChatMessagesEl.textContent = "";
@@ -6890,6 +6918,37 @@ function newsChatClearMessages() {
 
 function newsChatScrollToBottom() {
   newsChatMessagesEl.scrollTop = newsChatMessagesEl.scrollHeight;
+}
+
+function newsChatSetScrollTop(value) {
+  newsChatProgrammaticScroll = true;
+  newsChatMessagesEl.scrollTop = value;
+  // Scroll events for a programmatic move are dispatched before the next
+  // frame; clear the guard then so a real reader scroll is still detected.
+  requestAnimationFrame(() => {
+    newsChatProgrammaticScroll = false;
+  });
+}
+
+function newsChatNearBottom() {
+  return (
+    newsChatMessagesEl.scrollHeight -
+      newsChatMessagesEl.scrollTop -
+      newsChatMessagesEl.clientHeight <
+    40
+  );
+}
+
+// Put the top of an assistant message at the top of the message list. Used
+// once when an answer starts so the reader sees the beginning while the rest
+// of the answer streams in below it.
+function newsChatScrollMessageToTop(message) {
+  if (!message?.el) return;
+  const containerTop = newsChatMessagesEl.getBoundingClientRect().top;
+  const messageTop = message.el.getBoundingClientRect().top;
+  const offset =
+    newsChatMessagesEl.scrollTop + messageTop - containerTop;
+  newsChatSetScrollTop(Math.max(0, offset - 4));
 }
 
 function newsChatAppendUser(text) {
@@ -6941,7 +7000,14 @@ function newsChatRenderMessage(message) {
     error.textContent = message.error;
     message.el.appendChild(error);
   }
-  newsChatScrollToBottom();
+  if (
+    message === newsChatPinnedMessage &&
+    !newsChatUserScrolledAway
+  ) {
+    newsChatScrollMessageToTop(message);
+  } else if (newsChatStickToBottom) {
+    newsChatScrollToBottom();
+  }
 }
 
 function scheduleNewsChatRender(message) {
@@ -6961,6 +7027,9 @@ function resetNewsChat(hide = true) {
   }
   newsChatFresh = true;
   newsChatBusy = false;
+  newsChatStickToBottom = true;
+  newsChatPinnedMessage = null;
+  newsChatUserScrolledAway = false;
   if (newsChatSendEl) newsChatSendEl.disabled = false;
   if (newsChatInputEl) newsChatInputEl.value = "";
   if (newsChatMessagesEl) newsChatClearMessages();
@@ -6990,6 +7059,12 @@ function sendNewsChatMessage() {
   newsChatSendEl.disabled = true;
   newsChatAppendUser(question);
   const message = newsChatAppendAssistant();
+  // Show the answer from its first line. The reader can scroll down to follow
+  // the streaming text; the list no longer jumps to the answer's bottom.
+  newsChatStickToBottom = false;
+  newsChatPinnedMessage = message;
+  newsChatUserScrolledAway = false;
+  newsChatScrollMessageToTop(message);
   const controller = new AbortController();
   newsChatController = controller;
 
@@ -7046,6 +7121,17 @@ function sendNewsChatMessage() {
       newsChatInputEl.focus({ preventScroll: true });
     });
 }
+
+newsChatMessagesEl.addEventListener("scroll", () => {
+  // A scroll the reader caused while an answer is pinned means they want to
+  // read another part of the conversation; stop pulling the view back to the
+  // answer's first line. Programmatic pins are not reader intent.
+  if (!newsChatProgrammaticScroll && newsChatPinnedMessage?.streaming) {
+    newsChatUserScrolledAway = true;
+  }
+  if (newsChatBusy) return;
+  newsChatStickToBottom = newsChatNearBottom();
+}, { passive: true });
 
 newsChatMessagesEl.addEventListener("click", (event) => {
   const wordEl = event.target.closest?.(".word");

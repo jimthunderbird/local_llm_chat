@@ -88,6 +88,42 @@ task (persistent) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
+task.news_chat_do_not_scroll_to_bottom (completed) {
+  please learn from task.news_article_scrolled_to_bottom:
+  - in the news chat on the right column, after typing a question, the answer should show without scrolling to the answer's bottom
+
+  Implemented:
+  app/chat.html
+  - The in-modal news chat no longer follows the newest token while an answer
+    streams. On send, the new assistant message is pinned so its first line is
+    at the top of the message list, and every streaming render re-applies that
+    anchor instead of scrolling to the answer's bottom.
+  - A reader scroll during streaming releases the pin, so the answer does not
+    keep pulling the view back to the top while they read another part of the
+    conversation. Programmatic pin scrolls are distinguished from reader
+    scrolls, and the pin resets when the chat closes or a story is reopened.
+}
+
+task.news_article_scrolled_to_bottom (completed) {
+  when we load the news article in the modal, it scrolls to the end of the article, we should let it focus on the top part of the article and do not do the scrolling
+
+  Root cause:
+  renderNewsModal() ran before newsPanelEl.hidden was cleared. A scrollTop
+  assignment on a display:none subtree is ignored, and the browser restores
+  the news body's previous offset when the panel is shown, so opening a story
+  after the previous one had been scrolled left the new story at that offset
+  (often the end).
+
+  Implemented:
+  app/chat.html
+  - Added resetNewsBodyScroll(item), which clears the news body scroll offset
+    after the panel is visible and again on the next animation frame, guarded
+    so a newer story is never reset by an older request.
+  - openNewsModal() now shows the panel first and then resets the scroll, so
+    every story opens at its top instead of inheriting the previous article's
+    position. renderNewsModal() still pins the top while paragraphs stream in.
+}
+
 task.bug.news_list_loading_2 (completed) {
   please make sure the following news articles load {
     http://web.archive.org/web/20260211100204id_/https://www.hollywoodintoto.com/clifford-the-big-red-dog-review-2021/
