@@ -3246,17 +3246,31 @@ const COPY_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="fa
 function makeVideoLink(annotation) {
   const link = document.createElement("a");
   link.className = "video-link";
-  link.href = annotation.url;
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
   const isNews = annotation.kind === "news";
-  link.title = annotation.title
-    ? `${isNews ? "Open the source story" : "Watch the source video"}: ${annotation.title}`
-    : `${isNews ? "Open the source story" : "Watch the source video"} (${annotation.video_id || (isNews ? "news" : "YouTube")})`;
+  if (isNews) {
+    // A news icon opens the learned story in the in-app modal. The modal
+    // itself links out to the original article via its "Open article" link.
+    link.href = "#";
+    link.title = annotation.title
+      ? `Open the source story: ${annotation.title}`
+      : `Open the source story (${annotation.video_id || "news"})`;
+  } else {
+    link.href = annotation.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.title = annotation.title
+      ? `Watch the source video: ${annotation.title}`
+      : `Watch the source video (${annotation.video_id || "YouTube"})`;
+  }
   link.setAttribute("aria-label", link.title);
   link.innerHTML = isNews ? NEWS_ICON_SVG : VIDEO_ICON_SVG;
   // Keep the dictionary word-click handler from treating the icon as a word.
-  link.addEventListener("click", (event) => event.stopPropagation());
+  link.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (!isNews) return;
+    event.preventDefault();
+    openNewsStory(annotation.video_id, annotation.url, annotation.title);
+  });
   return link;
 }
 
@@ -3797,7 +3811,9 @@ function renderMarkdown(text, clickable = true, annotations = null, options = nu
   const annotate = (el) => {
     const annotation = annotationsByIndex.get(blockIndex);
     blockIndex += 1;
-    if (annotation && annotation.url) el.appendChild(makeVideoLink(annotation));
+    if (annotation && (annotation.url || annotation.kind === "news")) {
+      el.appendChild(makeVideoLink(annotation));
+    }
   };
   let i = 0;
 
@@ -6620,6 +6636,46 @@ function openNewsModal(item) {
   renderNewsModal(item);
   renderNewsAction(item);
   newsPanelEl.hidden = false;
+}
+
+/*
+ * Open a learned story cited by an answer paragraph. Annotations only carry
+ * the story id, so load its cached text and metadata first. If the story is
+ * unavailable, fall back to the original article URL rather than doing
+ * nothing when the citation icon is clicked.
+ */
+function openNewsStory(newsId, fallbackUrl = "", fallbackTitle = "") {
+  const id = String(newsId || "");
+  if (!/^news_[A-Za-z0-9]+$/.test(id)) {
+    if (fallbackUrl) window.open(fallbackUrl, "_blank", "noopener,noreferrer");
+    return;
+  }
+  fetch(`/api/news_item?id=${encodeURIComponent(id)}`)
+    .then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    })
+    .then((data) => {
+      openNewsModal({
+        index: 0,
+        newsId: data.id || id,
+        learned: Boolean(data.learned),
+        title: data.title || fallbackTitle || "News",
+        link: data.link || fallbackUrl || "",
+        published: data.published || "",
+        source: data.source || "",
+        section: data.section || "",
+        summary: data.summary || "",
+        paragraphs: Array.isArray(data.paragraphs) ? data.paragraphs : [],
+        images: Array.isArray(data.images) ? data.images : [],
+        complete: true,
+      });
+    })
+    .catch(() => {
+      if (fallbackUrl) {
+        window.open(fallbackUrl, "_blank", "noopener,noreferrer");
+      }
+    });
 }
 
 function closeNewsModal() {

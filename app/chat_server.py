@@ -3,9 +3,9 @@
 
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, transcript/article scoping, history, /memory,
-/status, /sources, /benchmark, /youtube, /news, /medium, /gutenberg,
-/wiki, /wiki_article, /article, /dict, and /ask. The browser is a pure
-HTML/CSS/JavaScript single-page app served from ./app/chat.html.
+/status, /sources, /benchmark, /youtube, /news, /googlenews, /medium,
+/gutenberg, /wiki, /wiki_article, /article, /dict, and /ask. The browser is a
+pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
 
 Every question searches the one global trunk corpus. Tags are no longer a
 user-facing scope; the corpus is never partitioned by topic.
@@ -47,6 +47,7 @@ Endpoints:
     POST /api/news_learn         store one /news story and build its learned
                                   trunks in .chat/news_cache
     GET  /api/news_status        ?id=<news_id> whether one story is learned
+    GET  /api/news_item          ?id=<news_id> full learned story for the modal
     POST /api/news_chat          SSE: answer a question from one learned news
                                   story in a session isolated from the main chat
     POST /api/video_summary      SSE: fetch a YouTube video's English transcript
@@ -120,6 +121,7 @@ WEB_COMMANDS = {
     "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
     "learn_playlist <playlist> | search <keyword> | bookmark list",
     "/news": "list the latest news from wsj, cnn, cbslite, nprtext, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count])",
+    "/googlenews": "search Google News for the latest stories: /googlenews <keywords>",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/gutenberg": "search Project Gutenberg books: /gutenberg search <keywords>; click a book to read it and ask questions",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
@@ -175,6 +177,7 @@ COMMAND_ARGUMENTS = {
     "/depth",
     "/benchmark",
     "/news",
+    "/googlenews",
     "/medium",
     "/gutenberg",
 }
@@ -5539,6 +5542,23 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if path == "/api/news_item":
+            params = parse_qs(parsed.query)
+            news_id = (params.get("id") or [""])[0].strip()
+            if not NEWS_ID_PATTERN.fullmatch(news_id):
+                self._send_error_json("Missing or invalid news story id", 400)
+                return
+            meta = _read_news_meta(news_id)
+            if not meta:
+                self._send_error_json("News story not found", 404)
+                return
+            item = dict(meta)
+            item["id"] = news_id
+            item["news_id"] = news_id
+            item["learned"] = news_is_learned(news_id)
+            item["complete"] = True
+            self._send_json(item)
+            return
         if path == "/api/autocomplete":
             params = parse_qs(parsed.query)
             kind = (params.get("kind") or ["commands"])[0]
@@ -7287,6 +7307,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_ask(argument)
         elif name == "/news":
             self._command_news(argument)
+        elif name == "/googlenews":
+            self._command_googlenews(argument)
         elif name == "/medium":
             self._command_medium(argument)
         elif name == "/gutenberg":
@@ -8535,6 +8557,27 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         for source in sources:
             argv.extend(["--source", source])
         self._stream_news_events("news_fetch.php", "/news", argv)
+
+    def _command_googlenews(self, argument: str) -> None:
+        """Search Google News RSS for the latest stories matching keywords.
+
+        Usage: /googlenews <keywords>
+        news_fetch.php creates a dynamic googlenews source for the query, so
+        the browser reuses the /news story-list and detail rendering.
+        """
+        keywords = argument.strip()
+        if not keywords:
+            self._sse_text(
+                "output",
+                "\nUsage: /googlenews <keywords>\n"
+                "Example: /googlenews open source llm\n",
+            )
+            return
+        self._stream_news_events(
+            "news_fetch.php",
+            "/googlenews",
+            ["--source", "googlenews", "--search", keywords],
+        )
 
     def _command_medium(self, argument: str) -> None:
         """Stream the latest stories from the configured Medium author.

@@ -27,6 +27,8 @@ declare(strict_types=1);
  *   hackernews    Hacker News RSS feed (front-page technology stories)
  *   medium        The Medium author feed configured in ~/.medium/username
  *                 (https://medium.com/feed/@username), used by /medium
+ *   googlenews    A Google News RSS search created with --search <keywords>,
+ *                 used by /googlenews <keywords>
  *
  * Default output is a human-readable stream for the terminal. The web chat
  * passes --json and receives one JSON event per line (NDJSON), which
@@ -34,13 +36,16 @@ declare(strict_types=1);
  *
  * Usage:
  *   ./news_fetch.php [--json] [--source SOURCE ...] [--limit N]
+ *   ./news_fetch.php [--json] --search <keywords> [--limit N]
  *
  * --source accepts wsj, cnn, cbslite, nprtext, yahoo_finance, kqed, sfgate,
  * sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech,
- * hackernews, or medium and may be repeated (or given as a comma separated
- * list).
+ * hackernews, medium, or googlenews and may be repeated (or given as a comma
+ * separated list).
+ * --search creates the dynamic googlenews source for the given keywords. It
+ * is selected automatically when no --source is given.
  * Without --source, every static source is fetched and emitted as its own
- * section; medium is only used when explicitly selected.
+ * section; medium and googlenews are only used when explicitly selected.
  * --limit caps the total number of stories across all selected sources (each
  * source has its own default when --limit is omitted).
  */
@@ -316,6 +321,42 @@ function mediumSource(): ?array
  * Return every source available at runtime: the static feeds plus the
  * configured Medium author feed.
  */
+function googleNewsQuery(): string
+{
+    return trim((string)($GLOBALS['NEWS_GOOGLE_NEWS_QUERY'] ?? ''));
+}
+
+/**
+ * Build the dynamic Google News RSS source used by /googlenews <keywords>.
+ *
+ * Returns null until --search supplies a query, so ordinary /news output and
+ * the static source list are unchanged.
+ */
+function googleNewsSource(): ?array
+{
+    $query = googleNewsQuery();
+    if ($query === '') {
+        return null;
+    }
+    return [
+        'label' => 'Google News',
+        'kind' => 'rss',
+        'default_limit' => 20,
+        'feeds' => [
+            'latest' => [
+                'label' => $query,
+                'url' => 'https://news.google.com/rss/search?q='
+                    . rawurlencode($query)
+                    . '&hl=en-US&gl=US&ceid=US:en',
+            ],
+        ],
+    ];
+}
+
+/**
+ * Return every source available at runtime: the static feeds plus the
+ * configured Medium author feed and Google News query.
+ */
 function newsSources(): array
 {
     static $sources = null;
@@ -324,6 +365,10 @@ function newsSources(): array
         $medium = mediumSource();
         if ($medium !== null) {
             $sources['medium'] = $medium;
+        }
+        $googleNews = googleNewsSource();
+        if ($googleNews !== null) {
+            $sources['googlenews'] = $googleNews;
         }
     }
     return $sources;
@@ -338,6 +383,8 @@ const IMAGE_CACHE_FAILURE_TTL = 86400; // one day for missing/broken images
 const IMAGE_FETCH_CONCURRENCY = 6;
 const ARTICLE_CACHE_TTL = 21600;       // six hours for successfully fetched articles
 const ARTICLE_CACHE_FAILURE_TTL = 3600; // one hour for articles we could not load
+const ARTICLE_EXTRACTOR_VERSION = 3;   // bump when article extraction logic changes
+const ARTICLE_MIN_BODY_CHARS = 1200;   // a container this large is a real body, not metadata
 const ARTICLE_FETCH_CONCURRENCY = 6;
 const MAX_ARTICLE_CACHE_ENTRIES = 500;
 
@@ -1230,6 +1277,216 @@ function isArticleBoilerplate(string $text): bool
 }
 
 /**
+ * True when an element is page chrome rather than article prose.
+ *
+ * Some publishers (for example the English edition of Financial News) put the
+ * whole body in a container as bare text separated by <br> tags instead of
+ * <p> elements. Walking those containers must skip navigation, ad slots,
+ * sharing controls, related-story rails, and footers, otherwise the extracted
+ * body turns into the whole page.
+ */
+function isArticleChromeNode(DOMNode $node): bool
+{
+    if (!($node instanceof DOMElement)) {
+        return false;
+    }
+
+    static $skipTags = [
+        'script' => true,
+        'style' => true,
+        'noscript' => true,
+        'template' => true,
+        'svg' => true,
+        'iframe' => true,
+        'form' => true,
+        'button' => true,
+        'input' => true,
+        'select' => true,
+        'textarea' => true,
+        'figure' => true,
+        'figcaption' => true,
+        'video' => true,
+        'audio' => true,
+        'canvas' => true,
+        'nav' => true,
+        'footer' => true,
+        'aside' => true,
+    ];
+    $tag = strtolower($node->tagName);
+    if (isset($skipTags[$tag])) {
+        return true;
+    }
+
+    $attributes = strtolower(
+        $node->getAttribute('class') . ' ' . $node->getAttribute('id')
+    );
+    if ($attributes === ' ') {
+        return false;
+    }
+
+    static $skipTokens = [
+        'ad' => true,
+        'ads' => true,
+        'advert' => true,
+        'adverts' => true,
+        'advertisement' => true,
+        'advertisements' => true,
+        'advertising' => true,
+        'adsense' => true,
+        'sponsor' => true,
+        'sponsored' => true,
+        'sponsorship' => true,
+        'share' => true,
+        'shares' => true,
+        'sharing' => true,
+        'social' => true,
+        'sns' => true,
+        'related' => true,
+        'recommend' => true,
+        'recommended' => true,
+        'recommendation' => true,
+        'recommendations' => true,
+        'newsletter' => true,
+        'subscribe' => true,
+        'subscription' => true,
+        'comment' => true,
+        'comments' => true,
+        'breadcrumb' => true,
+        'breadcrumbs' => true,
+        'nav' => true,
+        'navigation' => true,
+        'menu' => true,
+        'footer' => true,
+        'promo' => true,
+        'promotion' => true,
+        'popup' => true,
+        'modal' => true,
+        'cookie' => true,
+        'cookies' => true,
+        'consent' => true,
+        'paywall' => true,
+        'sidebar' => true,
+        'toolbar' => true,
+    ];
+    $tokens = preg_split('/[^a-z0-9]+/', $attributes, -1, PREG_SPLIT_NO_EMPTY);
+    foreach ($tokens ?: [] as $token) {
+        if (isset($skipTokens[$token])) {
+            return true;
+        }
+    }
+
+    // Common generated byline classes include the word inside a longer token
+    // ("customByline"), so a plain token check is not enough.
+    return str_contains($attributes, 'byline');
+}
+
+/**
+ * Collect prose segments from a container whose body uses <br> line breaks
+ * instead of <p> elements. Inline markup stays inside its line; block
+ * elements and <br> both close the current segment.
+ *
+ * @return list<string>
+ */
+function collectLineSegmentNodes(DOMNode $root): array
+{
+    static $blockTags = [
+        'address' => true,
+        'article' => true,
+        'aside' => true,
+        'blockquote' => true,
+        'dd' => true,
+        'details' => true,
+        'div' => true,
+        'dl' => true,
+        'dt' => true,
+        'fieldset' => true,
+        'figcaption' => true,
+        'figure' => true,
+        'footer' => true,
+        'form' => true,
+        'h1' => true,
+        'h2' => true,
+        'h3' => true,
+        'h4' => true,
+        'h5' => true,
+        'h6' => true,
+        'header' => true,
+        'hr' => true,
+        'li' => true,
+        'main' => true,
+        'nav' => true,
+        'ol' => true,
+        'p' => true,
+        'pre' => true,
+        'section' => true,
+        'table' => true,
+        'tbody' => true,
+        'td' => true,
+        'tfoot' => true,
+        'th' => true,
+        'thead' => true,
+        'tr' => true,
+        'ul' => true,
+    ];
+
+    $segments = [];
+    $seen = [];
+    $buffer = '';
+    $flush = static function () use (&$buffer, &$segments, &$seen): void {
+        $text = normalizeText($buffer);
+        $buffer = '';
+        if ($text === '' || mb_strlen($text) < 25) {
+            return;
+        }
+        // Drop bare CSS/JS payloads that some sites leave in the body.
+        if (preg_match('/^[.#@][\w-]+\s*\{/', $text)
+            || (substr_count($text, '{') >= 2 && substr_count($text, '}') >= 2)
+        ) {
+            return;
+        }
+        if (isArticleBoilerplate($text) || isset($seen[$text])) {
+            return;
+        }
+        $seen[$text] = true;
+        $segments[] = $text;
+    };
+
+    $walk = static function (DOMNode $node) use (
+        &$walk,
+        &$buffer,
+        &$flush,
+        $blockTags
+    ): void {
+        if ($node instanceof DOMText) {
+            $buffer .= $node->nodeValue . ' ';
+            return;
+        }
+        if (!($node instanceof DOMElement) || isArticleChromeNode($node)) {
+            return;
+        }
+        $tag = strtolower($node->tagName);
+        if ($tag === 'br') {
+            $flush();
+            return;
+        }
+        $isBlock = isset($blockTags[$tag]);
+        if ($isBlock) {
+            $flush();
+        }
+        foreach ($node->childNodes as $child) {
+            $walk($child);
+        }
+        if ($isBlock) {
+            $flush();
+        }
+    };
+
+    $walk($root);
+    $flush();
+    return $segments;
+}
+
+/**
  * Collect readable paragraphs from a DOMNodeList, preserving page order.
  *
  * @return list<string>
@@ -1241,6 +1498,12 @@ function collectParagraphNodes(iterable $nodes): array
     foreach ($nodes as $node) {
         $text = normalizeText($node->textContent);
         if ($text === '' || mb_strlen($text) < 25) {
+            continue;
+        }
+        // Drop bare CSS/JS payloads that some sites leave inside <p> tags.
+        if (preg_match('/^[.#@][\w-]+\s*\{/', $text)
+            || (substr_count($text, '{') >= 2 && substr_count($text, '}') >= 2)
+        ) {
             continue;
         }
         if (isArticleBoilerplate($text) || isset($seen[$text])) {
@@ -1298,27 +1561,90 @@ function extractArticleParagraphs(string $html, string $pageUrl = ''): array
         '//main//p',
     ];
 
-    $fallback = [];
+    $candidates = [];
     foreach ($queries as $query) {
         $nodes = $xpath->query($query);
         if ($nodes === false) {
             continue;
         }
         $candidate = collectParagraphNodes($nodes);
-        if (count($candidate) >= 2) {
-            return $candidate;
-        }
-        if (!$fallback && $candidate) {
-            $fallback = $candidate;
+        if ($candidate) {
+            $candidates[] = $candidate;
         }
     }
 
-    if ($fallback) {
-        return $fallback;
+    // Some publishers use bare text separated by <br> instead of <p> tags
+    // (for example Financial News English). Walk the semantic body containers
+    // directly so those pages still expose their complete article text.
+    $segmentQueries = [
+        '//*[@itemprop="articleBody"]',
+        '//*[@data-testid="article-body"]',
+        '//*[contains(concat(" ", normalize-space(@class), " "), " paragraphs-container ")]',
+        '//article',
+        '//*[contains(concat(" ", normalize-space(@class), " "), " article-body ")]',
+        '//*[contains(concat(" ", normalize-space(@class), " "), " article-content ")]',
+        '//*[contains(concat(" ", normalize-space(@class), " "), " entry-content ")]',
+        '//*[contains(concat(" ", normalize-space(@class), " "), " post-content ")]',
+        '//*[contains(concat(" ", normalize-space(@class), " "), " view_cont ")]',
+        '//main',
+    ];
+    foreach ($segmentQueries as $query) {
+        $nodes = $xpath->query($query);
+        if ($nodes === false) {
+            continue;
+        }
+        foreach ($nodes as $node) {
+            $candidate = collectLineSegmentNodes($node);
+            if ($candidate) {
+                $candidates[] = $candidate;
+            }
+        }
     }
 
     $nodes = $xpath->query('//p');
-    return $nodes === false ? [] : collectParagraphNodes($nodes);
+    if ($nodes !== false) {
+        $candidate = collectParagraphNodes($nodes);
+        if ($candidate) {
+            $candidates[] = $candidate;
+        }
+    }
+
+    // Pick the candidate that carries the most prose. Some sites put only the
+    // byline inside <article> and render the article body in a sibling
+    // container, so stopping at the first container with two paragraphs can
+    // return just author metadata. Semantic containers still win when they
+    // hold the body on their own or account for most of the best candidate.
+    $best = [];
+    $bestLength = 0;
+    foreach ($candidates as $candidate) {
+        $length = 0;
+        foreach ($candidate as $paragraph) {
+            $length += mb_strlen($paragraph);
+        }
+        if ($length > $bestLength) {
+            $best = $candidate;
+            $bestLength = $length;
+        }
+    }
+    if (!$best) {
+        return [];
+    }
+
+    $coverageFloor = (int)ceil($bestLength * 0.6);
+    foreach ($candidates as $candidate) {
+        if (count($candidate) < 2) {
+            continue;
+        }
+        $length = 0;
+        foreach ($candidate as $paragraph) {
+            $length += mb_strlen($paragraph);
+        }
+        if ($length >= ARTICLE_MIN_BODY_CHARS || $length >= $coverageFloor) {
+            return $candidate;
+        }
+    }
+
+    return $best;
 }
 
 /**
@@ -1414,6 +1740,8 @@ function enrichStoryContent(array $stories, string $sourceKey): array
             // full article body; let it be fetched once and cached again.
             $cacheIsUsable = !$forceFullArticle
                 || !empty($entry['full_article']);
+            $cacheIsUsable = $cacheIsUsable
+                && (int)($entry['extractor'] ?? 0) === ARTICLE_EXTRACTOR_VERSION;
             if ($cacheIsUsable && (int)($entry['ts'] ?? 0) + $ttl > $now) {
                 applyArticleContent($story, $entry);
                 continue;
@@ -1458,6 +1786,7 @@ function enrichStoryContent(array $stories, string $sourceKey): array
             'paragraphs' => [],
             'image' => '',
             'full_article' => $forceFullArticle,
+            'extractor' => ARTICLE_EXTRACTOR_VERSION,
             'ts' => $now,
         ];
 
@@ -2232,6 +2561,22 @@ function main(array $argv): int
     $section = null;
     $sourceKeys = null;
 
+    // Pre-scan for --search so the dynamic googlenews source exists before
+    // --source googlenews is validated below.
+    foreach ($argv as $index => $argument) {
+        if (($argument === '--search' || $argument === '--query')
+            && isset($argv[$index + 1])
+        ) {
+            $GLOBALS['NEWS_GOOGLE_NEWS_QUERY'] = trim($argv[$index + 1]);
+        } elseif (preg_match('/^--(?:search|query)=(.+)$/', $argument, $match)) {
+            $GLOBALS['NEWS_GOOGLE_NEWS_QUERY'] = trim($match[1]);
+        }
+    }
+    if (googleNewsQuery() === '' && in_array('--search', $argv, true)) {
+        diag('news_fetch: --search needs a keyword query');
+        return 2;
+    }
+
     $addSources = static function (string $value) use (&$sourceKeys): bool {
         $available = newsSources();
         foreach (preg_split('/[\s,]+/', strtolower($value)) as $requested) {
@@ -2285,10 +2630,16 @@ function main(array $argv): int
             $section = strtolower($argv[++$i]);
         } elseif (preg_match('/^--section=(.+)$/', $argument, $match)) {
             $section = strtolower($match[1]);
+        } elseif ($argument === '--search' || $argument === '--query') {
+            // Already applied by the pre-scan above.
+            $i++;
+        } elseif (preg_match('/^--(?:search|query)=(.+)$/', $argument)) {
+            // Already applied by the pre-scan above.
         } elseif ($argument === '--help' || $argument === '-h') {
             echo "Usage: news_fetch.php [--json] [--source "
-                . implode('|', array_keys(SOURCES)) . "|medium"
-                . " ...] [--limit N]\n";
+                . implode('|', array_keys(SOURCES)) . "|medium|googlenews"
+                . " ...] [--limit N]\n"
+                . "       news_fetch.php [--json] --search <keywords> [--limit N]\n";
             return 0;
         } else {
             diag("news_fetch: ignoring unknown argument: {$argument}");
@@ -2296,7 +2647,11 @@ function main(array $argv): int
     }
 
     if ($sourceKeys === null) {
-        $sourceKeys = array_keys(SOURCES);
+        // A search query is a complete request by itself; otherwise default
+        // to every static source as before.
+        $sourceKeys = googleNewsQuery() !== ''
+            ? ['googlenews']
+            : array_keys(SOURCES);
     }
     if ($sourceKeys === []) {
         diag('news_fetch: no news sources selected');

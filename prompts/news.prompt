@@ -78,6 +78,116 @@ task (completed) {
   the Python syntax check both pass.
 }
 
+task.bug."https://en.fnnews.com/news/202611071101376017" (completed) {
+  in the news popup, it failed to load the full text content of "https://en.fnnews.com/news/202611071101376017"
+
+  Root cause:
+  Financial News English renders the article body inside div#textSize.view_cont
+  as bare text separated by <br> tags, with no <p> elements at all, so the
+  paragraph-only extractor returned zero paragraphs.
+
+  Implemented:
+  news_fetch.php
+  - Added collectLineSegmentNodes(), which walks a semantic body container and
+    collects prose split by <br> and block elements while keeping inline markup
+    in its line. It skips scripts, styles, ads, sharing controls, related-story
+    rails, navigation, sidebars, footers, and bylines.
+  - extractArticleParagraphs() now also evaluates semantic containers
+    (articleBody, article-body, paragraphs-container, <article>, article/content
+    classes, view_cont, <main>) with the line-segment collector. Existing <p>
+    extraction still comes first, so sites with normal paragraphs are unchanged.
+  - Bumped ARTICLE_EXTRACTOR_VERSION to 3 so previously cached partial bodies
+    are refetched.
+
+  Verified: the reported URL now extracts 18 paragraphs / 3,773 characters
+  (headline, intro, every body section, and the closing ETF section) plus its
+  lead image. NPR (50 paragraphs / 10,179 chars), CBC Lite (17 paragraphs /
+  3,951 chars), and The Infatuation guide (39 paragraphs / 9,048 chars) still
+  extract their complete bodies. php -l passes.
+}
+
+task.refactor.news_trunk_and_news_article_loading (completed) {
+  in the answer, when a trunk of answer corresponds to a news, when clicking on the news icon next to the trunk, open up the news modal instead of going to the actual news source
+
+  Implemented:
+  app/chat_server.py
+  - Added `GET /api/news_item?id=<news_id>`, which returns a learned story's
+    cached metadata (title, link, source, section, published, summary,
+    paragraphs, images) together with its learned/complete flags.
+  app/chat.html
+  - `makeVideoLink()` now renders news citations as in-app controls: the icon
+    keeps its news styling, prevents the default navigation, and opens the
+    story modal through the new endpoint. Video citations still link out to
+    YouTube as before.
+  - Added `openNewsStory()`, which loads the story by id and feeds it to the
+    existing `openNewsModal()`; the modal's "Open article" link still reaches
+    the original source. If the cached story cannot be loaded, the click falls
+    back to opening the original article URL.
+
+  Verified: `python3 -m py_compile app/chat_server.py` and the browser script
+  (`node --check`) both pass.
+}
+
+task.bug.news_article_loading_problem (completed) {
+  bug:
+  - news article: https://www.theinfatuation.com/san-francisco/guides/best-hot-pot-restaurants-san-francisco
+    expect: the full news text content should appear in the news detail modal
+    actual: only part of the article content is loaded
+
+  Root cause:
+  extractArticleParagraphs() returned the first XPath candidate with at least
+  two paragraphs. On The Infatuation the <article> element contains only photo
+  credits and author bios (5 short lines), while the actual guide body is
+  rendered in a sibling container under <main>. The function stopped at the
+  bylines, so the detail modal showed only author metadata. The page also
+  leaves large CSS payloads inside <p> tags, which polluted broad candidates.
+
+  Implemented:
+  news_fetch.php
+  - Article extraction now collects every candidate container first and picks
+    the one with the greatest readable prose volume. A semantic container in
+    the preferred order still wins when it holds a real body (at least
+    ARTICLE_MIN_BODY_CHARS) or accounts for most of the best candidate, so
+    pages with comments/related links do not lose their clean article
+    container, while a byline-only <article> is skipped.
+  - collectParagraphNodes() drops bare CSS/JS payloads (selector-prefixed text
+    or text with multiple brace pairs) so they no longer count as prose.
+  - Added an ARTICLE_EXTRACTOR_VERSION marker to cached article entries;
+    entries from the old extractor are refetched instead of serving a stale
+    partial body for up to six hours.
+
+  Verified: the reported Infatuation URL now extracts 39 paragraphs / 9,048
+  characters (intro, every restaurant entry, and related links) instead of 5
+  bylines. Spot-checked full-article extraction against live NPR, CBC,
+  Yahoo Finance, and KQED stories; all still return their complete bodies.
+  php -l passes.
+}
+
+task.search (completed) {
+  add new command: /googlenews <keywords>
+  - example: keywords are "open source llm"
+    underneath, hook up to https://news.google.com/rss/search?q=open+source+llm&hl=en-US&gl=US&ceid=US:en
+
+  Implemented:
+  app/chat_server.py
+  - Added /googlenews <keywords> to the command table and argument commands.
+    It streams the same "news" SSE events as /news, so the browser story list,
+    detail modal, Learn/Chat actions, images, and Google News link resolution
+    all work unchanged.
+  news_fetch.php
+  - Added a dynamic googlenews source built from --search <keywords>, using
+    https://news.google.com/rss/search?q=<urlencoded keywords>&hl=en-US&gl=US&ceid=US:en.
+    It accepts an optional --limit, is selected automatically when --search is
+    given without --source, and does not change the default /news source list.
+  app/chat.html
+  - No renderer change was needed; /googlenews appears in the command list and
+    completion from the server-provided command metadata.
+
+  Verified: ./news_fetch.php --json --search "open source llm" --limit 2
+  returns Google News stories, resolved publisher links, images, and article
+  paragraphs; php -l and the server Python syntax check pass.
+}
+
 task.news_in_chat_global_corpus (completed) {
   please make sure the "learned" news are loaded as global corpus
   currently, we have messages like "11560 trunks from 535 videos", please do the same for news as well
