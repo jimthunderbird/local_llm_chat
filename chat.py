@@ -253,6 +253,10 @@ CHARS_PER_TOKEN = 4
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
 CHAT_DIR = Path.cwd() / ".chat"
+# Learned news articles live beside the YouTube corpus. Each learned story has
+# a .title file and one .trunk file per knowledge paragraph, so the same BM25
+# retrieval code can search news and transcripts together.
+NEWS_DIR = CHAT_DIR / "news_cache"
 HISTORY_FILE = CHAT_DIR / "question_history.txt"
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
@@ -1186,12 +1190,16 @@ def _collect_chunks(selected_video_ids: set[str]) -> tuple[list[Chunk], int]:
     return chunks, filtered
 
 
-def load_chunks(video_ids: set[str] | None = None) -> list[Chunk]:
+def load_chunks(
+    video_ids: set[str] | None = None,
+    announce: bool = True,
+) -> list[Chunk]:
     """Load the global trunk corpus, or an explicit set of video ids.
 
     When ``video_ids`` is given (the /youtube transcript command), only those
     videos are loaded. No embedding files are read; BM25 indexes the trunk
-    text lazily on the first question.
+    text lazily on the first question. Set ``announce`` to False when the
+    caller wants to print one combined transcript + news summary.
     """
     if not OUTPUT_DIR.is_dir():
         sys.exit(f"Transcript directory not found: {OUTPUT_DIR}")
@@ -1216,14 +1224,67 @@ def load_chunks(video_ids: set[str] | None = None) -> list[Chunk]:
     if filtered and video_ids is not None:
         details.append(f"filtered {filtered} trunk(s) {outside_scope}")
     suffix = f" ({', '.join(details)})" if details else ""
-    print(f"Loaded {len(chunks):,} trunks from "
-          f"{len(selected_video_ids):,} video(s) for {scope}{suffix}.")
+    if announce:
+        print(f"Loaded {len(chunks):,} trunks from "
+              f"{len(selected_video_ids):,} video(s) for {scope}{suffix}.")
+    return chunks
+
+
+def load_news_chunks(news_ids: set[str] | None = None) -> list[Chunk]:
+    """Load learned news trunks, optionally limited to specific story ids."""
+    if not NEWS_DIR.is_dir():
+        return []
+    selected = set(news_ids) if news_ids is not None else None
+    chunks: list[Chunk] = []
+    try:
+        paths = sorted(
+            NEWS_DIR.glob("*.trunk"),
+            key=lambda p: (p.name.split(".", 1)[0], p.name),
+        )
+    except OSError:
+        return []
+    for path in paths:
+        match = TRUNK_FILE.fullmatch(path.name)
+        if not match:
+            continue
+        news_id = match.group("video")
+        if selected is not None and news_id not in selected:
+            continue
+        chunks.append(
+            Chunk(
+                video_id=news_id,
+                index=int(match.group("index")),
+                trunk_path=path,
+            )
+        )
+    chunks.sort(key=lambda chunk: (chunk.video_id, chunk.index))
     return chunks
 
 
 def load_all_chunks() -> list[Chunk]:
-    """Load every learned trunk into one global corpus."""
-    return load_chunks()
+    """Load every learned transcript and news trunk into one global corpus."""
+    chunks: list[Chunk] = []
+    if OUTPUT_DIR.is_dir() and available_video_ids():
+        chunks = load_chunks(announce=False)
+    news_chunks = load_news_chunks()
+    if not chunks and not news_chunks:
+        sys.exit(
+            "No learned trunks found in "
+            f"{OUTPUT_DIR} or {NEWS_DIR}\n"
+            "Learn a YouTube video with /youtube learn or a news story "
+            "from its /news detail view."
+        )
+    all_chunks = chunks + news_chunks
+    video_count = len({chunk.video_id for chunk in chunks})
+    news_count = len({chunk.video_id for chunk in news_chunks})
+    source_summary = f"{video_count:,} video(s)"
+    if news_count:
+        source_summary += f" and {news_count:,} news story(ies)"
+    print(
+        f"Loaded {len(all_chunks):,} trunks from {source_summary} "
+        "for the global corpus."
+    )
+    return all_chunks
 
 
 # Backwards-compatible names for callers that only need the loaded chunks.
@@ -1297,7 +1358,9 @@ def chat_status_report(
     article: str | None = None,
 ) -> str:
     """Describe the chatbot's current configuration and loaded data."""
-    video_ids = {chunk.video_id for chunk in chunks}
+    all_ids = {chunk.video_id for chunk in chunks}
+    news_ids = {video_id for video_id in all_ids if video_id.startswith("news_")}
+    video_ids = all_ids - news_ids
     if article is not None:
         scope = f"single article {article!r}"
     elif transcript is not None:
@@ -1316,15 +1379,23 @@ def chat_status_report(
         suffix = " (default)" if depth == DEFAULT_DEPTH else ""
         retrieval = f"top {depth} matching trunk(s){suffix} by BM25"
 
+    if article is not None:
+        loaded_label = f"{len(video_ids):,} Article(s)"
+    elif news_ids:
+        loaded_label = (
+            f"{len(video_ids):,} video(s) and "
+            f"{len(news_ids):,} news story(ies)"
+        )
+    else:
+        loaded_label = f"{len(video_ids):,} video(s)"
+
     lines = [
         f"  models:      {CHAT_MODEL} (chat), {EXPANSION_MODEL} "
         "(query expansion), "
         f"{FILTER_MODEL} (candidate filter)",
         f"  Ollama host: {OLLAMA_HOST}",
         f"  scope:       {scope}",
-        f"  loaded:      {len(chunks):,} trunks from "
-        f"{len(video_ids):,} "
-        + ("Article(s)" if article is not None else "video(s)"),
+        f"  loaded:      {len(chunks):,} trunks from {loaded_label}",
         f"  retrieval:   {retrieval}",
         "  filter:      small-LLM question relevance filter",
         f"  answer cache: {cache_entries} entr{'y' if cache_entries == 1 else 'ies'}",
@@ -1605,8 +1676,11 @@ def _read_title_cached(path: str) -> str:
 
 
 def video_title(video_id: str) -> str:
-    """Return the saved title for a video, or an empty string if missing."""
-    return _read_title_cached(str(OUTPUT_DIR / f"{video_id}.title"))
+    """Return the saved title for a video or news story, if one exists."""
+    title = _read_title_cached(str(OUTPUT_DIR / f"{video_id}.title"))
+    if title:
+        return title
+    return _read_title_cached(str(NEWS_DIR / f"{video_id}.title"))
 
 
 def _token_set(text: str) -> frozenset[str]:
@@ -2065,7 +2139,32 @@ def top_chunks(
         for chunk, score in zip(chunks, scores)
         if score > 0.0
     ]
-    ranked.sort(key=lambda item: item[1], reverse=True)
+    if ranked:
+        ranked.sort(key=lambda item: item[1], reverse=True)
+    else:
+        # BM25's idf is negative when a term appears in more than half of the
+        # documents. In a very small corpus (for example one learned news
+        # story with three paragraphs) every query term can be that common,
+        # so all scores are negative even though the paragraphs clearly match.
+        # Fall back to the chunks that contain a distinctive query term.
+        meaningful = {
+            token
+            for token in query_tokens
+            if len(token) > 1 and token not in FUZZY_ANCHOR_STOPWORDS
+        }
+        fallback = []
+        for chunk, score in zip(chunks, scores):
+            # The BM25 document repeats the shared title, so count the
+            # fallback overlap against the paragraph body itself.
+            tokens = set(tokenize(paragraph_text(chunk)))
+            overlap = meaningful.intersection(tokens)
+            if overlap:
+                fallback.append((len(overlap), float(score), chunk))
+        # More distinct query terms first; BM25 score breaks ties. A raw
+        # negative-score sort would prefer a paragraph that contains only one
+        # common term over a paragraph that contains the actual topic.
+        fallback.sort(key=lambda item: (-item[0], -item[1]))
+        ranked = [(chunk, score) for _overlap, score, chunk in fallback]
     if not ranked:
         return []
 

@@ -14,6 +14,12 @@ source: {
     - https://openrss.org/feed/www.cnn.com/politics
     - https://openrss.org/feed/www.cnn.com/business
   }
+  cbslite: {
+    - https://www.cbc.ca/lite/news
+  }
+  nprtext: {
+    https://text.npr.org/
+  }
   yahoo_finance: {
     - https://news.google.com/rss/search?q=site:finance.yahoo.com+stock+market&hl=en-US&gl=US&ceid=US:en
   }
@@ -51,16 +57,146 @@ task (completed) {
 
   Implemented:
   news_fetch.php
-  - Added the `hackernews` source (https://news.ycombinator.com/rss) as a
-    new RSS source, so every entry in {source} is now supported.
-  - The Hacker News feed carries only the headline and a Comments link, so
-    the source uses `full_article`, which fetches and caches the linked
-    article page for the detail view (limit 10 stories).
-  - Verified with `php news_fetch.php --json --source hackernews --limit 3`;
-    stories stream with titles, dates, full paragraphs, and cover images.
+  - Added the `cbslite` source (https://www.cbc.ca/lite/news), parsed from
+    the CBC Lite Next.js `__NEXT_DATA__` story list, with each linked CBC
+    article page fetched and cached for the full detail view.
+  - Added the `nprtext` source (https://text.npr.org/). The text-only
+    homepage's `topic-title` links are parsed in listing order, and each
+    lightweight NPR article page is fetched and cached for the full body,
+    using the article's `paragraphs-container` prose (including the
+    broadcast transcript) without the headline/byline/timestamp lines.
+  - Both sources are full-article sources, so learned stories and the
+    detail popup always receive real article text rather than a headline.
   app/chat_server.py
-  - Added hackernews to NEWS_SOURCES (tab completion, the /news source
-    picker, and validation), the /news help text, and the command docstring.
+  - Added cbslite and nprtext to NEWS_SOURCES, so /news accepts them, the
+    source picker and tab completion include them, and the /news help text
+    lists them.
+
+  Verified: `./news_fetch.php --json --source cbslite --limit 2` and
+  `./news_fetch.php --json --source nprtext --limit 2` stream story cards
+  with dates, summaries, and full paragraphs; `php -l news_fetch.php` and
+  the Python syntax check both pass.
+}
+
+task.news_in_chat_global_corpus (completed) {
+  please make sure the "learned" news are loaded as global corpus
+  currently, we have messages like "11560 trunks from 535 videos", please do the same for news as well
+  for every related trunk in the answer, have a "news" icon, when clicking on the icon, go to the related news, similar to the video trunks
+
+  Implemented:
+  chat.py
+  - load_all_chunks() now merges .chat/news_cache trunks with the YouTube
+  transcript corpus, so every learned story is searched by the same global
+  BM25 index as the videos.
+  - The startup line reports one combined summary, for example
+  "Loaded 11,560 trunks from 534 video(s) and 1 news story(ies) for the
+  global corpus."  /status uses the same video/news breakdown.
+  - video_title() resolves a news story's saved headline, so BM25 prompts and
+  answer annotations use the real story title.
+  app/chat_server.py
+  - /api/state includes a separate `news` count (and `videos` now counts only
+  YouTube videos), and the server startup banner prints the combined
+  corpus with both counts.
+  - Answer annotations carry `kind: "news"` and the story's original URL
+  for news chunks, so each related answer paragraph gets a news icon that
+  opens the source story, matching the video icon behavior. Block-to-source
+  scoring now uses IDF-weighted cosine similarity (a long transcript no
+  longer wins just by sharing more common words), and a learned news source
+  is preferred when it is nearly as close as the best transcript match.
+  This keeps the news icon on a story even when a YouTube video paraphrases
+  the same reporting.
+  - refresh_news_corpus() makes a story learned from its /news modal part of
+  the live global corpus immediately, and chunk_is_news() uses the news id
+  pattern instead of a loose prefix check.
+  app/chat.html
+  - The status bar and welcome banner show the news story count next to the
+  video count. Answer paragraphs sourced from a news trunk render the news
+  icon (instead of the YouTube icon), with the story title as its tooltip.
+
+  Verified: the learned CNN/Nvidia story contributes 31 trunks and is counted
+  as 1 news story out of 535 sources overall; a query such as "what did Jensen
+  Huang admit" ranks its news trunks first. Through the live server the answer
+  event carried an annotation with `kind: "news"`, the story's CNN URL, and the
+  story title, so the paragraph renders the news icon.
+}
+
+task.bug.news_chat_2_column_layout (completed) {
+  please study the ui layout for youtube video popup modal, apply the same for news
+
+  Implemented:
+  app/chat.html
+  - The story modal now uses the same two-column layout as the video modal:
+  the article occupies a wide, independently scrolling left column, while
+  the Learn/Chat action and the in-modal story conversation sit in a
+  narrower right rail. The card widened from 760px to 1120px (up to 88vh)
+  to match the video modal.
+  - Below 760px the rail stacks under the article, and the whole layout
+  scrolls as one pane instead of letting fixed-height grid rows overlap the
+  article text.
+  - Verified in headless Chromium at 1280x900 and 600x900: the article and
+  rail render side by side on desktop with no page errors, the Learn/Chat
+  controls and composer keep their natural height, and the article scrolls
+  independently. The mobile layout stacks cleanly with no overlap.
+}
+
+task.bug.news_chat (completed) {
+  bug:
+  in the individual news popup modal:
+  - when clicking on the "Chat" button:
+  - expect: the chat message box show up
+  - actual: the chat message box does not show up
+
+  Root cause:
+  The story modal is a flex column with a max-height. When a long article was
+  rendered, the article body's huge flex base size consumed nearly all of the
+  negative free space. `#news-chat` had the default `flex-shrink: 1` and
+  `.video-chat` already sets `min-height: 0`, so the open chat collapsed to a
+  ~15px sliver: its header showed, but the message list and compose box were
+  clipped/overlapped by the article body.
+
+  Implemented:
+  app/chat.html
+  - `#news-action` and `#news-chat` are now `flex: 0 0 auto`, so they keep
+  their natural height when shown.
+  - `.news-body` is now `flex: 1 1 auto; min-height: 0`, so the long article
+  absorbs all vertical shrinking and scrolls inside its own pane.
+
+  Verified in headless Chromium with a 120-paragraph story: before the fix the
+  open chat was 14.9px tall with its input rendered below the chat box; after
+  the fix it is 199.6px tall, the input sits inside it, and the article body
+  shrinks to 343.8px and scrolls.
+}
+
+task.news_chat (completed) {
+  refactor, learn from youtube video chat:
+  - please allow learning on a news, the news content and the learned news should be stored in {directory_of_this_prompt}/../.chat/news_cache
+  - please allow chat on a specific news
+  - in the chat, please include news in the global corpus as well
+
+  Implemented:
+  chat.py
+  - Added .chat/news_cache to the corpus. Each learned story keeps a .json
+  record, a readable .md copy, a .title file, an overview trunk (index 0),
+  and one paragraph trunk per knowledge paragraph.
+  - load_all_chunks() merges the transcript corpus with learned news trunks,
+  and video_title() resolves news titles so BM25 indexing and prompts see
+  the story headline.
+  - Very small corpora can give every BM25 term a negative idf; top_chunks()
+  now falls back to paragraph-level query-term overlap when no positive
+  score exists, so a single learned story is still retrievable.
+  app/chat_server.py
+  - POST /api/news_learn stores the story content and builds its trunks in
+  .chat/news_cache, then refreshes the global corpus immediately.
+  - GET /api/news_status reports whether a story is already learned.
+  - POST /api/news_chat answers from one learned story in an isolated session,
+  using the same iterative RAG loop as transcript/video chat.
+  - /news item events carry a stable news_id and learned flag; answers cite
+  learned news with a news-source icon/link instead of a YouTube link.
+  app/chat.html
+  - The story modal now offers Learn, then Chat. Learned stories are marked
+  in the feed list and can be re-opened and chatted with in place.
+  - The in-modal story chat streams answers, supports dictionary lookups, and
+  never disturbs the main chat's scope or conversation.
 }
 
 task (completed) {
@@ -70,8 +206,8 @@ task (completed) {
   Implemented:
   app/chat.html
   - Each news story title in the /news and /medium lists now opens the story
-    detail popup when clicked; the external link is only offered from inside
-    the popup ("Open article ↗").
+  detail popup when clicked; the external link is only offered from inside
+  the popup ("Open article ↗").
   - Removed the per-story "details" button and its now-unused CSS.
 }
 

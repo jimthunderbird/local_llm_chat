@@ -11,6 +11,10 @@ declare(strict_types=1);
  *   wsj           Wall Street Journal markets, business, tech, world, US and
  *                 social-economy RSS feeds published by Dow Jones
  *   cnn           CNN RSS feeds served by openrss.org (top/world/us/politics/business)
+ *   cbslite       CBC Lite homepage (Next.js story list), with full CBC
+ *                 article pages fetched for the detail view
+ *   nprtext       NPR's text-only homepage, with full article pages fetched
+ *                 for the detail view
  *   yahoo_finance Yahoo Finance stock market news via Google News RSS
  *   kqed          KQED News RSS feed
  *   sfgate        SFGATE Bay Area News RSS feed
@@ -31,9 +35,10 @@ declare(strict_types=1);
  * Usage:
  *   ./news_fetch.php [--json] [--source SOURCE ...] [--limit N]
  *
- * --source accepts wsj, cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local,
- * richmond_sunset, techcrunch, krasia, wccftech, hackernews, or medium and may be repeated (or given as a
- * comma separated list).
+ * --source accepts wsj, cnn, cbslite, nprtext, yahoo_finance, kqed, sfgate,
+ * sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech,
+ * hackernews, or medium and may be repeated (or given as a comma separated
+ * list).
  * Without --source, every static source is fetched and emitted as its own
  * section; medium is only used when explicitly selected.
  * --limit caps the total number of stories across all selected sources (each
@@ -102,6 +107,36 @@ const SOURCES = [
             'business' => [
                 'label' => 'Business',
                 'url' => 'https://openrss.org/feed/www.cnn.com/business',
+            ],
+        ],
+    ],
+    'cbslite' => [
+        'label' => 'CBC Lite',
+        'kind' => 'cbc_lite',
+        // The CBC Lite homepage is a Next.js page whose __NEXT_DATA__ payload
+        // lists the latest stories. Fetch each linked CBC article page for the
+        // detail view because the list only carries headlines and metadata.
+        'full_article' => true,
+        'default_limit' => 20,
+        'feeds' => [
+            'top' => [
+                'label' => 'Top Stories',
+                'url' => 'https://www.cbc.ca/lite/news',
+            ],
+        ],
+    ],
+    'nprtext' => [
+        'label' => 'NPR (Text)',
+        'kind' => 'npr_text',
+        // The text-only homepage lists headlines that link to lightweight
+        // article pages; fetch those pages for the full body in the detail
+        // view because the list carries no story text.
+        'full_article' => true,
+        'default_limit' => 20,
+        'feeds' => [
+            'top' => [
+                'label' => 'Top Stories',
+                'url' => 'https://text.npr.org/',
             ],
         ],
     ],
@@ -1248,7 +1283,14 @@ function extractArticleParagraphs(string $html, string $pageUrl = ''): array
     $queries = [
         '//*[@itemprop="articleBody"]//p',
         '//*[@data-testid="article-body"]//p',
+        // NPR's text-only article pages wrap the prose in a paragraphs-container
+        // div; selecting it avoids the headline, byline, and timestamp <p> tags
+        // that also live under <article>.
+        '//*[contains(concat(" ", normalize-space(@class), " "), " paragraphs-container ")]//p',
         '//article//p',
+        // CBC News renders article prose with an "html-paragraph" class but
+        // no semantic article container, so select those paragraphs directly.
+        '//p[contains(concat(" ", normalize-space(@class), " "), " html-paragraph ")]',
         '//*[contains(concat(" ", normalize-space(@class), " "), " article-body ")]//p',
         '//*[contains(concat(" ", normalize-space(@class), " "), " article-content ")]//p',
         '//*[contains(concat(" ", normalize-space(@class), " "), " entry-content ")]//p',
@@ -1588,6 +1630,194 @@ function parseRssStories(
 }
 
 /**
+ * Parse the CBC Lite homepage into stories.
+ *
+ * The Lite site is a Next.js application. Its server-rendered
+ * <script id="__NEXT_DATA__"> payload contains the current article list under
+ * props.pageProps.articles. Each entry has a headline, URL, section, and an
+ * updatedAt timestamp in milliseconds; the linked CBC article page is fetched
+ * later for the full body and cover image.
+ *
+ * @return list<array{title:string,link:string,published:string,sort:int,summary:string,source:string,section:string,paragraphs:list<string>}>
+ */
+function parseCbcLiteStories(
+    string $html,
+    string $sourceKey,
+    string $sourceLabel,
+    string $sectionLabel
+): array {
+    if (!preg_match(
+        '/<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/s',
+        $html,
+        $match
+    )) {
+        diag("news_fetch ({$sourceKey}): CBC Lite page did not contain __NEXT_DATA__");
+        return [];
+    }
+
+    $data = json_decode($match[1], true);
+    if (!is_array($data)) {
+        diag("news_fetch ({$sourceKey}): CBC Lite __NEXT_DATA__ was not valid JSON");
+        return [];
+    }
+
+    $articles = $data['props']['pageProps']['articles'] ?? null;
+    if (!is_array($articles)) {
+        diag("news_fetch ({$sourceKey}): CBC Lite page did not contain an article list");
+        return [];
+    }
+
+    $stories = [];
+    foreach ($articles as $article) {
+        if (!is_array($article)) {
+            continue;
+        }
+        $main = $article['components']['mainContent'] ?? null;
+        if (!is_array($main)) {
+            $main = [];
+        }
+
+        $title = cleanTitle((string)($article['title'] ?? $main['title'] ?? ''));
+        $link = trim((string)($article['url'] ?? $main['url'] ?? ''));
+        if ($link === '') {
+            continue;
+        }
+
+        $sectionPath = trim((string)(
+            $main['section']['path'] ?? $article['section']['path'] ?? ''
+        ));
+        $published = '';
+        $timestamp = 0;
+        $updatedAt = $article['updatedAt'] ?? $main['updatedAt'] ?? '';
+        if (is_numeric($updatedAt) && (float)$updatedAt > 0) {
+            $timestamp = (int)floor((float)$updatedAt / 1000);
+            $published = date(DATE_ATOM, $timestamp);
+        }
+
+        $stories[] = [
+            'title' => $title,
+            'link' => $link,
+            'published' => $published,
+            'sort' => $timestamp,
+            'summary' => '',
+            'source' => $sourceLabel,
+            'section' => $sectionPath !== '' ? $sectionPath : $sectionLabel,
+            'paragraphs' => [],
+            'images' => [],
+        ];
+    }
+
+    usort(
+        $stories,
+        static fn(array $a, array $b): int => $b['sort'] <=> $a['sort']
+    );
+    return $stories;
+}
+
+/**
+ * Parse the NPR text-only homepage into stories.
+ *
+ * https://text.npr.org/ lists each current story as an <a class="topic-title">
+ * link to a lightweight article page (for example /nx-s1-6034483). The list
+ * carries only headlines, so each linked page is fetched later for the body.
+ *
+ * @return list<array{title:string,link:string,published:string,sort:int,summary:string,source:string,section:string,paragraphs:list<string>}>
+ */
+function parseNprTextStories(
+    string $html,
+    string $sourceKey,
+    string $sourceLabel,
+    string $sectionLabel
+): array {
+    if (trim($html) === '') {
+        diag("news_fetch ({$sourceKey}): NPR text homepage was empty");
+        return [];
+    }
+
+    $previous = libxml_use_internal_errors(true);
+    $document = new DOMDocument();
+    $loaded = $document->loadHTML(
+        '<?xml encoding="utf-8"?>' . $html,
+        LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING
+    );
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+    if (!$loaded) {
+        diag("news_fetch ({$sourceKey}): NPR text homepage could not be parsed");
+        return [];
+    }
+
+    // The homepage date is the only date on the list view; use it for the
+    // section's stories and keep the listing order (which is the site's sort).
+    $published = '';
+    $timestamp = 0;
+    $xpath = new DOMXPath($document);
+    $dateNodes = $xpath->query(
+        '//p[contains(concat(" ", normalize-space(@class), " "), " topic-date ")]'
+    );
+    if ($dateNodes !== false && $dateNodes->length > 0) {
+        $dateText = normalizeText($dateNodes->item(0)->textContent);
+        $parsed = $dateText !== '' ? strtotime($dateText) : false;
+        if ($parsed !== false) {
+            $timestamp = $parsed;
+            $published = date(DATE_ATOM, $timestamp);
+        }
+    }
+
+    $links = $xpath->query(
+        '//a[contains(concat(" ", normalize-space(@class), " "), " topic-title ")]'
+    );
+    if ($links === false) {
+        diag("news_fetch ({$sourceKey}): NPR text homepage links could not be read");
+        return [];
+    }
+
+    $stories = [];
+    $position = 0;
+    foreach ($links as $link) {
+        $title = cleanTitle($link->textContent);
+        $href = trim((string)$link->getAttribute('href'));
+        if ($title === '' || $href === '') {
+            continue;
+        }
+
+        if (str_starts_with($href, '/')) {
+            $href = 'https://text.npr.org' . $href;
+        }
+        if (!preg_match('~^https?://(?:www\.)?text\.npr\.org(/.*)$~i', $href, $match)) {
+            continue;
+        }
+        $path = $match[1];
+        // Article ids look like /nx-s1-6034483 or /g-s1-151625. Skip the
+        // homepage and topic/category links that are not stories.
+        if (!preg_match('~^/[a-z]+-s\d+-\d+$~i', $path)) {
+            continue;
+        }
+
+        $stories[] = [
+            'title' => $title,
+            'link' => 'https://text.npr.org' . $path,
+            'published' => $published,
+            // Preserve the homepage's own order: the first headline is the
+            // most prominent story on the current text-only front page.
+            'sort' => $timestamp > 0 ? $timestamp - $position : 1000000 - $position,
+            'summary' => '',
+            'source' => $sourceLabel,
+            'section' => $sectionLabel,
+            'paragraphs' => [],
+            'images' => [],
+        ];
+        $position++;
+    }
+
+    usort(
+        $stories,
+        static fn(array $a, array $b): int => $b['sort'] <=> $a['sort']
+    );
+    return $stories;
+}
+
+/**
  * Parse the SF Bay View WordPress posts endpoint into stories.
  *
  * @return list<array{title:string,link:string,published:string,sort:int,summary:string,source:string,section:string,paragraphs:list<string>}>
@@ -1783,9 +2013,13 @@ function storyStream(array $sourceKeys, ?int $limit, ?string $section): Generato
             $url = $kind === 'wp_json'
                 ? wpFeedUrl($feed['url'], min($sourceLimit - $emitted, MAX_WP_PER_PAGE))
                 : $feed['url'];
-            $accept = $kind === 'wp_json'
-                ? 'application/json, text/plain, */*'
-                : 'application/rss+xml, application/xml, text/xml, */*';
+            if ($kind === 'wp_json') {
+                $accept = 'application/json, text/plain, */*';
+            } elseif ($kind === 'cbc_lite' || $kind === 'npr_text') {
+                $accept = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+            } else {
+                $accept = 'application/rss+xml, application/xml, text/xml, */*';
+            }
 
             $body = fetchUrl($url, $accept, $sourceKey);
             if ($body === null) {
@@ -1801,9 +2035,35 @@ function storyStream(array $sourceKeys, ?int $limit, ?string $section): Generato
                 continue;
             }
 
-            $stories = $kind === 'wp_json'
-                ? parseWpJsonStories($body, $sourceKey, $source['label'], $feed['label'])
-                : parseRssStories($body, $sourceKey, $source['label'], $feed['label']);
+            if ($kind === 'wp_json') {
+                $stories = parseWpJsonStories(
+                    $body,
+                    $sourceKey,
+                    $source['label'],
+                    $feed['label']
+                );
+            } elseif ($kind === 'cbc_lite') {
+                $stories = parseCbcLiteStories(
+                    $body,
+                    $sourceKey,
+                    $source['label'],
+                    $feed['label']
+                );
+            } elseif ($kind === 'npr_text') {
+                $stories = parseNprTextStories(
+                    $body,
+                    $sourceKey,
+                    $source['label'],
+                    $feed['label']
+                );
+            } else {
+                $stories = parseRssStories(
+                    $body,
+                    $sourceKey,
+                    $source['label'],
+                    $feed['label']
+                );
+            }
 
             $selected = [];
             $feedEmitted = 0;

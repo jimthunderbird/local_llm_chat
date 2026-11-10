@@ -44,6 +44,11 @@ Endpoints:
                                   Go, Rust, or PHP
     POST /api/snippet_question   SSE: answer a free-form question about a whole
                                   code snippet
+    POST /api/news_learn         store one /news story and build its learned
+                                  trunks in .chat/news_cache
+    GET  /api/news_status        ?id=<news_id> whether one story is learned
+    POST /api/news_chat          SSE: answer a question from one learned news
+                                  story in a session isolated from the main chat
     POST /api/video_summary      SSE: fetch a YouTube video's English transcript
                                   and stream an AI summary for the /youtube
                                   search result modal
@@ -114,7 +119,7 @@ WEB_COMMANDS = {
     "/help": "show commands and keyboard shortcuts",
     "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
     "learn_playlist <playlist> | search <keyword> | bookmark list",
-    "/news": "list the latest news from wsj, cnn, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count])",
+    "/news": "list the latest news from wsj, cnn, cbslite, nprtext, yahoo_finance, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count])",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/gutenberg": "search Project Gutenberg books: /gutenberg search <keywords>; click a book to read it and ask questions",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
@@ -124,6 +129,8 @@ WEB_COMMANDS = {
 NEWS_SOURCES = {
     "wsj": "The Wall Street Journal",
     "cnn": "CNN News",
+    "cbslite": "CBC Lite",
+    "nprtext": "NPR (Text)",
     "yahoo_finance": "Yahoo Finance",
     "kqed": "KQED News",
     "sfgate": "SFGATE Bay Area News",
@@ -137,6 +144,13 @@ NEWS_SOURCES = {
 }
 
 NEWS_SOURCE_USAGE = "|".join(NEWS_SOURCES)
+
+# Learned /news stories live beside the transcript corpus. A story is learned
+# once, then its article content and retrieval trunks are reused on disk and
+# included in the global BM25 corpus.
+NEWS_CACHE_DIR = chat.NEWS_DIR
+NEWS_CACHE_LOCK = threading.Lock()
+NEWS_ID_PATTERN = re.compile(r"news_[A-Za-z0-9]+")
 
 # /medium reads the Medium author handle from this file and asks
 # news_fetch.php for that author's RSS feed (https://medium.com/feed/@handle).
@@ -2578,6 +2592,198 @@ def load_all_chunks_captured():
     return capture_call(chat.load_all_chunks)
 
 
+def chunk_is_news(chunk: chat.Chunk) -> bool:
+    """Return True when a chunk belongs to a learned news story."""
+    return bool(NEWS_ID_PATTERN.fullmatch(chunk.video_id))
+
+
+def _read_news_meta(news_id: str) -> dict:
+    """Load one learned story's metadata (title, link, paragraphs, ...)."""
+    if not NEWS_ID_PATTERN.fullmatch(news_id):
+        return {}
+    try:
+        data = json.loads(
+            (NEWS_CACHE_DIR / f"{news_id}.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def news_is_learned(news_id: str) -> bool:
+    """A story is learned once its metadata and overview trunk exist."""
+    if not NEWS_ID_PATTERN.fullmatch(news_id):
+        return False
+    return (
+        (NEWS_CACHE_DIR / f"{news_id}.json").is_file()
+        and (NEWS_CACHE_DIR / f"{news_id}.0.trunk").is_file()
+    )
+
+
+def news_title(news_id: str) -> str:
+    """Return a learned story's title, or an empty string."""
+    meta = _read_news_meta(news_id)
+    return str(meta.get("title") or "").strip()
+
+
+def news_link(news_id: str) -> str:
+    """Return a learned story's original article URL, or an empty string."""
+    meta = _read_news_meta(news_id)
+    return str(meta.get("link") or "").strip()
+
+
+def chunk_title(chunk: chat.Chunk) -> str:
+    """Return the title for a transcript or news chunk."""
+    if chunk_is_news(chunk):
+        return news_title(chunk.video_id) or chunk.video_id
+    return chat.video_title(chunk.video_id)
+
+
+def chunk_url(chunk: chat.Chunk) -> str:
+    """Return the source URL for a transcript or news chunk."""
+    if chunk_is_news(chunk):
+        return news_link(chunk.video_id)
+    return YOUTUBE_URL_TEMPLATE.format(video_id=chunk.video_id)
+
+
+def news_key_for_item(payload: dict) -> str:
+    """Return the stable identity used to cache one news story."""
+    link = str(payload.get("link") or "").strip()
+    if link:
+        # A fragment is a client-side anchor, not a different article.
+        return link.split("#", 1)[0].strip()
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise ValueError("The news story has no title or link")
+    return "\0".join(
+        [
+            title,
+            str(payload.get("published") or "").strip(),
+            str(payload.get("source") or "").strip(),
+        ]
+    )
+
+
+def news_id_for_item(payload: dict) -> str:
+    """Return the content-addressed id for a news story."""
+    key = news_key_for_item(payload)
+    return "news_" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+
+
+def _news_clean_paragraphs(values) -> list[str]:
+    """Normalize the paragraphs sent by the browser, dropping duplicates."""
+    paragraphs: list[str] = []
+    seen: set[str] = set()
+    if not isinstance(values, list):
+        return paragraphs
+    for value in values:
+        text = " ".join(str(value or "").split())
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        paragraphs.append(text)
+    return paragraphs
+
+
+def _news_trunk(title: str, paragraph: str) -> str:
+    return (
+        f"<article><title>{xml_escape(title)}</title>"
+        f"<paragraph>{xml_escape(paragraph)}</paragraph></article>\n"
+    )
+
+
+def learn_news_article(payload: dict) -> dict:
+    """Store one news story and build the learned retrieval trunks.
+
+    The original article content and its learned representation both live in
+    ``.chat/news_cache``: a JSON record plus a Markdown copy of the story, and
+    one trunk per paragraph. A compact overview trunk (index 0) makes
+    broad questions such as "what is this story about?" retrievable.
+    """
+    title = " ".join(str(payload.get("title") or "").split())
+    if not title:
+        raise ValueError("The news story has no title")
+    paragraphs = _news_clean_paragraphs(payload.get("paragraphs"))
+    summary = " ".join(str(payload.get("summary") or "").split())
+    if not paragraphs:
+        if summary:
+            paragraphs = [summary]
+        else:
+            raise ValueError("The news story has no readable paragraphs")
+
+    news_id = news_id_for_item(payload)
+    link = str(payload.get("link") or "").strip()
+    source = str(payload.get("source") or "").strip()
+    section = str(payload.get("section") or "").strip()
+    published = str(payload.get("published") or "").strip()
+    images = [
+        str(url).strip()
+        for url in (payload.get("images") or [])
+        if str(url).strip()
+    ][:12]
+    meta = {
+        "id": news_id,
+        "title": title,
+        "link": link,
+        "source": source,
+        "section": section,
+        "published": published,
+        "summary": summary,
+        "paragraphs": paragraphs,
+        "images": images,
+        "learned_at": time.time(),
+    }
+
+    content_lines = [f"# {title}", ""]
+    details = [part for part in (source, section) if part]
+    if details:
+        content_lines.extend([" · ".join(details), ""])
+    if published:
+        content_lines.extend([published, ""])
+    if link:
+        content_lines.extend([link, ""])
+    if summary and summary != paragraphs[0]:
+        content_lines.extend([summary, ""])
+    for paragraph in paragraphs:
+        content_lines.extend([paragraph, ""])
+    content = "\n".join(content_lines).rstrip() + "\n"
+
+    NEWS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with NEWS_CACHE_LOCK:
+        # Re-learning replaces the old generated trunks instead of appending.
+        for old in NEWS_CACHE_DIR.glob(f"{news_id}.*.trunk"):
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        (NEWS_CACHE_DIR / f"{news_id}.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        (NEWS_CACHE_DIR / f"{news_id}.md").write_text(
+            content, encoding="utf-8"
+        )
+        (NEWS_CACHE_DIR / f"{news_id}.title").write_text(
+            title + "\n", encoding="utf-8"
+        )
+        overview = summary or paragraphs[0]
+        (NEWS_CACHE_DIR / f"{news_id}.0.trunk").write_text(
+            _news_trunk(title, overview), encoding="utf-8"
+        )
+        for index, paragraph in enumerate(paragraphs, start=1):
+            (NEWS_CACHE_DIR / f"{news_id}.{index}.trunk").write_text(
+                _news_trunk(title, paragraph), encoding="utf-8"
+            )
+
+    return {
+        "id": news_id,
+        "learned": True,
+        "title": title,
+        "link": link,
+        "chunks": len(paragraphs) + 1,
+    }
+
+
 def source_payload(sources):
     """Serialize source chunks for the browser."""
     payload = []
@@ -2589,7 +2795,9 @@ def source_payload(sources):
                 "video_id": chunk.video_id,
                 "index": chunk.index,
                 "score": value,
-                "title": chat.video_title(chunk.video_id),
+                "title": chunk_title(chunk),
+                "kind": "news" if chunk_is_news(chunk) else "video",
+                "url": chunk_url(chunk),
             }
         )
     return payload
@@ -2715,12 +2923,18 @@ def _annotation_tokens(text: str) -> set[str]:
 def build_answer_annotations(
     answer: str, sources: list[tuple[chat.Chunk, float]]
 ) -> list[dict]:
-    """Map each answer block to the source video it most likely came from.
+    """Map each answer block to the source it most likely came from.
 
-    Scoring is an IDF-weighted token overlap between the block and each trunk
-    (plus its title). When a block shares no vocabulary with any trunk (for
-    example a Chinese answer synthesized from English context), it falls back
-    to the top-ranked trunk so the paragraph still gets a useful video link.
+    Scoring is the cosine similarity between IDF-weighted token sets of the
+    answer block and each trunk (plus its title). Normalizing by the source
+    length matters because a long transcript paragraph shares many common
+    words with any answer, while a short, precise news paragraph can be the
+    actual source. A learned news story that is nearly as good a lexical match
+    as the best transcript is preferred, so a story read with /news keeps its
+    news icon even when a video paraphrases the same reporting. When a block
+    shares no vocabulary with any trunk (for example a Chinese answer
+    synthesized from English context), it falls back to the top-ranked trunk
+    so the paragraph still gets a useful source link.
     """
     if not answer or not sources:
         return []
@@ -2730,7 +2944,7 @@ def build_answer_annotations(
 
     source_rows: list[tuple[int, chat.Chunk, str, set[str]]] = []
     for rank, (chunk, _score) in enumerate(sources, start=1):
-        title = chat.video_title(chunk.video_id)
+        title = chunk_title(chunk)
         tokens = _annotation_tokens(
             f"{title}\n{chat.paragraph_text(chunk)}"
         )
@@ -2752,18 +2966,41 @@ def build_answer_annotations(
         block_weight = sum(weights.get(token, 0.5) for token in tokens) or 1.0
 
         best: tuple[int, chat.Chunk, str, float] | None = None
+        best_news: tuple[int, chat.Chunk, str, float] | None = None
         for rank, chunk, title, source_tokens in source_rows:
             overlap = tokens & source_tokens
             if not overlap:
                 continue
-            score = sum(weights.get(token, 0.5) for token in overlap)
-            score /= block_weight
+            overlap_weight = sum(
+                weights.get(token, 0.5) for token in overlap
+            )
+            source_weight = (
+                sum(weights.get(token, 0.5) for token in source_tokens)
+                or 1.0
+            )
+            # Cosine similarity, so a short exact source is not outscored by
+            # a long paragraph that merely repeats many common words.
+            score = overlap_weight / math.sqrt(
+                block_weight * source_weight
+            )
             if best is None or score > best[3] + 1e-9:
                 best = (rank, chunk, title, score)
+            if chunk_is_news(chunk) and (
+                best_news is None or score > best_news[3] + 1e-9
+            ):
+                best_news = (rank, chunk, title, score)
+
+        # Learned news is an explicit source the user chose to keep, so give
+        # it the citation when it is essentially as close as the best match.
+        if (
+            best_news is not None
+            and (best is None or best_news[3] >= best[3] * 0.75)
+        ):
+            best = best_news
 
         if best is None:
             chunk = sources[0][0]
-            best = (1, chunk, chat.video_title(chunk.video_id), 0.0)
+            best = (1, chunk, chunk_title(chunk), 0.0)
 
         rank, chunk, title, score = best
         annotations.append(
@@ -2772,7 +3009,8 @@ def build_answer_annotations(
                 "video_id": chunk.video_id,
                 "chunk_index": chunk.index,
                 "title": title or chunk.video_id,
-                "url": YOUTUBE_URL_TEMPLATE.format(video_id=chunk.video_id),
+                "url": chunk_url(chunk),
+                "kind": "news" if chunk_is_news(chunk) else "video",
                 "rank": rank,
                 "score": round(score, 4),
             }
@@ -4537,6 +4775,8 @@ class ChatState:
         # same official documentation.
         self.code_language: str = ""
         self.transcript: str | None = None
+        # Set on an isolated in-modal session for one learned news story.
+        self.news_id: str | None = None
         self.article_path: str | None = None
         self.article_title: str = ""
         self.article_structure: dict | None = None
@@ -4677,7 +4917,9 @@ class ChatState:
         return str(self.depth)
 
     def snapshot(self, include_history: bool = False) -> dict:
-        video_ids = {chunk.video_id for chunk in self.chunks}
+        all_ids = {chunk.video_id for chunk in self.chunks}
+        news_ids = {video_id for video_id in all_ids if NEWS_ID_PATTERN.fullmatch(video_id)}
+        video_ids = all_ids - news_ids
         data = {
             "transcript": self.transcript,
             "depth": self.depth,
@@ -4687,14 +4929,19 @@ class ChatState:
             "progressive": self.progressive,
             "chunks": len(self.chunks),
             "videos": len(video_ids),
+            "news": len(news_ids),
             "code_language": self.code_language or "",
             "scope": (
-                f"article {self.article_path!r}"
-                if self.article_path is not None
+                f"news {self.news_id!r}"
+                if self.news_id is not None
                 else (
-                    f"transcript {self.transcript!r}"
-                    if self.transcript is not None
-                    else "global corpus (all learned trunks)"
+                    f"article {self.article_path!r}"
+                    if self.article_path is not None
+                    else (
+                        f"transcript {self.transcript!r}"
+                        if self.transcript is not None
+                        else "global corpus (all learned trunks)"
+                    )
                 )
             ),
             "article": self.article_path,
@@ -4763,6 +5010,8 @@ class ChatState:
                 (self.article_structure or {}).get("video_id", ""),
                 self.article_iterative,
             )
+        if self.news_id is not None:
+            key += ("news", self.news_id)
         if coding_mode:
             # The coding model and prompt differ from the regular RAG answer.
             key += ("coding", language_coding_model(language))
@@ -4824,6 +5073,69 @@ def forget_video_chat_state(video_id: str) -> None:
     """Drop a cached session, for example after the video is re-learned."""
     with VIDEO_CHAT_LOCK:
         VIDEO_CHAT_STATES.pop(video_id, None)
+
+
+# The "Chat" button inside a /news story modal keeps its own conversation
+# scoped to that one learned story. It is deliberately separate from the main
+# chat and from the video chat sessions.
+NEWS_CHAT_STATES: dict[str, ChatState] = {}
+NEWS_CHAT_LOCK = threading.Lock()
+
+
+def get_news_chat_state(news_id: str) -> ChatState:
+    """Return (creating if needed) the isolated chat session for a story."""
+    if not NEWS_ID_PATTERN.fullmatch(news_id):
+        raise RuntimeError("Missing or invalid news story id")
+    with NEWS_CHAT_LOCK:
+        session = NEWS_CHAT_STATES.get(news_id)
+        if session is not None:
+            return session
+        if not news_is_learned(news_id):
+            raise RuntimeError(
+                "This story has not been learned yet. Click Learn first, then "
+                "chat about it."
+            )
+        chunks = chat.load_news_chunks({news_id})
+        if not chunks:
+            raise RuntimeError(
+                f"No learned trunks found for news story {news_id!r}."
+            )
+        session = ChatState(chunks=chunks)
+        session.transcript = None
+        session.news_id = news_id
+        session.global_chunks = chunks
+        NEWS_CHAT_STATES[news_id] = session
+        return session
+
+
+def forget_news_chat_state(news_id: str) -> None:
+    """Drop a cached news chat session, for example after re-learning."""
+    with NEWS_CHAT_LOCK:
+        NEWS_CHAT_STATES.pop(news_id, None)
+
+
+def refresh_news_corpus(state: ChatState, news_id: str) -> None:
+    """Make a newly learned story part of the global corpus immediately."""
+    forget_news_chat_state(news_id)
+    try:
+        with state.lock:
+            chat.clear_bm25_cache()
+            state.cache.clear()
+            chunks, _printed, error = load_all_chunks_captured()
+            if error or chunks is None:
+                return
+            state.global_chunks = chunks
+            if (
+                state.article_path is not None
+                or state.transcript is not None
+                or state.news_id is not None
+            ):
+                return
+            state.replace_chunks(chunks)
+    except Exception:
+        # Learning succeeded even if the in-memory corpus could not refresh;
+        # /refresh or the next server start can retry.
+        pass
 
 
 # Each open Project Gutenberg book gets its own article-scoped ChatState. The
@@ -5213,6 +5525,20 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 {"jobs": _video_learn_jobs_snapshot(self.state) or []}
             )
             return
+        if path == "/api/news_status":
+            params = parse_qs(parsed.query)
+            news_id = (params.get("id") or [""])[0].strip()
+            if not NEWS_ID_PATTERN.fullmatch(news_id):
+                self._send_error_json("Missing or invalid news story id", 400)
+                return
+            self._send_json(
+                {
+                    "id": news_id,
+                    "learned": news_is_learned(news_id),
+                    "title": news_title(news_id),
+                }
+            )
+            return
         if path == "/api/autocomplete":
             params = parse_qs(parsed.query)
             kind = (params.get("kind") or ["commands"])[0]
@@ -5567,6 +5893,39 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 response["job"] = job
             self._send_json(response)
             return
+        if parsed.path == "/api/news_learn":
+            payload = self._read_json()
+            if payload is None:
+                return
+            try:
+                result = learn_news_article(payload)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except OSError as exc:
+                self._send_error_json(
+                    f"Could not store the story: {exc}", 500
+                )
+                return
+            refresh_news_corpus(self.state, result["id"])
+            self._send_json(result)
+            return
+        if parsed.path == "/api/news_chat":
+            payload = self._read_json()
+            if payload is None:
+                return
+            news_id = str(payload.get("id") or "").strip()
+            if not NEWS_ID_PATTERN.fullmatch(news_id):
+                self._send_error_json("Missing or invalid news story id", 400)
+                return
+            question = str(payload.get("question") or "").strip()
+            if not question:
+                self._send_error_json("Missing question", 400)
+                return
+            self._handle_news_chat(
+                news_id, question, reset=bool(payload.get("reset"))
+            )
+            return
         if parsed.path == "/api/video_summary":
             payload = self._read_json()
             if payload is None:
@@ -5723,6 +6082,59 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 except ClientDisconnected:
                     pass
                 except Exception as exc:  # Keep the modal informed.
+                    try:
+                        self._sse("error", {"message": str(exc)})
+                        self._sse("done", {"state": session.snapshot()})
+                    except ClientDisconnected:
+                        pass
+        finally:
+            self.state = previous_state
+
+    def _handle_news_chat(
+        self, news_id: str, question: str, reset: bool = False
+    ) -> None:
+        """Stream an answer from one learned news story in its modal."""
+        try:
+            session = get_news_chat_state(news_id)
+        except RuntimeError as exc:
+            self._begin_sse()
+            try:
+                self._sse("error", {"message": str(exc)})
+                self._sse("done", {})
+            except ClientDisconnected:
+                pass
+            return
+
+        previous_state = self.state
+        self.state = session
+        try:
+            with session.lock:
+                if reset:
+                    session.reset_conversation()
+                    session.cache.clear()
+                    session.latest_answer = None
+                    session.latest_sources = []
+                    session.latest_benchmark = None
+                self._begin_sse()
+                try:
+                    self._sse("meta", session.snapshot())
+                    self._run_question(question)
+                    self._sse(
+                        "done",
+                        {
+                            "state": session.snapshot(),
+                            "benchmark": (
+                                chat.format_benchmark_line(
+                                    session.latest_benchmark
+                                )
+                                if session.latest_benchmark is not None
+                                else ""
+                            ),
+                        },
+                    )
+                except ClientDisconnected:
+                    pass
+                except Exception as exc:
                     try:
                         self._sse("error", {"message": str(exc)})
                         self._sse("done", {"state": session.snapshot()})
@@ -8091,9 +8503,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         """Stream the latest news stories to the browser.
 
         Usage: /news [SOURCE ...] [number-of-stories]
-        Each SOURCE is one of wsj, cnn, yahoo_finance, kqed, sfgate, sfbayview,
-        mission_local, richmond_sunset, techcrunch, krasia, wccftech, or
-        hackernews.
+        Each SOURCE is one of wsj, cnn, cbslite, nprtext, yahoo_finance, kqed,
+        sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia,
+        wccftech, or hackernews.
         Several sources may be selected.
         Without a source, every supported source is shown as its own section.
         """
@@ -8241,6 +8653,17 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         continue
                     if payload.get("type") == "item":
                         item_count += 1
+                        # Attach the stable learned-story id and status so the
+                        # browser can offer Learn or Chat without a second
+                        # request for every story in the feed.
+                        try:
+                            news_id = news_id_for_item(payload)
+                        except ValueError:
+                            news_id = ""
+                        payload["news_id"] = news_id
+                        payload["learned"] = bool(
+                            news_id and news_is_learned(news_id)
+                        )
                     self._sse("news", payload)
                 returncode = process.wait()
             except ClientDisconnected:
@@ -9086,8 +9509,17 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), ChatRequestHandler)
     server.daemon_threads = True
     address = f"http://{args.host}:{args.port}/"
+    all_ids = {chunk.video_id for chunk in state.chunks}
+    news_count = sum(1 for video_id in all_ids if NEWS_ID_PATTERN.fullmatch(video_id))
+    source_summary = f"({len(all_ids) - news_count} videos)"
+    if news_count:
+        source_summary = (
+            f"({len(all_ids) - news_count} videos, "
+            f"{news_count} news stories)"
+        )
     print(
-        f"Loaded {len(state.chunks)} trunks into the global corpus.",
+        f"Loaded {len(state.chunks)} trunks into the global corpus "
+        f"{source_summary}.",
         flush=True,
     )
     print(f"YouTube local chat server running at {address}", flush=True)

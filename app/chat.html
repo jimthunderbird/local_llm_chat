@@ -1086,8 +1086,8 @@
   }
   #news-panel[hidden] { display: none; }
   .news-card {
-    width: min(760px, 100%);
-    max-height: 82vh;
+    width: min(1120px, 100%);
+    max-height: 88vh;
     display: flex;
     flex-direction: column;
     background: #0d151e;
@@ -1130,11 +1130,43 @@
     user-select: none;
   }
   #news-close:hover { color: var(--text); }
-  .news-body {
+  /* Match the video modal: the article fills the wide left column, while
+     the Learn/Chat controls and in-modal conversation stay in a narrower
+     right rail. Each column scrolls on its own. */
+  .news-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.55fr) minmax(250px, 1fr);
+    gap: 14px;
+    align-items: stretch;
+    flex: 1 1 auto;
+    min-height: 0;
     padding: 14px 18px 18px;
+    overflow: hidden;
+  }
+  .news-body {
+    min-height: 0;
+    padding: 0;
     overflow-y: auto;
     font-size: 13px;
     color: #cfdae5;
+  }
+  .news-side {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+  @media (max-width: 760px) {
+    .news-layout {
+      grid-template-columns: minmax(0, 1fr);
+      grid-auto-rows: max-content;
+      align-content: start;
+      overflow-y: auto;
+    }
+    .news-body, .news-side { max-height: none; overflow: visible; }
   }
   .news-body p { margin: 0 0 .9em; }
   .news-body p:first-child { margin-top: 0; }
@@ -1165,6 +1197,10 @@
   }
   .news-body .news-loading { color: var(--warn); font-size: 12px; }
   .news-body .news-summary { color: #dfeaf4; font-style: italic; }
+  /* The story controls and chat reuse the video modal's action styles. */
+  #news-action { flex: 0 0 auto; margin: 0; }
+  #news-chat { flex: 0 0 auto; margin: 0; }
+  #news-chat .video-chat-messages { max-height: min(34vh, 320px); }
   .video-results {
     margin: 10px 0 4px;
     padding: 10px 0 2px;
@@ -1510,7 +1546,7 @@
     user-select: none;
   }
   .video-chat-head .video-action-title { flex: 1; }
-  #video-chat-close {
+  #video-chat-close, #news-chat-close {
     background: transparent;
     border: 0;
     color: var(--dim);
@@ -1519,7 +1555,7 @@
     cursor: pointer;
     padding: 0 2px;
   }
-  #video-chat-close:hover { color: var(--text); }
+  #video-chat-close:hover, #news-chat-close:hover { color: var(--text); }
   .video-chat-messages {
     display: flex;
     flex-direction: column;
@@ -1580,7 +1616,7 @@
     padding: 9px 11px 11px;
     border-top: 1px solid #223344;
   }
-  #video-chat-input {
+  #video-chat-input, #news-chat-input {
     flex: 1;
     min-height: 42px;
     max-height: 130px;
@@ -1594,8 +1630,8 @@
     font-size: 12px;
     line-height: 1.4;
   }
-  #video-chat-input:focus { outline: 1px solid var(--accent-2); }
-  #video-chat-send {
+  #video-chat-input:focus, #news-chat-input:focus { outline: 1px solid var(--accent-2); }
+  #video-chat-send, #news-chat-send {
     flex: 0 0 auto;
     background: #142334;
     color: var(--text);
@@ -1606,8 +1642,8 @@
     font-size: 12px;
     cursor: pointer;
   }
-  #video-chat-send:hover:not(:disabled) { border-color: var(--accent-2); color: #fff; }
-  #video-chat-send:disabled { opacity: .65; cursor: wait; }
+  #video-chat-send:hover:not(:disabled), #news-chat-send:hover:not(:disabled) { border-color: var(--accent-2); color: #fff; }
+  #video-chat-send:disabled, #news-chat-send:disabled { opacity: .65; cursor: wait; }
   .video-player {
     position: relative;
     width: 100%;
@@ -2240,10 +2276,33 @@
               title="Translate this story into Simplified Chinese with the local LLM">中文</button>
       <button id="news-close" type="button" title="Close (Esc)">×</button>
     </div>
-    <div id="news-body" class="news-body">
-      <div id="news-translation" hidden>
-        <div id="news-translation-label" class="translation-label">中文翻译</div>
-        <div id="news-translation-body" class="markdown"></div>
+    <div class="news-layout">
+      <div id="news-body" class="news-body">
+        <div id="news-translation" hidden>
+          <div id="news-translation-label" class="translation-label">中文翻译</div>
+          <div id="news-translation-body" class="markdown"></div>
+        </div>
+      </div>
+      <div class="news-side">
+        <div id="news-action" class="video-action" hidden>
+          <div class="video-action-title">This story</div>
+          <div id="news-action-note" class="video-action-note"></div>
+          <button id="news-action-btn" class="video-action-btn" type="button" hidden></button>
+        </div>
+        <div id="news-chat" class="video-chat" hidden>
+          <div class="video-chat-head">
+            <span class="video-action-title">Chat about this story</span>
+            <button id="news-chat-close" type="button" title="Close chat">×</button>
+          </div>
+          <div id="news-chat-messages" class="video-chat-messages">
+            <div class="video-chat-empty">Ask a question and the answer will use only this learned story.</div>
+          </div>
+          <div class="video-chat-compose">
+            <textarea id="news-chat-input" rows="2"
+                      placeholder="Ask about this story… (Enter to send, Shift+Enter for a new line)"></textarea>
+            <button id="news-chat-send" type="button">Send</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -2462,6 +2521,13 @@ const newsTranslateBtn = $("#news-translate");
 const newsTranslationEl = $("#news-translation");
 const newsTranslationLabelEl = $("#news-translation-label");
 const newsTranslationBodyEl = $("#news-translation-body");
+const newsActionEl = $("#news-action");
+const newsActionNoteEl = $("#news-action-note");
+const newsActionBtnEl = $("#news-action-btn");
+const newsChatEl = $("#news-chat");
+const newsChatMessagesEl = $("#news-chat-messages");
+const newsChatInputEl = $("#news-chat-input");
+const newsChatSendEl = $("#news-chat-send");
 const videoPanelEl = $("#video-panel");
 const videoModalTitleEl = $("#video-modal-title");
 const videoBookmarkEl = $("#video-bookmark");
@@ -3174,6 +3240,7 @@ function appendInline(parent, text, clickable) {
 const BLOCK_START_RE = /^(?:#{1,6}\s|```|>\s?|(?:[-*+]|\d+[.)])\s+|-{3,}\s*$|\*{3,}\s*$)/;
 
 const VIDEO_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M23.5 6.2a3 3 0 0 0-2.1-2.1C19.5 3.5 12 3.5 12 3.5s-7.5 0-9.4.6A3 3 0 0 0 .5 6.2 31.6 31.6 0 0 0 0 12a31.6 31.6 0 0 0 .5 5.8 3 3 0 0 0 2.1 2.1c1.9.6 9.4.6 9.4.6s7.5 0 9.4-.6a3 3 0 0 0 2.1-2.1A31.6 31.6 0 0 0 24 12a31.6 31.6 0 0 0-.5-5.8zM9.6 15.6V8.4L15.8 12z"/></svg>';
+const NEWS_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 4h18v16H3V4zm2 2v12h14V6H5zm2 2h6v2H7V8zm0 4h10v2H7v-2zm0 4h10v2H7v-2z"/></svg>';
 const COPY_ICON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>';
 
 function makeVideoLink(annotation) {
@@ -3182,11 +3249,12 @@ function makeVideoLink(annotation) {
   link.href = annotation.url;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
+  const isNews = annotation.kind === "news";
   link.title = annotation.title
-    ? `Watch the source video: ${annotation.title}`
-    : `Watch the source video (${annotation.video_id || "YouTube"})`;
+    ? `${isNews ? "Open the source story" : "Watch the source video"}: ${annotation.title}`
+    : `${isNews ? "Open the source story" : "Watch the source video"} (${annotation.video_id || (isNews ? "news" : "YouTube")})`;
   link.setAttribute("aria-label", link.title);
-  link.innerHTML = VIDEO_ICON_SVG;
+  link.innerHTML = isNews ? NEWS_ICON_SVG : VIDEO_ICON_SVG;
   // Keep the dictionary word-click handler from treating the icon as a word.
   link.addEventListener("click", (event) => event.stopPropagation());
   return link;
@@ -4325,6 +4393,8 @@ function addNewsEvent(entry, data) {
   if (type === "item") {
     entry.newsItems.push({
       index: Number(data.index) || entry.newsItems.length + 1,
+      newsId: String(data.news_id || ""),
+      learned: Boolean(data.learned),
       title: data.title || "(untitled)",
       link: data.link || "",
       published: data.published || "",
@@ -4367,7 +4437,10 @@ function addNewsEvent(entry, data) {
       || entry.newsItems[entry.newsItems.length - 1];
     if (item) {
       item.complete = true;
-      if (newsItem === item) renderNewsModal(item);
+      if (newsItem === item) {
+        renderNewsModal(item);
+        renderNewsAction(item);
+      }
       scheduleRender(entry);
     }
     return;
@@ -4625,6 +4698,7 @@ function renderNewsList(entry) {
         const count = item.paragraphs.length;
         metaParts.push(`${count} paragraph${count === 1 ? "" : "s"}`);
       }
+      if (item.learned) metaParts.push("learned");
       meta.textContent = metaParts.join(" · ");
       main.appendChild(meta);
 
@@ -6542,19 +6616,338 @@ function renderNewsModal(item) {
 function openNewsModal(item) {
   newsItem = item;
   resetNewsTranslation();
+  resetNewsChat();
   renderNewsModal(item);
+  renderNewsAction(item);
   newsPanelEl.hidden = false;
 }
 
 function closeNewsModal() {
   newsItem = null;
   resetNewsTranslation();
+  resetNewsChat();
+  resetNewsAction();
   newsPanelEl.hidden = true;
   newsBodyEl.textContent = "";
   if (newsTranslationEl.parentNode !== newsBodyEl) {
     newsBodyEl.appendChild(newsTranslationEl);
   }
 }
+
+/* ------------------------------------------------------------------ *
+ *  Learn a news story and chat about it inside the story modal
+ * ------------------------------------------------------------------ */
+function newsLearnPayload(item) {
+  return {
+    news_id: item.newsId || "",
+    title: item.title || "",
+    link: item.link || "",
+    source: item.source || "",
+    section: item.section || "",
+    published: item.published || "",
+    summary: item.summary || "",
+    paragraphs: Array.isArray(item.paragraphs) ? item.paragraphs.slice() : [],
+    images: Array.isArray(item.images) ? item.images.slice() : [],
+  };
+}
+
+function resetNewsAction() {
+  if (!newsActionEl) return;
+  newsActionEl.hidden = true;
+  if (newsActionNoteEl) newsActionNoteEl.textContent = "";
+  if (newsActionBtnEl) {
+    newsActionBtnEl.hidden = true;
+    newsActionBtnEl.disabled = false;
+    newsActionBtnEl.className = "video-action-btn";
+    newsActionBtnEl.onclick = null;
+  }
+}
+
+function renderNewsAction(item) {
+  if (!newsActionEl || !item || newsItem !== item) return;
+  newsActionEl.hidden = false;
+  newsActionBtnEl.hidden = false;
+  newsActionBtnEl.disabled = false;
+  newsActionBtnEl.className = "video-action-btn";
+  newsActionBtnEl.onclick = null;
+
+  if (item.learning) {
+    newsActionNoteEl.textContent = "Learning this story…";
+    newsActionBtnEl.textContent = "Learning…";
+    newsActionBtnEl.disabled = true;
+    return;
+  }
+  if (item.learned) {
+    newsActionNoteEl.textContent =
+      "This story is learned. Chat here, without leaving this window.";
+    newsActionBtnEl.textContent = "Chat";
+    newsActionBtnEl.classList.add("is-chat");
+    newsActionBtnEl.title = "Chat about this story in this window";
+    newsActionBtnEl.onclick = () => openNewsChat();
+    return;
+  }
+  if (item.learnError) {
+    newsActionNoteEl.textContent = `Learn failed: ${item.learnError}`;
+    newsActionBtnEl.textContent = "Retry";
+    newsActionBtnEl.title = "Retry learning this story";
+  } else if (!item.complete) {
+    newsActionNoteEl.textContent = "Waiting for the full story text…";
+    newsActionBtnEl.textContent = "Learn";
+    newsActionBtnEl.disabled = true;
+    return;
+  } else {
+    newsActionNoteEl.textContent =
+      "Learn this story to chat with it here and add it to the global corpus.";
+    newsActionBtnEl.textContent = "Learn";
+    newsActionBtnEl.title = "Learn this story";
+  }
+  newsActionBtnEl.onclick = () => learnNewsItem(item);
+}
+
+async function learnNewsItem(item) {
+  if (!item || item.learning || !item.newsId) return;
+  item.learning = true;
+  item.learnError = "";
+  renderNewsAction(item);
+  try {
+    const response = await fetch("/api/news_learn", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(newsLearnPayload(item)),
+    });
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try {
+        const text = await response.text();
+        if (text) {
+          try {
+            detail = JSON.parse(text).error || detail;
+          } catch {
+            detail = text.slice(0, 200);
+          }
+        }
+      } catch { /* ignore */ }
+      throw new Error(detail);
+    }
+    const data = await response.json();
+    if (data?.id) item.newsId = data.id;
+    item.learned = Boolean(data?.learned);
+  } catch (error) {
+    item.learnError = error?.message || String(error);
+  } finally {
+    item.learning = false;
+    if (newsItem === item) renderNewsAction(item);
+  }
+}
+
+let newsChatController = null;
+let newsChatFresh = true;
+let newsChatBusy = false;
+let newsChatGeneration = 0;
+
+function newsChatClearMessages() {
+  newsChatMessagesEl.textContent = "";
+  const empty = document.createElement("div");
+  empty.className = "video-chat-empty";
+  empty.textContent =
+    "Ask a question and the answer will use only this learned story.";
+  newsChatMessagesEl.appendChild(empty);
+}
+
+function newsChatScrollToBottom() {
+  newsChatMessagesEl.scrollTop = newsChatMessagesEl.scrollHeight;
+}
+
+function newsChatAppendUser(text) {
+  newsChatMessagesEl.querySelector(".video-chat-empty")?.remove();
+  const node = document.createElement("div");
+  node.className = "video-chat-msg user";
+  node.textContent = text;
+  newsChatMessagesEl.appendChild(node);
+  newsChatScrollToBottom();
+}
+
+function newsChatAppendAssistant() {
+  newsChatMessagesEl.querySelector(".video-chat-empty")?.remove();
+  const message = {
+    el: document.createElement("div"),
+    text: "",
+    error: "",
+    thinking: true,
+    streaming: true,
+    renderPending: false,
+  };
+  message.el.className = "video-chat-msg assistant";
+  message.el._newsChatMessage = message;
+  newsChatMessagesEl.appendChild(message.el);
+  newsChatRenderMessage(message);
+  return message;
+}
+
+function newsChatRenderMessage(message) {
+  if (!message?.el) return;
+  message.el.classList.toggle("is-streaming", Boolean(message.streaming));
+  message.el.textContent = "";
+  if (message.text) {
+    const body = document.createElement("div");
+    body.className = "markdown";
+    body.dataset.clickable = "true";
+    body.appendChild(renderMarkdown(message.text, true));
+    message.el.appendChild(body);
+  }
+  if (message.thinking && !message.text && !message.error) {
+    const thinking = document.createElement("div");
+    thinking.className = "video-chat-thinking";
+    thinking.textContent = "thinking…";
+    message.el.appendChild(thinking);
+  }
+  if (message.error) {
+    const error = document.createElement("div");
+    error.className = "video-chat-error";
+    error.textContent = message.error;
+    message.el.appendChild(error);
+  }
+  newsChatScrollToBottom();
+}
+
+function scheduleNewsChatRender(message) {
+  if (!message || message.renderPending) return;
+  message.renderPending = true;
+  window.setTimeout(() => {
+    message.renderPending = false;
+    newsChatRenderMessage(message);
+  }, 55);
+}
+
+function resetNewsChat(hide = true) {
+  newsChatGeneration += 1;
+  if (newsChatController) {
+    newsChatController.abort();
+    newsChatController = null;
+  }
+  newsChatFresh = true;
+  newsChatBusy = false;
+  if (newsChatSendEl) newsChatSendEl.disabled = false;
+  if (newsChatInputEl) newsChatInputEl.value = "";
+  if (newsChatMessagesEl) newsChatClearMessages();
+  if (newsChatEl && hide) newsChatEl.hidden = true;
+}
+
+function openNewsChat() {
+  if (!newsItem?.newsId || !newsItem?.learned) return;
+  newsChatEl.hidden = false;
+  newsChatScrollToBottom();
+  newsChatInputEl.focus({ preventScroll: true });
+}
+
+function closeNewsChatPanel() {
+  resetNewsChat(true);
+}
+
+function sendNewsChatMessage() {
+  const item = newsItem;
+  const question = String(newsChatInputEl.value || "").trim();
+  if (!item?.newsId || !question || newsChatBusy) return;
+  const generation = newsChatGeneration;
+  const reset = newsChatFresh;
+  newsChatFresh = false;
+  newsChatBusy = true;
+  newsChatInputEl.value = "";
+  newsChatSendEl.disabled = true;
+  newsChatAppendUser(question);
+  const message = newsChatAppendAssistant();
+  const controller = new AbortController();
+  newsChatController = controller;
+
+  const isCurrent = () => generation === newsChatGeneration;
+  const handlers = {
+    delta: (data) => {
+      if (!isCurrent()) return;
+      message.thinking = false;
+      message.text += String(data?.text || "");
+      scheduleNewsChatRender(message);
+    },
+    reset: () => {
+      if (!isCurrent()) return;
+      message.text = "";
+      message.error = "";
+      scheduleNewsChatRender(message);
+    },
+    error: (data) => {
+      if (!isCurrent()) return;
+      message.thinking = false;
+      message.streaming = false;
+      message.error = data?.message || "Unknown server error.";
+      scheduleNewsChatRender(message);
+    },
+    done: () => {
+      if (!isCurrent()) return;
+      message.thinking = false;
+      message.streaming = false;
+      newsChatRenderMessage(message);
+    },
+  };
+
+  streamSSE(
+    "/api/news_chat",
+    { id: item.newsId, question, reset },
+    handlers,
+    controller.signal
+  )
+    .catch((error) => {
+      if (!isCurrent() || error?.name === "AbortError") return;
+      message.thinking = false;
+      message.streaming = false;
+      message.error = error?.message || String(error);
+      newsChatRenderMessage(message);
+    })
+    .finally(() => {
+      if (!isCurrent()) return;
+      if (newsChatController === controller) newsChatController = null;
+      newsChatBusy = false;
+      newsChatSendEl.disabled = false;
+      message.thinking = false;
+      message.streaming = false;
+      newsChatRenderMessage(message);
+      newsChatInputEl.focus({ preventScroll: true });
+    });
+}
+
+newsChatMessagesEl.addEventListener("click", (event) => {
+  const wordEl = event.target.closest?.(".word");
+  if (!wordEl) return;
+  const markdownEl = wordEl.closest(
+    '.video-chat-msg.assistant .markdown[data-clickable="true"]'
+  );
+  if (!markdownEl) return;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && String(selection).trim()) return;
+  const messageEl = wordEl.closest(".video-chat-msg.assistant");
+  const message = messageEl?._newsChatMessage;
+  event.preventDefault();
+  event.stopPropagation();
+  openDictionaryPopup(
+    wordEl.dataset.word || wordEl.textContent,
+    message?.text || "",
+    wordEl
+  );
+});
+
+newsChatSendEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  sendNewsChatMessage();
+});
+newsChatInputEl.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  event.stopPropagation();
+  sendNewsChatMessage();
+});
+$("#news-chat-close").addEventListener("click", (event) => {
+  event.preventDefault();
+  closeNewsChatPanel();
+});
+
 $("#news-close").addEventListener("click", closeNewsModal);
 newsTranslateBtn.addEventListener("click", (event) => {
   event.preventDefault();
@@ -6814,7 +7207,11 @@ function applyState(state, loadHistory = false) {
       ? "Only this transcript is used as context"
       : "All learned trunks are searched for every question";
   $("#status-depth").textContent = state.depth_label || "—";
-  $("#status-chunks").textContent = `${state.chunks ?? "?"} / ${state.videos ?? "?"} videos`;
+  const newsCount = Number(state.news ?? 0);
+  const videoCount = Number(state.videos ?? 0);
+  $("#status-chunks").textContent = newsCount
+    ? `${state.chunks ?? "?"} / ${videoCount} videos + ${newsCount} news`
+    : `${state.chunks ?? "?"} / ${videoCount} videos`;
   $("#status-conversation").textContent =
     `${state.conversation_turns ?? 0} turn${(state.conversation_turns ?? 0) === 1 ? "" : "s"}`;
   const statusModelEl = $("#status-model");
@@ -9120,11 +9517,15 @@ function renderWelcome(state) {
   const pre = document.createElement("pre");
   const chunks = state?.chunks ?? "?";
   const videos = state?.videos ?? "?";
+  const news = Number(state?.news ?? 0);
+  const sources = news
+    ? `${videos} videos + ${news} news stor${news === 1 ? "y" : "ies"}`
+    : `${videos} videos`;
   const model = displayModelName(state?.models?.chat);
   const historyCount = state?.history_count ?? 0;
   pre.innerHTML =
     `<span class="accent">Personal Chatbot</span>  <span class="dim">— lexical BM25 RAG over transcript trunks</span>\n` +
-    `global corpus · ${escapeText(String(chunks))} trunks from ${escapeText(String(videos))} videos · model <span class="accent">${escapeText(model)}</span>\n` +
+    `global corpus · ${escapeText(String(chunks))} trunks from ${escapeText(sources)} · model <span class="accent">${escapeText(model)}</span>\n` +
     `history ${escapeText(String(historyCount))} entries · depth ${escapeText(String(state?.depth_label ?? "—"))} · scope ${escapeText(state?.scope ?? "—")}\n\n` +
     `<span class="dim">Type a question and press ⌘/Ctrl+Enter (or click Send) to send. Enter adds a newline, so questions and code blocks can span several lines. Type /help for commands and vim shortcuts.\n` +
     `Follow-up questions keep conversation context (for example, "what does he think?").\n` +
