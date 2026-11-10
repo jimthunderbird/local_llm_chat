@@ -246,18 +246,16 @@ YOUTUBE_SUBCOMMANDS = {
     "learn": "fetch, rewrite, chunk, and embed one video",
     "learn_topic": "search YouTube for <topic> and learn the top 3 videos",
     "learn_playlist": "learn every video in a YouTube playlist",
-    "search": "search YouTube for <keyword> and show the 6 most recent 5-60 minute videos with English captions",
+    "search": "search YouTube through Google News RSS for <keyword> and show matching video urls and titles",
     "transcript": "use one transcript by hash/URL, or search titles with ag",
     "search_transcript": "search transcript titles with ag and pick a video",
     "bookmark": "list bookmarked videos, latest first: /youtube bookmark list",
 }
 
-# /youtube search duration window (seconds).
-YOUTUBE_SEARCH_MIN_DURATION = 5 * 60
-YOUTUBE_SEARCH_MAX_DURATION = 60 * 60
-
 # /youtube search shows six cards at a time. The "More" button below the
 # cards asks /api/youtube_more for the next six from the same cached search.
+# Search itself uses Google News RSS (site:youtube.com <keyword>); results are
+# only the YouTube source items, reduced to a video url and title.
 YOUTUBE_SEARCH_PAGE_SIZE = 6
 # Cache at most this many results per keyword, even after many "More" clicks.
 YOUTUBE_SEARCH_MAX_RESULTS = 200
@@ -7620,14 +7618,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _command_youtube_search(self, argument: str) -> None:
-        """Search YouTube and show clickable thumbnail cards.
+        """Search YouTube through Google News RSS and show video cards.
 
         Usage: /youtube search "<keyword>"
-        Returns 6 of the most recent 5-60 minute videos with English captions.
-        Cards are streamed as soon as the fast search returns; caption checks
-        then update the list in place.  Unlike /youtube learn_topic this only
-        lists the videos; nothing is learned.  Each card opens a centered
-        player, and its Summary button streams an AI overview of the video.
+        Google News RSS is queried with ``site:youtube.com <keyword>``. Only
+        feed items whose source is YouTube are kept, and each result is
+        reduced to a watch url and title (no thumbnail or duration lookup).
+        Each card opens a centered player, and its Summary/Learn buttons keep
+        working from the video id.
         """
         keyword = argument.strip()
         if len(keyword) >= 2 and keyword[0] == keyword[-1] and keyword[0] in "\"'":
@@ -7640,8 +7638,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         self._sse_text(
             "output",
-            f"\n/youtube search: searching YouTube for {keyword!r} "
-            "(5-60 minute videos; captions checked as cards load)...\n",
+            f"\n/youtube search: searching Google News for YouTube videos "
+            f"matching {keyword!r}...\n",
         )
         # Fetch one extra result so the UI knows whether a "More" button is
         # useful without making a second search just to find out.
@@ -7683,7 +7681,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 self._sse_text(
                     "output",
                     "\n/youtube search: showing the matching videos found so "
-                    "far; English captions could not be verified in time.\n",
+                    "far.\n",
                 )
                 self._sse(
                     "videos",
@@ -7707,8 +7705,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             self._sse_text(
                 "output",
-                "\n/youtube search: no videos between 5 and 60 minutes with "
-                f"English captions were found for {keyword!r}.\n",
+                "\n/youtube search: no YouTube videos were found for "
+                f"{keyword!r}.\n",
             )
             return
 
@@ -7724,6 +7722,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "items": videos,
                 "has_more": len(results) > YOUTUBE_SEARCH_PAGE_SIZE,
                 "pending": False,
+                "heading": "YouTube videos · Google News",
+                "note": (
+                    f"{len(videos)} result"
+                    f"{'' if len(videos) == 1 else 's'} · site:youtube.com"
+                ),
             },
         )
         if len(results) > YOUTUBE_SEARCH_PAGE_SIZE:
@@ -7741,16 +7744,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         command = [
             sys.executable,
             "-u",
-            str(SCRIPT_DIR / "search_youtube.py"),
+            str(SCRIPT_DIR / "youtube_news_search.py"),
             "--progressive-json" if progressive else "--json",
             "--limit",
             str(limit),
-            "--min-duration",
-            str(YOUTUBE_SEARCH_MIN_DURATION),
-            "--max-duration",
-            str(YOUTUBE_SEARCH_MAX_DURATION),
-            "--any-date",
-            "--sort-recent",
         ]
         if exclude:
             command.extend(["--exclude", ",".join(sorted(exclude))])
@@ -7779,6 +7776,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "duration": int(video.get("duration") or 0),
                     "channel": str(video.get("channel") or "").strip(),
                     "thumbnail": str(video.get("thumbnail") or "").strip(),
+                    "no_thumbnail": bool(video.get("no_thumbnail")),
                     "upload_date": str(video.get("upload_date") or "").strip(),
                     "published": str(video.get("published") or "").strip(),
                     "published_text": str(
@@ -7823,21 +7821,17 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         fallback_to_candidates: bool = False,
         status: dict[str, bool] | None = None,
     ) -> list[dict]:
-        """Run search_youtube.py and return normalized video metadata.
+        """Run youtube_news_search.py and return normalized video metadata.
 
-        With ``on_candidates`` the script is asked to emit its duration-filtered
-        candidates before caption verification.  Those are passed to the
-        callback immediately, so the UI can paint cards while the final list is
-        still being assembled.  ``exclude`` omits already-known video ids so a
-        "More" request only verifies genuinely new candidates.
+        The search script queries Google News RSS with ``site:youtube.com``,
+        keeps only items whose source is YouTube, and resolves each item to a
+        real YouTube watch URL.  ``exclude`` omits already-known video ids so
+        a "More" request only returns genuinely new results.
 
-        When every English-caption lookup fails (for example because YouTube
-        blocks caption requests from the current IP), the script still emits a
-        usable candidate list.  ``fallback_to_candidates`` returns that list
-        instead of an empty result, so the "More" button and background
-        prefetch keep working with unverified captions rather than appearing
-        to load nothing.  ``status`` is filled with ``captions_unverified`` so
-        callers can label those results honestly.
+        ``on_candidates`` is retained for the progressive caller interface,
+        although the Google News search emits one final result set.  The
+        ``fallback_to_candidates`` and ``status`` arguments are kept for cache
+        prefetch callers; caption checks no longer run for this search.
         """
         progressive = on_candidates is not None or fallback_to_candidates
         command = self._youtube_search_command(
@@ -7858,7 +7852,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 raise RuntimeError("YouTube search timed out.") from exc
             except OSError as exc:
                 raise RuntimeError(
-                    f"could not run search_youtube.py: {exc}"
+                    f"could not run youtube_news_search.py: {exc}"
                 ) from exc
 
             if result.returncode != 0:
@@ -7878,7 +7872,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
         except OSError as exc:
             raise RuntimeError(
-                f"could not run search_youtube.py: {exc}"
+                f"could not run youtube_news_search.py: {exc}"
             ) from exc
 
         stderr_lines: list[str] = []
@@ -8026,8 +8020,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     def _grow_youtube_cache(self, keyword: str, target: int) -> list[dict]:
         """Fetch only the videos needed to reach ``target`` cached results.
 
-        Known ids are passed as ``--exclude`` so caption checks are spent on
-        unseen candidates instead of re-verifying the pages already shown.
+        Known ids are passed as ``--exclude`` so the Google News search only
+        resolves links for unseen candidates instead of the items already shown.
         """
         target = max(1, min(target, YOUTUBE_SEARCH_MAX_RESULTS))
         cached = self._youtube_cache_items(keyword)
@@ -8135,9 +8129,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return
 
         # The cache is short: fetch only the missing, unseen videos.  Asking
-        # for one extra result keeps `has_more` accurate.  If caption checks
-        # are blocked, fall back to the duration/search candidates so "More"
-        # still advances instead of returning an empty page.
+        # for one extra result keeps `has_more` accurate.  The Google News
+        # search skips known ids and resolves only unseen RSS items.
         missing = page_size - len(unseen) + 1
         known = set(exclude) | {video["id"] for video in cached}
         status: dict[str, bool] = {}

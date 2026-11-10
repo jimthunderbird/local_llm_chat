@@ -1,3 +1,57 @@
+task.youtube_search.sort_videos_by_date.descending (completed) {
+  reference task.refactor.youtube_search_improvement_using_google_rss:
+  - after fetching the search result, sort the youtube videos by date in descending order
+}
+
+  Implemented:
+  youtube_news_search.py
+  - _rss_items() now sorts YouTube feed entries by their published ISO
+    date in descending order after parsing and before link resolution, with
+    undated items last. This keeps /youtube search results, prefetched pages,
+    and the "More" button uniformly newest-first.
+
+task.refactor.youtube_search_improvement_using_google_rss (completed) {
+  refactor the /youtube search command:
+  example: when i search "jensen huang" {
+    - result: use "https://news.google.com/rss/search?q=site:youtube.com+jensen+huang&hl=en-US&gl=US&ceid=US:en"
+    - analyse {result}, only return list of results that has <source url="https://www.youtube.com">YouTube</source>
+
+    - do not return the video image, simply return list of video url and video title is ok 
+  }
+
+  Implemented:
+  youtube_news_search.py (new)
+  - /youtube search now queries Google News RSS with site:youtube.com,
+    hl=en-US, gl=US, ceid=US:en instead of YouTube's InnerTube search.
+  - Only feed items whose <source> is YouTube are kept (case-insensitive
+    source name plus youtube.com/m.youtube.com/music.youtube.com URL).
+  - Google News redirect links are resolved through the batchexecute exchange
+    to real YouTube watch URLs, so the returned result is a playable video.
+    Resolved links are cached in .chat/youtube_news_links.json so the "More"
+    button and background prefetch do not repeat the exchange.
+  - Results contain only the video id, title, watch URL, and the feed's
+    publish date; no thumbnail, duration, or caption lookup is performed.
+  - Supports --json, --progressive-json, --limit, and --exclude so the
+    existing /youtube search cache, "More" button, Summary, Learn, and
+    Bookmark actions keep working unchanged.
+  app/chat_server.py
+  - _youtube_search_command now runs youtube_news_search.py and no longer
+    applies the old 5-60 minute/English-caption filters for this command.
+  - _normalize_youtube_items carries the no_thumbnail flag, and the /youtube
+    search messages/headings describe the Google News RSS source.
+  - search_youtube.py is unchanged and still powers /youtube learn_topic.
+  app/chat.html
+  - Video search cards honor no_thumbnail, so Google News results show a
+    compact title/url card instead of a generated thumbnail. Cards without a
+    known date no longer print "Release date unavailable".
+
+  Verified: `python3 youtube_news_search.py --json --limit 4 -- "jensen
+  huang"` returns four resolved youtube.com/watch?v=... URLs with titles and
+  dates; an --exclude follow-up returns the next unseen videos. Python syntax
+  checks pass for youtube_news_search.py and app/chat_server.py, and the
+  browser script passes `node --check`.
+}
+
 task.refactor.youtube_transcripts_location (completed) {
   currently, all youtube transcripts are located at ./youtube_transcript
   - we need to move it to ./.chat/youtube_transcripts directory
@@ -5,12 +59,12 @@ task.refactor.youtube_transcripts_location (completed) {
 
   Implemented:
   - Moved the transcript store from ./youtube_transcript to
-    ./.chat/youtube_transcripts and updated every reader/writer:
-    fetch_youtube_transcript.py, fetch_youtube_transcript.php, rewrite.py,
-    create_trunks.py, create_embeddings.py, get_videos_in_playlist.py,
-    chat.py, chat_gradual_context.py, app/chat_server.py, and the
-    research helper scripts. .chat/ was already runtime data and is
-    ignored by git; the old youtube_transcript/ ignore rule was removed.
+  ./.chat/youtube_transcripts and updated every reader/writer:
+  fetch_youtube_transcript.py, fetch_youtube_transcript.php, rewrite.py,
+  create_trunks.py, create_embeddings.py, get_videos_in_playlist.py,
+  chat.py, chat_gradual_context.py, app/chat_server.py, and the
+  research helper scripts. .chat/ was already runtime data and is
+  ignored by git; the old youtube_transcript/ ignore rule was removed.
 }
 
 task.bookmark_list_command_result_ui (completed) {
@@ -20,13 +74,13 @@ task.bookmark_list_command_result_ui (completed) {
   Implemented:
   app/chat_server.py
   - /youtube bookmark list now emits the same "videos" event as /youtube search,
-    with the bookmarks converted to the search-card shape (id, title,
-    thumbnail, duration, date, URL) and newest first. Invalid ids are skipped.
+  with the bookmarks converted to the search-card shape (id, title,
+  thumbnail, duration, date, URL) and newest first. Invalid ids are skipped.
   app/chat.html
   - The video-card renderer accepts optional "heading" and "note" fields, so
-    the bookmark list reads "Bookmarked videos · N saved videos · latest first"
-    while using the same clickable cards, player modal, Summary, and Learn
-    buttons as search results. No More button is shown.
+  the bookmark list reads "Bookmarked videos · N saved videos · latest first"
+  while using the same clickable cards, player modal, Summary, and Learn
+  buttons as search results. No More button is shown.
 }
 
 task.youtube_video_bookmark (completed) {
@@ -35,16 +89,16 @@ task.youtube_video_bookmark (completed) {
   Implemented:
   app/chat.html
   - Added a "Bookmark" button next to the video title in the /youtube search
-    player modal. It posts id, thumbnail, title, release date, and duration to
-    /api/youtube_bookmark and shows a "Bookmarked ✓" state afterwards.
+  player modal. It posts id, thumbnail, title, release date, and duration to
+  /api/youtube_bookmark and shows a "Bookmarked ✓" state afterwards.
   app/chat_server.py
   - /api/youtube_bookmark appends a JSON Lines entry to
-    .chat/youtube_video_bookmark.json, newest last. Re-bookmarking a video
-    moves its entry to the end, and the file is capped at 500 entries by
-    dropping the oldest ones. Writes are atomic.
+  .chat/youtube_video_bookmark.json, newest last. Re-bookmarking a video
+  moves its entry to the end, and the file is capped at 500 entries by
+  dropping the oldest ones. Writes are atomic.
   - Added /youtube bookmark list, which prints every bookmark latest-first
-    with its title, release date, duration, and YouTube URL. Tab completion
-    covers both the /youtube bookmark subcommand and its "list" action.
+  with its title, release date, duration, and YouTube URL. Tab completion
+  covers both the /youtube bookmark subcommand and its "list" action.
 
   in the video popup {
     next to the video title, add a new button "Bookmark", when click {

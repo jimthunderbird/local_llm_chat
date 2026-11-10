@@ -1246,6 +1246,11 @@
     outline: 2px solid var(--accent-2);
     outline-offset: 2px;
   }
+  .video-card.no-thumb .video-meta { padding: 10px; }
+  .video-card.no-thumb .video-title {
+    -webkit-line-clamp: 3;
+    font-size: 12.5px;
+  }
   .video-thumb {
     position: relative;
     background: #060a0e;
@@ -1286,6 +1291,13 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .video-url {
+    margin-top: 4px;
+    color: var(--dim);
+    font-size: 10.5px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
   }
   .video-date {
     margin-top: 2px;
@@ -4781,6 +4793,7 @@ function normalizeVideoItems(rawItems) {
       duration: Number(item?.duration) || 0,
       channel: String(item?.channel || "").trim(),
       thumbnail: String(item?.thumbnail || "").trim(),
+      noThumbnail: Boolean(item?.no_thumbnail),
       uploadDate: String(item?.upload_date || "").trim(),
       published: String(item?.published || "").trim(),
       publishedText: String(item?.published_text || "").trim(),
@@ -4954,13 +4967,9 @@ function renderVideoResults(entry) {
   label.textContent = entry.videosHeading || "YouTube videos";
   const note = document.createElement("span");
   note.className = "video-list-note";
-  const captionNote = entry.videosPending
-    ? "checking English captions…"
-    : entry.videosCaptionsUnverified
-      ? "English captions unavailable to verify"
-      : "English captions";
+  const resultNote = `${items.length} result${items.length === 1 ? "" : "s"}`;
   note.textContent = entry.videosNote ||
-    `${items.length} result${items.length === 1 ? "" : "s"} · 5–60 min · ${captionNote}`;
+    (entry.videosPending ? "loading…" : resultNote);
   head.appendChild(label);
   head.appendChild(note);
   container.appendChild(head);
@@ -4969,7 +4978,7 @@ function renderVideoResults(entry) {
   cards.className = "video-cards";
   for (const item of items) {
     const card = document.createElement("div");
-    card.className = "video-card";
+    card.className = item.noThumbnail ? "video-card no-thumb" : "video-card";
     card.tabIndex = 0;
     card.setAttribute("role", "button");
     card.title = item.channel
@@ -4985,21 +4994,23 @@ function renderVideoResults(entry) {
 
     const thumb = document.createElement("div");
     thumb.className = "video-thumb";
-    const image = document.createElement("img");
-    image.alt = item.title || "YouTube video thumbnail";
-    image.loading = "lazy";
-    image.referrerPolicy = "no-referrer";
-    const fallback = `https://i.ytimg.com/vi/${encodeURIComponent(item.id)}/mqdefault.jpg`;
-    image.src = item.thumbnail || fallback;
-    image.addEventListener("error", () => {
-      if (image.dataset.fallback === "1") {
-        image.hidden = true;
-        return;
-      }
-      image.dataset.fallback = "1";
-      image.src = fallback;
-    });
-    thumb.appendChild(image);
+    if (!item.noThumbnail) {
+      const image = document.createElement("img");
+      image.alt = item.title || "YouTube video thumbnail";
+      image.loading = "lazy";
+      image.referrerPolicy = "no-referrer";
+      const fallback = `https://i.ytimg.com/vi/${encodeURIComponent(item.id)}/mqdefault.jpg`;
+      image.src = item.thumbnail || fallback;
+      image.addEventListener("error", () => {
+        if (image.dataset.fallback === "1") {
+          image.hidden = true;
+          return;
+        }
+        image.dataset.fallback = "1";
+        image.src = fallback;
+      });
+      thumb.appendChild(image);
+    }
 
     if (item.duration > 0) {
       const duration = document.createElement("span");
@@ -5020,18 +5031,24 @@ function renderVideoResults(entry) {
       channel.textContent = item.channel;
       meta.appendChild(channel);
     }
-    const dateValue = item.published || item.uploadDate;
-    const published = document.createElement("div");
-    published.className = "video-date";
-    published.textContent = dateValue
-      ? `Published ${formatVideoDate(dateValue)}`
-      : item.publishedText
-        ? `Published ${item.publishedText}`
-        : "Release date unavailable";
-    if (item.duration > 0) {
-      published.textContent += ` · ${formatVideoDuration(item.duration)}`;
+    if (item.noThumbnail && item.url) {
+      const url = document.createElement("div");
+      url.className = "video-url";
+      url.textContent = item.url;
+      meta.appendChild(url);
     }
-    meta.appendChild(published);
+    const dateValue = item.published || item.uploadDate;
+    if (dateValue || item.publishedText) {
+      const published = document.createElement("div");
+      published.className = "video-date";
+      published.textContent = dateValue
+        ? `Published ${formatVideoDate(dateValue)}`
+        : `Published ${item.publishedText}`;
+      if (item.duration > 0) {
+        published.textContent += ` · ${formatVideoDuration(item.duration)}`;
+      }
+      meta.appendChild(published);
+    }
 
     const actions = document.createElement("div");
     actions.className = "video-actions";
@@ -5084,7 +5101,7 @@ function renderVideoResults(entry) {
     applyVideoLearnUi(learnProgress, videoLearnState.get(item.id));
     meta.appendChild(learnProgress);
 
-    card.appendChild(thumb);
+    if (!item.noThumbnail) card.appendChild(thumb);
     card.appendChild(meta);
     cards.appendChild(card);
   }

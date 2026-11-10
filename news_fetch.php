@@ -383,10 +383,15 @@ const IMAGE_CACHE_FAILURE_TTL = 86400; // one day for missing/broken images
 const IMAGE_FETCH_CONCURRENCY = 6;
 const ARTICLE_CACHE_TTL = 21600;       // six hours for successfully fetched articles
 const ARTICLE_CACHE_FAILURE_TTL = 3600; // one hour for articles we could not load
-const ARTICLE_EXTRACTOR_VERSION = 3;   // bump when article extraction logic changes
+const ARTICLE_EXTRACTOR_VERSION = 4;   // bump when article extraction logic changes
 const ARTICLE_MIN_BODY_CHARS = 1200;   // a container this large is a real body, not metadata
 const ARTICLE_FETCH_CONCURRENCY = 6;
 const MAX_ARTICLE_CACHE_ENTRIES = 500;
+// Some publishers put the complete story in a public RSS feed while the
+// article page itself is behind a bot challenge. Keyed by host suffix.
+const ARTICLE_FEED_FALLBACKS = [
+    'axios.com' => 'https://api.axios.com/feed/',
+];
 
 /**
  * Print a diagnostic line to stderr without disturbing the event stream.
@@ -1648,6 +1653,216 @@ function extractArticleParagraphs(string $html, string $pageUrl = ''): array
 }
 
 /**
+ * Return the public feed that carries full story bodies for a publisher.
+ */
+function articleFeedFallbackUrl(string $url): string
+{
+    $host = strtolower((string)parse_url($url, PHP_URL_HOST));
+    if ($host === '') {
+        return '';
+    }
+    foreach (ARTICLE_FEED_FALLBACKS as $domain => $feedUrl) {
+        if ($host === $domain || str_ends_with($host, '.' . $domain)) {
+            return $feedUrl;
+        }
+    }
+    return '';
+}
+
+/**
+ * Normalise an article URL for matching a page link against a feed <link>.
+ * Query strings and fragments are ignored because feeds use canonical paths.
+ */
+function articleUrlKey(string $url): string
+{
+    $parts = parse_url(trim($url));
+    if (!is_array($parts) || empty($parts['host'])) {
+        return '';
+    }
+    $path = rtrim((string)($parts['path'] ?? '/'), '/');
+    return strtolower($parts['host']) . ($path === '' ? '/' : $path);
+}
+
+/**
+ * Pick the richest body field from a feed item (content:encoded preferred).
+ */
+function feedArticleBodyHtml(DOMElement $item): string
+{
+    $best = '';
+    foreach ($item->childNodes as $child) {
+        if (!($child instanceof DOMElement)) {
+            continue;
+        }
+        $name = strtolower($child->localName);
+        if ($name !== 'encoded' && $name !== 'description') {
+            continue;
+        }
+        $text = (string)$child->textContent;
+        if (mb_strlen($text) > mb_strlen($best)) {
+            $best = $text;
+        }
+    }
+    return $best;
+}
+
+/**
+ * Extract story prose from the HTML embedded in a feed item. Paragraphs,
+ * list items, and section headings are kept in document order.
+ *
+ * @return list<string>
+ */
+function extractFeedArticleParagraphs(string $html): array
+{
+    if (trim($html) === '') {
+        return [];
+    }
+
+    $previous = libxml_use_internal_errors(true);
+    $document = new DOMDocument();
+    $loaded = $document->loadHTML(
+        '<?xml encoding="utf-8"?><div id="feed-article">' . $html . '</div>',
+        LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING
+    );
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+    if (!$loaded) {
+        return [];
+    }
+
+    $xpath = new DOMXPath($document);
+    $nodes = $xpath->query(
+        '//*[@id="feed-article"]//p'
+        . ' | //*[@id="feed-article"]//li'
+        . ' | //*[@id="feed-article"]//h2'
+        . ' | //*[@id="feed-article"]//h3'
+        . ' | //*[@id="feed-article"]//h4'
+    );
+    if ($nodes === false) {
+        return [];
+    }
+
+    $paragraphs = [];
+    $seen = [];
+    foreach ($nodes as $node) {
+        $text = normalizeText($node->textContent);
+        if ($text === '' || mb_strlen($text) < 12) {
+            continue;
+        }
+        if (preg_match('/^[.#@][\w-]+\s*\{/', $text)
+            || (substr_count($text, '{') >= 2 && substr_count($text, '}') >= 2)
+        ) {
+            continue;
+        }
+        if (isArticleBoilerplate($text) || isset($seen[$text])) {
+            continue;
+        }
+        $seen[$text] = true;
+        $paragraphs[] = $text;
+    }
+    return $paragraphs;
+}
+
+/**
+ * Pick the lead image advertised by a feed item.
+ */
+function feedArticleImage(DOMElement $item, string $baseUrl): string
+{
+    foreach ($item->childNodes as $child) {
+        if (!($child instanceof DOMElement)) {
+            continue;
+        }
+        $name = strtolower($child->localName);
+        if ($name !== 'content' && $name !== 'thumbnail') {
+            continue;
+        }
+        $url = normalizeImageUrl($child->getAttribute('url'), $baseUrl);
+        if ($url !== '' && looksLikeImageUrl($url)) {
+            return $url;
+        }
+    }
+    return '';
+}
+
+/**
+ * Recover a blocked article from its publisher's public feed.
+ *
+ * @return array{paragraphs:list<string>, image:string}|null
+ */
+function fetchArticleFeedFallback(string $url, string $sourceKey): ?array
+{
+    static $feeds = [];
+
+    $feedUrl = articleFeedFallbackUrl($url);
+    $targetKey = articleUrlKey($url);
+    if ($feedUrl === '' || $targetKey === '') {
+        return null;
+    }
+
+    if (!array_key_exists($feedUrl, $feeds)) {
+        $feeds[$feedUrl] = fetchUrl(
+            $feedUrl,
+            'application/rss+xml, application/xml;q=0.9, */*;q=0.8',
+            $sourceKey
+        );
+    }
+    $feed = $feeds[$feedUrl];
+    if (!is_string($feed) || trim($feed) === '') {
+        return null;
+    }
+
+    $previous = libxml_use_internal_errors(true);
+    $document = new DOMDocument();
+    $loaded = $document->loadXML($feed, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+    if (!$loaded) {
+        return null;
+    }
+
+    $xpath = new DOMXPath($document);
+    $items = $xpath->query('//item');
+    if ($items === false) {
+        return null;
+    }
+
+    foreach ($items as $item) {
+        $matches = false;
+        foreach ($item->childNodes as $child) {
+            if (!($child instanceof DOMElement)) {
+                continue;
+            }
+            $name = strtolower($child->localName);
+            if ($name !== 'link' && $name !== 'guid') {
+                continue;
+            }
+            if (articleUrlKey(trim((string)$child->textContent)) === $targetKey) {
+                $matches = true;
+                break;
+            }
+        }
+        if (!$matches) {
+            continue;
+        }
+
+        $bodyHtml = feedArticleBodyHtml($item);
+        $paragraphs = extractFeedArticleParagraphs($bodyHtml);
+        if (!$paragraphs) {
+            return null;
+        }
+        $image = feedArticleImage($item, $url);
+        if ($image === '') {
+            $image = extractArticleImageFromHtml($bodyHtml, $url);
+        }
+        return [
+            'paragraphs' => $paragraphs,
+            'image' => $image,
+        ];
+    }
+
+    return null;
+}
+
+/**
  * A feed story needs a page fetch when it carries no usable body text, or
  * when its source explicitly asks for the complete article page.
  */
@@ -1805,6 +2020,18 @@ function enrichStoryContent(array $stories, string $sourceKey): array
                     $page['body'],
                     $finalLink
                 );
+            }
+        }
+
+        // A bot challenge or paywall can hide the page body while the
+        // publisher's public feed still carries the full story (Axios).
+        if (!$entry['paragraphs']) {
+            $fallback = fetchArticleFeedFallback($finalLink, $sourceKey);
+            if ($fallback !== null) {
+                $entry['paragraphs'] = $fallback['paragraphs'];
+                if ($entry['image'] === '' && $fallback['image'] !== '') {
+                    $entry['image'] = $fallback['image'];
+                }
             }
         }
 

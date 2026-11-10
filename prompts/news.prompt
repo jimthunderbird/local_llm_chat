@@ -78,6 +78,34 @@ task (completed) {
   the Python syntax check both pass.
 }
 
+task.bug."https://www.axios.com/2026/11/09/alice-huang-nvidia-jensen-megaspeed" (completed) {
+  bug: similar to task.bug."https://en.fnnews.com/news/202611071101376017", news not loading properly
+
+  Root cause:
+  Axios serves its article pages behind a Cloudflare bot challenge (HTTP 403),
+  so extractArticleParagraphs() received only the "Just a moment..." page and
+  cached an empty body for the story.
+
+  Implemented:
+  news_fetch.php
+  - Added ARTICLE_FEED_FALLBACKS and fetchArticleFeedFallback(). When a fetched
+    article page yields no readable paragraphs (for example a bot challenge),
+    the publisher's public RSS feed is fetched once per batch and the matching
+    item is located by canonical URL.
+    Axios publishes the complete story (paragraphs, bullets, section headings,
+    and lead image) in https://api.axios.com/feed/, so its full text is restored
+    without bypassing the site's protection with a scraper.
+  - Feed bodies are parsed in document order from p, li, and h2-h4 elements,
+    with the same CSS/boilerplate/duplicate filtering as page extraction.
+  - Bumped ARTICLE_EXTRACTOR_VERSION to 4 so previously cached empty Axios
+    entries are refetched.
+
+  Verified: /googlenews "site:axios.com alice huang jensen" now emits 37
+  paragraphs (5,477 characters) for the reported URL, including every section
+  and bullet, plus the lead image. Other Axios stories in the same batch also
+  load their full bodies; php -l passes.
+}
+
 task.bug."https://en.fnnews.com/news/202611071101376017" (completed) {
   in the news popup, it failed to load the full text content of "https://en.fnnews.com/news/202611071101376017"
 
