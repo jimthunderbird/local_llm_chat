@@ -7047,7 +7047,10 @@ function ensureNewsArticle(item) {
   if (!/^https?:\/\//i.test(link)) return;
   item.articleLoading = true;
   item.articleError = "";
-  if (newsItem === item) renderNewsModal(item);
+  if (newsItem === item) {
+    renderNewsModal(item);
+    renderNewsAction(item);
+  }
   fetch(`/api/news_article?url=${encodeURIComponent(link)}&title=${encodeURIComponent(item.title || "")}`)
     .then((response) => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -7192,8 +7195,10 @@ function renderNewsAction(item) {
     newsActionNoteEl.textContent = `Learn failed: ${item.learnError}`;
     newsActionBtnEl.textContent = "Retry";
     newsActionBtnEl.title = "Retry learning this story";
-  } else if (!item.complete) {
-    newsActionNoteEl.textContent = "Waiting for the full story text…";
+  } else if (!item.complete || item.articleLoading) {
+    newsActionNoteEl.textContent = item.articleLoading
+      ? "Loading the full story text…"
+      : "Waiting for the full story text…";
     newsActionBtnEl.textContent = "Learn";
     newsActionBtnEl.disabled = true;
     return;

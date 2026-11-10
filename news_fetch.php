@@ -970,7 +970,7 @@ function fetchArticleImages(array $links, string $sourceKey): array
  * their article page. Successful and failed lookups are cached on disk so
  * repeated /news calls stay fast.
  */
-function enrichStoryImages(array $stories, string $sourceKey): array
+function enrichStoryImages(array $stories, string $sourceKey, bool $cacheOnly = false): array
 {
     if (!$stories) {
         return $stories;
@@ -1004,6 +1004,9 @@ function enrichStoryImages(array $stories, string $sourceKey): array
                 }
                 continue;
             }
+        }
+        if ($cacheOnly) {
+            continue;
         }
         $requests[$index] = $link;
     }
@@ -3069,11 +3072,17 @@ function applyArticleContent(array &$story, array $entry): void
  * link is a redirect wrapper. Resolving the link and fetching the publisher
  * page makes the "details" popup show the actual story instead of an empty
  * body. Successful pages are cached on disk to keep repeated /news calls fast.
+ *
+ * With $cacheOnly the function never touches the network: list views reuse
+ * bodies that are already cached and leave the rest for the on-demand detail
+ * request. This keeps /news, /news search, and /medium fast instead of
+ * downloading every article up front.
  */
 function enrichStoryContent(
     array $stories,
     string $sourceKey,
-    bool $retryFailedCache = false
+    bool $retryFailedCache = false,
+    bool $cacheOnly = false
 ): array {
     if (!$stories) {
         return $stories;
@@ -3138,6 +3147,16 @@ function enrichStoryContent(
                 applyArticleContent($story, $entry);
                 continue;
             }
+        }
+
+        // Lazy/list mode only reuses cached bodies. The detail modal fetches
+        // the full article on demand through --article when it is opened.
+        if ($cacheOnly) {
+            // The feed body was only a headline/preview and the full article
+            // is not cached yet. Drop the preview so the detail modal does not
+            // treat the snippet as the complete story and fetches it on demand.
+            $story['paragraphs'] = [];
+            continue;
         }
 
         $originals[$index] = $link;
@@ -3823,7 +3842,7 @@ function wpFeedUrl(string $baseUrl, int $limit): string
  * Lazily fetch the selected sources, yielding (source key, source label,
  * feed label, stories, warning) tuples as each feed arrives.
  */
-function storyStream(array $sourceKeys, ?int $limit, ?string $section): Generator
+function storyStream(array $sourceKeys, ?int $limit, ?string $section, bool $lazy = false): Generator
 {
     $seen = [];
     $total = 0;
@@ -3945,8 +3964,15 @@ function storyStream(array $sourceKeys, ?int $limit, ?string $section): Generato
                 }
             }
 
-            $selected = enrichStoryContent($selected, $sourceKey);
-            $selected = enrichStoryImages($selected, $sourceKey);
+            if ($lazy) {
+                // List views must not wait for article pages. Reuse only
+                // what is already cached; the detail modal loads the rest.
+                $selected = enrichStoryContent($selected, $sourceKey, false, true);
+                $selected = enrichStoryImages($selected, $sourceKey, true);
+            } else {
+                $selected = enrichStoryContent($selected, $sourceKey);
+                $selected = enrichStoryImages($selected, $sourceKey);
+            }
             yield [
                 'source_key' => $sourceKey,
                 'source_label' => $source['label'],
@@ -4090,6 +4116,7 @@ function main(array $argv): int
     $sourceKeys = null;
     $articleUrl = '';
     $articleTitle = '';
+    $lazy = false;
 
     // Pre-scan for --search so the dynamic googlenews source exists before
     // --source googlenews is validated below.
@@ -4175,11 +4202,15 @@ function main(array $argv): int
             $articleTitle = trim($argv[++$i]);
         } elseif (preg_match('/^--title=(.+)$/', $argument, $match)) {
             $articleTitle = trim($match[1]);
+        } elseif ($argument === '--lazy') {
+            // List mode: never download article bodies; the detail modal
+            // fetches the selected story on demand via --article.
+            $lazy = true;
         } elseif ($argument === '--help' || $argument === '-h') {
             echo "Usage: news_fetch.php [--json] [--source "
                 . implode('|', array_keys(SOURCES)) . "|medium_author|googlenews"
-                . " ...] [--limit N]\n"
-                . "       news_fetch.php [--json] --search <keywords> [--limit N]\n"
+                . " ...] [--limit N] [--lazy]\n"
+                . "       news_fetch.php [--json] --search <keywords> [--limit N] [--lazy]\n"
                 . "       news_fetch.php [--json] --article <url> [--title <headline>]\n";
             return 0;
         } else {
@@ -4231,7 +4262,7 @@ function main(array $argv): int
         }
     }
 
-    $stream = storyStream($sourceKeys, $limit, $section);
+    $stream = storyStream($sourceKeys, $limit, $section, $lazy);
     if ($json) {
         streamJson($stream, $sourceKeys, $limit);
     } else {

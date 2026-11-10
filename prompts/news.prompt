@@ -88,6 +88,40 @@ task (persistent) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
+task.speedup_news_search (completed) {
+  the following command is very slow, why:
+  /news search rust programming
+
+  do we actually preload all the news articles, if so, stop doing that, we can lazy load it when we click open the article modal
+
+  Why it was slow:
+  news_fetch.php ran enrichStoryContent() and enrichStoryImages() over the
+  whole selected batch before yielding the first story. For Google News every
+  item is a wrapper link with no body, so the list request downloaded and
+  parsed every publisher article (with feed/reader/WordPress/proxy/syndication/
+  Wayback fallbacks) and every article page again for a lead image.
+
+  Implemented:
+  - news_fetch.php: added a `--lazy` list mode. It reuses article bodies and
+    images that are already on disk but never touches the network; a story
+    whose feed body is only a headline/preview gets its preview cleared so the
+    detail view knows it still needs the full text. `--article` is unchanged
+    and remains the on-demand path used by the modal.
+  - app/chat_server.py: `_stream_news_events` now passes `--lazy` for every
+    /news, /news search, /googlenews, and /medium list request.
+  - app/chat.html: the story modal already fetched /api/news_article when a
+    story arrived without paragraphs; the Learn action now stays disabled
+    while that on-demand fetch is in flight so a preview cannot be learned as
+    if it were the complete article.
+
+  Verified:
+  - A cold Google News search lists 8 stories with no paragraph events in
+    ~0.9s (previously 6.1s and 189 preloaded paragraphs for the same batch).
+  - Opening one lazy story still resolves its Google News wrapper and returns
+    the complete body (40 paragraphs) plus its lead image in ~1.1s on demand.
+  - php -l, py_compile, and node --check all pass.
+}
+
 task.news_voice_text_to_speech (completed) {
   please reference {directory_of_this_prompt}/../research/text_to_speech.txt:
   - in the news article popup, add a text_to_speech image icon, when click {

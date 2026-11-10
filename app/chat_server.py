@@ -9952,7 +9952,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         news_fetch.php emits one JSON event per line; relaying each one lets
         the title list appear story by story while the feeds are still being
-        downloaded.
+        downloaded. List requests run with --lazy so publisher article bodies
+        are not downloaded up front; the detail modal fetches the selected
+        story on demand through /api/news_article.
         """
         script = SCRIPT_DIR / script_name
         if not script.exists():
@@ -9961,7 +9963,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        argv = ["php", str(script), "--json", *extra_argv]
+        argv = ["php", str(script), "--json", "--lazy", *extra_argv]
         log_prefix = command.lstrip("/")
         process = None
         item_count = 0
