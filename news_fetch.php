@@ -408,7 +408,7 @@ const ARTICLE_CACHE_FAILURE_TTL = 3600; // one hour for articles we could not lo
 // failed mirror lookup on the next news request instead of hiding the story
 // for a full hour.
 const ARTICLE_READER_FAILURE_TTL = 120;
-const ARTICLE_EXTRACTOR_VERSION = 5;   // bump when article extraction logic changes
+const ARTICLE_EXTRACTOR_VERSION = 6;   // bump when article extraction logic changes
 const ARTICLE_MIN_BODY_CHARS = 1200;   // a container this large is a real body, not metadata
 const ARTICLE_FETCH_CONCURRENCY = 6;
 const MAX_ARTICLE_CACHE_ENTRIES = 500;
@@ -1921,6 +1921,95 @@ function articleUrlWithoutTracking(string $url): string
 }
 
 /**
+ * Find a Wayback Machine snapshot for a URL.
+ *
+ * Some publishers (Cloudflare-protected sites, for example) reject both the
+ * live page and generic reader mirrors but have a public archived copy. The
+ * availability API returns the closest snapshot; the "id_" form of the URL
+ * serves the original page without the archive toolbar so article extraction
+ * sees only the publisher's markup.
+ */
+function articleArchiveSnapshotUrl(string $url, string $sourceKey): string
+{
+    $cleanUrl = articleUrlWithoutTracking($url);
+    if ($cleanUrl === '') {
+        return '';
+    }
+
+    $apiUrl = 'https://archive.org/wayback/available?url=' . rawurlencode($cleanUrl);
+    $body = fetchUrl(
+        $apiUrl,
+        'application/json, text/plain;q=0.9, */*;q=0.8',
+        $sourceKey
+    );
+    if (!is_string($body) || trim($body) === '') {
+        return '';
+    }
+
+    $payload = json_decode($body, true);
+    $snapshot = $payload['archived_snapshots']['closest'] ?? null;
+    if (!is_array($snapshot) || empty($snapshot['available'])) {
+        return '';
+    }
+    $snapshotUrl = trim((string)($snapshot['url'] ?? ''));
+    if ($snapshotUrl === '') {
+        return '';
+    }
+
+    // Prefer the raw archived document (no injected banner/toolbar).
+    $rawUrl = preg_replace(
+        '#^(https?://web\.archive\.org/web/\d+)/#',
+        '$1id_/',
+        $snapshotUrl,
+        1
+    );
+    return is_string($rawUrl) && $rawUrl !== '' ? $rawUrl : $snapshotUrl;
+}
+
+/**
+ * Recover a blocked article from a Wayback Machine snapshot.
+ *
+ * @return array{paragraphs:list<string>, image:string}|null
+ */
+function fetchArticleArchiveFallback(string $url, string $sourceKey): ?array
+{
+    if (isNonArticleUrl($url)) {
+        return null;
+    }
+
+    $snapshotUrl = articleArchiveSnapshotUrl($url, $sourceKey);
+    if ($snapshotUrl === '') {
+        return null;
+    }
+
+    for ($attempt = 0; $attempt < 2; $attempt++) {
+        $body = fetchUrl(
+            $snapshotUrl,
+            'text/html, application/xhtml+xml;q=0.9, */*;q=0.8',
+            $sourceKey
+        );
+        if (!is_string($body) || trim($body) === '') {
+            if ($attempt === 0) {
+                usleep(300000);
+            }
+            continue;
+        }
+        $paragraphs = extractArticleParagraphs($body, $snapshotUrl);
+        if ($paragraphs && !articleBodyIsPlaceholder($paragraphs)) {
+            return [
+                'paragraphs' => $paragraphs,
+                'image' => extractArticleImageFromHtml($body, $snapshotUrl),
+            ];
+        }
+        if ($attempt === 0) {
+            usleep(300000);
+        }
+    }
+
+    return null;
+}
+
+/**
  * Recover a blocked article from its publisher's public feed.
  *
  * @return array{paragraphs:list<string>, image:string}|null
@@ -2309,6 +2398,19 @@ function enrichStoryContent(
         // so a reader mirror is the only source of the complete article.
         if (!$entry['paragraphs']) {
             $fallback = fetchArticleReaderFallback($finalLink, $sourceKey);
+            if ($fallback !== null) {
+                $entry['paragraphs'] = $fallback['paragraphs'];
+                if ($entry['image'] === '' && $fallback['image'] !== '') {
+                    $entry['image'] = $fallback['image'];
+                }
+            }
+        }
+
+        // Cloudflare-protected publishers may block both the live page and
+        // generic reader mirrors. Fall back to a public Wayback snapshot so
+        // older review/archive links still open with their complete body.
+        if (!$entry['paragraphs']) {
+            $fallback = fetchArticleArchiveFallback($finalLink, $sourceKey);
             if ($fallback !== null) {
                 $entry['paragraphs'] = $fallback['paragraphs'];
                 if ($entry['image'] === '' && $fallback['image'] !== '') {

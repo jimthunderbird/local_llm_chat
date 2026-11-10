@@ -86,6 +86,38 @@ task (persistent) {
   complete tasks in ./news/medium.prompt
 }
 
+task.bug.news_list_loading (completed) {
+  please make sure the following news articles load {
+    https://www.hollywoodintoto.com/clifford-the-big-red-dog-review-2021/
+    https://www.rogerebert.com/reviews/clifford-the-big-red-dog-movie-review-2021
+    https://www.hollywoodintoto.com/clifford-the-big-red-dog-review-2021/ 
+    https://www.rogerebert.com/reviews/clifford-the-big-red-dog-movie-review-2021
+  }
+
+  please make sure to fix it in the systematic way
+
+  Implemented:
+  news_fetch.php
+  - Added a generic Wayback Machine fallback after the article-page, feed, and
+    reader-mirror paths. When a publisher blocks both the live page and reader
+    mirrors (Hollywood in Toto and RogerEbert.com both return Cloudflare/403
+    responses), the availability API finds the closest archived snapshot and
+    the "id_" raw form is fetched so the archive toolbar is not parsed as
+    article prose.
+  - The fallback applies to any blocked article URL, not just these two hosts,
+    and reuses the existing paragraph/image extraction and placeholder checks.
+  - Bumped ARTICLE_EXTRACTOR_VERSION to 6 so empty cached bodies from the old
+    extractor are refetched instead of served from the failure cache.
+
+  Verified:
+  - The Hollywood in Toto review loads 20 paragraphs / 4,212 characters plus
+    its lead image.
+  - The RogerEbert.com review loads 7 paragraphs / 4,203 characters plus its
+    lead image (from a 2026 snapshot of the 2021 review).
+  - The duplicate URLs in the task resolve to the same complete article bodies;
+    php -l passes.
+}
+
 task.news_search_command_option (completed) {
   add new option "search":
   - /news search jensen huang 
