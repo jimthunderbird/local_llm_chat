@@ -86,6 +86,35 @@ task (persistent) {
   complete tasks in ./news/medium.prompt
 }
 
+task.news_search_command_option (completed) {
+  add new option "search":
+  - /news search jensen huang 
+    should be the same as:
+    /googlenews jensen huang
+
+  Implemented:
+  app/chat_server.py
+  - /news now recognizes a leading "search" subcommand and runs
+    news_fetch.php with --source googlenews --search <keywords>, exactly like
+    /googlenews. The result streams through the normal /news story-list and
+    detail rendering, and a keyword-less "/news search" prints usage.
+  - The /news help text documents the new form, and tab completion offers
+    "search" only as the first argument; sources are completed for later
+    arguments. Once "search " is typed, completion steps aside so keywords
+    are free text.
+  app/chat.html
+  - /news completion uses a first-argument subcommand kind (search + sources)
+    and a sources-only kind after the first argument.
+
+  Verified:
+  - "/news search jensen huang" dispatches
+    [--source googlenews --search jensen huang]; "cnn 3" still dispatches
+    [--limit 3 --source cnn]; "/news search" prints usage.
+  - ./news_fetch.php --json --source googlenews --search 'jensen huang'
+    returns the matching Google News story.
+  - py_compile, php -l, and node --check pass.
+}
+
 task.bug."https://medium.com/@chrisdunlop_37984/so-shall-we-give-up-then-2d095fa8c410" (completed) {
   bug: similar to task.bug."https://medium.com/@RetroTechShow/1993-before-mp3-and-spotify-the-bizarre-90s-battle-between-three-digital-audio-formats-4a3ba7a4f8ce", news not loading properly
 

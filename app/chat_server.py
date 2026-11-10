@@ -122,7 +122,7 @@ WEB_COMMANDS = {
     "/help": "show commands and keyboard shortcuts",
     "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
     "learn_playlist <playlist> | search <keyword> | bookmark list",
-    "/news": "list the latest news from wsj, cnn, cbslite, nprtext, yahoo_finance, medium, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count])",
+    "/news": "list the latest news from wsj, cnn, cbslite, nprtext, yahoo_finance, medium, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count]); /news search <keywords> searches Google News",
     "/googlenews": "search Google News for the latest stories: /googlenews <keywords>",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/gutenberg": "search Project Gutenberg books: /gutenberg search <keywords>; click a book to read it and ask questions",
@@ -5707,13 +5707,22 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 if name.startswith(lowered)
             ]
 
-        if kind == "news_sources":
+        if kind in {"news_sources", "news_subcommands"}:
             lowered = query.lower()
-            return [
+            items = []
+            if kind == "news_subcommands" and "search".startswith(lowered):
+                items.append(
+                    {
+                        "value": "search",
+                        "description": "search Google News by keywords",
+                    }
+                )
+            items.extend(
                 {"value": name, "description": label}
                 for name, label in sorted(NEWS_SOURCES.items())
                 if name.startswith(lowered)
-            ]
+            )
+            return items
 
         if kind == "paths":
             return self._path_completions(query)
@@ -8591,12 +8600,33 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         """Stream the latest news stories to the browser.
 
         Usage: /news [SOURCE ...] [number-of-stories]
+               /news search <keywords>
         Each SOURCE is one of wsj, cnn, cbslite, nprtext, yahoo_finance, medium,
         kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch,
         krasia, wccftech, or hackernews.
         Several sources may be selected.
         Without a source, every supported source is shown as its own section.
+        "search <keywords>" is the same as /googlenews <keywords>: it searches
+        Google News and renders the matches exactly like a /news story list.
         """
+        stripped = argument.strip()
+        search_match = re.match(r"(?i)^search(?:\s+(.*))?$", stripped)
+        if search_match:
+            keywords = (search_match.group(1) or "").strip()
+            if not keywords:
+                self._sse_text(
+                    "output",
+                    "\nUsage: /news search <keywords>\n"
+                    "Example: /news search jensen huang\n",
+                )
+                return
+            self._stream_news_events(
+                "news_fetch.php",
+                "/news",
+                ["--source", "googlenews", "--search", keywords],
+            )
+            return
+
         argv: list[str] = []
         sources: list[str] = []
         for part in argument.replace(",", " ").split():

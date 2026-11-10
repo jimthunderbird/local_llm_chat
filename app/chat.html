@@ -8127,10 +8127,15 @@ function completionContext() {
     }
   }
   else if (name === "/news") {
-    kind = "news_sources";
+    // The first argument may also be the "search" subcommand; everything
+    // after it is free-form Google News keywords, not a source name.
+    const args = value.slice(firstSpace + 1, caret);
+    const firstToken = args.split(/[\s,]/, 1)[0]?.toLowerCase() || "";
+    if (firstToken === "search" && /[\s,]/.test(args)) return null;
+    const hasSeparator = /[\s,]/.test(args);
+    kind = hasSeparator ? "news_sources" : "news_subcommands";
     // /news accepts several space-separated sources, so complete only the
     // token being typed rather than everything after the command name.
-    const args = value.slice(firstSpace + 1, caret);
     const lastSeparator = Math.max(
       args.lastIndexOf(" "),
       args.lastIndexOf("\t"),
