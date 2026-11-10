@@ -1,32 +1,41 @@
-task.refactor_book_search (completed) {
-  refactor /gutenberg search <keywords>:
-  learn from the /news search <keywords>, use "https://news.google.com/rss/search?q=site:gutenberg.org&hl=en-US&gl=US&ceid=US:en" to search for the books using <keywords>
+task (completed) {
+  bug:
+  /gutenberg search the 39 steps:
+  expect: we should find https://www.gutenberg.org/ebooks/558
+  actual: https://www.gutenberg.org/ebooks/558 does not show up in the result list
+  please have a systematic fix on this
 }
 
   Implemented:
   app/chat_server.py
-  - /gutenberg search now reuses the same news_fetch.php googlenews path as
-    /news search. The query is `site:gutenberg.org <keywords>`, which
-    news_fetch.php sends to
-    https://news.google.com/rss/search?q=...&hl=en-US&gl=US&ceid=US:en and
-    resolves from Google News redirects back to the Gutenberg pages.
-  - Each NDJSON item becomes a normalized book card. Ebook ids are parsed from
-    /ebooks/<id>, /cache/epub/<id>/ and /files/<id>/ links; category,
-    author-search and homepage hits are ignored. Titles are cleaned of the
-    "- Project Gutenberg" suffix and split into title/author when they use the
-    "Title by Author" form. Duplicate cards (for example the reading page and
-    the canonical /ebooks page) are merged so a missing author is filled in.
-  - Cards are published to the browser progressively as Google News items
-    arrive, so /gutenberg search now renders results while the search is still
-    running, like /news search.
-  - The existing Open Library/catalogue search remains as a fallback only when
-    Google News returns no usable ebook links (or the news search cannot run).
+  - /gutenberg search now always augments the Google News results with the
+    Project Gutenberg catalogue instead of consulting the catalogue only when
+    the news feed is empty. Google News searches full text and can fill a page
+    with loosely related books (for `the 39 steps` it returned other John
+    Buchan novels and unrelated titles), which previously hid the exact book.
+  - Added query spelling variants for the literal Gutenberg catalogue search.
+    Standalone numbers are expanded to English words (`39` -> `thirty nine`),
+    year-like numbers also get a year-style spelling (`1984` ->
+    `nineteen eighty four`), and each variant is also tried without a leading
+    article. Duplicate variants are removed.
+  - Added relevance ranking across all sources. Cards are deduplicated by
+    Gutenberg id, missing metadata is merged across sources, and titles/authors
+    are scored against the original query and its variants with an exact-title
+    bonus. For `the 39 steps`, ebook 558 (The Thirty-Nine Steps) now ranks
+    first; the Google News partial results are replaced by the merged list.
 
-  Verified: helper tests map ebook/reading-page links to cards and reject
-  category/"also downloaded" links; live searches for `jane austen` and
-  `the time machine by h g wells` streamed 5 and 4 correct Gutenberg books,
-  with the Time Machine reading-page/canonical duplicate merged into ebook 35
-  and its author filled in. py_compile passes.
+  Verified on the live APIs:
+  - `search_gutenberg_books("the 39 steps")` returns ebook 558 first, followed
+    by the unrelated Open Library/catalogue matches.
+  - The combined Google News + catalogue result for `the 39 steps` keeps
+    ebook 558 first.
+  - `39 steps`, `the time machine by h g wells`, and `jane austen` still
+    return sensible catalogues; py_compile passes.
+
+task.refactor_book_search (completed) {
+  refactor /gutenberg search <keywords>:
+  learn from the /news search <keywords>, use "https://news.google.com/rss/search?q=site:gutenberg.org&hl=en-US&gl=US&ceid=US:en" to search for the books using <keywords>
+}
 
 task (completed) {
   find out how the chat works in the book specific chat, what kind of technique or algorithms does it use, save the findings to documents/project_gutenberg_book_specific_chat.html  

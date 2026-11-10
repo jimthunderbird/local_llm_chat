@@ -4781,6 +4781,220 @@ def _gutenberg_search_card(block: str) -> dict | None:
     }
 
 
+_NUMBER_ONES = (
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+)
+_NUMBER_TENS = (
+    "",
+    "",
+    "twenty",
+    "thirty",
+    "forty",
+    "fifty",
+    "sixty",
+    "seventy",
+    "eighty",
+    "ninety",
+)
+_GUTENBERG_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "by",
+    "for",
+    "from",
+    "in",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "with",
+}
+
+
+def _number_to_words(value: int) -> str:
+    """Render a non-negative integer as lowercase English words."""
+    if value < 0 or value > 999999999:
+        return str(value)
+
+    def under_thousand(number: int) -> list[str]:
+        words: list[str] = []
+        if number >= 100:
+            words.extend((_NUMBER_ONES[number // 100], "hundred"))
+            number %= 100
+        if number >= 20:
+            words.append(_NUMBER_TENS[number // 10])
+            number %= 10
+        if number or not words:
+            words.append(_NUMBER_ONES[number])
+        return words
+
+    if value == 0:
+        return "zero"
+    parts: list[str] = []
+    for divisor, label in ((1000000, "million"), (1000, "thousand")):
+        if value >= divisor:
+            parts.extend(under_thousand(value // divisor))
+            parts.append(label)
+            value %= divisor
+    if value:
+        parts.extend(under_thousand(value))
+    return " ".join(parts)
+
+
+def _year_to_words(value: int) -> str:
+    """Render a year-like number the way book titles usually spell it."""
+    if not 1100 <= value <= 2099:
+        return ""
+    high, low = divmod(value, 100)
+    if low == 0:
+        return f"{_number_to_words(high)} hundred"
+    return f"{_number_to_words(high)} {_number_to_words(low)}"
+
+
+def _gutenberg_query_variants(keyword: str) -> list[str]:
+    """Return catalogue queries for a free-form book search.
+
+    Project Gutenberg's catalogue search is literal: ``the 39 steps`` does not
+    match ``The Thirty-Nine Steps`` even though a reader expects it to. Build a
+    few spelling variants (digits as words, year-style numbers, and the query
+    without a leading article) so titles written either way remain findable.
+    """
+    base = " ".join(str(keyword or "").split())
+    if not base:
+        return []
+    variants: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        value = " ".join(value.split())
+        key = value.casefold()
+        if value and key not in seen:
+            seen.add(key)
+            variants.append(value)
+
+    add(base)
+    add(
+        re.sub(
+            r"\b\d{1,6}\b",
+            lambda match: _number_to_words(int(match.group(0))),
+            base,
+        )
+    )
+    add(
+        re.sub(
+            r"\b\d{4}\b",
+            lambda match: _year_to_words(int(match.group(0)))
+            or match.group(0),
+            base,
+        )
+    )
+    for value in list(variants):
+        add(re.sub(r"^(?:the|a|an)\s+", "", value, flags=re.IGNORECASE))
+    return variants[:6]
+
+
+def _gutenberg_tokens(text: str) -> list[str]:
+    text = html.unescape(str(text or "")).casefold()
+    return [token for token in re.split(r"[^a-z0-9]+", text) if token]
+
+
+def _gutenberg_query_term_sets(keyword: str) -> list[set[str]]:
+    term_sets: list[set[str]] = []
+    seen: set[frozenset[str]] = set()
+    for variant in _gutenberg_query_variants(keyword):
+        terms = {
+            token
+            for token in _gutenberg_tokens(variant)
+            if token not in _GUTENBERG_STOPWORDS
+        }
+        if not terms:
+            continue
+        frozen = frozenset(terms)
+        if frozen not in seen:
+            seen.add(frozen)
+            term_sets.append(terms)
+    return term_sets
+
+
+def _gutenberg_card_relevance(card: dict, keyword: str) -> float:
+    """Score a book card against the query and its spelling variants.
+
+    The catalogue can return loosely related books for a literal query (for
+    example other John Buchan novels for ``the 39 steps``). Ranking by title
+    and author coverage keeps the exact title ahead of those results.
+    """
+    title_tokens = _gutenberg_tokens(str(card.get("title") or ""))
+    author_tokens = _gutenberg_tokens(str(card.get("authors") or ""))
+    title_set = set(title_tokens)
+    author_set = set(author_tokens)
+    title_text = " ".join(title_tokens)
+    variants = _gutenberg_query_variants(keyword)
+    variant_texts = {" ".join(_gutenberg_tokens(value)) for value in variants}
+    best = 0.0
+    for terms in _gutenberg_query_term_sets(keyword):
+        title_coverage = len(terms & title_set) / len(terms)
+        author_coverage = len(terms & author_set) / len(terms)
+        score = title_coverage * 6.0 + author_coverage * 1.5
+        if terms <= title_set:
+            score += 3.0
+        if title_text in variant_texts:
+            score += 4.0
+        best = max(best, score)
+    return best
+
+
+def _combine_gutenberg_cards(
+    keyword: str,
+    *groups: list[dict],
+    limit: int = GUTENBERG_BOOK_RESULT_LIMIT,
+) -> list[dict]:
+    """Merge book cards from all sources, deduplicate, and rank them."""
+    by_id: dict[str, dict] = {}
+    order: list[str] = []
+    for group in groups:
+        for card in group or []:
+            if not isinstance(card, dict):
+                continue
+            book_id = str(card.get("id") or "")
+            if not book_id:
+                continue
+            existing = by_id.get(book_id)
+            if existing is None:
+                by_id[book_id] = dict(card)
+                order.append(book_id)
+            else:
+                _merge_gutenberg_news_card(existing, card)
+    cards = [by_id[book_id] for book_id in order]
+    ranked = sorted(
+        enumerate(cards),
+        key=lambda pair: (-_gutenberg_card_relevance(pair[1], keyword), pair[0]),
+    )
+    return [card for _index, card in ranked[: max(1, limit)]]
+
+
 def _openlibrary_search_params(keyword: str) -> dict:
     """Build Open Library search parameters from a free-form query.
 
@@ -4840,7 +5054,7 @@ def _search_gutenberg_openlibrary(
 def _search_gutenberg_gutenberg_org(
     keyword: str, limit: int = GUTENBERG_BOOK_RESULT_LIMIT
 ) -> list[dict]:
-    """Search the Project Gutenberg catalogue page as a fallback.
+    """Search the Project Gutenberg catalogue page for one query.
 
     Open Library is authoritative for identifiers it has linked, but some
     public-domain works (for example early H. G. Wells editions) have no
@@ -4878,40 +5092,39 @@ def search_gutenberg_books(keyword: str, limit: int = GUTENBERG_BOOK_RESULT_LIMI
     Open Library is the primary catalog: each matching work contributes its
     ``id_project_gutenberg`` identifier. Because not every work is linked to a
     Gutenberg text there yet, the Project Gutenberg catalogue search fills in
-    only the missing cards; results are deduplicated by Gutenberg id.
+    the missing cards. Every catalogue spelling variant is consulted, and the
+    merged results are ranked against the original query so an exact title is
+    not pushed out by loosely related matches.
     """
     keyword = keyword.strip()
     if not keyword:
         return []
     limit = max(1, limit)
     items: list[dict] = []
-    seen: set[str] = set()
     errors: list[str] = []
 
     try:
-        for card in _search_gutenberg_openlibrary(keyword, limit):
-            if card["id"] in seen:
-                continue
-            seen.add(card["id"])
-            items.append(card)
+        items.extend(_search_gutenberg_openlibrary(keyword, limit))
     except RuntimeError as exc:
         errors.append(str(exc))
 
-    if len(items) < limit:
+    # Search the catalogue even when Open Library returned a full page: its
+    # literal search misses digit/word title spellings, so a variant may hold
+    # the exact book while the other sources only returned related works.
+    for variant in _gutenberg_query_variants(keyword):
         try:
-            for card in _search_gutenberg_gutenberg_org(keyword, limit):
-                if card["id"] in seen:
-                    continue
-                seen.add(card["id"])
-                items.append(card)
-                if len(items) >= limit:
-                    break
+            items.extend(
+                _search_gutenberg_gutenberg_org(
+                    variant, max(limit, GUTENBERG_BOOK_RESULT_LIMIT)
+                )
+            )
         except RuntimeError as exc:
             errors.append(str(exc))
 
-    if not items and errors:
+    merged = _combine_gutenberg_cards(keyword, items, limit=limit)
+    if not merged and errors:
         raise RuntimeError("; ".join(errors))
-    return items[:limit]
+    return merged
 
 
 def _gutenberg_news_book_id(link: str) -> str:
@@ -9173,28 +9386,26 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "log", f"[gutenberg: Google News search failed: {exc}]"
             )
 
-        if not items:
-            self._sse_text(
-                "log",
-                "[gutenberg: no book hits in Google News; "
-                "searching the catalogue]",
+        # Google News searches full text and can fill a page with loosely
+        # related books; the catalogue search is literal, so augment every
+        # search instead of using it only when the news feed is empty. Query
+        # variants (for example ``39`` -> ``thirty nine``) let the catalogue
+        # find an exact title such as The Thirty-Nine Steps.
+        try:
+            items = _combine_gutenberg_cards(
+                keyword,
+                items,
+                search_gutenberg_books(keyword),
+                limit=GUTENBERG_BOOK_RESULT_LIMIT,
             )
-            try:
-                items = search_gutenberg_books(keyword)
-            except RuntimeError as exc:
-                self._sse_text("output", f"\n/gutenberg: {exc}\n")
-                return
-
-        if not items:
+        except RuntimeError as exc:
             self._sse_text(
-                "output",
-                f"\nNo Project Gutenberg books matched {keyword!r}.\n",
+                "log", f"[gutenberg: catalogue search failed: {exc}]"
             )
-            return
 
         # Google News may have published partial results while it streamed;
-        # this final event also replaces them with the catalogue fallback when
-        # the news feed had no usable book links.
+        # this final event replaces them with the merged, relevance-ranked
+        # list so an exact catalogue hit is not hidden behind loose news hits.
         publish(items)
 
     def _stream_news_events(
