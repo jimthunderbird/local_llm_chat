@@ -6184,6 +6184,13 @@ def _iterative_paragraph_chunks(chunks: list[chat.Chunk]) -> list[chat.Chunk]:
     entry = _PARAGRAPH_CHUNKS_CACHE.get(key)
     if entry is not None and entry[0] is chunks:
         return entry[1]
+    # Annotate article paragraphs with their enclosing section heading before
+    # dropping the heading chunks. The heading then contributes to BM25 for
+    # the section body without becoming evidence itself. For example, the
+    # "Eat" heading makes the Izumo soba and Hara paragraphs match "what can i
+    # eat in Izumo" even though those paragraphs do not repeat the word
+    # "eat".
+    chat.annotate_section_headings(chunks)
     filtered = [
         chunk
         for chunk in chunks

@@ -1,4 +1,10 @@
 task (completed) {
+  - in the global chat, when i ask: what can i eat in Izumo
+    it said: The provided context does not contain sufficient information to answer this question.
+  - please provide a generic fix
+}
+
+task (completed) {
   when i ask this question: what can i eat in Izumo
   we should be able to find the information from the learned article https://en.wikivoyage.org/wiki/Izumo
   but how come in the answer, it does not contain the restaurant information

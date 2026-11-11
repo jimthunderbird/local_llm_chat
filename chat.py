@@ -861,10 +861,61 @@ class Chunk:
     video_id: str
     index: int
     trunk_path: Path
+    # Article paragraphs inherit the heading of the section they belong to.
+    # The heading is indexed with the paragraph body so a question about a
+    # section ("what can i eat in Izumo" -> the "Eat" section) retrieves the
+    # actual paragraph, while the answer context still contains only the
+    # paragraph text and never the standalone heading.
+    section_heading: str = ""
 
     @property
     def label(self) -> str:
         return f"{self.video_id}.{self.index}"
+
+
+ARTICLE_CHUNK_PREFIXES = ("news_", "article_")
+
+
+def _article_heading_like(text: str) -> bool:
+    """Return True when ``text`` looks like a short article section label."""
+    text = " ".join(text.split())
+    if not text or len(text) > 120 or len(text.split()) > 12:
+        return False
+    if re.match(r"^(?:\d+(?:\.\d+)*\.?|[IVXLC]+\.)\s+", text):
+        return True
+    return not text.endswith((".", "!", "?", ";", ","))
+
+
+def annotate_section_headings(chunks: list[Chunk]) -> None:
+    """Attach each learned-article paragraph to its enclosing section heading.
+
+    BM25 otherwise ranks a one-word heading such as "Eat" above the food
+    paragraphs below it, or lets repeated city mentions in travel paragraphs
+    outrank the short section body that actually answers the question. The
+    paragraph body remains the answer context; only the searchable document
+    gains the section label.
+    """
+    grouped: dict[str, list[Chunk]] = {}
+    for chunk in chunks:
+        grouped.setdefault(chunk.video_id, []).append(chunk)
+    for video_id, video_chunks in grouped.items():
+        article = video_id.startswith(ARTICLE_CHUNK_PREFIXES) or any(
+            chunk.trunk_path.parent == ARTICLES_DIR for chunk in video_chunks
+        )
+        if not article:
+            continue
+        heading = ""
+        for chunk in sorted(video_chunks, key=lambda item: item.index):
+            if chunk.index <= 0:
+                continue
+            text = " ".join(paragraph_text(chunk).split())
+            if not text:
+                continue
+            if _article_heading_like(text):
+                heading = text
+                chunk.section_heading = ""
+            else:
+                chunk.section_heading = heading
 
 
 class AnswerCache:
@@ -1034,7 +1085,12 @@ def build_bm25_index(chunks: list[Chunk]) -> BM25Index:
     for chunk in chunks:
         text = paragraph_text(chunk)
         title = video_title(chunk.video_id)
-        document = f"{title}\n{text}" if title else text
+        # Learned article paragraphs inherit their section heading, so the
+        # body of the "Eat" section matches a question that uses the word
+        # "eat" even though the heading itself is not a standalone answer.
+        heading = getattr(chunk, "section_heading", "")
+        parts = [part for part in (title, heading, text) if part]
+        document = "\n".join(parts)
         tokenized_documents.append(tokenize(document))
 
     vocabulary = {
@@ -1259,6 +1315,7 @@ def load_news_chunks(news_ids: set[str] | None = None) -> list[Chunk]:
             )
         )
     chunks.sort(key=lambda chunk: (chunk.video_id, chunk.index))
+    annotate_section_headings(chunks)
     return chunks
 
 
