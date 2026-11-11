@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Create RAG trunks from a rewritten YouTube transcript.
+"""Create news-style RAG trunks directly from a YouTube transcript.
 
 Usage:
     python3 create_trunks.py <youtube_video_hash>
 
 Reads:
-    ./.chat/youtube_transcripts/<youtube_video_hash>.rewrite
+    ./.chat/youtube_transcripts/<youtube_video_hash>.transcript
     ./.chat/youtube_transcripts/<youtube_video_hash>.title
 
 Writes:
+    ./.chat/youtube_transcripts/<youtube_video_hash>.0.trunk
     ./.chat/youtube_transcripts/<youtube_video_hash>.<paragraph_index>.trunk
+
+This mirrors news learning: one compact overview trunk (index 0) plus one
+trunk per transcript paragraph. No rewrite file and no embeddings are needed.
 """
 
 import argparse
@@ -19,6 +23,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from paragraph_utils import split_paragraphs
+
 
 def normalize_argv(argv):
     """Let positional values begin with '-' (e.g. video ID -PcBFgkrR2o)."""
@@ -30,11 +35,87 @@ def normalize_argv(argv):
 OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
 
 TRUNK_TEMPLATE = "<article><title>{title}</title><paragraph>{paragraph}</paragraph></article>"
+SPEAKER_MARKER_RE = re.compile(r">>\s*")
+BRACKETED_SOUND_RE = re.compile(r"\[(?:laughter|music|applause|silence)\]", re.IGNORECASE)
+
+
+def clean_transcript(transcript: str) -> str:
+    """Normalize raw caption text so it splits into readable paragraphs."""
+    text = SPEAKER_MARKER_RE.sub(" ", transcript)
+    text = BRACKETED_SOUND_RE.sub(" ", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text.strip()
+
+
+def transcript_paragraphs(transcript: str) -> list[str]:
+    """Return short, self-contained trunks from a raw transcript."""
+    paragraphs = split_paragraphs(clean_transcript(transcript))
+    # Captions often append a trailing speaker change or filler token as its
+    # own tiny paragraph. Drop fragments that carry no retrievable content.
+    return [paragraph for paragraph in paragraphs if len(paragraph.split()) >= 3]
+
+
+def build_video_trunks(
+    video_id: str,
+    output_dir: Path = OUTPUT_DIR,
+) -> int:
+    """Generate the overview and paragraph trunks for one transcript.
+
+    Returns the number of paragraph trunks written (the overview trunk is
+    additional). Raises ``FileNotFoundError``/``ValueError`` with a readable
+    message when the transcript or title is unusable.
+    """
+    transcript_path = output_dir / f"{video_id}.transcript"
+    title_path = output_dir / f"{video_id}.title"
+
+    if not transcript_path.is_file():
+        raise FileNotFoundError(
+            f"Transcript not found: {transcript_path}\n"
+            f"Run: python3 fetch_youtube_transcript.py {video_id}"
+        )
+
+    transcript = transcript_path.read_text(encoding="utf-8")
+    paragraphs = transcript_paragraphs(transcript)
+    if not paragraphs:
+        raise ValueError(f"Transcript contains no paragraphs: {transcript_path}")
+
+    title = ""
+    if title_path.is_file():
+        title = title_path.read_text(encoding="utf-8").strip(" \t\r\n")
+    if not title:
+        # A missing title must not block learning; the video id still gives
+        # every trunk a stable, searchable label.
+        title = video_id
+
+    # Remove previously generated trunks for this video before rebuilding.
+    for old_trunk in output_dir.glob(f"{video_id}.*.trunk"):
+        old_trunk.unlink()
+
+    # Index 0 mirrors news learning: a compact overview trunk for broad
+    # questions such as "what is this video about?".
+    overview_trunk = TRUNK_TEMPLATE.format(
+        title=escape(title),
+        paragraph=escape(paragraphs[0]),
+    )
+    (output_dir / f"{video_id}.0.trunk").write_text(
+        overview_trunk + "\n", encoding="utf-8"
+    )
+
+    for index, paragraph in enumerate(paragraphs, start=1):
+        trunk = TRUNK_TEMPLATE.format(
+            title=escape(title),
+            paragraph=escape(paragraph),
+        )
+        (output_dir / f"{video_id}.{index}.trunk").write_text(
+            trunk + "\n", encoding="utf-8"
+        )
+
+    return len(paragraphs)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Create trunk files from a rewritten YouTube transcript."
+        description="Create news-style trunk files directly from a YouTube transcript."
     )
     parser.add_argument("youtube_video_hash", help="YouTube video ID, e.g. FTwxtyOEGyM")
     args = parser.parse_args(normalize_argv(sys.argv[1:]))
@@ -43,42 +124,15 @@ def main() -> None:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", video_id):
         sys.exit(f"Invalid YouTube video hash: {video_id!r}")
 
-    rewrite_path = OUTPUT_DIR / f"{video_id}.rewrite"
-    title_path = OUTPUT_DIR / f"{video_id}.title"
+    try:
+        paragraph_count = build_video_trunks(video_id)
+    except (OSError, ValueError) as exc:
+        sys.exit(str(exc))
 
-    if not rewrite_path.is_file():
-        sys.exit(
-            f"Rewrite not found: {rewrite_path}\n"
-            f"Run: python3 rewrite.py {video_id}"
-        )
-    if not title_path.is_file():
-        sys.exit(
-            f"Title not found: {title_path}\n"
-            f"Run: python3 fetch_youtube_transcript.py {video_id}"
-        )
-
-    rewritten_content = rewrite_path.read_text(encoding="utf-8")
-    title = title_path.read_text(encoding="utf-8").strip(" \t\r\n")
-    if not title:
-        sys.exit(f"Title is empty: {title_path}")
-
-    paragraphs = split_paragraphs(rewritten_content)
-    if not paragraphs:
-        sys.exit(f"Rewrite contains no paragraphs: {rewrite_path}")
-
-    # Remove previously generated trunks for this video.
-    for old_trunk in OUTPUT_DIR.glob(f"{video_id}.*.trunk"):
-        old_trunk.unlink()
-
-    for index, paragraph in enumerate(paragraphs, start=1):
-        trunk = TRUNK_TEMPLATE.format(
-            title=escape(title),
-            paragraph=escape(paragraph),
-        )
-        trunk_path = OUTPUT_DIR / f"{video_id}.{index}.trunk"
-        trunk_path.write_text(trunk + "\n", encoding="utf-8")
-
-    print(f"Created {len(paragraphs)} trunk files for {video_id}")
+    print(
+        f"Created {paragraph_count + 1} trunk files for {video_id} "
+        f"(overview + {paragraph_count} paragraphs)"
+    )
     print(f"Output directory: {OUTPUT_DIR}")
 
 

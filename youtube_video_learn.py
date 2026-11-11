@@ -8,12 +8,12 @@ Usage:
 
 Runs, in order:
     1. fetch_youtube_transcript.py
-    2. rewrite.py
-    3. create_trunks.py
-    4. create_embeddings.py
+    2. create_trunks.py
 
-A newly learned video is written into the one global corpus and is
-immediately available to every question.
+The transcript is chunked directly into news-style trunks: one overview
+chunk (index 0) plus one chunk per paragraph. Rewrite files and embeddings
+are no longer generated. A newly learned video is written into the one
+global corpus and is immediately available to every question.
 """
 
 import argparse
@@ -83,9 +83,7 @@ def extract_video_hash(value: str) -> str:
 
 STEPS = [
     ("fetch_youtube_transcript.py", ["<hash>"]),
-    ("rewrite.py", ["<hash>"]),
     ("create_trunks.py", ["<hash>"]),
-    ("create_embeddings.py", ["<hash>"]),
 ]
 
 
@@ -106,7 +104,7 @@ def run_step(script: str, script_args: list[str], youtube_video_hash: str) -> No
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Fetch, rewrite, chunk, and embed a YouTube video transcript."
+        description="Fetch a YouTube transcript and chunk it into RAG trunks."
     )
     parser.add_argument(
         "youtube_video_hash",

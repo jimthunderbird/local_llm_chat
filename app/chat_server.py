@@ -1023,7 +1023,7 @@ GUTENBERG_BOOK_ID_RE = re.compile(r"\d{1,8}")
 # Subcommands grouped under /youtube. Kept in display order for Tab
 # completion and the /help panel.
 YOUTUBE_SUBCOMMANDS = {
-    "learn": "fetch, rewrite, chunk, and embed one video",
+    "learn": "fetch one transcript and chunk it into RAG trunks",
     "learn_topic": "search YouTube for <topic> and learn the top 3 videos",
     "learn_playlist": "learn every video in a YouTube playlist",
     "search": "search YouTube through Google News RSS for <keyword> and show matching video urls and titles",
@@ -1140,13 +1140,11 @@ VIDEO_SUMMARY_PROMPT = """You summarize YouTube videos for a viewer who is decid
 
 # /youtube search cards also have a "Learn" button.  Learning runs the
 # youtube_video_learn.py pipeline in a background thread, so the browser can
-# keep chatting while the transcript is fetched, rewritten, chunked, embedded,
+# keep chatting while the transcript is fetched and chunked into trunks.
 # Progress is reported as a percentage by the status endpoint.
 VIDEO_LEARN_TRANSCRIPT_DIR = SCRIPT_DIR / ".chat" / "youtube_transcripts"
-# Weights match youtube_video_learn.STEPS: fetch, rewrite, trunks, embeddings.
-# They only make the progress bar move sensibly between steps; the embeddings
-# step refines its share from the subprocess output.
-VIDEO_LEARN_STEP_WEIGHTS = (10.0, 30.0, 20.0, 40.0)
+# Weights match youtube_video_learn.STEPS: fetch and create_trunks.
+VIDEO_LEARN_STEP_WEIGHTS = (30.0, 70.0)
 VIDEO_LEARN_ACTIVE_STATES = {"queued", "running"}
 
 # The /youtube player modal has a "Bookmark" button. Bookmarks are stored as
@@ -6733,10 +6731,10 @@ class ChatState:
 
 
 def video_is_learned(video_id: str) -> bool:
-    """A video counts as learned once its transcript and rewrite exist."""
+    """A video counts as learned once its transcript and trunks exist."""
     return (
         (VIDEO_LEARN_TRANSCRIPT_DIR / f"{video_id}.transcript").is_file()
-        and (VIDEO_LEARN_TRANSCRIPT_DIR / f"{video_id}.rewrite").is_file()
+        and any(VIDEO_LEARN_TRANSCRIPT_DIR.glob(f"{video_id}.*.trunk"))
     )
 
 
@@ -6973,11 +6971,6 @@ def _run_video_learn_job(state: ChatState, video_id: str) -> None:
         for index, (script, script_args) in enumerate(steps):
             start = progress
             end = min(100.0, start + weights[index])
-            trunk_total = 0
-            if script == "create_embeddings.py":
-                trunk_total = len(
-                    list(VIDEO_LEARN_TRANSCRIPT_DIR.glob(f"{video_id}.*.trunk"))
-                )
             _update_video_learn_job(
                 state,
                 video_id,
@@ -7001,22 +6994,6 @@ def _run_video_learn_job(state: ChatState, video_id: str) -> None:
                     clean = line.strip()
                     if not clean:
                         continue
-
-                    if script == "create_embeddings.py":
-                        match = re.match(r"\[(\d+)\]\s+Saved\s", clean)
-                        if match and trunk_total > 0:
-                            saved = min(int(match.group(1)), trunk_total)
-                            ratio = saved / trunk_total
-                            _update_video_learn_job(
-                                state,
-                                video_id,
-                                progress=round(start + (end - start) * ratio, 1),
-                                message=(
-                                    f"Embedding {saved}/{trunk_total} trunk(s)"
-                                ),
-                            )
-                            continue
-
                     _update_video_learn_job(
                         state, video_id, message=clean[:200]
                     )

@@ -1,3 +1,44 @@
+task.refactor.new_learning_process_for_video (completed) {
+  major refactor {
+    - when learning a youtube video:
+      - download the youtube video transcript to <video_id_hash>.transcript
+      - generate trunks of the transcript similar to the ones in /news learning
+      - DO NOT need to generate the .rewrite files and .embedding
+  }
+
+  create youtube_video_learning_migration.py {
+    - remote all the existing .embedding, .trunk, .rewrite files in {directory_of_this_prompt}/../.chat/youtube_transcripts directory
+    - examine all *.transcript files, generate new trunk files similar to the news
+  }
+
+  Implemented:
+  youtube_video_learn.py
+  - STEPS is now fetch_youtube_transcript.py -> create_trunks.py. Rewrite and
+    embeddings are no longer part of learning.
+  create_trunks.py
+  - Reads <video>.transcript (falling back to the video id when a title is
+    missing), strips caption speaker markers, splits the raw transcript into
+    sentence-aligned paragraphs, and writes one overview trunk (index 0) plus
+    one paragraph trunk per chunk, matching news learning. Re-learning removes
+    that video's old trunks first.
+  youtube_video_learning_migration.py
+  - Removes every .embedding (including .paragraph.embedding), .trunk, and
+    .rewrite file in .chat/youtube_transcripts, then rebuilds news-style trunks
+    from every existing .transcript. Supports --dry-run, continues past a bad
+    transcript, and exits non-zero if any transcript fails.
+  app/chat_server.py
+  - Learn progress weights match the two remaining steps.
+    video_is_learned() now requires the transcript plus at least one trunk
+    instead of a .rewrite file.
+
+  Verified:
+  - py_compile passes for the changed Python files; a temp-dir run built 34
+    trunks (overview + 33 paragraphs) from a real transcript.
+  - Ran the migration on the live corpus: 23,414 embedding files, 11,707 old
+    trunks, and 546 rewrite files removed; 19,482 news-style trunks rebuilt
+    for all 546 transcripts, with no failures.
+}
+
 task.load_youtube_image (completed) {
   in youtube search result, load the video image from: https://img.youtube.com/vi/<VIDEO_ID>/maxresdefault.jpg
 
