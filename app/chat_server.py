@@ -1146,6 +1146,7 @@ VIDEO_LEARN_TRANSCRIPT_DIR = SCRIPT_DIR / ".chat" / "youtube_transcripts"
 # Weights match youtube_video_learn.STEPS: fetch and create_trunks.
 VIDEO_LEARN_STEP_WEIGHTS = (30.0, 70.0)
 VIDEO_LEARN_ACTIVE_STATES = {"queued", "running"}
+VIDEO_LEARN_TERMINAL_STATES = {"done", "learned"}
 
 # The /youtube player modal has a "Bookmark" button. Bookmarks are stored as
 # JSON Lines in .chat/youtube_video_bookmark.json: one entry per line, newest
@@ -6730,12 +6731,67 @@ class ChatState:
         return key
 
 
+def _video_files(video_id: str) -> tuple[Path, list[Path]]:
+    """Return the transcript path and learned trunk paths for one video."""
+    transcript = VIDEO_LEARN_TRANSCRIPT_DIR / f"{video_id}.transcript"
+    trunks = list(VIDEO_LEARN_TRANSCRIPT_DIR.glob(f"{video_id}.*.trunk"))
+    return transcript, trunks
+
+
+def video_has_transcript(video_id: str) -> bool:
+    """Whether a video's downloaded transcript is available."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        return False
+    transcript, _trunks = _video_files(video_id)
+    return transcript.is_file()
+
+
 def video_is_learned(video_id: str) -> bool:
-    """A video counts as learned once its transcript and trunks exist."""
-    return (
-        (VIDEO_LEARN_TRANSCRIPT_DIR / f"{video_id}.transcript").is_file()
-        and any(VIDEO_LEARN_TRANSCRIPT_DIR.glob(f"{video_id}.*.trunk"))
-    )
+    """A video is learned once its RAG trunks exist.
+
+    This intentionally mirrors ``news_is_learned``: chat only needs the
+    learned trunks, not a particular transcript or rewrite file. Requiring
+    every intermediate file made chats fail after the learning pipeline was
+    migrated even though the trunks were present.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        return False
+    _transcript, trunks = _video_files(video_id)
+    return bool(trunks)
+
+
+def video_is_chat_ready(video_id: str) -> bool:
+    """Whether the Chat button can open a usable video session.
+
+    A transcript without trunks is still chat-ready because
+    ``get_video_chat_state`` can rebuild the trunks locally before opening.
+    """
+    return video_is_learned(video_id) or video_has_transcript(video_id)
+
+
+def ensure_video_trunks(video_id: str) -> bool:
+    """Rebuild missing trunks from an existing transcript, if possible.
+
+    Learning is a two-step subprocess pipeline. If it was interrupted after
+    the transcript was saved -- or an older release left only a transcript --
+    chat can repair the local, offline chunking step without re-downloading.
+    """
+    if video_is_learned(video_id):
+        return True
+    if not video_has_transcript(video_id):
+        return False
+    try:
+        import create_trunks
+
+        create_trunks.build_video_trunks(
+            video_id, output_dir=VIDEO_LEARN_TRANSCRIPT_DIR
+        )
+    except (ImportError, OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"Found the transcript for {video_id!r}, but could not rebuild "
+            f"its learned trunks: {exc}"
+        ) from exc
+    return video_is_learned(video_id)
 
 
 # The "Chat" button inside a /youtube search video modal keeps its own
@@ -6752,7 +6808,10 @@ def get_video_chat_state(video_id: str) -> ChatState:
         session = VIDEO_CHAT_STATES.get(video_id)
         if session is not None:
             return session
-        if not video_is_learned(video_id):
+        # Use the same disk-backed readiness check as the status endpoint.
+        # If a transcript exists but its trunks were lost or never finished,
+        # rebuild them before declaring the video unlearned.
+        if not ensure_video_trunks(video_id):
             raise RuntimeError(
                 "This video has not been learned yet. Click Learn first, then "
                 "chat about its transcript."
@@ -6893,6 +6952,35 @@ def get_gutenberg_chat_state(
         return session
 
 
+def _reconcile_video_learn_job(job: dict) -> dict:
+    """Reconcile a terminal job snapshot with what is actually on disk.
+
+    The browser decides whether to show Learn or Chat from this snapshot.
+    A job that says "done" after its files were moved or removed must not
+    keep advertising a chat session that the server will reject.
+    """
+    snapshot = dict(job)
+    video_id = str(snapshot.get("id") or "")
+    if (
+        snapshot.get("status") in VIDEO_LEARN_TERMINAL_STATES
+        and not video_is_chat_ready(video_id)
+    ):
+        message = (
+            "Learned files are missing for this video. Learn it again to "
+            "rebuild its transcript and trunks."
+        )
+        snapshot.update(
+            status="error",
+            learned=False,
+            message=message,
+            error=message,
+        )
+    elif snapshot.get("status") in VIDEO_LEARN_TERMINAL_STATES:
+        # Trunks may have been rebuilt after the job finished.
+        snapshot["learned"] = True
+    return snapshot
+
+
 def _video_learn_jobs_snapshot(
     state: ChatState, video_id: str | None = None
 ) -> list[dict] | dict | None:
@@ -6900,8 +6988,11 @@ def _video_learn_jobs_snapshot(
     with state.video_learn_lock:
         if video_id is not None:
             job = state.video_learn_jobs.get(video_id)
-            return dict(job) if job is not None else None
-        return [dict(job) for job in state.video_learn_jobs.values()]
+            return _reconcile_video_learn_job(job) if job is not None else None
+        return [
+            _reconcile_video_learn_job(job)
+            for job in state.video_learn_jobs.values()
+        ]
 
 
 def _update_video_learn_job(
@@ -7015,6 +7106,12 @@ def _run_video_learn_job(state: ChatState, video_id: str) -> None:
                 message=f"Finished {script}",
             )
 
+        if not video_is_learned(video_id):
+            raise RuntimeError(
+                "Learning finished but no trunk files were written; the "
+                "transcript and learned corpus may be in different "
+                "directories."
+            )
         _update_video_learn_job(
             state,
             video_id,
@@ -7206,7 +7303,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 if job is not None:
                     self._send_json(job)
                     return
-                learned = video_is_learned(video_id)
+                # Match the disk-backed readiness rule used by
+                # get_video_chat_state. A transcript-only video is also
+                # chat-ready because the chat request rebuilds its trunks.
+                learned = video_is_chat_ready(video_id)
                 self._send_json(
                     {
                         "id": video_id,
@@ -9632,7 +9732,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             str(limit),
         ]
         if exclude:
-            command.extend(["--exclude", ",".join(sorted(exclude))])
+            # Attach the value with ``=`` instead of passing it as a separate
+            # argument.  YouTube ids may start with ``-`` (for example
+            # ``-PcBFgkrR2o``), and argparse would otherwise mistake the
+            # comma-separated exclusion list for an option and fail with
+            # "argument --exclude: expected one argument".
+            command.append("--exclude=" + ",".join(sorted(exclude)))
         command.extend(["--", keyword])
         return command
 

@@ -1,3 +1,63 @@
+task.bug.fail_to_load_more_videos (completed) {
+  when click on "More" button, we got error:
+  /youtube search: YouTube search failed: usage: youtube_news_search.py [-h] [-n LIMIT] [--json] [--progressive-json]
+                              [--exclude VIDEO_IDS]
+                              keyword
+youtube_news_search.py: error: argument --exclude: expected one argument
+
+  Implemented:
+  app/chat_server.py
+  - The More request now passes the skip list as one attached argument,
+    `--exclude=<ids>`, instead of `--exclude <ids>`. YouTube ids may begin
+    with a hyphen (for example `-PcBFgkrR2o`), so argparse mistook the
+    comma-separated value for a new option and aborted with "expected one
+    argument" before the search ran.
+
+  Verified:
+  - py_compile passes. The generated command keeps a hyphen-leading id
+    attached to `--exclude=`, and `youtube_news_search.py --json --limit 1
+    --exclude=-PcBFgkrR2o,abcdefghijk -- test` exits 0 and returns JSON.
+}
+
+task.bug.video_chat (completed) {
+  - after a video is learned and i click on "Chat", it said: "This video has not been learned yet. Click Learn first, then chat about its transcript."
+    please fix it in a systematic way, the chat behavior should be very similar to the news chat
+
+  Implemented:
+  app/chat_server.py
+  - Video learned state is now disk-backed and news-like: a video is learned
+    once its RAG trunks exist, regardless of whether an intermediate
+    transcript, rewrite, or embedding file is still present. Previously the
+    chat guard also required <video>.transcript, so a migrated or partially
+    cleaned video could be advertised as learned by an in-memory learn job
+    while get_video_chat_state rejected it with "This video has not been
+    learned yet".
+  - Added video_is_chat_ready() and ensure_video_trunks(). If a chat request
+    arrives for a video whose transcript exists but whose trunks are missing
+    or incomplete, the server now rebuilds the trunks locally (offline, via
+    create_trunks.build_video_trunks) before loading the isolated session.
+    No transcript re-download and no model call is needed.
+  - The video learn status endpoint reconciles terminal jobs with the files
+    actually on disk. A stale "done"/"learned" job whose files disappeared
+    is reported as an error (so the UI offers Retry instead of a broken
+    Chat), while a transcript-only video is reported chat-ready and heals on
+    the first chat message.
+  - A learn job now fails if it reaches the end without writing any trunks,
+    instead of publishing a false "Video learned" state.
+
+  Verified:
+  - py_compile on app/chat_server.py, create_trunks.py, and
+    youtube_video_learn.py passes; node --check on the inline app/chat.html
+    script passes.
+  - Unit checks: transcript-only -> chat-ready and get_video_chat_state
+    rebuilt 2 trunks and loaded 2 chunks; trunk-only (no transcript) ->
+    learned and chat-ready; a stale terminal job with no files reconciles to
+    status "error" with learned=false.
+  - Live check against a temporary server: a transcript-only video returned
+    status "learned" and POST /api/video_chat streamed a valid meta event
+    with 2 chunks instead of the old error.
+}
+
 task.refactor.new_learning_process_for_video (completed) {
   major refactor {
     - when learning a youtube video:
