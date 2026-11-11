@@ -1,3 +1,9 @@
+task (completed) {
+  when i ask this question: what can i eat in Izumo
+  we should be able to find the information from the learned article https://en.wikivoyage.org/wiki/Izumo
+  but how come in the answer, it does not contain the restaurant information
+}
+
 task.chat_not_working (completed) {
   bug:
   when i click on the chat button in the article modal and ask a question, it is not working

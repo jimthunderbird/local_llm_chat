@@ -253,10 +253,11 @@ CHARS_PER_TOKEN = 4
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
 CHAT_DIR = Path.cwd() / ".chat"
-# Learned news articles live beside the YouTube corpus. Each learned story has
-# a .title file and one .trunk file per knowledge paragraph, so the same BM25
-# retrieval code can search news and transcripts together.
-NEWS_DIR = CHAT_DIR / "news_cache"
+# Learned articles (news stories and learned web articles) live beside the
+# YouTube corpus. Each learned article has a .title file and one .trunk file
+# per knowledge paragraph, so the same BM25 retrieval code can search articles
+# and transcripts together.
+ARTICLES_DIR = CHAT_DIR / "articles_cache"
 HISTORY_FILE = CHAT_DIR / "question_history.txt"
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
@@ -1231,14 +1232,14 @@ def load_chunks(
 
 
 def load_news_chunks(news_ids: set[str] | None = None) -> list[Chunk]:
-    """Load learned news trunks, optionally limited to specific story ids."""
-    if not NEWS_DIR.is_dir():
+    """Load learned article trunks, optionally limited to specific article ids."""
+    if not ARTICLES_DIR.is_dir():
         return []
     selected = set(news_ids) if news_ids is not None else None
     chunks: list[Chunk] = []
     try:
         paths = sorted(
-            NEWS_DIR.glob("*.trunk"),
+            ARTICLES_DIR.glob("*.trunk"),
             key=lambda p: (p.name.split(".", 1)[0], p.name),
         )
     except OSError:
@@ -1262,7 +1263,7 @@ def load_news_chunks(news_ids: set[str] | None = None) -> list[Chunk]:
 
 
 def load_all_chunks() -> list[Chunk]:
-    """Load every learned transcript and news trunk into one global corpus."""
+    """Load every learned transcript and article trunk into one global corpus."""
     chunks: list[Chunk] = []
     if OUTPUT_DIR.is_dir() and available_video_ids():
         chunks = load_chunks(announce=False)
@@ -1270,8 +1271,8 @@ def load_all_chunks() -> list[Chunk]:
     if not chunks and not news_chunks:
         sys.exit(
             "No learned trunks found in "
-            f"{OUTPUT_DIR} or {NEWS_DIR}\n"
-            "Learn a YouTube video with /youtube learn or a news story "
+            f"{OUTPUT_DIR} or {ARTICLES_DIR}\n"
+            "Learn a YouTube video with /youtube learn or an article "
             "from its /news detail view."
         )
     all_chunks = chunks + news_chunks
@@ -1676,11 +1677,11 @@ def _read_title_cached(path: str) -> str:
 
 
 def video_title(video_id: str) -> str:
-    """Return the saved title for a video or news story, if one exists."""
+    """Return the saved title for a video or learned article, if one exists."""
     title = _read_title_cached(str(OUTPUT_DIR / f"{video_id}.title"))
     if title:
         return title
-    return _read_title_cached(str(NEWS_DIR / f"{video_id}.title"))
+    return _read_title_cached(str(ARTICLES_DIR / f"{video_id}.title"))
 
 
 def _token_set(text: str) -> frozenset[str]:

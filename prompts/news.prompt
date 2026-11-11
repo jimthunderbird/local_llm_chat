@@ -65,6 +65,19 @@ task (persistent) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
+task (completed) {
+  bug: in the article modal, it should load the full article of https://en.wikivoyage.org/wiki/Izumo
+}
+
+task.refactor.article_cache (completed) {
+  currently, when we learn a news, we are storing the trunks in {directory_of_this_prompt}/../.chat/news_cache
+  please change it to {directory_of_this_prompt}/../.chat/articles_cache
+  please rename {directory_of_this_prompt}/../.chat/news_cache to {directory_of_this_prompt}/../.chat/articles_cache
+  please change the related code as well
+
+  basically, we want a generic "article" concept for anything we learn
+}
+
 task.update_search_command_args_include_website (completed) {
   add support like for /news search <keyword> howstuffworks.com {
     it will then only search articles from howstuffworks.com

@@ -57,7 +57,7 @@ Endpoints:
     POST /api/snippet_question   SSE: answer a free-form question about a whole
                                   code snippet
     POST /api/news_learn         store one /news story and build its learned
-                                  trunks in .chat/news_cache
+                                  trunks in .chat/articles_cache
     GET  /api/news_status        ?id=<news_id> whether one story is learned
     GET  /api/news_item          ?id=<news_id> full learned story for the modal
     GET  /api/news_article       ?url=<article_url> fetch a story body for the
@@ -330,10 +330,12 @@ def _podcast_voice_defaults() -> dict[str, str]:
         ),
     }
 
-# Learned /news stories live beside the transcript corpus. A story is learned
-# once, then its article content and retrieval trunks are reused on disk and
-# included in the global BM25 corpus.
-NEWS_CACHE_DIR = chat.NEWS_DIR
+# Learned articles live beside the transcript corpus. An article is learned
+# once, then its content and retrieval trunks are reused on disk and included
+# in the global BM25 corpus. NEWS_CACHE_DIR is kept as the compatibility name
+# for the news-specific callers.
+ARTICLES_CACHE_DIR = chat.ARTICLES_DIR
+NEWS_CACHE_DIR = ARTICLES_CACHE_DIR
 NEWS_CACHE_LOCK = threading.Lock()
 NEWS_ID_PATTERN = re.compile(r"news_[A-Za-z0-9]+")
 
@@ -769,6 +771,33 @@ def search_wikivoyage_destinations(
 # returned HTML is well-formed XML, which lets us keep headings, paragraphs,
 # lists, and figures in their original reading order.
 WIKIVOYAGE_API_URL = "https://en.wikivoyage.org/w/api.php"
+# The normal page-render endpoint is CDN-cached and is not subject to the
+# MediaWiki API's tight per-IP request limit. A /wikivoyage search already
+# makes one search request plus a summary request per card, so opening a card
+# immediately afterwards through action=parse could return HTTP 429 and leave
+# the modal showing only the short search extract.
+WIKIVOYAGE_RENDER_URL = WIKIVOYAGE_BASE_URL + "/w/index.php"
+WIKIVOYAGE_RETRY_MAX_SECONDS = 35.0
+WIKIVOYAGE_ARTICLE_CACHE_TTL = 3600.0
+_WIKIVOYAGE_ARTICLE_CACHE: dict[str, tuple[float, dict]] = {}
+_WIKIVOYAGE_ARTICLE_CACHE_LOCK = threading.Lock()
+_WIKIVOYAGE_VOID_TAGS = (
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "param",
+    "source",
+    "track",
+    "wbr",
+)
+_WIKIVOYAGE_PREDEFINED_ENTITIES = {"amp", "apos", "gt", "lt", "quot"}
 WIKIVOYAGE_ARTICLE_IMAGE_LIMIT = 80
 _WIKIVOYAGE_SKIP_TABLE_CLASSES = (
     "infobox",
@@ -797,17 +826,39 @@ def _wikivoyage_title_from_url(url: str, title: str = "") -> str:
 
 
 def _wikivoyage_element_text(element) -> str:
-    """Return normalized plain text for one parsed HTML element."""
+    """Return normalized plain text for one parsed HTML element.
+
+    MediaWiki pages embed their templatestyles in <style> elements inside the
+    article body. Those rules are presentation, not article text, so exclude
+    them (and edit links) from headings, paragraphs, listings, and tables.
+    """
     if element is None:
         return ""
-    return " ".join("".join(element.itertext()).split())
+    parts: list[str] = []
+
+    def collect(node) -> None:
+        tag = str(node.tag or "").lower()
+        if tag in {"style", "script", "sup", "nav"}:
+            return
+        if node.text:
+            parts.append(str(node.text))
+        for child in node:
+            collect(child)
+            if child.tail:
+                parts.append(str(child.tail))
+
+    collect(element)
+    return " ".join("".join(parts).split())
 
 
 def _wikivoyage_image_url(image) -> str:
     """Return the largest available absolute URL for one article image."""
     sources: list[str] = []
     srcset = str(image.get("srcset") or "").strip()
-    for candidate in srcset.split(","):
+    # Wikimedia map URLs contain commas in the path (osm-intl,10,...), so a
+    # plain split on every comma truncates them to a broken URL. srcset
+    # candidates are only separated by a comma followed by the next URL.
+    for candidate in re.split(r",\s*(?=https?://)", srcset):
         parts = candidate.strip().split()
         if parts:
             sources.append(parts[0])
@@ -822,8 +873,188 @@ def _wikivoyage_image_url(image) -> str:
     return source if source.startswith(("http://", "https://")) else ""
 
 
-def _wikivoyage_article_blocks(document: str) -> list[dict]:
-    """Turn the parse API HTML into ordered blocks for the detail modal."""
+class _WikivoyageRequestError(RuntimeError):
+    """One Wikivoyage endpoint failed; retry_after carries a 429 hint."""
+
+    def __init__(self, message: str, retry_after: float = 0.0):
+        super().__init__(message)
+        self.retry_after = max(0.0, float(retry_after))
+
+
+def _wikivoyage_retry_after(response) -> float:
+    """Return the response's Retry-After delay, bounded to a usable wait."""
+    raw = str(response.headers.get("Retry-After") or "").strip()
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = 5.0
+    return max(1.0, min(WIKIVOYAGE_RETRY_MAX_SECONDS, seconds))
+
+
+def _wikivoyage_request_error(source: str, response) -> _WikivoyageRequestError:
+    if response.status_code == 429:
+        delay = _wikivoyage_retry_after(response)
+        return _WikivoyageRequestError(
+            f"{source} is rate-limited (HTTP 429); retry after {delay:.0f}s",
+            delay,
+        )
+    return _WikivoyageRequestError(
+        f"{source} returned HTTP {response.status_code}"
+    )
+
+
+def _wikivoyage_render_document(title: str) -> str:
+    """Return the full article HTML through the normal CDN-cached page path."""
+    try:
+        response = requests.get(
+            WIKIVOYAGE_RENDER_URL,
+            params={"title": title, "action": "render"},
+            headers={**chat.HTTP_HEADERS, "Accept": "text/html"},
+            timeout=(10, 60),
+        )
+    except requests.RequestException as exc:
+        raise _WikivoyageRequestError(f"page render failed: {exc}") from exc
+    if response.status_code != 200:
+        raise _wikivoyage_request_error("page render", response)
+    document = response.text
+    if not document.strip():
+        raise _WikivoyageRequestError("page render returned an empty article")
+    return document
+
+
+def _wikivoyage_parse_document(title: str) -> str:
+    """Return the full article HTML through the MediaWiki parse API."""
+    try:
+        response = requests.get(
+            WIKIVOYAGE_API_URL,
+            params={
+                "action": "parse",
+                "page": title,
+                "prop": "text",
+                "format": "json",
+                "formatversion": 2,
+                "redirects": 1,
+                "disableeditsection": 1,
+            },
+            headers={**chat.HTTP_HEADERS, "Accept": "application/json"},
+            timeout=(10, 60),
+        )
+    except requests.RequestException as exc:
+        raise _WikivoyageRequestError(f"parse API failed: {exc}") from exc
+    if response.status_code != 200:
+        raise _wikivoyage_request_error("MediaWiki parse API", response)
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise _WikivoyageRequestError(
+            f"MediaWiki parse API returned invalid JSON: {exc}"
+        ) from exc
+    parse = payload.get("parse") if isinstance(payload, dict) else None
+    if not isinstance(parse, dict):
+        detail = ""
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                detail = str(error.get("info") or "").strip()
+        raise _WikivoyageRequestError(
+            f"MediaWiki parse API: {detail or 'unexpected API response'}"
+        )
+    document = str(parse.get("text") or "")
+    if not document.strip():
+        raise _WikivoyageRequestError(
+            "MediaWiki parse API returned an empty article"
+        )
+    return document
+
+
+def _wikivoyage_fetch_document(title: str) -> tuple[str, bool]:
+    """Fetch one complete destination article, returning (document, is_html).
+
+    The rendered page is preferred because a /wikivoyage search has just made
+    several API requests, and the parse API can answer the immediate modal
+    open with HTTP 429. The API remains the fallback. If both endpoints are
+    rate-limited, wait for the advertised Retry-After and try once more.
+    """
+    errors: list[str] = []
+    for attempt in range(2):
+        retry_after = 0.0
+        for source, html_document, fetch in (
+            ("page render", True, _wikivoyage_render_document),
+            ("MediaWiki parse API", False, _wikivoyage_parse_document),
+        ):
+            try:
+                return fetch(title), html_document
+            except _WikivoyageRequestError as exc:
+                errors.append(str(exc))
+                retry_after = max(retry_after, exc.retry_after)
+        if attempt == 0 and retry_after > 0:
+            time.sleep(retry_after)
+            continue
+        break
+    detail = errors[-1] if errors else "unexpected response"
+    raise RuntimeError(f"Could not load the Wikivoyage article: {detail}")
+
+
+def _wikivoyage_cached_article(key: str) -> dict | None:
+    """Return a recently fetched article, or None when the cache misses."""
+    now = time.time()
+    with _WIKIVOYAGE_ARTICLE_CACHE_LOCK:
+        entry = _WIKIVOYAGE_ARTICLE_CACHE.get(key)
+        if entry is None:
+            return None
+        fetched_at, article = entry
+        if now - fetched_at > WIKIVOYAGE_ARTICLE_CACHE_TTL:
+            _WIKIVOYAGE_ARTICLE_CACHE.pop(key, None)
+            return None
+        return article
+
+
+def _wikivoyage_store_article(key: str, article: dict) -> None:
+    """Keep a small in-memory cache so reopening a card needs no request."""
+    with _WIKIVOYAGE_ARTICLE_CACHE_LOCK:
+        if len(_WIKIVOYAGE_ARTICLE_CACHE) >= 16:
+            oldest = sorted(
+                _WIKIVOYAGE_ARTICLE_CACHE.items(), key=lambda item: item[1][0]
+            )[:4]
+            for stale_key, _ in oldest:
+                _WIKIVOYAGE_ARTICLE_CACHE.pop(stale_key, None)
+        _WIKIVOYAGE_ARTICLE_CACHE[key] = (time.time(), article)
+
+
+def _wikivoyage_named_entity(match: re.Match[str]) -> str:
+    """Convert an HTML named entity to an XML-safe numeric reference."""
+    name = match.group(1)
+    if name in _WIKIVOYAGE_PREDEFINED_ENTITIES:
+        return match.group(0)
+    decoded = html.unescape(match.group(0))
+    if decoded == match.group(0):
+        return "&amp;" + name + ";"
+    return "".join(f"&#{ord(character)};" for character in decoded)
+
+
+def _wikivoyage_html_to_xml(document: str) -> str:
+    """Make the action=render HTML parseable by the shared block walker."""
+    text = re.sub(r"<!--.*?-->", "", str(document or ""), flags=re.S)
+    void_pattern = "|".join(_WIKIVOYAGE_VOID_TAGS)
+    text = re.sub(
+        rf"<({void_pattern})(\b[^>]*?)(?<!/)>",
+        r"<\1\2/>",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"&([A-Za-z][A-Za-z0-9]+);", _wikivoyage_named_entity, text)
+    text = re.sub(
+        r"&(?!#\d+;|#x[0-9A-Fa-f]+;|amp;|lt;|gt;|quot;|apos;)",
+        "&amp;",
+        text,
+    )
+    return "<root>" + text + "</root>"
+
+
+def _wikivoyage_article_blocks(document: str, *, html_document: bool = False) -> list[dict]:
+    """Turn MediaWiki article HTML into ordered blocks for the detail modal."""
+    if html_document:
+        document = _wikivoyage_html_to_xml(document)
     try:
         root = ElementTree.fromstring(document)
     except ElementTree.ParseError:
@@ -969,39 +1200,14 @@ def fetch_wikivoyage_article(url: str, title: str = "") -> dict:
     article_title = _wikivoyage_title_from_url(url, title)
     if not article_title:
         raise ValueError("Missing Wikivoyage article title")
-    try:
-        response = requests.get(
-            WIKIVOYAGE_API_URL,
-            params={
-                "action": "parse",
-                "page": article_title,
-                "prop": "text",
-                "format": "json",
-                "formatversion": 2,
-                "redirects": 1,
-                "disableeditsection": 1,
-            },
-            headers={**chat.HTTP_HEADERS, "Accept": "application/json"},
-            timeout=(10, 60),
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        raise RuntimeError(f"Could not load the Wikivoyage article: {exc}") from exc
 
-    parse = payload.get("parse") if isinstance(payload, dict) else None
-    if not isinstance(parse, dict):
-        detail = ""
-        if isinstance(payload, dict):
-            error = payload.get("error")
-            if isinstance(error, dict):
-                detail = str(error.get("info") or "").strip()
-        raise RuntimeError(
-            f"Could not load the Wikivoyage article: {detail or 'unexpected API response'}"
-        )
+    cache_key = article_title.casefold()
+    cached = _wikivoyage_cached_article(cache_key)
+    if cached is not None:
+        return cached
 
-    document = str(parse.get("text") or "")
-    blocks = _wikivoyage_article_blocks(document)
+    document, html_document = _wikivoyage_fetch_document(article_title)
+    blocks = _wikivoyage_article_blocks(document, html_document=html_document)
     paragraphs: list[str] = []
     images: list[str] = []
     seen_paragraphs: set[str] = set()
@@ -1031,17 +1237,19 @@ def fetch_wikivoyage_article(url: str, title: str = "") -> dict:
                 seen_images.add(key)
                 images.append(image_url)
 
-    canonical_title = str(parse.get("title") or article_title).strip()
+    canonical_title = article_title
     link = WIKIVOYAGE_BASE_URL + "/wiki/" + quote(
         canonical_title.replace(" ", "_"), safe="/()_',.:!-~"
     )
-    return {
+    article = {
         "title": canonical_title,
         "link": link,
         "paragraphs": paragraphs,
         "images": images,
         "blocks": blocks,
     }
+    _wikivoyage_store_article(cache_key, article)
+    return article
 
 
 # ---- /changelog ------------------------------------------------------
@@ -4703,8 +4911,8 @@ def learn_news_article(payload: dict) -> dict:
     """Store one news story and build the learned retrieval trunks.
 
     The original article content and its learned representation both live in
-    ``.chat/news_cache``: a JSON record plus a Markdown copy of the story, and
-    one trunk per paragraph. A compact overview trunk (index 0) makes
+    ``.chat/articles_cache``: a JSON record plus a Markdown copy of the story,
+    and one trunk per paragraph. A compact overview trunk (index 0) makes
     broad questions such as "what is this story about?" retrievable.
     """
     title = " ".join(str(payload.get("title") or "").split())
@@ -5944,13 +6152,30 @@ def _article_sufficiency_check(
 _PARAGRAPH_CHUNKS_CACHE: dict[int, tuple[list[chat.Chunk], list[chat.Chunk]]] = {}
 
 
+def _is_article_heading_chunk(chunk: chat.Chunk) -> bool:
+    """Return True when a learned-article chunk is just a section heading.
+
+    Article trunks preserve headings as their own paragraph (Wikivoyage's
+    ``Eat``, ``Sleep``, ``By plane``, and so on). A heading is a structural
+    label, not a knowledge paragraph, and BM25's length normalization gives
+    such a tiny document a very high score. For example, "what can i eat in
+    Izumo" ranked the one-word ``Eat`` heading far above the soba and
+    restaurant paragraphs it introduces, so the answer never contained them.
+    Keep headings out of paragraph retrieval and let the body paragraphs,
+    which repeat the useful section vocabulary, answer the question.
+    """
+    text = " ".join(chat.paragraph_text(chunk).split())
+    return bool(text) and _article_heading_like(text)
+
+
 def _iterative_paragraph_chunks(chunks: list[chat.Chunk]) -> list[chat.Chunk]:
     """Return a stable paragraph-only list for BM25 indexing.
 
     ``get_bm25_index`` caches by list identity. Building a fresh
     ``[chunk for chunk in chunks if chunk.index > 0]`` list on every question
     defeated that cache and rebuilt the whole corpus index (~2 seconds) each
-    time. Keep one filtered list per source corpus instead.
+    time. Keep one filtered list per source corpus instead. Standalone article
+    headings are excluded because they are section labels, not evidence.
     """
     if not any(chunk.index <= 0 for chunk in chunks):
         # YouTube corpora contain only paragraph chunks, so no copy is needed.
@@ -5959,7 +6184,11 @@ def _iterative_paragraph_chunks(chunks: list[chat.Chunk]) -> list[chat.Chunk]:
     entry = _PARAGRAPH_CHUNKS_CACHE.get(key)
     if entry is not None and entry[0] is chunks:
         return entry[1]
-    filtered = [chunk for chunk in chunks if chunk.index > 0]
+    filtered = [
+        chunk
+        for chunk in chunks
+        if chunk.index > 0 and not _is_article_heading_chunk(chunk)
+    ]
     _PARAGRAPH_CHUNKS_CACHE[key] = (chunks, filtered)
     while len(_PARAGRAPH_CHUNKS_CACHE) > 4:
         _PARAGRAPH_CHUNKS_CACHE.pop(next(iter(_PARAGRAPH_CHUNKS_CACHE)))
@@ -5975,7 +6204,9 @@ def _evidence_covers_question(
     retrieval round. When the evidence already contains every content word
     from the question, there is no reason to ask the model. A miss (including
     a synonym or a misspelling) still falls back to the model, so this is a
-    conservative fast path.
+    conservative fast path. Heading-only chunks do not count: a question word
+    that appears only in the label ``Eat`` is not evidence that the gathered
+    paragraphs describe what to eat.
     """
     if not evidence:
         return False
@@ -5986,8 +6217,15 @@ def _evidence_covers_question(
     }
     if not question_terms:
         return False
+    substantive = [
+        chunk
+        for chunk, _score in evidence
+        if not _is_article_heading_chunk(chunk)
+    ]
+    if not substantive:
+        return False
     evidence_text = " ".join(
-        chat.paragraph_text(chunk) for chunk, _score in evidence
+        chat.paragraph_text(chunk) for chunk in substantive
     )
     evidence_terms = set(chat.tokenize(evidence_text))
     return question_terms.issubset(evidence_terms)
