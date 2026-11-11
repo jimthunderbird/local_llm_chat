@@ -546,7 +546,7 @@ def _fetch_search_page_data(keyword: str):
     a slightly different desktop payload.  The desktop URL is tried first;
     the mobile endpoint (which redirects to the desktop results with the same
     data) and a cache-bypassing desktop URL are retries, so a transient
-    response does not make ``/youtube advancesearch`` fail outright.
+    response does not make ``/youtube search`` fail outright.
     """
     query = urllib.parse.quote_plus(keyword)
     urls = [
@@ -578,7 +578,7 @@ def search_youtube_results_page(
 ) -> list[dict]:
     """Extract video metadata from the YouTube search results page.
 
-    This is the ``/youtube advancesearch`` backend.  It loads
+    This is the ``/youtube search`` backend.  It loads
     ``https://www.youtube.com/results?search_query=<keyword>`` and reads the
     embedded ``ytInitialData`` JSON, which yields richer metadata than the
     Google News RSS source (duration, channel, and relative publish time).
@@ -645,7 +645,7 @@ def main(argv=None) -> None:
         "--search-page", action="store_true",
         help=(
             "extract results from https://www.youtube.com/results "
-            "instead of Google News RSS (used by advancesearch)"
+            "instead of Google News RSS (used by /youtube search)"
         ),
     )
     args = parser.parse_args(argv)

@@ -1,0 +1,4 @@
+task (completed) {
+  create new command /mdn <keyword>, hook up to https://developer.mozilla.org/api/v1/search?q=%3Ckeyword%3E&locale=en-US
+  the UI/UX should be very similar to /news search <keyword>
+}

@@ -1,0 +1,31 @@
+task.chat_not_working (completed) {
+  bug:
+  when i click on the chat button in the article modal and ask a question, it is not working
+}
+
+task (completed) {
+  currently when the chat is loaded, it said something like:
+  "global corpus · 24765 trunks from 583 videos + 106 news stories"
+
+  we do not want the word "news stories", please use "articles" instead
+}
+
+task.learn_article (completed) {
+  refer to task.article_modal, please add a learn button in the article modal and allow learning the article, very similar to the news learning
+}
+
+task.article_modal (completed) {
+  currently the article modal only loads part of the article, please load the full article instead, including the pictures in article
+}
+
+task (completed) {
+  create new command /wikivoyage <keyword> {
+    # Search destinations
+    curl "https://en.wikivoyage.org/w/rest.php/v1/search/page?q=<keyword>&limit=10"
+
+    # Get destination summary & coordinates (example)
+    curl "https://en.wikivoyage.org/api/rest_v1/page/summary/Kyoto"
+
+    the UI/UX should be very similar to /news search <keyword>
+  }
+}

@@ -1,0 +1,8 @@
+task (completed) {
+  create a new command /changelog {
+    it will examine {directory_of_this_prompt}/../.log directory
+    list: find all the log files with time descending order
+    display {list}
+    when clicking on each entry of the list, open up a modal and load the actual list's html content
+  }
+}

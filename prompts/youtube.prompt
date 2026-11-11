@@ -1,5 +1,24 @@
 task (completed) {
+  for /youtube command:
+  - change the option advancesearch to search
+    the old search logic will be replaced by the one in advancesearch
+}
+
+task (completed) {
   in task.feature.advancesearch, sort the videos by publish dates in reverse order
+}
+
+task.no_summary_button (completed) {
+  currently on each video, we have the "Summary" and "Learn" button, please remove the "Summary" button  
+}
+
+task.next_and_previous_video (completed) {
+  in the video player, add a next and previous button, allow us to cycle through the list of videos that are in the search result list
+}
+
+task.fix_video_player (completed) {
+  currently,when we click outside of the video modal, the video player modal disappear and the video is stopped
+  please prevent the modal from disappearing when we click outside of it
 }
 
 task (completed) {

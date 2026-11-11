@@ -1279,7 +1279,7 @@ def load_all_chunks() -> list[Chunk]:
     news_count = len({chunk.video_id for chunk in news_chunks})
     source_summary = f"{video_count:,} video(s)"
     if news_count:
-        source_summary += f" and {news_count:,} news story(ies)"
+        source_summary += f" and {news_count:,} article(s)"
     print(
         f"Loaded {len(all_chunks):,} trunks from {source_summary} "
         "for the global corpus."
@@ -1384,7 +1384,7 @@ def chat_status_report(
     elif news_ids:
         loaded_label = (
             f"{len(video_ids):,} video(s) and "
-            f"{len(news_ids):,} news story(ies)"
+            f"{len(news_ids):,} article(s)"
         )
     else:
         loaded_label = f"{len(video_ids):,} video(s)"

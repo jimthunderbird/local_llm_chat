@@ -9,159 +9,19 @@ restrictions:
 }
 - if a task is persistent, DO NOT mark it as completed
 
-group search_youtube.py related to ./search_youtube.py {
-  task (completed) {
-    only return the videos that has english transcript
-  }
-
-  task (completed) {
-    in ./search_youtube.py script, please return the videos that are at most 20 minutes long
-  }
-
-  task (completed) {
-    create ./search_youtube.py <keyword>:
-    - sample code:
-    ```
-    from youtubesearchpython import VideosSearch
-
-    videosSearch = VideosSearch('quantum physics', limit=5)
-    results = videosSearch.result()
-    ```
-    - return:
-    <youtube_video_hash_1>
-    <youtube_video_hash_2>
-    <youtube_video_hash_3>
-    ...
-
-    - requirement: please return only videos that are published within 1 year
-  }
-}
-
-group chat_gradual_context.py related to ./chat_gradual_context.py {
-  task (completed) {
-    bug: 
-    - question: can i do left turn on redlight
-    the answer is yes
-    - questoin: can i do left turn on red light
-    the answer is no
-  }
-
-  task (completed) {
-    after we gathered the trunks for the answer:
-    - display a rough estimate of tokens in context
-    - display the current maximum context window size
-  }
-
-  task (completed) {
-    for the question: list me all levels of wagyu in details
-    we should need more trunks, why it only uses 3 trunks
-  }
-
-  task (completed) {
-    - create ./chat_gradual_context.py:
-    - clone all features in chat.py
-    - change the answer genertion logic to:
-    loop {
-      if total number of trunks in context exceed 100, stop
-
-      1. grep 3 new trunks of context
-      2. check if they are enough for fulfilling the requirements of the answer, please use ollama local model qwen3:1.7b, construct to prompt to check it
-      if yes: stop
-      if no:
-      continue the loop
-    }
-  }
-}
-
-group chat_lowcontext.py, related to file: ./chat_lowcontext.py only {
-  task (completed) {
-    bug: 
-    question:  i want to get 90-day long-stay visa, what are the requirements
-    the answer shows incorrect information: The 90-day long-stay visa requires approximately 30 million yen (around $200,000 USD)
-    the correct answer should be: The **visa fee** for a 90-day long-stay visa in Japan is typically **around 300,000 yen (approximately $2,000 USD)**
-  }
-
-  task (completed) {
-    bug:
-    question: what are all levels of wagyu
-    the answer gave me unrelated questions like: Sushi Yasuki is a third-floor sushi restaurant...
-    the answer should be very focus
-    please fix it in a generic and systematic way
-  }
-
-  task (completed) {
-    bug: 
-    question: i want to buy electronics in japan, give me a recommendation in 600 words
-    the answer shows unrelated information like:
-    Japanese gas station terms like "Man" for a full tank, "Genkin" for cash, and "Kurejitto Kaado" for credit card...
-  }
-
-  task (completed) {
-    bug:
-    question: what time does nijo market open
-    the answer contains more than it needs, it contains information of other markets
-    please fix it in a systematic and generic way
-  }
-
-  task (completed) {
-    currently, the chat will display messages like:
-    - [batch 1/2: 5 chunk(s), 0 item(s) tracked]
-    - +3 new item(s); 3 tracked.
-
-    DO NOT display them and instead, make an empty line so that the answer looks like an integrated article 
-  }
-
-  task (completed) {
-    bug: when i ask: where is nijo market, it keeps giving me unrelated answers like: The Toyosu Fish Market...
-    please fix it in generic and systematic way
-  }
-
-  task (completed) {
-    - create ./chat_lowcontext.py:
-    - clone all features of chat.py, but implement it with the following:
-    - study research/low_context_streaming_rag_architecture.md, use it to help guide the architectural decision
-  }
-}
-
-group: generate_tags.py {
-  task (completed) {
-    if we do --tag <tag_name>, and if the <tag_name> does not exist, just create it
-  }
-
-  task (completed) {
-    create ./generate_tags.py:
-    logic:
-    - tags: examine all files in ./tags
-    - titles: execulte command "find .chat/youtube_transcripts/*.title"
-    for each {title} in {titles} {
-      youtube_video_hash: youtube_video_hash_related_to_{title}
-      for each {tag} in {tags} {
-        if {youtube_video_hash} does not exist in ./tags/{tag} {
-          use ollama local model ornith:35b to find out if {youtube_video_hash} is related to {tag}
-          if yes {
-            append youtube_video_hash_related_to_{title} to ./tags/{tag} with new line at the end 
-          }
-        }
-      }
-    }  
-  }
-
-  task (completed) {
-    add a new flag --youtube_video_hash <youtube_video_hash>
-    logic:
-    - tags: examine all files in ./tags
-    for each {tag} in {tags} {
-      if {youtube_video_hash} does not exist in ./tags/{tag} {
-        use ollama local model ornith:35b to find out if {youtube_video_hash} is related to {tag}
-        if yes {
-          append youtube_video_hash_related_to_{title} to ./tags/{tag} with new line at the end 
-        }
-      }
-    }
-  }
-}
-
 group app/chat.html and app/chat_server.py {
+
+  task (persistent) {
+    complete task in ./prompts/wikivoyage.prompt
+  }
+
+  task (persistent) {
+    complete tasks in ./prompts/changelog.prompt
+  }
+
+  task (persistent) {
+    complete tasks in ./prompts/mdn.prompt
+  }
 
   task (persistent) {
     complete tasks in ./prompts/programming.prompt
@@ -837,3 +697,157 @@ group golang_doc_search.py {
     - use ollama local model ornith:35b (no thinking mode) to understand the question, find out keywords to search in {source}
   }
 }
+
+group search_youtube.py related to ./search_youtube.py {
+  task (completed) {
+    only return the videos that has english transcript
+  }
+
+  task (completed) {
+    in ./search_youtube.py script, please return the videos that are at most 20 minutes long
+  }
+
+  task (completed) {
+    create ./search_youtube.py <keyword>:
+    - sample code:
+    ```
+    from youtubesearchpython import VideosSearch
+
+    videosSearch = VideosSearch('quantum physics', limit=5)
+    results = videosSearch.result()
+    ```
+    - return:
+    <youtube_video_hash_1>
+    <youtube_video_hash_2>
+    <youtube_video_hash_3>
+    ...
+
+    - requirement: please return only videos that are published within 1 year
+  }
+}
+
+group chat_gradual_context.py related to ./chat_gradual_context.py {
+  task (completed) {
+    bug: 
+    - question: can i do left turn on redlight
+    the answer is yes
+    - questoin: can i do left turn on red light
+    the answer is no
+  }
+
+  task (completed) {
+    after we gathered the trunks for the answer:
+    - display a rough estimate of tokens in context
+    - display the current maximum context window size
+  }
+
+  task (completed) {
+    for the question: list me all levels of wagyu in details
+    we should need more trunks, why it only uses 3 trunks
+  }
+
+  task (completed) {
+    - create ./chat_gradual_context.py:
+    - clone all features in chat.py
+    - change the answer genertion logic to:
+    loop {
+      if total number of trunks in context exceed 100, stop
+
+      1. grep 3 new trunks of context
+      2. check if they are enough for fulfilling the requirements of the answer, please use ollama local model qwen3:1.7b, construct to prompt to check it
+      if yes: stop
+      if no:
+      continue the loop
+    }
+  }
+}
+
+group chat_lowcontext.py, related to file: ./chat_lowcontext.py only {
+  task (completed) {
+    bug: 
+    question:  i want to get 90-day long-stay visa, what are the requirements
+    the answer shows incorrect information: The 90-day long-stay visa requires approximately 30 million yen (around $200,000 USD)
+    the correct answer should be: The **visa fee** for a 90-day long-stay visa in Japan is typically **around 300,000 yen (approximately $2,000 USD)**
+  }
+
+  task (completed) {
+    bug:
+    question: what are all levels of wagyu
+    the answer gave me unrelated questions like: Sushi Yasuki is a third-floor sushi restaurant...
+    the answer should be very focus
+    please fix it in a generic and systematic way
+  }
+
+  task (completed) {
+    bug: 
+    question: i want to buy electronics in japan, give me a recommendation in 600 words
+    the answer shows unrelated information like:
+    Japanese gas station terms like "Man" for a full tank, "Genkin" for cash, and "Kurejitto Kaado" for credit card...
+  }
+
+  task (completed) {
+    bug:
+    question: what time does nijo market open
+    the answer contains more than it needs, it contains information of other markets
+    please fix it in a systematic and generic way
+  }
+
+  task (completed) {
+    currently, the chat will display messages like:
+    - [batch 1/2: 5 chunk(s), 0 item(s) tracked]
+    - +3 new item(s); 3 tracked.
+
+    DO NOT display them and instead, make an empty line so that the answer looks like an integrated article 
+  }
+
+  task (completed) {
+    bug: when i ask: where is nijo market, it keeps giving me unrelated answers like: The Toyosu Fish Market...
+    please fix it in generic and systematic way
+  }
+
+  task (completed) {
+    - create ./chat_lowcontext.py:
+    - clone all features of chat.py, but implement it with the following:
+    - study research/low_context_streaming_rag_architecture.md, use it to help guide the architectural decision
+  }
+}
+
+group: generate_tags.py {
+  task (completed) {
+    if we do --tag <tag_name>, and if the <tag_name> does not exist, just create it
+  }
+
+  task (completed) {
+    create ./generate_tags.py:
+    logic:
+    - tags: examine all files in ./tags
+    - titles: execulte command "find .chat/youtube_transcripts/*.title"
+    for each {title} in {titles} {
+      youtube_video_hash: youtube_video_hash_related_to_{title}
+      for each {tag} in {tags} {
+        if {youtube_video_hash} does not exist in ./tags/{tag} {
+          use ollama local model ornith:35b to find out if {youtube_video_hash} is related to {tag}
+          if yes {
+            append youtube_video_hash_related_to_{title} to ./tags/{tag} with new line at the end 
+          }
+        }
+      }
+    }  
+  }
+
+  task (completed) {
+    add a new flag --youtube_video_hash <youtube_video_hash>
+    logic:
+    - tags: examine all files in ./tags
+    for each {tag} in {tags} {
+      if {youtube_video_hash} does not exist in ./tags/{tag} {
+        use ollama local model ornith:35b to find out if {youtube_video_hash} is related to {tag}
+        if yes {
+          append youtube_video_hash_related_to_{title} to ./tags/{tag} with new line at the end 
+        }
+      }
+    }
+  }
+}
+
+

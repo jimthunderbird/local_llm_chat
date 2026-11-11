@@ -1118,6 +1118,59 @@
   }
   .news-title-translation .error-text { margin-top: 3px; }
   .news-meta { color: var(--dim); font-size: 11px; margin-top: 3px; }
+  /* /changelog: a newest-first list of completed-task summary pages. The
+     selected page is shown as the original HTML document in an iframe. */
+  .changelog-item { cursor: pointer; }
+  .changelog-title {
+    background: transparent;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+  }
+  #changelog-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 57;
+    background: rgba(2, 6, 10, .72);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  #changelog-panel[hidden] { display: none; }
+  .changelog-card {
+    width: min(1120px, 100%);
+    height: min(88vh, 960px);
+    display: flex;
+    flex-direction: column;
+    background: #0d151e;
+    border: 1px solid #2b4056;
+    border-radius: 10px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.7);
+    overflow: hidden;
+  }
+  #changelog-frame {
+    flex: 1 1 auto;
+    width: 100%;
+    min-height: 0;
+    border: 0;
+    background: #fff;
+  }
+  #changelog-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+    user-select: none;
+  }
+  #changelog-close:hover { color: var(--text); }
   #news-panel {
     position: fixed;
     inset: 0;
@@ -1194,6 +1247,11 @@
     font-size: 13px;
     color: #cfdae5;
   }
+  /* MDN documentation has no Learn/Chat rail, so let the article use the
+     full width instead of leaving an empty second column. Learnable
+     documentation, such as Wikivoyage destinations, keeps the rail. */
+  #news-panel.is-docs .news-layout { grid-template-columns: minmax(0, 1fr); }
+  #news-panel.is-docs .news-side { display: none; }
   .news-side {
     min-width: 0;
     display: flex;
@@ -1214,6 +1272,48 @@
   }
   .news-body p { margin: 0 0 .9em; }
   .news-body p:first-child { margin-top: 0; }
+  .news-body .news-heading {
+    color: #e8f1f8;
+    line-height: 1.3;
+    margin: 1.15em 0 .5em;
+  }
+  .news-body h2.news-heading {
+    font-size: 16px;
+    padding-bottom: .25em;
+    border-bottom: 1px solid #223344;
+  }
+  .news-body h3.news-heading { font-size: 14px; }
+  .news-body h4.news-heading,
+  .news-body h5.news-heading,
+  .news-body h6.news-heading { font-size: 13px; }
+  .news-body .news-list { margin: 0 0 .9em 1.15em; padding: 0; }
+  .news-body .news-list li { margin: .25em 0; }
+  .news-figure {
+    margin: 0 0 1em;
+    padding: 0;
+  }
+  .news-figure a {
+    display: block;
+    overflow: hidden;
+    border: 1px solid #223344;
+    border-radius: 6px;
+    background: #060a0e;
+  }
+  .news-figure a:hover { border-color: #33506d; }
+  .news-figure img {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: 460px;
+    object-fit: contain;
+    background: #060a0e;
+  }
+  .news-figure figcaption {
+    margin-top: .35em;
+    color: #93a6b8;
+    font-size: 12px;
+    line-height: 1.4;
+  }
   .news-images {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -1743,6 +1843,53 @@
   }
   .video-maximize:hover { opacity: 1; background: rgba(16, 27, 38, .95); }
   .video-maximize:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* Previous/next controls cycle through the search result list without
+     closing the player, so the iframe keeps its own playback state until a
+     different video is chosen. */
+  .video-nav {
+    position: absolute;
+    left: 8px;
+    bottom: 8px;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px;
+    background: rgba(8, 14, 20, .78);
+    border: 1px solid rgba(120, 170, 210, .45);
+    border-radius: 6px;
+    opacity: .82;
+    transition: opacity .15s ease, background .15s ease;
+  }
+  .video-nav[hidden] { display: none; }
+  .video-nav:hover { opacity: 1; background: rgba(16, 27, 38, .95); }
+  .video-nav-btn {
+    width: 28px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: #dfeaf5;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .video-nav-btn:hover:not(:disabled) {
+    background: rgba(48, 70, 93, .9);
+    border-color: rgba(120, 170, 210, .55);
+  }
+  .video-nav-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .video-nav-btn:disabled { opacity: .35; cursor: default; }
+  .video-nav-label {
+    color: #cfdae5;
+    font-family: var(--mono);
+    font-size: 11px;
+    min-width: 44px;
+    text-align: center;
+  }
   .video-player iframe {
     position: absolute;
     inset: 0;
@@ -2678,6 +2825,20 @@
   </div>
 </div>
 
+<div id="changelog-panel" hidden>
+  <div class="changelog-card" role="dialog" aria-modal="true" aria-labelledby="changelog-title">
+    <div class="news-head">
+      <div class="news-head-main">
+        <div id="changelog-title" class="news-modal-title">Changelog</div>
+        <div id="changelog-meta" class="news-modal-meta"></div>
+      </div>
+      <a id="changelog-open" class="news-link" href="#" target="_blank" rel="noopener noreferrer">Open in a new tab ↗</a>
+      <button id="changelog-close" type="button" title="Close (Esc)">×</button>
+    </div>
+    <iframe id="changelog-frame" title="Changelog entry" sandbox="allow-same-origin allow-popups"></iframe>
+  </div>
+</div>
+
 <div id="gutenberg-panel" hidden>
   <div class="gutenberg-card" role="dialog" aria-modal="true" aria-labelledby="gutenberg-title">
     <div class="gutenberg-head">
@@ -2738,6 +2899,13 @@
                   allowfullscreen loading="lazy"></iframe>
           <button id="video-maximize" class="video-maximize" type="button"
                   title="Maximize player" aria-label="Maximize player">⛶</button>
+          <div id="video-nav" class="video-nav" hidden>
+            <button id="video-prev" class="video-nav-btn" type="button"
+                    title="Previous video" aria-label="Previous video">‹</button>
+            <span id="video-nav-label" class="video-nav-label"></span>
+            <button id="video-next" class="video-nav-btn" type="button"
+                    title="Next video" aria-label="Next video">›</button>
+          </div>
         </div>
         <div class="video-side">
           <div id="video-action" class="video-action" hidden>
@@ -2829,7 +2997,7 @@
       <span class="k">Drag an image</span><span class="d">attach a PNG, JPEG, WebP, or GIF to the composer (paste or use the Image button too), then ask a question about it</span>
       <span class="k">Drag text</span><span class="d">select output text, then Ctrl+C / ⌘C to copy</span>
       <span class="k">Click a word</span><span class="d">open a streaming /dict popup (drag instead to select); also works in /news, /medium, video summaries, and Project Gutenberg book text</span>
-      <span class="k">Click a video</span><span class="d">play it in a centered modal; the right column offers Learn or Chat, and the Summary button streams an AI overview</span>
+      <span class="k">Click a video</span><span class="d">play it in a centered modal; the right column offers Learn or Chat</span>
       <span class="k">Click a book</span><span class="d">open a /gutenberg result in a two-column reader; the right column answers questions from the book's most relevant paragraphs</span>
       <span class="k">中文 in /news</span><span class="d">translate a news or Medium story title, or the open story, into Simplified Chinese</span>
       <span class="k">? in code</span><span class="d">explain that line (rust, golang, and php answers)</span>
@@ -2900,6 +3068,12 @@ const newsChatEl = $("#news-chat");
 const newsChatMessagesEl = $("#news-chat-messages");
 const newsChatInputEl = $("#news-chat-input");
 const newsChatSendEl = $("#news-chat-send");
+const changelogPanelEl = $("#changelog-panel");
+const changelogTitleEl = $("#changelog-title");
+const changelogMetaEl = $("#changelog-meta");
+const changelogOpenEl = $("#changelog-open");
+const changelogFrameEl = $("#changelog-frame");
+const changelogCloseEl = $("#changelog-close");
 const videoPanelEl = $("#video-panel");
 const videoModalTitleEl = $("#video-modal-title");
 const videoBookmarkEl = $("#video-bookmark");
@@ -2908,6 +3082,10 @@ const videoLinkEl = $("#video-link");
 const videoPlayerEl = $("#video-player");
 const videoIframeEl = $("#video-iframe");
 const videoMaximizeEl = $("#video-maximize");
+const videoNavEl = $("#video-nav");
+const videoPrevEl = $("#video-prev");
+const videoNextEl = $("#video-next");
+const videoNavLabelEl = $("#video-nav-label");
 const videoSummaryEl = $("#video-summary");
 const videoActionEl = $("#video-action");
 const videoActionNoteEl = $("#video-action-note");
@@ -5055,8 +5233,13 @@ function makeEntry(kind, options = {}) {
     newsSource: "",
     newsFeed: "",
     newsSources: [],
+    newsDocs: false,
     newsDone: false,
     aiNewsPodcast: false,
+    changelogItems: [],
+    changelogSource: "",
+    changelogDirectory: "",
+    changelogDone: false,
     videos: [],
     videosKeyword: "",
     videosHeading: "",
@@ -5073,6 +5256,7 @@ function makeEntry(kind, options = {}) {
     mathtutor: null,
     mathtutorState: null,
     newsEl: document.createElement("div"),
+    changelogEl: document.createElement("div"),
     el: document.createElement("div"),
     logsEl: document.createElement("div"),
     outputEl: document.createElement("pre"),
@@ -5154,6 +5338,8 @@ function makeEntry(kind, options = {}) {
 
   entry.choicesEl.className = "choices";
   entry.newsEl.className = "news-list";
+  entry.changelogEl.className = "news-list";
+  entry.changelogEl.hidden = true;
   entry.videosEl = document.createElement("div");
   entry.videosEl.className = "video-results";
   entry.videosEl.hidden = true;
@@ -5164,6 +5350,7 @@ function makeEntry(kind, options = {}) {
   entry.mathtutorEl.className = "math-tutor";
   entry.mathtutorEl.hidden = true;
   entry.bodyEl.appendChild(entry.newsEl);
+  entry.bodyEl.appendChild(entry.changelogEl);
   entry.bodyEl.appendChild(entry.videosEl);
   entry.bodyEl.appendChild(entry.booksEl);
   entry.bodyEl.appendChild(entry.mathtutorEl);
@@ -5265,6 +5452,7 @@ function renderEntry(entry) {
 
   entry.choicesEl.textContent = "";
   renderNewsList(entry);
+  renderChangelogList(entry);
   renderVideoResults(entry);
   renderBookResults(entry);
   renderMathTutor(entry);
@@ -5352,6 +5540,8 @@ function addNewsEvent(entry, data) {
     entry.newsSource = data.source || "News";
     entry.newsFeed = data.feed || "";
     entry.newsSources = Array.isArray(data.sources) ? data.sources : [];
+    entry.newsDocs = Boolean(data.docs || data.mdn);
+    entry.newsDocsLabel = String(data.docs_label || "");
     scheduleRender(entry);
     return;
   }
@@ -5361,6 +5551,11 @@ function addNewsEvent(entry, data) {
       newsId: String(data.news_id || ""),
       learned: Boolean(data.learned),
       aiNewsPodcast: Boolean(data.ai_news_podcast || entry.aiNewsPodcast),
+      docs: Boolean(data.docs || data.mdn || entry.newsDocs),
+      docsLabel: String(data.docs_label || entry.newsDocsLabel || ""),
+      learnable: data.learnable !== undefined
+        ? Boolean(data.learnable)
+        : !(data.docs || data.mdn || entry.newsDocs),
       entry,
       podcast: null,
       title: data.title || "(untitled)",
@@ -5370,6 +5565,10 @@ function addNewsEvent(entry, data) {
       section: data.section || "",
       summary: data.summary || "",
       paragraphs: [],
+      blocks: [],
+      fullArticleLoaded: false,
+      articleApi: String(data.article_api || ""),
+      articleRetryCount: 0,
       images: Array.isArray(data.images)
         ? data.images.map((url) => String(url || "").trim()).filter(Boolean)
         : [],
@@ -5429,6 +5628,125 @@ function addNewsEvent(entry, data) {
   if (type === "error") {
     addError(entry, data.message || "Could not load the news feed.");
   }
+}
+
+function addChangelogEvent(entry, data) {
+  const type = String(data.type || "");
+  if (type === "start") {
+    entry.changelogSource = data.source || "Changelog";
+    entry.changelogDirectory = String(data.directory || "");
+    scheduleRender(entry);
+    return;
+  }
+  if (type === "item") {
+    entry.changelogItems.push({
+      index: Number(data.index) || entry.changelogItems.length + 1,
+      name: String(data.name || ""),
+      title: String(data.title || data.name || "(untitled)"),
+      prompt: String(data.prompt || ""),
+      timestamp: String(data.timestamp || ""),
+      size: Number(data.size) || 0,
+      url: String(data.url || ""),
+    });
+    scheduleRender(entry);
+    return;
+  }
+  if (type === "done") {
+    entry.changelogDone = true;
+    entry.thinking = false;
+    scheduleRender(entry);
+    return;
+  }
+  if (type === "error") {
+    addError(entry, data.message || "Could not load the changelog.");
+  }
+}
+
+function renderChangelogList(entry) {
+  const container = entry.changelogEl;
+  if (!container) return;
+  container.textContent = "";
+  const items = Array.isArray(entry.changelogItems) ? entry.changelogItems : [];
+  if (!items.length) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+
+  const head = document.createElement("div");
+  head.className = "news-list-head";
+  const label = document.createElement("span");
+  label.textContent = entry.changelogSource || "Changelog";
+  const note = document.createElement("span");
+  note.className = "news-list-note";
+  note.textContent = entry.changelogDone
+    ? `${items.length} ${items.length === 1 ? "entry" : "entries"}`
+    : `${items.length} loaded…`;
+  head.appendChild(label);
+  head.appendChild(note);
+  container.appendChild(head);
+
+  const list = document.createElement("ol");
+  list.className = "news-list-items";
+  for (const item of items) {
+    const li = document.createElement("li");
+    li.className = "news-item changelog-item";
+    li.title = `Open ${item.name || "this summary"}`;
+
+    const main = document.createElement("div");
+    main.className = "news-item-main";
+    const indexEl = document.createElement("span");
+    indexEl.className = "news-index";
+    indexEl.textContent = `${item.index}.`;
+    main.appendChild(indexEl);
+
+    const titleEl = document.createElement("button");
+    titleEl.type = "button";
+    titleEl.className = "news-title changelog-title";
+    titleEl.textContent = item.title;
+    main.appendChild(titleEl);
+
+    const meta = document.createElement("div");
+    meta.className = "news-meta";
+    const metaParts = [];
+    if (item.timestamp) metaParts.push(item.timestamp);
+    if (item.prompt) metaParts.push(item.prompt);
+    meta.textContent = metaParts.join(" · ");
+    main.appendChild(meta);
+
+    li.appendChild(main);
+    li.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openChangelogModal(item);
+    });
+    list.appendChild(li);
+  }
+  container.appendChild(list);
+}
+
+let changelogItem = null;
+
+function openChangelogModal(item) {
+  if (!changelogPanelEl || !item) return;
+  changelogItem = item;
+  changelogTitleEl.textContent = item.title || item.name || "Changelog";
+  const metaParts = [];
+  if (item.timestamp) metaParts.push(item.timestamp);
+  if (item.prompt) metaParts.push(`prompt: ${item.prompt}`);
+  changelogMetaEl.textContent = metaParts.join(" · ");
+  const url = item.url
+    || `/api/changelog_file?name=${encodeURIComponent(item.name || "")}`;
+  changelogOpenEl.href = url;
+  changelogFrameEl.src = url;
+  changelogPanelEl.hidden = false;
+}
+
+function closeChangelogModal() {
+  if (!changelogPanelEl || changelogPanelEl.hidden) return;
+  changelogPanelEl.hidden = true;
+  changelogFrameEl.src = "about:blank";
+  changelogItem = null;
 }
 
 function newsTitleTranslationState(item) {
@@ -5589,7 +5907,9 @@ function renderNewsList(entry) {
     || (groups.length === 1 ? groups[0].source : "News");
   const note = document.createElement("span");
   note.className = "news-list-note";
-  const storyWord = items.length === 1 ? "story" : "stories";
+  const storyWord = entry.newsDocs
+    ? (items.length === 1 ? "result" : "results")
+    : (items.length === 1 ? "story" : "stories");
   note.textContent = entry.newsDone
     ? `${items.length} ${storyWord}`
     : `${items.length} loaded…`;
@@ -6475,7 +6795,7 @@ function renderVideoResults(entry) {
     card.title = item.channel
       ? `${item.title || item.id} · ${item.channel}`
       : (item.title || item.id);
-    const openPlayer = () => openVideoModal(item, "play");
+    const openPlayer = () => openVideoModal(item, "play", entry);
     card.addEventListener("click", openPlayer);
     card.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
@@ -6543,21 +6863,6 @@ function renderVideoResults(entry) {
 
     const actions = document.createElement("div");
     actions.className = "video-actions";
-    const summaryBtn = document.createElement("button");
-    summaryBtn.type = "button";
-    summaryBtn.className = "video-summary-btn";
-    summaryBtn.textContent = "Summary";
-    summaryBtn.title = "Summarize this video with the local LLM";
-    summaryBtn.addEventListener("keydown", (event) => {
-      // Keep Enter/Space on the Summary button from also activating the card.
-      event.stopPropagation();
-    });
-    summaryBtn.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      openVideoModal(item, "summary");
-    });
-    actions.appendChild(summaryBtn);
 
     const learnBtn = document.createElement("button");
     learnBtn.type = "button";
@@ -6802,6 +7107,7 @@ learnPanelEl.addEventListener("click", (event) => {
  *  /youtube search player + AI summary modal
  * ------------------------------------------------------------------ */
 let videoItem = null;
+let videoPlaylistEntry = null;
 let videoSummaryController = null;
 let videoSummaryGeneration = 0;
 let videoSummaryText = "";
@@ -7251,7 +7557,7 @@ async function refreshVideoAction(item) {
   }
 }
 
-function openVideoModal(item, mode = "play") {
+function openVideoModal(item, mode = "play", playlistEntry = null) {
   if (!item?.id) return;
   resetVideoSummary();
   resetVideoAction();
@@ -7259,6 +7565,7 @@ function openVideoModal(item, mode = "play") {
   resetVideoBookmark();
   setVideoMaximized(false);
   videoItem = item;
+  videoPlaylistEntry = playlistEntry || null;
   videoModalTitleEl.textContent = item.title || item.id;
   const metaParts = [];
   if (item.channel) metaParts.push(item.channel);
@@ -7272,17 +7579,55 @@ function openVideoModal(item, mode = "play") {
   videoLinkEl.href = item.url || `https://www.youtube.com/watch?v=${item.id}`;
   videoPlayerEl.hidden = false;
   // A click on the card is a user gesture, so the embedded player can start
-  // immediately. The Summary button opens the same modal without autoplay.
+  // immediately.
   videoIframeEl.src = videoEmbedUrl(item.id, mode === "play");
-  if (mode === "summary") {
-    videoSummaryEl.hidden = false;
-    startVideoSummary(item);
-  } else {
-    videoSummaryEl.hidden = true;
-  }
+  videoSummaryEl.hidden = true;
   videoPanelEl.hidden = false;
+  updateVideoNav();
   refreshVideoAction(item);
 }
+
+function videoPlaylistItems() {
+  const items = videoPlaylistEntry?.videos;
+  return Array.isArray(items) ? items.filter((item) => item?.id) : [];
+}
+
+function updateVideoNav() {
+  if (!videoNavEl) return;
+  const items = videoPlaylistItems();
+  const index = items.findIndex((item) => item.id === videoItem?.id);
+  if (items.length < 2 || index < 0) {
+    videoNavEl.hidden = true;
+    return;
+  }
+  videoNavEl.hidden = false;
+  videoNavLabelEl.textContent = `${index + 1} / ${items.length}`;
+  videoPrevEl.disabled = items.length < 2;
+  videoNextEl.disabled = items.length < 2;
+  videoPrevEl.title = `Previous video (${index === 0 ? items.length : index} / ${items.length})`;
+  videoNextEl.title = `Next video (${index + 2 > items.length ? 1 : index + 2} / ${items.length})`;
+}
+
+function stepVideoPlaylist(delta) {
+  const items = videoPlaylistItems();
+  if (items.length < 2) return;
+  const index = items.findIndex((item) => item.id === videoItem?.id);
+  if (index < 0) return;
+  const nextIndex = (index + delta + items.length) % items.length;
+  openVideoModal(items[nextIndex], "play", videoPlaylistEntry);
+}
+
+videoPrevEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  stepVideoPlaylist(-1);
+});
+
+videoNextEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  stepVideoPlaylist(1);
+});
 
 function closeVideoModal() {
   resetVideoSummary();
@@ -7291,6 +7636,8 @@ function closeVideoModal() {
   resetVideoBookmark();
   setVideoMaximized(false);
   videoItem = null;
+  videoPlaylistEntry = null;
+  if (videoNavEl) videoNavEl.hidden = true;
   videoPanelEl.hidden = true;
   videoIframeEl.src = "about:blank";
   videoSummaryEl.hidden = true;
@@ -7397,9 +7744,8 @@ document.addEventListener("keydown", (event) => {
 }, true);
 
 $("#video-close").addEventListener("click", closeVideoModal);
-videoPanelEl.addEventListener("click", (event) => {
-  if (event.target === videoPanelEl) closeVideoModal();
-});
+/* Deliberately no outside-click close: clicking the dark backdrop should not
+ * dismiss the modal or stop the embedded player. Use the × button or Esc. */
 videoSummaryContentEl.addEventListener("click", (event) => {
   const wordEl = event.target.closest(".word");
   if (!wordEl) return;
@@ -8759,7 +9105,89 @@ function toggleNewsTranslation() {
   newsTranslationEl.scrollIntoView({ block: "nearest" });
 }
 
+function appendNewsHeading(text, level) {
+  const value = String(text || "").trim();
+  if (!value) return;
+  const depth = Math.min(6, Math.max(2, Number(level) || 2));
+  const heading = document.createElement(`h${depth}`);
+  heading.className = "news-heading";
+  heading.appendChild(wordNodes(value, true));
+  newsBodyEl.appendChild(heading);
+}
+
+function appendNewsList(items, ordered) {
+  if (!Array.isArray(items) || !items.length) return;
+  const list = document.createElement(ordered ? "ol" : "ul");
+  list.className = "news-list";
+  let added = 0;
+  for (const value of items) {
+    const text = String(value || "").trim();
+    if (!text) continue;
+    const item = document.createElement("li");
+    item.appendChild(wordNodes(text, true));
+    list.appendChild(item);
+    added += 1;
+  }
+  if (added) newsBodyEl.appendChild(list);
+}
+
+function appendNewsFigure(block) {
+  const url = String(block?.url || "").trim();
+  if (!url) return;
+  const figure = document.createElement("figure");
+  figure.className = "news-figure";
+  const link = document.createElement("a");
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.title = "Open the image in a new tab";
+  const image = document.createElement("img");
+  image.src = url;
+  image.alt = String(block?.alt || block?.caption || "Wikivoyage article image");
+  image.loading = "lazy";
+  image.referrerPolicy = "no-referrer";
+  image.addEventListener("error", () => figure.remove(), { once: true });
+  link.appendChild(image);
+  figure.appendChild(link);
+  const caption = String(block?.caption || "").trim();
+  if (caption) {
+    const figcaption = document.createElement("figcaption");
+    figcaption.appendChild(wordNodes(caption, true));
+    figure.appendChild(figcaption);
+  }
+  newsBodyEl.appendChild(figure);
+}
+
+function appendNewsBlocks(blocks) {
+  if (!Array.isArray(blocks) || !blocks.length) return;
+  for (const block of blocks) {
+    if (!block || typeof block !== "object") continue;
+    switch (block.type) {
+      case "heading":
+        appendNewsHeading(block.text, block.level);
+        break;
+      case "paragraph":
+        appendNewsParagraph(block.text, "");
+        break;
+      case "list":
+        appendNewsList(block.items, Boolean(block.ordered));
+        break;
+      case "image":
+        appendNewsFigure(block);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
 function renderNewsModal(item) {
+  if (newsPanelEl) {
+    newsPanelEl.classList.toggle(
+      "is-docs",
+      Boolean(item.docs && !item.learnable)
+    );
+  }
   newsTitleEl.textContent = "";
   // Title words are dictionary-searchable too, just like the story body.
   newsTitleEl.appendChild(
@@ -8773,6 +9201,9 @@ function renderNewsModal(item) {
   newsMetaEl.textContent = metaParts.join(" · ");
   if (item.link) {
     newsLinkEl.href = item.link;
+    newsLinkEl.textContent = item.docs
+      ? `Open on ${item.docsLabel || "MDN"} ↗`
+      : "Open article ↗";
     newsLinkEl.hidden = false;
   } else {
     newsLinkEl.removeAttribute("href");
@@ -8780,40 +9211,47 @@ function renderNewsModal(item) {
   }
 
   newsBodyEl.textContent = "";
+  const blocks = Array.isArray(item.blocks) ? item.blocks : [];
   const images = Array.isArray(item.images)
     ? item.images.map((url) => String(url || "").trim()).filter(Boolean)
     : [];
-  if (images.length) {
-    const gallery = document.createElement("div");
-    gallery.className = "news-images";
-    for (const url of images.slice(0, 6)) {
-      const link = document.createElement("a");
-      link.className = "news-image";
-      link.href = url;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.title = "Open the source image in a new tab";
-      const image = document.createElement("img");
-      image.src = url;
-      image.alt = item.title || "News source image";
-      image.loading = "lazy";
-      image.referrerPolicy = "no-referrer";
-      image.addEventListener("error", () => {
-        link.remove();
-        if (!gallery.children.length) gallery.remove();
-      }, { once: true });
-      link.appendChild(image);
-      gallery.appendChild(link);
-    }
-    if (gallery.children.length) newsBodyEl.appendChild(gallery);
-  }
   const paragraphs = Array.isArray(item.paragraphs) ? item.paragraphs : [];
   const summary = String(item.summary || "");
-  if (summary && summary !== paragraphs[0]) {
-    appendNewsParagraph(summary, "news-summary");
-  }
-  for (const text of paragraphs) {
-    appendNewsParagraph(text, "");
+  if (blocks.length) {
+    // Full article view: headings, text, lists, and figures stay in the
+    // order they appear in the source article.
+    appendNewsBlocks(blocks);
+  } else {
+    if (images.length) {
+      const gallery = document.createElement("div");
+      gallery.className = "news-images";
+      for (const url of images.slice(0, 6)) {
+        const link = document.createElement("a");
+        link.className = "news-image";
+        link.href = url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.title = "Open the source image in a new tab";
+        const image = document.createElement("img");
+        image.src = url;
+        image.alt = item.title || "News source image";
+        image.loading = "lazy";
+        image.referrerPolicy = "no-referrer";
+        image.addEventListener("error", () => {
+          link.remove();
+          if (!gallery.children.length) gallery.remove();
+        }, { once: true });
+        link.appendChild(image);
+        gallery.appendChild(link);
+      }
+      if (gallery.children.length) newsBodyEl.appendChild(gallery);
+    }
+    if (summary && summary !== paragraphs[0]) {
+      appendNewsParagraph(summary, "news-summary");
+    }
+    for (const text of paragraphs) {
+      appendNewsParagraph(text, "");
+    }
   }
   if (!item.complete || item.articleLoading) {
     const loading = document.createElement("div");
@@ -8822,13 +9260,13 @@ function renderNewsModal(item) {
       ? "loading full article…"
       : "loading paragraphs…";
     newsBodyEl.appendChild(loading);
-  } else if (!paragraphs.length && item.articleError) {
+  } else if (!paragraphs.length && !blocks.length && item.articleError) {
     const empty = document.createElement("div");
     empty.className = "news-loading";
     empty.textContent = "The full article could not be loaded. Use the article link above to open it directly.";
     empty.title = item.articleError;
     newsBodyEl.appendChild(empty);
-  } else if (!paragraphs.length && !summary) {
+  } else if (!paragraphs.length && !blocks.length && !summary) {
     const empty = document.createElement("div");
     empty.className = "news-loading";
     empty.textContent = "This story has no readable paragraphs in the feed.";
@@ -8894,21 +9332,46 @@ function resetNewsBodyScroll(item) {
  */
 function ensureNewsArticle(item) {
   if (!item || !item.complete || item.articleLoading) return;
-  if (Array.isArray(item.paragraphs) && item.paragraphs.length) return;
+  const articleApi = String(item.articleApi || "").trim();
+  // Documentation sources load their complete article lazily when the modal
+  // is opened; item_end must not prefetch ten full destination articles.
+  if (articleApi && newsItem !== item) return;
+  const needsFullArticle = Boolean(articleApi) && !item.fullArticleLoaded;
+  if (
+    !needsFullArticle
+    && Array.isArray(item.paragraphs)
+    && item.paragraphs.length
+  ) {
+    return;
+  }
   const link = String(item.link || "").trim();
   if (!/^https?:\/\//i.test(link)) return;
   item.articleLoading = true;
   item.articleError = "";
+  let retryArticle = false;
   if (newsItem === item) {
     renderNewsModal(item);
     renderNewsAction(item);
   }
-  fetch(`/api/news_article?url=${encodeURIComponent(link)}&title=${encodeURIComponent(item.title || "")}`)
+  const requestUrl = articleApi
+    ? `${articleApi}?url=${encodeURIComponent(link)}&title=${encodeURIComponent(item.title || "")}`
+    : `/api/news_article?url=${encodeURIComponent(link)}&title=${encodeURIComponent(item.title || "")}`;
+  fetch(requestUrl)
     .then((response) => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return response.json();
     })
     .then((data) => {
+      const blocks = Array.isArray(data.blocks)
+        ? data.blocks.filter((block) => block && typeof block === "object")
+        : [];
+      if (blocks.length) {
+        item.blocks = blocks;
+        item.fullArticleLoaded = true;
+        // The blocks already carry the article's lead paragraphs, so keeping
+        // the card summary would show that text twice in the modal.
+        item.summary = "";
+      }
       const paragraphs = Array.isArray(data.paragraphs)
         ? data.paragraphs.map((text) => String(text || "").trim()).filter(Boolean)
         : [];
@@ -8917,21 +9380,41 @@ function ensureNewsArticle(item) {
         ? data.images.map((url) => String(url || "").trim()).filter(Boolean)
         : [];
       if (images.length) {
-        item.images = [...new Set([...(item.images || []), ...images])].slice(0, 6);
+        item.images = [...new Set([...(item.images || []), ...images])].slice(0, 80);
       }
       if (data.link) item.link = String(data.link);
-      if (!item.summary && paragraphs.length) {
+      if (data.title) item.fullArticleTitle = String(data.title);
+      if (!blocks.length && !item.summary && paragraphs.length) {
         item.summary = paragraphs[0].slice(0, 400);
       }
     })
     .catch((error) => {
       item.articleError = error?.message || String(error);
+      // Documentation articles (Wikivoyage) are fetched through a second
+      // upstream API that can be briefly rate-limited. Retry once so the
+      // Learn action never stores only the short search extract after a
+      // transient failure.
+      if (
+        articleApi
+        && (item.articleRetryCount || 0) < 1
+        && !item.fullArticleLoaded
+      ) {
+        item.articleRetryCount = (item.articleRetryCount || 0) + 1;
+        retryArticle = true;
+      }
     })
     .finally(() => {
       item.articleLoading = false;
       if (newsItem === item) {
         renderNewsModal(item);
         renderNewsAction(item);
+      }
+      if (retryArticle && newsItem === item) {
+        window.setTimeout(() => {
+          if (newsItem !== item || item.fullArticleLoaded) return;
+          item.articleError = "";
+          ensureNewsArticle(item);
+        }, 1200);
       }
     });
 }
@@ -9024,43 +9507,71 @@ function resetNewsAction() {
 
 function renderNewsAction(item) {
   if (!newsActionEl || !item || newsItem !== item) return;
+  // MDN results are documentation without an article body to learn, so keep
+  // the modal's read-aloud and translation controls but no Learn/Chat
+  // action. Learnable documentation (for example Wikivoyage destinations)
+  // uses the same rail as a news story.
+  if (item.docs && !item.learnable) {
+    newsActionEl.hidden = true;
+    return;
+  }
   newsActionEl.hidden = false;
   newsActionBtnEl.hidden = false;
   newsActionBtnEl.disabled = false;
   newsActionBtnEl.className = "video-action-btn";
   newsActionBtnEl.onclick = null;
+  const noun = item.docs ? "article" : "story";
 
   if (item.learning) {
-    newsActionNoteEl.textContent = "Learning this story…";
+    newsActionNoteEl.textContent = `Learning this ${noun}…`;
     newsActionBtnEl.textContent = "Learning…";
     newsActionBtnEl.disabled = true;
     return;
   }
   if (item.learned) {
     newsActionNoteEl.textContent =
-      "This story is learned. Chat here, without leaving this window.";
+      `This ${noun} is learned. Chat here, without leaving this window.`;
     newsActionBtnEl.textContent = "Chat";
     newsActionBtnEl.classList.add("is-chat");
-    newsActionBtnEl.title = "Chat about this story in this window";
+    newsActionBtnEl.title = `Chat about this ${noun} in this window`;
     newsActionBtnEl.onclick = () => openNewsChat();
     return;
   }
   if (item.learnError) {
     newsActionNoteEl.textContent = `Learn failed: ${item.learnError}`;
     newsActionBtnEl.textContent = "Retry";
-    newsActionBtnEl.title = "Retry learning this story";
+    newsActionBtnEl.title = `Retry learning this ${noun}`;
+  } else if (
+    item.docs
+    && item.articleApi
+    && item.articleError
+    && !(Array.isArray(item.blocks) && item.blocks.length)
+  ) {
+    // Do not silently learn the short search extract when the complete
+    // destination article could not be loaded.
+    newsActionNoteEl.textContent =
+      `Could not load the full ${noun}: ${item.articleError}`;
+    newsActionBtnEl.textContent = "Retry";
+    newsActionBtnEl.title = `Retry loading the full ${noun}`;
+    newsActionBtnEl.onclick = () => {
+      item.articleError = "";
+      item.articleRetryCount = 0;
+      renderNewsAction(item);
+      ensureNewsArticle(item);
+    };
+    return;
   } else if (!item.complete || item.articleLoading) {
     newsActionNoteEl.textContent = item.articleLoading
-      ? "Loading the full story text…"
-      : "Waiting for the full story text…";
+      ? `Loading the full ${noun} text…`
+      : `Waiting for the full ${noun} text…`;
     newsActionBtnEl.textContent = "Learn";
     newsActionBtnEl.disabled = true;
     return;
   } else {
     newsActionNoteEl.textContent =
-      "Learn this story to chat with it here and add it to the global corpus.";
+      `Learn this ${noun} to chat with it here and add it to the global corpus.`;
     newsActionBtnEl.textContent = "Learn";
-    newsActionBtnEl.title = "Learn this story";
+    newsActionBtnEl.title = `Learn this ${noun}`;
   }
   newsActionBtnEl.onclick = () => learnNewsItem(item);
 }
@@ -9392,6 +9903,14 @@ newsTranslateBtn.addEventListener("click", (event) => {
 });
 newsPanelEl.addEventListener("click", (event) => {
   if (event.target === newsPanelEl) closeNewsModal();
+});
+changelogPanelEl.addEventListener("click", (event) => {
+  if (event.target === changelogPanelEl) closeChangelogModal();
+});
+changelogCloseEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  closeChangelogModal();
 });
 
 /* News words (in the story body and the modal title) open the same
@@ -10094,10 +10613,12 @@ function submitText(text, fromChoice = false) {
   const commandArgs = question.startsWith("/")
     ? question.slice(1).split(/\s+/).slice(1)
     : [];
-  // /news search streams its story list; anchor the list at the top so new
-  // stories do not drag the viewport down to the bottom as they arrive.
-  const pinsNewsSearch = commandName === "news"
-    && String(commandArgs[0] || "").toLowerCase() === "search";
+  // /news search, /mdn, and /wikivoyage stream their result lists; anchor
+  // each list at the top so new results do not drag the viewport down.
+  const pinsNewsSearch = (
+    commandName === "news"
+      && String(commandArgs[0] || "").toLowerCase() === "search"
+  ) || commandName === "mdn" || commandName === "wikivoyage";
 
   addUserEcho(question, image);
   const isCommand = question.startsWith("/");
@@ -10109,17 +10630,23 @@ function submitText(text, fromChoice = false) {
       ? "Image"
       : commandName === "news"
         ? "News"
-        : commandName === "howstuffworks"
-          ? "HowStuffWorks"
-          : commandName === "medium"
-            ? "Medium"
-            : commandName === "gutenberg"
-              ? "Project Gutenberg"
-              : commandName === "openlibrary"
-                ? "Open Library"
-                : commandName === "mathtutor"
-                  ? "Math Tutor"
-                  : undefined,
+        : commandName === "mdn"
+          ? "MDN Web Docs"
+          : commandName === "wikivoyage"
+            ? "Wikivoyage"
+            : commandName === "howstuffworks"
+              ? "HowStuffWorks"
+              : commandName === "medium"
+                ? "Medium"
+                : commandName === "gutenberg"
+                  ? "Project Gutenberg"
+                  : commandName === "openlibrary"
+                    ? "Open Library"
+                    : commandName === "mathtutor"
+                      ? "Math Tutor"
+                      : commandName === "changelog"
+                        ? "Changelog"
+                        : undefined,
   });
   appendEntry(entry);
   resetAnswerSourceStatus();
@@ -10208,6 +10735,7 @@ function submitText(text, fromChoice = false) {
     },
     output: (data) => addOutput(entry, data.text || ""),
     news: (data) => addNewsEvent(entry, data || {}),
+    changelog: (data) => addChangelogEvent(entry, data || {}),
     videos: (data) => {
       entry.videos = normalizeVideoItems(data?.items);
       entry.videosKeyword = String(data?.keyword || "").trim();
@@ -10847,6 +11375,12 @@ function handleKeyDown(event) {
     return;
   }
 
+  if (!changelogPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeChangelogModal();
+    return;
+  }
+
   if (!videoPanelEl.hidden && key === "Escape") {
     event.preventDefault();
     closeVideoModal();
@@ -11261,6 +11795,11 @@ document.addEventListener("keydown", (event) => {
     closeNewsModal();
     return;
   }
+  if (!changelogPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeChangelogModal();
+    return;
+  }
   if (!videoPanelEl.hidden && key === "Escape") {
     event.preventDefault();
     closeVideoModal();
@@ -11327,6 +11866,7 @@ inputEl.addEventListener("blur", () => {
       !helpPanel.hidden ||
       !lineHelpPanel.hidden ||
       !newsPanelEl.hidden ||
+      !changelogPanelEl.hidden ||
       !videoPanelEl.hidden
     ) return;
     if (outputPointerDown || selectionInsideOutput()) return;
@@ -12013,7 +12553,7 @@ function renderWelcome(state) {
   const videos = state?.videos ?? "?";
   const news = Number(state?.news ?? 0);
   const sources = news
-    ? `${videos} videos + ${news} news stor${news === 1 ? "y" : "ies"}`
+    ? `${videos} videos + ${news} article${news === 1 ? "" : "s"}`
     : `${videos} videos`;
   const model = displayModelName(state?.models?.chat);
   const historyCount = state?.history_count ?? 0;

@@ -3,8 +3,9 @@
 
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, transcript/article scoping, history, /memory,
-/status, /sources, /benchmark, /youtube, /news, /googlenews, /medium,
-/gutenberg, /openlibrary, /wiki, /wiki_article, /article, /dict, and /ask. The browser is a
+/status, /sources, /benchmark, /youtube, /news, /mdn, /googlenews, /medium,
+/gutenberg, /openlibrary, /changelog, /wikivoyage, /wiki, /wiki_article,
+/article, /dict, and /ask. The browser is a
 pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
 
 Every question searches the one global trunk corpus. Tags are no longer a
@@ -20,6 +21,8 @@ Endpoints:
     GET  /api/autocomplete       ?kind=commands|transcripts|paths&q=...
     GET  /api/wiki?word=...      JSON Wikipedia summary
     GET  /api/transcripts?q=...  ag title search results
+    GET  /api/changelog_file     ?name=<summary.html> one completed-task page
+                                  used by /changelog's detail modal
     GET  /api/gutenberg_book     ?id=<book_id>&url=<plaintext_url>&title=...
                                   the cached plaintext used by the book modal
     POST /api/ask                SSE: question or slash-command stream
@@ -59,6 +62,9 @@ Endpoints:
     GET  /api/news_item          ?id=<news_id> full learned story for the modal
     GET  /api/news_article       ?url=<article_url> fetch a story body for the
                                   detail modal when the list feed had no body
+    GET  /api/wikivoyage_article ?url=<article_url> fetch a complete Wikivoyage
+                                  article (headings, text, lists, and figures)
+                                  for the /wikivoyage detail modal
     POST /api/news_chat          SSE: answer a question from one learned news
                                   story in a session isolated from the main chat
     POST /api/video_summary      SSE: fetch a YouTube video's English transcript
@@ -104,7 +110,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, NamedTuple
-from urllib.parse import parse_qs, quote, quote_plus, urlparse
+from urllib.parse import parse_qs, quote, quote_plus, unquote, urlparse
 from xml.sax.saxutils import escape as xml_escape
 from xml.etree import ElementTree
 
@@ -133,21 +139,35 @@ CHAT_HTML = APP_DIR / "chat.html"
 MAX_REQUEST_BYTES = 20 * 1024 * 1024
 PATH_COMPLETION_LIMIT = 50
 
+# /changelog lists the task summary pages written by the prompt workflow.
+# Those pages live in .logs at the repository root; .log is accepted too so an
+# older checkout with that spelling still works. File names are trusted only
+# when they match this pattern, and the resolver never leaves the log folder.
+LOGS_DIR = SCRIPT_DIR / ".logs"
+CHANGELOG_FILE_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.summary\.html$"
+)
+CHANGELOG_TIMESTAMP_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})\.summary\.html$"
+)
+
 WEB_COMMANDS = {
     **chat.COMMANDS,
     "/help": "show commands and keyboard shortcuts",
     "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
-    "learn_playlist <playlist> | search <keyword> | advancesearch <keyword> | "
-    "bookmark list",
+    "learn_playlist <playlist> | search <keyword> | bookmark list",
     "/news": "list the latest news from wsj, cnn, cbslite, nprtext, yahoo_finance, medium, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count]); /news search <keywords> [website] searches Google News, optionally only that website",
+    "/mdn": "search MDN Web Docs by keywords: /mdn <keywords>",
     "/googlenews": "search Google News for the latest stories: /googlenews <keywords>",
     "/howstuffworks": "search HowStuffWorks articles by keywords: /howstuffworks <keywords>",
+    "/wikivoyage": "search Wikivoyage destinations by keywords: /wikivoyage <keywords>",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/ai_news_podcast": "show the top five stories from the last 12 hours and create a two-voice AI news podcast",
     "/gutenberg": "search Project Gutenberg books: /gutenberg search <keywords>; click a book to read it and ask questions",
     "/openlibrary": "search inside Open Library books: /openlibrary search <keywords>",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
     "/mathtutor": "upload Microsoft Word test papers and practice similar math problems with detailed answers",
+    "/changelog": "list completed-task summaries from .logs (newest first); click one to read it",
 }
 
 # News sources accepted by /news and completed by news_fetch.php.
@@ -223,6 +243,15 @@ def split_news_search_website(keywords: str) -> tuple[str, str]:
         return stripped, ""
 
     return " ".join(parts[:-1]), host + path
+
+# /mdn searches the public MDN Web Docs search API and renders the matches as
+# a /news-style result list. Each result opens in the existing story modal so
+# readers can translate, read aloud, or follow the original documentation link.
+MDN_SEARCH_URL = "https://developer.mozilla.org/api/v1/search"
+MDN_DOCS_BASE_URL = "https://developer.mozilla.org"
+MDN_LOCALE = "en-US"
+MDN_RESULT_LIMIT = 10
+MDN_HIGHLIGHT_LIMIT = 3
 
 # /ai_news_podcast lists the five newest stories from the last 12 hours and
 # turns their full article bodies into a two-host podcast script, read aloud
@@ -508,6 +537,598 @@ def medium_username() -> str:
     except OSError:
         return ""
     return value.lstrip("@").strip()
+
+
+def _mdn_plain_text(value: object) -> str:
+    """Turn one MDN summary or highlighted snippet into readable text."""
+    if isinstance(value, list):
+        return "\n\n".join(
+            text for text in (_mdn_plain_text(item) for item in value) if text
+        )
+    text = html.unescape(re.sub(r"<[^>]*>", "", str(value or "")))
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def search_mdn_docs(keyword: str, limit: int = MDN_RESULT_LIMIT) -> list[dict]:
+    """Search MDN Web Docs and return normalized documentation result cards."""
+    keyword = " ".join(str(keyword or "").split())
+    if not keyword:
+        return []
+    try:
+        response = requests.get(
+            MDN_SEARCH_URL,
+            params={"q": keyword, "locale": MDN_LOCALE},
+            headers={**chat.HTTP_HEADERS, "Accept": "application/json"},
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"MDN search failed: {exc}") from exc
+
+    documents = data.get("documents") if isinstance(data, dict) else None
+    if not isinstance(documents, list):
+        raise RuntimeError("MDN returned an unexpected response.")
+
+    results: list[dict] = []
+    for document in documents[: max(1, int(limit))]:
+        if not isinstance(document, dict):
+            continue
+        mdn_url = str(document.get("mdn_url") or "").strip()
+        title = _mdn_plain_text(document.get("title")) or "(untitled)"
+        summary = _mdn_plain_text(document.get("summary"))
+        if not mdn_url and not summary:
+            continue
+        link = (
+            MDN_DOCS_BASE_URL + mdn_url
+            if mdn_url.startswith("/")
+            else mdn_url
+        )
+        passages: list[str] = []
+        highlight = document.get("highlight")
+        bodies = highlight.get("body") if isinstance(highlight, dict) else None
+        if isinstance(bodies, list):
+            for raw in bodies[:MDN_HIGHLIGHT_LIMIT]:
+                passage = _mdn_plain_text(raw)
+                if (
+                    passage
+                    and passage not in passages
+                    and passage.casefold() not in summary.casefold()
+                ):
+                    passages.append(passage)
+        results.append(
+            {
+                "title": title,
+                "link": link,
+                "summary": summary,
+                "paragraphs": passages,
+            }
+        )
+    return results
+
+
+# /wikivoyage searches the Wikivoyage REST API and renders the destinations as
+# a /news-style result list. Each card carries the destination description,
+# summary extract, coordinates, and a link to the full Wikivoyage article.
+WIKIVOYAGE_SEARCH_URL = "https://en.wikivoyage.org/w/rest.php/v1/search/page"
+WIKIVOYAGE_SUMMARY_URL = (
+    "https://en.wikivoyage.org/api/rest_v1/page/summary/{title}"
+)
+WIKIVOYAGE_BASE_URL = "https://en.wikivoyage.org"
+WIKIVOYAGE_RESULT_LIMIT = 10
+WIKIVOYAGE_SUMMARY_WORKERS = 8
+
+
+def _wikivoyage_plain_text(value: object) -> str:
+    """Turn a Wikivoyage excerpt, extract, or description into plain text."""
+    text = html.unescape(re.sub(r"<[^>]*>", "", str(value or "")))
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _wikivoyage_page_link(page: dict, summary: dict) -> str:
+    """Return the canonical Wikivoyage article URL for one search page."""
+    content_urls = summary.get("content_urls")
+    if isinstance(content_urls, dict):
+        desktop = content_urls.get("desktop")
+        if isinstance(desktop, dict):
+            page_url = str(desktop.get("page") or "").strip()
+            if page_url:
+                return page_url
+    key = str(page.get("key") or page.get("title") or "").strip()
+    if not key:
+        return ""
+    return (
+        WIKIVOYAGE_BASE_URL
+        + "/wiki/"
+        + quote(key.replace(" ", "_"), safe="/()_',.:!-~")
+    )
+
+
+def _wikivoyage_summary(key: str) -> dict:
+    """Fetch one destination summary, returning an empty dict on failure."""
+    if not key:
+        return {}
+    try:
+        response = requests.get(
+            WIKIVOYAGE_SUMMARY_URL.format(
+                title=quote(key.replace(" ", "_"), safe="")
+            ),
+            headers={**chat.HTTP_HEADERS, "Accept": "application/json"},
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def search_wikivoyage_destinations(
+    keyword: str, limit: int = WIKIVOYAGE_RESULT_LIMIT
+) -> list[dict]:
+    """Search Wikivoyage and return normalized destination result cards."""
+    keyword = " ".join(str(keyword or "").split())
+    if not keyword:
+        return []
+    try:
+        response = requests.get(
+            WIKIVOYAGE_SEARCH_URL,
+            params={"q": keyword, "limit": max(1, int(limit))},
+            headers={**chat.HTTP_HEADERS, "Accept": "application/json"},
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"Wikivoyage search failed: {exc}") from exc
+
+    pages = data.get("pages") if isinstance(data, dict) else None
+    if not isinstance(pages, list):
+        raise RuntimeError("Wikivoyage returned an unexpected response.")
+    pages = [page for page in pages if isinstance(page, dict)][: max(1, int(limit))]
+
+    summaries: dict[int, dict] = {}
+    if pages:
+        with ThreadPoolExecutor(
+            max_workers=min(WIKIVOYAGE_SUMMARY_WORKERS, len(pages))
+        ) as executor:
+            futures = {
+                executor.submit(
+                    _wikivoyage_summary,
+                    str(page.get("key") or page.get("title") or "").strip(),
+                ): index
+                for index, page in enumerate(pages)
+            }
+            for future in as_completed(futures):
+                try:
+                    summaries[futures[future]] = future.result()
+                except Exception:  # pragma: no cover - defensive fallback
+                    summaries[futures[future]] = {}
+
+    results: list[dict] = []
+    for index, page in enumerate(pages):
+        summary = summaries.get(index) or {}
+        title = _wikivoyage_plain_text(
+            summary.get("title") or page.get("title")
+        ) or "(untitled)"
+        description = _wikivoyage_plain_text(
+            summary.get("description") or page.get("description")
+        )
+        excerpt = _wikivoyage_plain_text(page.get("excerpt"))
+        extract = _wikivoyage_plain_text(summary.get("extract")) or excerpt
+        link = _wikivoyage_page_link(page, summary)
+        if not link and not extract:
+            continue
+
+        paragraphs: list[str] = []
+        if extract:
+            paragraphs.append(extract)
+        coordinates = summary.get("coordinates")
+        if isinstance(coordinates, dict):
+            latitude = coordinates.get("lat")
+            longitude = coordinates.get("lon")
+            if isinstance(latitude, (int, float)) and isinstance(
+                longitude, (int, float)
+            ):
+                paragraphs.append(
+                    f"Coordinates: {latitude:.6g}, {longitude:.6g}"
+                )
+
+        card_summary = description
+        if extract and extract != description:
+            card_summary = f"{description} — {extract}" if description else extract
+
+        thumbnail = page.get("thumbnail") or summary.get("thumbnail") or {}
+        image_url = ""
+        if isinstance(thumbnail, dict):
+            image_url = str(
+                thumbnail.get("source") or thumbnail.get("url") or ""
+            ).strip()
+            if image_url.startswith("//"):
+                image_url = "https:" + image_url
+
+        results.append(
+            {
+                "title": title,
+                "link": link,
+                "description": description,
+                "summary": card_summary,
+                "paragraphs": paragraphs,
+                "images": [image_url] if image_url else [],
+            }
+        )
+    return results
+
+
+# The detail modal uses the MediaWiki parse API so a destination opens as the
+# complete article, not just the search API's short overview extract. The
+# returned HTML is well-formed XML, which lets us keep headings, paragraphs,
+# lists, and figures in their original reading order.
+WIKIVOYAGE_API_URL = "https://en.wikivoyage.org/w/api.php"
+WIKIVOYAGE_ARTICLE_IMAGE_LIMIT = 80
+_WIKIVOYAGE_SKIP_TABLE_CLASSES = (
+    "infobox",
+    "routebox",
+    "article-status",
+    "navbox",
+    "metadata",
+    "noprint",
+)
+
+
+def _wikivoyage_title_from_url(url: str, title: str = "") -> str:
+    """Return the article title encoded in a Wikivoyage URL."""
+    fallback = " ".join(str(title or "").split())
+    parsed = urlparse(str(url or "").strip())
+    path = unquote(parsed.path or "")
+    if path.startswith("/wiki/"):
+        candidate = path[len("/wiki/") :].replace("_", " ").strip()
+        candidate = candidate.split("#", 1)[0].strip()
+        if candidate and not candidate.lower().startswith("special:"):
+            return candidate
+    query_title = (parse_qs(parsed.query).get("title") or [""])[0].strip()
+    if query_title:
+        return query_title
+    return fallback
+
+
+def _wikivoyage_element_text(element) -> str:
+    """Return normalized plain text for one parsed HTML element."""
+    if element is None:
+        return ""
+    return " ".join("".join(element.itertext()).split())
+
+
+def _wikivoyage_image_url(image) -> str:
+    """Return the largest available absolute URL for one article image."""
+    sources: list[str] = []
+    srcset = str(image.get("srcset") or "").strip()
+    for candidate in srcset.split(","):
+        parts = candidate.strip().split()
+        if parts:
+            sources.append(parts[0])
+    source = str(image.get("src") or "").strip()
+    if source:
+        sources.append(source)
+    if not sources:
+        return ""
+    source = html.unescape(sources[0]).strip()
+    if source.startswith("//"):
+        source = "https:" + source
+    return source if source.startswith(("http://", "https://")) else ""
+
+
+def _wikivoyage_article_blocks(document: str) -> list[dict]:
+    """Turn the parse API HTML into ordered blocks for the detail modal."""
+    try:
+        root = ElementTree.fromstring(document)
+    except ElementTree.ParseError:
+        # Defensive fallback: still return readable text if the parser output
+        # is ever not well-formed XML.
+        text = html.unescape(re.sub(r"<[^>]+>", " ", document))
+        text = " ".join(text.split())
+        return [{"type": "paragraph", "text": text}] if text else []
+
+    blocks: list[dict] = []
+    seen_images: set[str] = set()
+    image_count = 0
+
+    def add_image(image, caption: str = "") -> None:
+        nonlocal image_count
+        if image_count >= WIKIVOYAGE_ARTICLE_IMAGE_LIMIT:
+            return
+        url = _wikivoyage_image_url(image)
+        if not url:
+            return
+        key = url.split("?", 1)[0]
+        if key in seen_images:
+            return
+        seen_images.add(key)
+        image_count += 1
+        alt = " ".join(str(image.get("alt") or "").split())
+        blocks.append(
+            {
+                "type": "image",
+                "url": url,
+                "caption": " ".join(str(caption or "").split()),
+                "alt": alt,
+            }
+        )
+
+    def walk(node) -> None:
+        tag = str(node.tag or "").lower()
+        classes = str(node.get("class") or "").lower()
+        if tag in {"style", "script", "link", "meta", "nav", "sup"}:
+            return
+        if tag == "div" and "mw-heading" in classes:
+            heading = next(
+                (
+                    child
+                    for child in node
+                    if str(child.tag or "").lower()
+                    in {"h1", "h2", "h3", "h4", "h5", "h6"}
+                ),
+                None,
+            )
+            if heading is not None:
+                text = _wikivoyage_element_text(heading)
+                if text:
+                    blocks.append(
+                        {
+                            "type": "heading",
+                            "level": int(str(heading.tag)[1]),
+                            "text": text,
+                        }
+                    )
+                return
+        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            text = _wikivoyage_element_text(node)
+            if text:
+                blocks.append(
+                    {"type": "heading", "level": int(tag[1]), "text": text}
+                )
+            return
+        if tag == "figure":
+            caption = _wikivoyage_element_text(node.find("figcaption"))
+            for image in node.iter("img"):
+                add_image(image, caption)
+                caption = ""
+            return
+        if tag == "img":
+            width = str(image_size(node))
+            if width.isdigit() and int(width) >= 160:
+                add_image(node)
+            return
+        if tag == "p":
+            for image in node.iter("img"):
+                width = str(image_size(image))
+                if width.isdigit() and int(width) >= 160:
+                    add_image(image)
+            text = _wikivoyage_element_text(node)
+            if text:
+                blocks.append({"type": "paragraph", "text": text})
+            return
+        if tag in {"ul", "ol"}:
+            items = [
+                _wikivoyage_element_text(child)
+                for child in node
+                if str(child.tag or "").lower() == "li"
+            ]
+            items = [item for item in items if item]
+            if items:
+                blocks.append(
+                    {"type": "list", "ordered": tag == "ol", "items": items}
+                )
+            return
+        if tag == "dl":
+            for child in node:
+                if str(child.tag or "").lower() not in {"dt", "dd"}:
+                    continue
+                text = _wikivoyage_element_text(child)
+                if text:
+                    blocks.append({"type": "paragraph", "text": text})
+            return
+        if tag == "table":
+            if any(name in classes for name in _WIKIVOYAGE_SKIP_TABLE_CLASSES):
+                return
+            rows: list[str] = []
+            for row in node.iter("tr"):
+                cells = [
+                    _wikivoyage_element_text(cell)
+                    for cell in row
+                    if str(cell.tag or "").lower() in {"td", "th"}
+                ]
+                cells = [cell for cell in cells if cell]
+                if cells:
+                    rows.append(" — ".join(cells))
+            if rows:
+                blocks.append(
+                    {"type": "list", "ordered": False, "items": rows}
+                )
+            return
+        for child in node:
+            walk(child)
+
+    def image_size(image) -> int | str:
+        for attribute in ("data-file-width", "width"):
+            value = str(image.get(attribute) or "").strip()
+            if value.isdigit():
+                return int(value)
+        return ""
+
+    walk(root)
+    return blocks
+
+
+def fetch_wikivoyage_article(url: str, title: str = "") -> dict:
+    """Fetch the complete Wikivoyage article behind a search result card."""
+    article_title = _wikivoyage_title_from_url(url, title)
+    if not article_title:
+        raise ValueError("Missing Wikivoyage article title")
+    try:
+        response = requests.get(
+            WIKIVOYAGE_API_URL,
+            params={
+                "action": "parse",
+                "page": article_title,
+                "prop": "text",
+                "format": "json",
+                "formatversion": 2,
+                "redirects": 1,
+                "disableeditsection": 1,
+            },
+            headers={**chat.HTTP_HEADERS, "Accept": "application/json"},
+            timeout=(10, 60),
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"Could not load the Wikivoyage article: {exc}") from exc
+
+    parse = payload.get("parse") if isinstance(payload, dict) else None
+    if not isinstance(parse, dict):
+        detail = ""
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                detail = str(error.get("info") or "").strip()
+        raise RuntimeError(
+            f"Could not load the Wikivoyage article: {detail or 'unexpected API response'}"
+        )
+
+    document = str(parse.get("text") or "")
+    blocks = _wikivoyage_article_blocks(document)
+    paragraphs: list[str] = []
+    images: list[str] = []
+    seen_paragraphs: set[str] = set()
+    seen_images: set[str] = set()
+    for block in blocks:
+        kind = block.get("type")
+        if kind == "heading":
+            text = str(block.get("text") or "").strip()
+            if text and text not in seen_paragraphs:
+                seen_paragraphs.add(text)
+                paragraphs.append(text)
+        elif kind == "paragraph":
+            text = str(block.get("text") or "").strip()
+            if text and text not in seen_paragraphs:
+                seen_paragraphs.add(text)
+                paragraphs.append(text)
+        elif kind == "list":
+            for value in block.get("items") or []:
+                text = str(value or "").strip()
+                if text and text not in seen_paragraphs:
+                    seen_paragraphs.add(text)
+                    paragraphs.append(text)
+        elif kind == "image":
+            image_url = str(block.get("url") or "").strip()
+            key = image_url.split("?", 1)[0]
+            if image_url and key not in seen_images:
+                seen_images.add(key)
+                images.append(image_url)
+
+    canonical_title = str(parse.get("title") or article_title).strip()
+    link = WIKIVOYAGE_BASE_URL + "/wiki/" + quote(
+        canonical_title.replace(" ", "_"), safe="/()_',.:!-~"
+    )
+    return {
+        "title": canonical_title,
+        "link": link,
+        "paragraphs": paragraphs,
+        "images": images,
+        "blocks": blocks,
+    }
+
+
+# ---- /changelog ------------------------------------------------------
+def changelog_directory() -> Path | None:
+    """Return the folder holding completed-task summary pages."""
+    for candidate in (LOGS_DIR, SCRIPT_DIR / ".log"):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _changelog_label(name: str, timestamp: str) -> tuple[str, str, str]:
+    """Split a summary file name into its prompt, slug, and readable title."""
+    label = name[: -len(".summary.html")]
+    if timestamp and label.endswith("-" + timestamp):
+        label = label[: -(len(timestamp) + 1)]
+    prompt, _, slug = label.partition("-")
+    title = " ".join(part for part in slug.split("-") if part).strip()
+    if not title:
+        title = label.replace("-", " ").strip() or name
+    return prompt or "task", slug, title
+
+
+def list_changelog_entries() -> list[dict]:
+    """List completed-task summary pages, newest first."""
+    directory = changelog_directory()
+    if directory is None:
+        return []
+    entries: list[dict] = []
+    for path in directory.iterdir():
+        try:
+            if not path.is_file():
+                continue
+            name = path.name
+            if CHANGELOG_FILE_RE.fullmatch(name) is None:
+                continue
+            stat = path.stat()
+        except OSError:
+            continue
+        timestamp_match = CHANGELOG_TIMESTAMP_RE.search(name)
+        timestamp = timestamp_match.group(1) if timestamp_match else ""
+        if timestamp:
+            display_time = (
+                f"{timestamp[:4]}-{timestamp[5:7]}-{timestamp[8:10]} "
+                f"{timestamp[11:13]}:{timestamp[14:16]}:{timestamp[17:19]}"
+            )
+        else:
+            display_time = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)
+            )
+        prompt, slug, title = _changelog_label(name, timestamp)
+        entries.append(
+            {
+                "name": name,
+                "title": title,
+                "prompt": prompt,
+                "slug": slug,
+                "timestamp": display_time,
+                "sort_key": timestamp or time.strftime(
+                    "%Y-%m-%d-%H-%M-%S", time.localtime(stat.st_mtime)
+                ),
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+                "url": f"/api/changelog_file?name={quote(name)}",
+            }
+        )
+    entries.sort(key=lambda item: (item["sort_key"], item["mtime"]), reverse=True)
+    return entries
+
+
+def changelog_file_path(name: str) -> Path | None:
+    """Resolve one summary page without allowing it to escape the log folder."""
+    directory = changelog_directory()
+    if directory is None:
+        return None
+    name = str(name or "").strip()
+    if not name or name != Path(name).name:
+        return None
+    if CHANGELOG_FILE_RE.fullmatch(name) is None:
+        return None
+    root = directory.resolve()
+    path = (directory / name).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return None
+    return path if path.is_file() else None
 
 
 # ---- /mathtutor ------------------------------------------------------
@@ -1067,6 +1688,7 @@ COMMAND_ARGUMENTS = {
     "/depth",
     "/benchmark",
     "/news",
+    "/mdn",
     "/googlenews",
     "/howstuffworks",
     "/medium",
@@ -1168,8 +1790,7 @@ YOUTUBE_SUBCOMMANDS = {
     "learn": "fetch one transcript and chunk it into RAG trunks",
     "learn_topic": "search YouTube for <topic> and learn the top 3 videos",
     "learn_playlist": "learn every video in a YouTube playlist",
-    "search": "search YouTube through Google News RSS for <keyword> and show matching video urls and titles",
-    "advancesearch": "load the YouTube search-results page for <keyword> and extract every video with its channel and duration",
+    "search": "load the YouTube search-results page for <keyword> and show matching videos with channel, duration, and publish date",
     "transcript": "use one transcript by hash/URL, or search titles with ag",
     "search_transcript": "search transcript titles with ag and pick a video",
     "bookmark": "list bookmarked videos, latest first: /youtube bookmark list",
@@ -1177,18 +1798,19 @@ YOUTUBE_SUBCOMMANDS = {
 
 # /youtube search shows six cards at a time. The "More" button below the
 # cards asks /api/youtube_more for the next six from the same cached search.
-# Search itself uses Google News RSS (site:youtube.com <keyword>); results are
-# only the YouTube source items, reduced to a video url and title.
+# Search itself reads YouTube's own results page, so the cards also carry the
+# channel, duration, and relative publish date.
 YOUTUBE_SEARCH_PAGE_SIZE = 6
-# /youtube advancesearch reads one YouTube results page, which normally
-# contains about twenty videoRenderer entries.
-YOUTUBE_ADVANCE_SEARCH_SIZE = 20
+# One YouTube results page normally contains about twenty videoRenderer
+# entries.  Fetching all of them at once would be slower than painting the
+# first six, so they are cached and revealed by the "More" button.
+YOUTUBE_SEARCH_PAGE_RESULTS = 20
 # Cache at most this many results per keyword, even after many "More" clicks.
-YOUTUBE_SEARCH_MAX_RESULTS = 200
-# After the first page is painted, quietly fill the cache with a few more
-# pages.  The "More" button then usually reads from memory instead of paying
-# for another YouTube search and caption check.
-YOUTUBE_SEARCH_PREFETCH_RESULTS = 37
+YOUTUBE_SEARCH_MAX_RESULTS = YOUTUBE_SEARCH_PAGE_RESULTS
+# After the first page is painted, quietly fill the cache with the remaining
+# videos from the results page.  The "More" button then reads from memory
+# instead of paying for another search.
+YOUTUBE_SEARCH_PREFETCH_RESULTS = YOUTUBE_SEARCH_PAGE_RESULTS
 # How long a "More" request will wait for that prefetch before doing its own
 # search.  A prefetch normally finishes in a few seconds.
 YOUTUBE_PREFETCH_WAIT_SECONDS = 8.0
@@ -4512,6 +5134,18 @@ Do not say that the context is insufficient; if a detail is genuinely absent,
 answer the supported parts and omit the unsupported detail.
 
 """
+# A learned news story, a single transcript, or a book modal is a small,
+# explicitly-scoped corpus. If the question has no lexical match in that scope,
+# BM25 can return nothing and the answer stream ends silently (the article
+# modal then looks broken). In that case use the scope's reading-order text as
+# context, up to the normal context budget, instead of refusing with no output.
+SCOPED_CONTEXT_FALLBACK_PROMPT_PREFIX = """### SCOPED SOURCE
+The question did not lexically match any single paragraph, so the context
+below is the available text of the active source in reading order. Use this
+source to answer. If the requested detail is genuinely absent, say briefly
+that this source does not cover it; never return an empty answer.
+
+"""
 ARTICLE_ENUMERATIVE_RE = re.compile(
     r"\b(?:list|all|every|each|enumerate|compare|comparison|across\s+the\s+"
     r"(?:article|document)|types?|kinds?|levels?|categories)\b",
@@ -5572,6 +6206,36 @@ def _article_iterative_evidence(
         batch=ARTICLE_ITERATIVE_BATCH,
         candidate_limit=ARTICLE_ITERATIVE_CANDIDATES,
     )
+
+
+def _scoped_context_fallback(
+    chunks: list[chat.Chunk],
+    budget: int,
+) -> list[chat.Chunk]:
+    """Return a scoped corpus in reading order within the context budget.
+
+    This is the last line of defence for an isolated session (a learned news
+    story, one transcript, or one book). A question can have no BM25 overlap
+    with an otherwise useful article; returning no context made the modal's
+    chat appear to do nothing at all. Keeping the overview/first chunks plus
+    as many following chunks as fit gives the answer model real source text
+    while still respecting the context window.
+    """
+    if not chunks:
+        return []
+    if budget is None or budget <= 0:
+        budget = YOUTUBE_ITERATIVE_EVIDENCE_TOKENS
+    ordered = sorted(chunks, key=lambda chunk: (chunk.index, chunk.video_id))
+    selected: list[chat.Chunk] = []
+    for chunk in ordered:
+        trial = selected + [chunk]
+        context = chat.build_context(trial)
+        if selected and chat.estimate_tokens(context) > budget:
+            continue
+        selected = trial
+        if chat.estimate_tokens(context) >= budget:
+            break
+    return selected
 
 
 def _youtube_iterative_evidence(
@@ -7907,11 +8571,30 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(article)
             return
+        if path == "/api/wikivoyage_article":
+            params = parse_qs(parsed.query)
+            url = (params.get("url") or [""])[0].strip()
+            title = (params.get("title") or [""])[0].strip()
+            try:
+                article = fetch_wikivoyage_article(url, title)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except RuntimeError as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json(article)
+            return
         if path == "/api/autocomplete":
             params = parse_qs(parsed.query)
             kind = (params.get("kind") or ["commands"])[0]
             query = (params.get("q") or [""])[0]
             self._send_json({"items": self._autocomplete(kind, query)})
+            return
+        if path == "/api/changelog_file":
+            params = parse_qs(parsed.query)
+            name = (params.get("name") or [""])[0]
+            self._send_changelog_file(name)
             return
         if path == "/api/wiki":
             params = parse_qs(parsed.query)
@@ -7937,6 +8620,27 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             data = CHAT_HTML.read_bytes()
         except OSError as exc:
             self._send_error_json(f"Cannot read {CHAT_HTML}: {exc}", 500)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _send_changelog_file(self, name: str) -> None:
+        """Serve one completed-task summary page to the changelog modal."""
+        path = changelog_file_path(name)
+        if path is None:
+            self._send_error_json("Changelog entry not found", 404)
+            return
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            self._send_error_json(f"Cannot read changelog entry: {exc}", 500)
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -9385,14 +10089,15 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 if iterative_cached:
                     cache_variant = iterative_variant
                 else:
+                    evidence_budget = (
+                        max_context_tokens_override
+                        if max_context_tokens_override is not None
+                        else state.max_context_tokens
+                    )
                     evidence = _youtube_iterative_evidence(
                         retrieval_question,
                         chunks,
-                        (
-                            max_context_tokens_override
-                            if max_context_tokens_override is not None
-                            else state.max_context_tokens
-                        ),
+                        evidence_budget,
                         lambda text: self._sse_text("log", text),
                         depth=(
                             depth_override
@@ -9408,6 +10113,31 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         prompt_prefix = (
                             YOUTUBE_ITERATIVE_PROMPT_PREFIX + prompt_prefix
                         )
+                    elif state.news_id is not None or state.transcript is not None:
+                        # The scoped corpus is small and there is no BM25
+                        # match. Answer from its reading-order text rather
+                        # than ending the stream with no message at all.
+                        scoped_chunks = _scoped_context_fallback(
+                            chunks, evidence_budget
+                        )
+                        if scoped_chunks:
+                            chunks = scoped_chunks
+                            use_all_chunks = True
+                            cache_variant = (
+                                f"{cache_variant}+scoped-context-fallback"
+                                if cache_variant
+                                else "scoped-context-fallback"
+                            )
+                            prompt_prefix = (
+                                SCOPED_CONTEXT_FALLBACK_PROMPT_PREFIX
+                                + prompt_prefix
+                            )
+                            self._sse_text(
+                                "log",
+                                "[no matching paragraph in this scoped "
+                                "source; using its reading-order text as "
+                                "context]",
+                            )
             emit_delta = lambda text: self._sse("delta", {"text": text})
             docs_backed = language_uses_official_docs(code_language)
             answer_filter = InsufficientContextFilter(enabled=docs_backed)
@@ -9839,7 +10569,29 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
 
         if response is None:
-            return
+            # An isolated modal must never finish with an empty answer. The
+            # scoped fallback above normally prevents this, but a model or
+            # upstream failure can still produce no text; make that visible.
+            if state.news_id is not None:
+                message = (
+                    "I could not produce an answer from this learned story. "
+                    "Try rephrasing the question or learning the article again."
+                )
+                self._sse_text("delta", message)
+                response = message
+                sources = []
+                stats = dict(stats or {})
+            elif state.transcript is not None:
+                message = (
+                    "I could not produce an answer from this transcript. "
+                    "Try rephrasing the question or learning the video again."
+                )
+                self._sse_text("delta", message)
+                response = message
+                sources = []
+                stats = dict(stats or {})
+            else:
+                return
         if documentation_language and response is not None:
             # Final safety net: whatever path produced the answer (local,
             # documentation merge, or code rescue), never persist or annotate
@@ -9893,10 +10645,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_ask(argument)
         elif name == "/news":
             self._command_news(argument)
+        elif name == "/mdn":
+            self._command_mdn(argument)
         elif name == "/googlenews":
             self._command_googlenews(argument)
         elif name == "/howstuffworks":
             self._command_howstuffworks(argument)
+        elif name == "/wikivoyage":
+            self._command_wikivoyage(argument)
         elif name == "/medium":
             self._command_medium(argument)
         elif name == "/ai_news_podcast":
@@ -9905,6 +10661,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_gutenberg(argument)
         elif name == "/openlibrary":
             self._command_openlibrary(argument)
+        elif name == "/changelog":
+            self._command_changelog(argument)
         elif name == "/wiki":
             self._command_wiki(argument)
         elif name == "/wiki_article":
@@ -10133,8 +10891,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_learn_playlist(rest)
         elif subcommand == "search":
             self._command_youtube_search(rest)
-        elif subcommand == "advancesearch":
-            self._command_youtube_advance_search(rest)
         elif subcommand == "transcript":
             self._command_transcript(rest, direct=False)
         elif subcommand == "search_transcript":
@@ -10216,14 +10972,16 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _command_youtube_search(self, argument: str) -> None:
-        """Search YouTube through Google News RSS and show video cards.
+        """Search YouTube's own results page and show video cards.
 
         Usage: /youtube search "<keyword>"
-        Google News RSS is queried with ``site:youtube.com <keyword>``. Only
-        feed items whose source is YouTube are kept, and each result carries
-        its watch url, title, and maxres YouTube thumbnail (no duration
-        lookup). Each card opens a centered player, and its Summary/Learn
-        buttons keep working from the video id.
+        The command loads ``https://www.youtube.com/results?search_query=
+        <keyword>`` and extracts the video metadata embedded in the page.
+        Each card carries the watch url, title, channel, duration, thumbnail,
+        and relative publish date.  Each card opens a centered player, and its
+        Summary/Learn buttons keep working from the video id.  The fetched
+        result page is cached so the "More" button can reveal the remaining
+        videos without another search.
         """
         keyword = argument.strip()
         if len(keyword) >= 2 and keyword[0] == keyword[-1] and keyword[0] in "\"'":
@@ -10234,10 +10992,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
+        page_url = (
+            "https://www.youtube.com/results?search_query="
+            + quote_plus(keyword)
+        )
         self._sse_text(
             "output",
-            f"\n/youtube search: searching Google News for YouTube videos "
-            f"matching {keyword!r}...\n",
+            f"\n/youtube search: loading {page_url}\n",
         )
         # Fetch one extra result so the UI knows whether a "More" button is
         # useful without making a second search just to find out.
@@ -10248,8 +11009,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             candidate_state["items"] = items
             candidate_state["has_more"] = has_more
-            # Paint the cards immediately.  A later "videos" event replaces
-            # this list with the caption-verified one.
+            # Paint the cards immediately if a future backend streams
+            # candidates before the final result set.
             self._sse(
                 "videos",
                 {
@@ -10291,11 +11052,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         "captions_unverified": True,
                     },
                 )
-                # Keep the cards that were just painted.  Without this, the
-                # "More" button would ask for the next page with an empty
-                # cache and could not advance when caption lookups are
-                # blocked (it would re-fetch, find no new verified videos, and
-                # return nothing).
                 self._merge_youtube_cache(
                     keyword, list(candidate_state["items"])
                 )
@@ -10320,77 +11076,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "items": videos,
                 "has_more": len(results) > YOUTUBE_SEARCH_PAGE_SIZE,
                 "pending": False,
-                "heading": "YouTube videos · Google News",
-                "note": (
-                    f"{len(videos)} result"
-                    f"{'' if len(videos) == 1 else 's'} · site:youtube.com"
-                ),
-            },
-        )
-        if len(results) > YOUTUBE_SEARCH_PAGE_SIZE:
-            # Warm the next few pages while the user is still looking at the
-            # first one, so the "More" button usually needs no network work.
-            self._start_youtube_prefetch(keyword)
-
-    def _command_youtube_advance_search(self, argument: str) -> None:
-        """Load YouTube's own search-results page and extract video cards.
-
-        Usage: /youtube advancesearch <keywords>
-        Unlike ``/youtube search`` (Google News RSS), this reads
-        ``https://www.youtube.com/results?search_query=<keywords>`` directly,
-        so the cards also include the channel and video duration.  The page
-        only contains one result set, so no "More" button is shown.
-        """
-        keyword = argument.strip()
-        if (
-            len(keyword) >= 2
-            and keyword[0] == keyword[-1]
-            and keyword[0] in "\"'"
-        ):
-            keyword = keyword[1:-1].strip()
-        if not keyword:
-            self._sse_text(
-                "output", "\nUsage: /youtube advancesearch <keywords>\n"
-            )
-            return
-
-        page_url = (
-            "https://www.youtube.com/results?search_query="
-            + quote_plus(keyword)
-        )
-        self._sse_text(
-            "output",
-            f"\n/youtube advancesearch: loading {page_url}\n",
-        )
-        try:
-            videos = self._run_youtube_advance_search(
-                keyword, YOUTUBE_ADVANCE_SEARCH_SIZE
-            )
-        except RuntimeError as exc:
-            self._sse_text("output", f"\n/youtube advancesearch: {exc}\n")
-            return
-
-        if not videos:
-            self._sse_text(
-                "output",
-                "\n/youtube advancesearch: no videos were found for "
-                f"{keyword!r}.\n",
-            )
-            return
-
-        self._sse_text(
-            "output",
-            f"\n/youtube advancesearch: {len(videos)} video(s) for "
-            f"{keyword!r}. Click a video to play it here, or use Summary "
-            "for an AI overview.\n",
-        )
-        self._sse(
-            "videos",
-            {
-                "keyword": keyword,
-                "items": videos,
-                "has_more": False,
-                "pending": False,
                 "heading": "YouTube videos · search page",
                 "note": (
                     f"{len(videos)} result"
@@ -10399,45 +11084,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 ),
             },
         )
-
-    def _run_youtube_advance_search(
-        self, keyword: str, limit: int
-    ) -> list[dict]:
-        """Run ``youtube_news_search.py --search-page`` and normalize it."""
-        command = [
-            sys.executable,
-            "-u",
-            str(SCRIPT_DIR / "youtube_news_search.py"),
-            "--search-page",
-            "--json",
-            "--limit",
-            str(limit),
-            "--",
-            keyword,
-        ]
-        try:
-            result = subprocess.run(
-                command,
-                cwd=SCRIPT_DIR,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=60,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError("YouTube search-results page timed out.") from exc
-        except OSError as exc:
-            raise RuntimeError(
-                f"could not run youtube_news_search.py: {exc}"
-            ) from exc
-
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
-            raise RuntimeError(
-                "YouTube search-results page failed"
-                + (f": {detail}" if detail else ".")
-            )
-        return self._parse_youtube_json_lines(result.stdout, limit)
+        if len(results) > YOUTUBE_SEARCH_PAGE_SIZE:
+            # Warm the remaining cards from the same results page while the
+            # user is still looking at the first one.
+            self._start_youtube_prefetch(keyword)
 
     def _youtube_search_command(
         self,
@@ -10450,6 +11100,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             sys.executable,
             "-u",
             str(SCRIPT_DIR / "youtube_news_search.py"),
+            "--search-page",
             "--progressive-json" if progressive else "--json",
             "--limit",
             str(limit),
@@ -10533,15 +11184,15 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     ) -> list[dict]:
         """Run youtube_news_search.py and return normalized video metadata.
 
-        The search script queries Google News RSS with ``site:youtube.com``,
-        keeps only items whose source is YouTube, and resolves each item to a
-        real YouTube watch URL.  ``exclude`` omits already-known video ids so
-        a "More" request only returns genuinely new results.
+        The search script reads YouTube's own search-results page and extracts
+        each video's id, title, watch URL, thumbnail, channel, duration, and
+        relative publish date.  ``exclude`` omits already-known video ids so a
+        "More" request only returns genuinely new results.
 
         ``on_candidates`` is retained for the progressive caller interface,
-        although the Google News search emits one final result set.  The
+        although the results-page search emits one final result set.  The
         ``fallback_to_candidates`` and ``status`` arguments are kept for cache
-        prefetch callers; caption checks no longer run for this search.
+        prefetch callers.
         """
         progressive = on_candidates is not None or fallback_to_candidates
         command = self._youtube_search_command(
@@ -10730,8 +11381,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     def _grow_youtube_cache(self, keyword: str, target: int) -> list[dict]:
         """Fetch only the videos needed to reach ``target`` cached results.
 
-        Known ids are passed as ``--exclude`` so the Google News search only
-        resolves links for unseen candidates instead of the items already shown.
+        Known ids are passed as ``--exclude`` so the results-page search only
+        returns videos that are not already cached.
         """
         target = max(1, min(target, YOUTUBE_SEARCH_MAX_RESULTS))
         cached = self._youtube_cache_items(keyword)
@@ -10839,8 +11490,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return
 
         # The cache is short: fetch only the missing, unseen videos.  Asking
-        # for one extra result keeps `has_more` accurate.  The Google News
-        # search skips known ids and resolves only unseen RSS items.
+        # for one extra result keeps `has_more` accurate.  The results-page
+        # search skips known ids and returns only unseen videos.
         missing = page_size - len(unseen) + 1
         known = set(exclude) | {video["id"] for video in cached}
         status: dict[str, bool] = {}
@@ -11286,6 +11937,183 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         for source in sources:
             argv.extend(["--source", source])
         self._stream_news_events("news_fetch.php", "/news", argv)
+
+    def _command_mdn(self, argument: str) -> None:
+        """Search MDN Web Docs and stream the matches as a /news-style list.
+
+        Usage: /mdn <keywords>
+        The public MDN search API supplies the titles, summaries, and matching
+        snippets. The browser reuses the /news story-list and detail modal, so
+        a result can be translated, read aloud, or opened on MDN.
+        """
+        keyword = " ".join(argument.split())
+        if not keyword:
+            self._sse_text(
+                "output",
+                "\nUsage: /mdn <keywords>\n"
+                "Example: /mdn fetch api\n"
+                "Example: /mdn javascript promises\n",
+            )
+            return
+
+        self._sse_text(
+            "log", f"[mdn: searching developer.mozilla.org for {keyword!r}]"
+        )
+        try:
+            results = search_mdn_docs(keyword)
+        except RuntimeError as exc:
+            self._sse_text("error", f"\n/mdn: {exc}\n")
+            return
+
+        self._sse(
+            "news",
+            {
+                "type": "start",
+                "source": "MDN Web Docs",
+                "feed": MDN_SEARCH_URL,
+                "sources": ["MDN Web Docs"],
+                "docs": True,
+            },
+        )
+        for index, result in enumerate(results, 1):
+            self._sse(
+                "news",
+                {
+                    "type": "item",
+                    "index": index,
+                    "title": result["title"],
+                    "link": result["link"],
+                    "source": "MDN Web Docs",
+                    "summary": result["summary"],
+                    "docs": True,
+                },
+            )
+            paragraphs = [
+                text
+                for text in [result["summary"], *result["paragraphs"]]
+                if text
+            ]
+            seen: set[str] = set()
+            for text in paragraphs:
+                if text in seen:
+                    continue
+                seen.add(text)
+                self._sse(
+                    "news",
+                    {"type": "paragraph", "index": index, "text": text},
+                )
+            self._sse("news", {"type": "item_end", "index": index})
+        self._sse("news", {"type": "done"})
+        if not results:
+            self._sse_text(
+                "output", f"\n/mdn: no documentation matched {keyword!r}.\n"
+            )
+
+    def _command_wikivoyage(self, argument: str) -> None:
+        """Search Wikivoyage destinations and stream a /news-style list.
+
+        Usage: /wikivoyage <keywords>
+        The Wikivoyage search API supplies the destination cards, and each
+        destination summary adds its overview extract and coordinates. The
+        browser reuses the /news result list and detail modal, so a card can
+        be read, translated, learned, chatted with, and opened on Wikivoyage.
+        """
+        keyword = " ".join(argument.split())
+        if not keyword:
+            self._sse_text(
+                "output",
+                "\nUsage: /wikivoyage <keywords>\n"
+                "Example: /wikivoyage Kyoto\n"
+                "Example: /wikivoyage hiking in Japan\n",
+            )
+            return
+
+        self._sse_text(
+            "log", f"[wikivoyage: searching en.wikivoyage.org for {keyword!r}]"
+        )
+        try:
+            results = search_wikivoyage_destinations(keyword)
+        except RuntimeError as exc:
+            self._sse_text("error", f"\n/wikivoyage: {exc}\n")
+            return
+
+        self._sse(
+            "news",
+            {
+                "type": "start",
+                "source": "Wikivoyage",
+                "feed": WIKIVOYAGE_SEARCH_URL,
+                "sources": ["Wikivoyage"],
+                "docs": True,
+                "docs_label": "Wikivoyage",
+            },
+        )
+        for index, result in enumerate(results, 1):
+            # A destination article can be learned exactly like a news story,
+            # so attach the same stable id and learned status that /news items
+            # carry. The browser then adds the Learn/Chat rail to the modal.
+            news_id = news_id_for_item(result)
+            self._sse(
+                "news",
+                {
+                    "type": "item",
+                    "index": index,
+                    "title": result["title"],
+                    "link": result["link"],
+                    "source": "Wikivoyage",
+                    "summary": result["summary"],
+                    "images": result["images"],
+                    "docs": True,
+                    "docs_label": "Wikivoyage",
+                    "learnable": True,
+                    "news_id": news_id,
+                    "learned": news_is_learned(news_id),
+                    "article_api": "/api/wikivoyage_article",
+                },
+            )
+            seen: set[str] = set()
+            for text in result["paragraphs"]:
+                if text in seen:
+                    continue
+                seen.add(text)
+                self._sse(
+                    "news", {"type": "paragraph", "index": index, "text": text}
+                )
+            self._sse("news", {"type": "item_end", "index": index})
+        self._sse("news", {"type": "done"})
+        if not results:
+            self._sse_text(
+                "output", f"\n/wikivoyage: no destinations matched {keyword!r}.\n"
+            )
+
+    def _command_changelog(self, argument: str) -> None:
+        """List the completed-task summary pages, newest first.
+
+        Usage: /changelog
+        Every entry is one .logs/*.summary.html page. The browser renders the
+        list and asks /api/changelog_file for the selected page when its row is
+        clicked, so the modal receives the original HTML document.
+        """
+        entries = list_changelog_entries()
+        self._sse(
+            "changelog",
+            {
+                "type": "start",
+                "directory": str(changelog_directory() or LOGS_DIR),
+                "count": len(entries),
+            },
+        )
+        for index, entry in enumerate(entries, 1):
+            self._sse(
+                "changelog",
+                {"type": "item", "index": index, **entry},
+            )
+        self._sse("changelog", {"type": "done"})
+        if not entries:
+            self._sse_text(
+                "output",
+                "\nNo completed-task summaries were found in .logs.\n",
+            )
 
     def _command_googlenews(self, argument: str) -> None:
         """Search Google News RSS for the latest stories matching keywords.
@@ -12613,7 +13441,7 @@ def main() -> None:
     if news_count:
         source_summary = (
             f"({len(all_ids) - news_count} videos, "
-            f"{news_count} news stories)"
+            f"{news_count} articles)"
         )
     print(
         f"Loaded {len(state.chunks)} trunks into the global corpus "
