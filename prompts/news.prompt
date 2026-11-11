@@ -88,6 +88,18 @@ task (persistent) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
+task.ui.search_result_do_not_scroll_to_bottom (completed) {
+  when doing: /news search <keywords>, the search result list is scrolled to the bottom, please do not do the auto scrolling, keep the view port at the top
+}
+
+  Implemented:
+  app/chat.html
+  - `/news search <keywords>` now pins its entry to the top of the viewport
+    instead of following the newest story. The story list can keep streaming
+    in underneath while the reader stays on the first results.
+  - Only the search form is pinned; a normal `/news [source]` load keeps the
+    existing follow-the-output scrolling.
+
 task.speedup_news_search (completed) {
   the following command is very slow, why:
   /news search rust programming

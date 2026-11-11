@@ -1,0 +1,98 @@
+restriction: please write the implementation summary inside the task {...} block, not outside!
+
+mathtutor_llm: ollama local model ornith:35b with no thinking
+
+task.generate_5_problem_at_once (completed) {
+  - every time when clicking on the next question button {
+    generate 5 problems if the {problem number offset}%5 == 0
+    so "next question" button will either navigate to the next question or generate next 5 questions
+  }
+
+  Implemented:
+  app/chat_server.py
+  - Replaced the eager 20-problem pre-generation with lazy batches of five.
+    MATHUTOR_PROBLEMS_PER_BATCH is 5, so an upload now creates only the first
+    five problems and the student reaches them immediately.
+  - _mathtutor_generate_problems(session, count=5, start_id=1) generates one
+    validated batch, avoids every question already stored in the session
+    (not just the current batch), and assigns ids continuing from start_id.
+  - Added POST /api/mathtutor_more {id}. It loads the persisted session under
+    the mathtutor lock, generates five more problems with start_id after the
+    last id, appends them, saves the session, and returns the updated
+    browser-safe session plus the number added.
+  app/chat.html
+  - "Next question" navigates within the already loaded problems. When the
+    current 1-based problem offset is a multiple of five (the end of a batch),
+    it calls /api/mathtutor_more instead, then moves to the first of the five
+    new problems. Previous still navigates back through all loaded problems.
+  - While a batch is generating, Next shows "Generating…", the problem counter
+    still shows how many are loaded, and the card displays "Generating 5 more
+    practice problems…". A generation error is shown inline and the loaded
+    problems stay usable.
+}
+
+task.bug (completed) {
+  - use {mathtutor_llm} as the sole question generation and answering model
+  - in the textbox: "Write your answer here, then click Check my answer...", I am not able to enter my answer!
+  - there should be a "next question" button and "previous question" button, the "next question" button should generate a new problem (maybe we should pre-generate 20 problems at a time and then use the next question and previous question buttons to navigate back and forth)
+
+  Implemented:
+  app/chat.html
+  - Root cause of the uneditable answer box: every left mousedown inside the
+    chat output marked the interaction as an output text selection, and the
+    global mouseup handler then focused the main console input. That focus
+    steal fired immediately after clicking the mathtutor textarea, so typed
+    characters went to the console instead. Mouse handling now ignores text
+    entry targets (textarea/input/select/contenteditable) and never moves
+    focus away from another text field on mouseup or after a click.
+  - Global shortcuts (Ctrl/⌘+Enter send, Ctrl/Cmd+K clear, Ctrl+C/L) also step
+    aside while focus is in a non-composer text field, so typing or copying in
+    the mathtutor answer box is not hijacked by the main chat.
+  - The practice view already renders Previous question / Next question
+    buttons, preserves the typed answer per problem while navigating, and
+    offers Check my answer and Show answer.
+  app/chat_server.py
+  - MATHUTOR_PROBLEM_COUNT is now 20: one upload pre-generates a full set, and
+    the Previous/Next buttons navigate that set without another model call.
+  - Problems are generated in validated batches of 10 (up to five attempts),
+    avoiding a single 20-object JSON reply that commonly truncates. The parser
+    also salvages complete objects from a truncated reply, and each batch is
+    asked not to repeat earlier questions.
+  - Generation uses the same 32,768-token context as answer generation, so the
+    test-paper source, avoid-list, and worked answers fit without an extra
+    Ollama model reload.
+  - Both generation and grading/solution prompts use the mathtutor model
+    (ornith:35b) with thinking disabled, as required.
+}
+
+task.mathtutor_command (completed) {
+  create new command /mathtutor, once enter {
+    - prompt the user to upload a few test papers in microsoft word format
+    - allow user to upload multiple word docs
+    - the uploaded docs will be stored in {directory_of_this_prompt}/../.chat/mathtutor/uploaded_word_docs
+    - we also need to store the chat session context of the uploaded docs in {directory_of_this_prompt}/../.chat/mathtutor/sessions/{unixtimestamp}.context.json
+      we will then store the uploaded word docs in {directory_of_this_prompt}/../.chat/mathtutor/sessions/{unixtimestamp}.context.json so that we can remember the word docs in the context
+    - based on the referenced word docs in the context, in the chat, start generating similar practice problems for the user to answer, it will render a "next question" button and "previous question" button to allow user to navigate the list of generated questions
+    - please provide detail answer for each question once the student finish answering or wish to see the answer
+  }
+
+  Implemented:
+  app/chat_server.py
+  - Added /mathtutor plus POST /api/mathtutor_upload and
+    POST /api/mathtutor_answer. Uploads accept multiple .docx (parsed with
+    zipfile/XML, no extra dependency) or legacy .doc files (textutil/
+    antiword/catdoc when installed), enforce per-file and total size limits,
+    and store the originals under .chat/mathtutor/uploaded_word_docs/.
+  - Each upload creates .chat/mathtutor/sessions/<unixtimestamp>.context.json
+    containing the document metadata, extracted text, generated practice
+    problems with worked reference answers, and the interaction history, so the
+    session can be resumed after a restart.
+  - The local chat model pre-generates a set of twenty practice problems from
+    the uploaded papers (validated JSON batches). Answering streams a detailed
+    step-by-step solution, first grading the student's submitted answer when
+    one is provided.
+  app/chat.html
+  - /mathtutor renders an inline Math Tutor card: multi-file Word picker,
+    upload progress, document chips, Previous/Next question navigation, an
+    answer box, Check my answer, and Show answer with streaming markdown.
+}

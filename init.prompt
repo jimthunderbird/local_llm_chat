@@ -207,6 +207,10 @@ group app/chat.html and app/chat_server.py {
   }
 
   task (persistent) {
+    complete tasks in ./prompts/mathtutor.prompt
+  }
+
+  task (persistent) {
     complete tasks in ./prompts/chat_common.prompt  
   }
 

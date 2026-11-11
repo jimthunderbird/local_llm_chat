@@ -2051,6 +2051,167 @@
   }
   .book-results-error { color: var(--warn); font-size: 11px; margin-top: 6px; }
 
+  /* /mathtutor: upload Word test papers, then practice generated problems. */
+  .math-tutor {
+    margin: 11px 0 4px;
+    padding: 12px 13px;
+    background: #0f1a25;
+    border: 1px solid #22384b;
+    border-radius: 8px;
+  }
+  .math-tutor[hidden] { display: none; }
+  .math-tutor-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .math-tutor-head strong {
+    color: var(--accent);
+    font-size: 12px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .math-tutor-head .math-tutor-count {
+    margin-left: auto;
+    color: var(--dimmer);
+    font-size: 10.5px;
+  }
+  .math-tutor p.math-tutor-help {
+    margin: 0 0 9px;
+    color: #b9cad9;
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
+  .math-tutor-docs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 7px 0 9px;
+  }
+  .math-tutor-doc {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: #c5d5e3;
+    background: #122131;
+    border: 1px solid #29445c;
+    border-radius: 5px;
+    padding: 3px 7px;
+    font-size: 10.5px;
+  }
+  .math-tutor-doc button {
+    color: var(--dim);
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+    font: inherit;
+    padding: 0;
+  }
+  .math-tutor-doc button:hover { color: var(--error); }
+  .math-tutor-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin-top: 9px;
+  }
+  .math-tutor button.math-tutor-btn {
+    font: inherit;
+    font-size: 11px;
+    color: #d7ecff;
+    background: #172433;
+    border: 1px solid #2d4d68;
+    border-radius: 5px;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+  .math-tutor button.math-tutor-btn:hover:not(:disabled) {
+    border-color: var(--accent-2);
+    color: #fff;
+  }
+  .math-tutor button.math-tutor-btn:disabled { opacity: .45; cursor: default; }
+  .math-tutor button.math-tutor-btn.primary {
+    color: #0c1510;
+    background: #7ee787;
+    border-color: #7ee787;
+    font-weight: 700;
+  }
+  .math-tutor button.math-tutor-btn.primary:hover:not(:disabled) {
+    background: #9af0a2;
+    border-color: #9af0a2;
+    color: #0c1510;
+  }
+  .math-tutor-status {
+    margin-top: 8px;
+    color: var(--warn);
+    font-size: 11px;
+    line-height: 1.45;
+  }
+  .math-tutor-status.error { color: var(--error); }
+  .math-tutor-qhead {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: 2px 0 7px;
+  }
+  .math-tutor-qhead .math-tutor-topic {
+    color: var(--accent-2);
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .math-tutor-nav {
+    display: flex;
+    gap: 7px;
+    margin-bottom: 9px;
+  }
+  .math-tutor-question {
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.55;
+    padding: 9px 11px;
+    background: #0b141d;
+    border-left: 2px solid #3d6b8f;
+    border-radius: 0 5px 5px 0;
+  }
+  .math-tutor-question p { margin: 0 0 7px; }
+  .math-tutor-question p:last-child { margin-bottom: 0; }
+  .math-tutor textarea {
+    width: 100%;
+    min-height: 76px;
+    margin-top: 9px;
+    padding: 7px 9px;
+    color: var(--text);
+    background: #0b141d;
+    border: 1px solid #2d4d68;
+    border-radius: 5px;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.5;
+    resize: vertical;
+    user-select: text;
+  }
+  .math-tutor textarea:focus {
+    outline: none;
+    border-color: var(--accent-2);
+  }
+  .math-tutor-answer {
+    margin-top: 10px;
+    padding-top: 9px;
+    border-top: 1px solid #1c2f40;
+    color: var(--text);
+    font-size: 12.5px;
+    line-height: 1.58;
+  }
+  .math-tutor-answer p { margin: 0 0 8px; }
+  .math-tutor-answer p:last-child { margin-bottom: 0; }
+  .math-tutor-answer .math-tutor-answer-label {
+    color: var(--accent);
+    font-size: 10.5px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    margin-bottom: 7px;
+  }
+
   #gutenberg-panel {
     position: fixed;
     inset: 0;
@@ -4217,6 +4378,8 @@ function makeEntry(kind, options = {}) {
     booksKeyword: "",
     booksHeading: "",
     booksError: "",
+    mathtutor: null,
+    mathtutorState: null,
     newsEl: document.createElement("div"),
     el: document.createElement("div"),
     logsEl: document.createElement("div"),
@@ -4305,9 +4468,13 @@ function makeEntry(kind, options = {}) {
   entry.booksEl = document.createElement("div");
   entry.booksEl.className = "book-results";
   entry.booksEl.hidden = true;
+  entry.mathtutorEl = document.createElement("div");
+  entry.mathtutorEl.className = "math-tutor";
+  entry.mathtutorEl.hidden = true;
   entry.bodyEl.appendChild(entry.newsEl);
   entry.bodyEl.appendChild(entry.videosEl);
   entry.bodyEl.appendChild(entry.booksEl);
+  entry.bodyEl.appendChild(entry.mathtutorEl);
   entry.bodyEl.appendChild(entry.choicesEl);
   entry.errorEl.className = "error-text";
   entry.bodyEl.appendChild(entry.errorEl);
@@ -4408,6 +4575,7 @@ function renderEntry(entry) {
   renderNewsList(entry);
   renderVideoResults(entry);
   renderBookResults(entry);
+  renderMathTutor(entry);
   for (const choice of entry.choices) {
     const button = document.createElement("button");
     button.className = "choice";
@@ -4880,6 +5048,482 @@ function normalizeVideoItems(rawItems) {
       url: String(item?.url || "").trim(),
     }))
     .filter((item) => item.id && item.url);
+}
+
+function normalizeMathtutorSession(raw) {
+  if (!raw || typeof raw !== "object" || !raw.id) return null;
+  const documents = (Array.isArray(raw.documents) ? raw.documents : [])
+    .map((item) => ({
+      name: String(item?.name || "test paper"),
+      bytes: Number(item?.bytes) || 0,
+      characters: Number(item?.characters) || 0,
+    }));
+  const problems = (Array.isArray(raw.problems) ? raw.problems : [])
+    .map((item, index) => ({
+      id: Number(item?.id) || index + 1,
+      topic: String(item?.topic || "Practice"),
+      question: String(item?.question || ""),
+    }))
+    .filter((item) => item.question);
+  return {
+    id: String(raw.id),
+    createdAt: Number(raw.created_at) || 0,
+    documents,
+    problems,
+  };
+}
+
+function ensureMathtutorState(entry) {
+  if (!entry.mathtutorState) {
+    const session = normalizeMathtutorSession(entry.mathtutor);
+    entry.mathtutorState = {
+      session,
+      pendingFiles: [],
+      busy: false,
+      moreBusy: false,
+      answerBusy: false,
+      status: "",
+      error: "",
+      index: 0,
+      answers: {},
+      results: {},
+      showUpload: !(session && session.problems.length),
+      controller: null,
+    };
+  }
+  return entry.mathtutorState;
+}
+
+const MATHUTOR_MAX_FILE_BYTES = 8 * 1024 * 1024;
+const MATHUTOR_MAX_TOTAL_BYTES = 12 * 1024 * 1024;
+
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadMathtutorFiles(entry) {
+  const state = ensureMathtutorState(entry);
+  if (state.busy || !state.pendingFiles.length) return;
+  state.busy = true;
+  state.error = "";
+  state.status = "Reading the Word documents and generating similar practice problems…";
+  scheduleRender(entry);
+  try {
+    const files = [];
+    for (const file of state.pendingFiles) {
+      const data = await readFileAsDataURL(file);
+      files.push({ name: file.name, data });
+    }
+    const response = await fetch("/api/mathtutor_upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files }),
+    });
+    let payload = null;
+    try { payload = await response.json(); } catch { /* ignore */ }
+    if (!response.ok) {
+      throw new Error(payload?.error || `HTTP ${response.status}`);
+    }
+    const session = normalizeMathtutorSession(payload?.session);
+    if (!session) throw new Error("The server returned no mathtutor session.");
+    state.session = session;
+    state.pendingFiles = [];
+    state.index = 0;
+    state.answers = {};
+    state.results = {};
+    state.showUpload = false;
+    state.status = "";
+    entry.mathtutor = session;
+  } catch (error) {
+    state.error = error?.message || String(error);
+    state.status = "";
+  } finally {
+    state.busy = false;
+    scheduleRender(entry);
+  }
+}
+
+async function generateMoreMathtutorProblems(entry) {
+  const state = ensureMathtutorState(entry);
+  const session = state.session;
+  if (!session || state.moreBusy) return;
+  const previousCount = session.problems.length;
+  state.moreBusy = true;
+  state.error = "";
+  state.status = "Generating 5 more practice problems…";
+  scheduleRender(entry);
+  try {
+    const response = await fetch("/api/mathtutor_more", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: session.id }),
+    });
+    let payload = null;
+    try { payload = await response.json(); } catch { /* ignore */ }
+    if (!response.ok) {
+      throw new Error(payload?.error || `HTTP ${response.status}`);
+    }
+    const updated = normalizeMathtutorSession(payload?.session);
+    if (!updated) throw new Error("The server returned no mathtutor session.");
+    state.session = updated;
+    entry.mathtutor = updated;
+    const added = Number(payload?.added)
+      || Math.max(0, updated.problems.length - previousCount);
+    if (added > 0) state.index = previousCount;
+    state.status = "";
+  } catch (error) {
+    state.error = error?.message || String(error);
+    state.status = "";
+  } finally {
+    state.moreBusy = false;
+    scheduleRender(entry);
+  }
+}
+
+function startMathtutorAnswer(entry, reveal) {
+  const state = ensureMathtutorState(entry);
+  const session = state.session;
+  const problem = session?.problems?.[state.index];
+  if (!session || !problem || state.answerBusy) return;
+  const index = state.index;
+  const studentAnswer = reveal ? "" : String(state.answers[index] || "");
+  state.answerBusy = true;
+  state.error = "";
+  state.results[index] = { text: "", complete: false };
+  scheduleRender(entry);
+
+  const controller = new AbortController();
+  state.controller = controller;
+  const handlers = {
+    delta: (data) => {
+      const result = state.results[index];
+      if (!result) return;
+      result.text += data.text || "";
+      scheduleRender(entry);
+    },
+    error: (data) => {
+      state.error = data.message || "Could not generate the answer.";
+      scheduleRender(entry);
+    },
+    mathtutor_answer_done: (data) => {
+      const result = state.results[index];
+      if (result && data?.text) result.text = data.text;
+      if (result) result.complete = true;
+      state.answerBusy = false;
+      scheduleRender(entry);
+    },
+    done: () => {
+      const result = state.results[index];
+      if (result) result.complete = true;
+      state.answerBusy = false;
+      scheduleRender(entry);
+    },
+  };
+  streamSSE(
+    "/api/mathtutor_answer",
+    { id: session.id, index, answer: studentAnswer },
+    handlers,
+    controller.signal
+  )
+    .catch((error) => {
+      if (error?.name !== "AbortError") {
+        state.error = error?.message || String(error);
+      }
+    })
+    .finally(() => {
+      state.answerBusy = false;
+      const result = state.results[index];
+      if (result) result.complete = true;
+      if (state.controller === controller) state.controller = null;
+      scheduleRender(entry);
+    });
+}
+
+function renderMathTutor(entry) {
+  const container = entry.mathtutorEl;
+  if (!container) return;
+  if (!entry.mathtutor && !entry.mathtutorState) {
+    container.hidden = true;
+    return;
+  }
+  const state = ensureMathtutorState(entry);
+  const session = state.session;
+  container.hidden = false;
+  container.textContent = "";
+
+  const head = document.createElement("div");
+  head.className = "math-tutor-head";
+  const title = document.createElement("strong");
+  title.textContent = "Math Tutor";
+  head.appendChild(title);
+  const count = document.createElement("span");
+  count.className = "math-tutor-count";
+  if (session) {
+    const n = session.problems.length;
+    count.textContent = `${n} practice problem${n === 1 ? "" : "s"} loaded · session ${session.id}`;
+  } else {
+    count.textContent = ".docx / .doc · multiple files allowed";
+  }
+  head.appendChild(count);
+  container.appendChild(head);
+
+  const help = document.createElement("p");
+  help.className = "math-tutor-help";
+  help.textContent = session
+    ? "Practice problems were generated from your uploaded test papers. Answer one, then check it or reveal a detailed solution."
+    : "Upload a few test papers in Microsoft Word format (.docx or .doc). The tutor reads them and creates similar practice problems with detailed answers.";
+  container.appendChild(help);
+
+  if (session && session.documents.length) {
+    const docs = document.createElement("div");
+    docs.className = "math-tutor-docs";
+    for (const doc of session.documents) {
+      const chip = document.createElement("span");
+      chip.className = "math-tutor-doc";
+      const label = document.createElement("span");
+      label.textContent = doc.name;
+      chip.appendChild(label);
+      docs.appendChild(chip);
+    }
+    container.appendChild(docs);
+  }
+
+  if (state.showUpload || !session) {
+    const docs = document.createElement("div");
+    docs.className = "math-tutor-docs";
+    for (const file of state.pendingFiles) {
+      const chip = document.createElement("span");
+      chip.className = "math-tutor-doc";
+      const label = document.createElement("span");
+      label.textContent = `${file.name} · ${formatImageBytes(file.size)}`;
+      chip.appendChild(label);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "×";
+      remove.title = `Remove ${file.name}`;
+      remove.addEventListener("click", () => {
+        state.pendingFiles = state.pendingFiles.filter((item) => item !== file);
+        scheduleRender(entry);
+      });
+      chip.appendChild(remove);
+      docs.appendChild(chip);
+    }
+    if (state.pendingFiles.length) container.appendChild(docs);
+
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = ".docx,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword";
+    fileInput.multiple = true;
+    fileInput.hidden = true;
+    fileInput.addEventListener("change", () => {
+      const selected = Array.from(fileInput.files || []);
+      for (const file of selected) {
+        const suffix = String(file.name || "").toLowerCase().split(".").pop();
+        if (suffix !== "docx" && suffix !== "doc") {
+          state.error = `${file.name} is not a Word document (.docx or .doc).`;
+          continue;
+        }
+        if (file.size > MATHUTOR_MAX_FILE_BYTES) {
+          state.error = `${file.name} is larger than ${MATHUTOR_MAX_FILE_BYTES / (1024 * 1024)} MB.`;
+          continue;
+        }
+        if (state.pendingFiles.some((item) => item.name === file.name && item.size === file.size)) {
+          continue;
+        }
+        const total = state.pendingFiles.reduce((sum, item) => sum + item.size, 0) + file.size;
+        if (total > MATHUTOR_MAX_TOTAL_BYTES) {
+          state.error = `The selected Word documents are too large in total (limit ${MATHUTOR_MAX_TOTAL_BYTES / (1024 * 1024)} MB).`;
+          break;
+        }
+        state.pendingFiles.push(file);
+      }
+      scheduleRender(entry);
+    });
+    container.appendChild(fileInput);
+
+    const actions = document.createElement("div");
+    actions.className = "math-tutor-actions";
+    const choose = document.createElement("button");
+    choose.type = "button";
+    choose.className = "math-tutor-btn";
+    choose.textContent = state.pendingFiles.length ? "Choose more Word documents" : "Choose Word documents";
+    choose.disabled = state.busy;
+    choose.addEventListener("click", () => fileInput.click());
+    actions.appendChild(choose);
+
+    const upload = document.createElement("button");
+    upload.type = "button";
+    upload.className = "math-tutor-btn primary";
+    upload.textContent = state.busy ? "Generating…" : "Upload and generate practice problems";
+    upload.disabled = state.busy || !state.pendingFiles.length;
+    upload.addEventListener("click", () => void uploadMathtutorFiles(entry));
+    actions.appendChild(upload);
+
+    if (session) {
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "math-tutor-btn";
+      cancel.textContent = "Cancel";
+      cancel.disabled = state.busy;
+      cancel.addEventListener("click", () => {
+        state.pendingFiles = [];
+        state.showUpload = false;
+        state.error = "";
+        scheduleRender(entry);
+      });
+      actions.appendChild(cancel);
+    }
+    container.appendChild(actions);
+
+    if (state.status || state.error) {
+      const status = document.createElement("div");
+      status.className = "math-tutor-status" + (state.error ? " error" : "");
+      status.textContent = state.error || state.status;
+      container.appendChild(status);
+    }
+    return;
+  }
+
+  const actionRow = document.createElement("div");
+  actionRow.className = "math-tutor-actions";
+  const newPapers = document.createElement("button");
+  newPapers.type = "button";
+  newPapers.className = "math-tutor-btn";
+  newPapers.textContent = "Upload new papers";
+  newPapers.addEventListener("click", () => {
+    state.showUpload = true;
+    state.error = "";
+    scheduleRender(entry);
+  });
+  actionRow.appendChild(newPapers);
+  container.appendChild(actionRow);
+
+  if (!session.problems.length) {
+    const status = document.createElement("div");
+    status.className = "math-tutor-status error";
+    status.textContent = state.error || "No practice problems were generated. Upload the papers again.";
+    container.appendChild(status);
+    return;
+  }
+
+  state.index = Math.max(0, Math.min(state.index, session.problems.length - 1));
+  const index = state.index;
+  const problem = session.problems[index];
+
+  const qhead = document.createElement("div");
+  qhead.className = "math-tutor-qhead";
+  const topic = document.createElement("span");
+  topic.className = "math-tutor-topic";
+  topic.textContent = problem.topic || "Practice";
+  const counter = document.createElement("span");
+  counter.className = "math-tutor-count";
+  counter.textContent = `Question ${index + 1} of ${session.problems.length}`;
+  qhead.appendChild(topic);
+  qhead.appendChild(counter);
+  container.appendChild(qhead);
+
+  const nav = document.createElement("div");
+  nav.className = "math-tutor-nav";
+  const prev = document.createElement("button");
+  prev.type = "button";
+  prev.className = "math-tutor-btn";
+  prev.textContent = "← Previous question";
+  prev.disabled = index <= 0;
+  prev.addEventListener("click", () => {
+    state.index = Math.max(0, index - 1);
+    state.error = "";
+    scheduleRender(entry);
+  });
+  const next = document.createElement("button");
+  next.type = "button";
+  next.className = "math-tutor-btn";
+  next.textContent = state.moreBusy ? "Generating…" : "Next question →";
+  next.disabled = state.moreBusy;
+  if (index >= session.problems.length - 1) {
+    next.title = "Generate 5 more practice problems";
+  }
+  next.addEventListener("click", () => {
+    if (state.moreBusy) return;
+    if (index + 1 < session.problems.length) {
+      state.index = index + 1;
+      state.error = "";
+      scheduleRender(entry);
+      return;
+    }
+    // Problem offsets are 1-based; problems are generated in batches of five.
+    // Reaching the end of the current batch makes Next load the next five.
+    if ((index + 1) % 5 === 0 || index + 1 >= session.problems.length) {
+      void generateMoreMathtutorProblems(entry);
+    }
+  });
+  nav.appendChild(prev);
+  nav.appendChild(next);
+  container.appendChild(nav);
+
+  if (state.status || state.error) {
+    const status = document.createElement("div");
+    status.className = "math-tutor-status" + (state.error ? " error" : "");
+    status.textContent = state.error || state.status;
+    container.appendChild(status);
+  }
+
+  const question = document.createElement("div");
+  question.className = "math-tutor-question";
+  question.appendChild(renderMarkdown(problem.question, false, [], null));
+  container.appendChild(question);
+
+  const answerInput = document.createElement("textarea");
+  answerInput.placeholder = "Write your answer here, then click Check my answer…";
+  answerInput.value = String(state.answers[index] || "");
+  answerInput.disabled = state.answerBusy;
+  answerInput.addEventListener("input", () => {
+    state.answers[index] = answerInput.value;
+  });
+  container.appendChild(answerInput);
+
+  const actions = document.createElement("div");
+  actions.className = "math-tutor-actions";
+  const check = document.createElement("button");
+  check.type = "button";
+  check.className = "math-tutor-btn primary";
+  check.textContent = state.answerBusy ? "Solving…" : "Check my answer";
+  check.disabled = state.answerBusy;
+  check.addEventListener("click", () => startMathtutorAnswer(entry, false));
+  const reveal = document.createElement("button");
+  reveal.type = "button";
+  reveal.className = "math-tutor-btn";
+  reveal.textContent = "Show answer";
+  reveal.disabled = state.answerBusy;
+  reveal.addEventListener("click", () => startMathtutorAnswer(entry, true));
+  actions.appendChild(check);
+  actions.appendChild(reveal);
+  container.appendChild(actions);
+
+  const result = state.results[index];
+  if (result && (result.text || state.answerBusy)) {
+    const answerEl = document.createElement("div");
+    answerEl.className = "math-tutor-answer";
+    const answerLabel = document.createElement("div");
+    answerLabel.className = "math-tutor-answer-label";
+    answerLabel.textContent = result.complete ? "Detailed answer" : "Solving…";
+    answerEl.appendChild(answerLabel);
+    const body = document.createElement("div");
+    body.appendChild(renderMarkdown(result.text, false, [], null));
+    answerEl.appendChild(body);
+    container.appendChild(answerEl);
+  }
+
+  if (state.status || state.error) {
+    const status = document.createElement("div");
+    status.className = "math-tutor-status" + (state.error ? " error" : "");
+    status.textContent = state.error || state.status;
+    container.appendChild(status);
+  }
 }
 
 function normalizeBookItems(rawItems) {
@@ -8232,6 +8876,13 @@ function submitText(text, fromChoice = false) {
   const commandName = question.startsWith("/")
     ? question.slice(1).split(/\s+/, 1)[0].toLowerCase()
     : "";
+  const commandArgs = question.startsWith("/")
+    ? question.slice(1).split(/\s+/).slice(1)
+    : [];
+  // /news search streams its story list; anchor the list at the top so new
+  // stories do not drag the viewport down to the bottom as they arrive.
+  const pinsNewsSearch = commandName === "news"
+    && String(commandArgs[0] || "").toLowerCase() === "search";
 
   addUserEcho(question, image);
   const isCommand = question.startsWith("/");
@@ -8249,13 +8900,15 @@ function submitText(text, fromChoice = false) {
             ? "Project Gutenberg"
             : commandName === "openlibrary"
               ? "Open Library"
+              : commandName === "mathtutor"
+                ? "Math Tutor"
               : undefined,
   });
   appendEntry(entry);
   resetAnswerSourceStatus();
   if (image) clearPendingImage();
 
-  if (commandName === "wiki_article") {
+  if (commandName === "wiki_article" || pinsNewsSearch) {
     pinEntryToTop(entry);
   } else {
     stickToBottom = true;
@@ -8357,6 +9010,18 @@ function submitText(text, fromChoice = false) {
       entry.booksKeyword = String(data?.keyword || "").trim();
       entry.booksHeading = String(data?.heading || "").trim();
       entry.booksError = "";
+      scheduleRender(entry);
+    },
+    mathtutor: (data) => {
+      const session = normalizeMathtutorSession(data?.session);
+      const state = ensureMathtutorState(entry);
+      state.session = session;
+      state.busy = false;
+      state.status = "";
+      state.error = "";
+      state.index = Math.min(state.index, Math.max(0, (session?.problems?.length || 1) - 1));
+      if (session?.problems?.length) state.showUpload = false;
+      entry.mathtutor = session;
       scheduleRender(entry);
     },
     choices: (data) => {
@@ -9402,8 +10067,13 @@ document.addEventListener("keydown", (event) => {
   // Keep Ctrl/⌘+Enter working when focus sits on a button instead of the
   // composer. (When the composer is focused, its own handler already sent.)
   // Do not let it send the main composer's text while an in-modal chat is
-  // being used.
+  // being used, or while the user is typing in another text field.
+  const typingOutsideComposer =
+    event.target instanceof HTMLElement &&
+    event.target !== inputEl &&
+    Boolean(event.target.closest("textarea, input, [contenteditable='true']"));
   if (key === "Enter" && (event.metaKey || event.ctrlKey)
+      && !typingOutsideComposer
       && helpPanel.hidden && document.activeElement !== inputEl
       && !event.target.closest?.("#video-chat")
       && !event.target.closest?.(".gutenberg-chat-compose")) {
@@ -9412,13 +10082,13 @@ document.addEventListener("keydown", (event) => {
     submitText(inputEl.value);
     return;
   }
-  if (event.metaKey && !event.ctrlKey && !event.altKey && key.toLowerCase() === "k") {
+  if (!typingOutsideComposer && event.metaKey && !event.ctrlKey && !event.altKey && key.toLowerCase() === "k") {
     event.preventDefault();
     outputEl.textContent = "";
     toast("Console cleared.");
     return;
   }
-  if (event.ctrlKey && !event.altKey && !event.metaKey) {
+  if (!typingOutsideComposer && event.ctrlKey && !event.altKey && !event.metaKey) {
     if (key === "c" && busy && document.activeElement !== inputEl) {
       event.preventDefault();
       cancelStreaming();
@@ -9453,12 +10123,28 @@ inputEl.addEventListener("blur", () => {
  * open /dict on a plain click; a drag that creates a selection does not. */
 let outputPointerDown = false;
 
+/* Clicks in a form control inside the output (the mathtutor answer box, a
+ * book/news chat composer, etc.) belong to that control. Treating them like an
+ * output selection used to move focus back to the main console on mouseup,
+ * which made the mathtutor answer box impossible to type in. */
+const TEXT_ENTRY_SELECTOR =
+  "textarea, input, select, [contenteditable='true'], [contenteditable='']";
+
+function isTextEntryTarget(target) {
+  return Boolean(
+    target &&
+    typeof target.closest === "function" &&
+    target.closest(TEXT_ENTRY_SELECTOR)
+  );
+}
+
 outputEl.addEventListener("mousedown", (event) => {
   if (event.button !== 0) return;
+  if (isTextEntryTarget(event.target)) return;
   outputPointerDown = true;
 });
 
-window.addEventListener("mouseup", () => {
+window.addEventListener("mouseup", (event) => {
   if (!outputPointerDown) return;
   outputPointerDown = false;
   const hasSelection = Boolean(selectionInsideOutput());
@@ -9466,8 +10152,13 @@ window.addEventListener("mouseup", () => {
   // selection stays inside one answer its range is restored after the
   // rebuild; a cross-entry selection waits until it is cleared.
   flushDeferredRenders();
-  // A plain click (no selection) should leave the console ready for typing.
-  if (!hasSelection) {
+  // A plain click (no selection) should leave the console ready for typing,
+  // but never steal focus from another text field.
+  if (
+    !hasSelection &&
+    !isTextEntryTarget(event.target) &&
+    !isTextEntryTarget(document.activeElement)
+  ) {
     inputEl.focus({ preventScroll: true });
   }
 });

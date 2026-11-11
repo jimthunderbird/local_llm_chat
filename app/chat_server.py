@@ -86,8 +86,10 @@ import selectors
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import wave
+import zipfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import redirect_stderr, redirect_stdout
@@ -96,6 +98,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 from urllib.parse import parse_qs, quote, urlparse
 from xml.sax.saxutils import escape as xml_escape
+from xml.etree import ElementTree
 
 try:
     import requests
@@ -133,6 +136,7 @@ WEB_COMMANDS = {
     "/gutenberg": "search Project Gutenberg books: /gutenberg search <keywords>; click a book to read it and ask questions",
     "/openlibrary": "search inside Open Library books: /openlibrary search <keywords>",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
+    "/mathtutor": "upload Microsoft Word test papers and practice similar math problems with detailed answers",
 }
 
 # News sources accepted by /news and completed by news_fetch.php.
@@ -363,6 +367,546 @@ def medium_username() -> str:
     except OSError:
         return ""
     return value.lstrip("@").strip()
+
+
+# ---- /mathtutor ------------------------------------------------------
+# A mathtutor session owns the Word test papers the student uploaded and the
+# practice problems generated from them. Everything persists on disk so the
+# session survives a server restart:
+#   .chat/mathtutor/uploaded_word_docs/<session>_<filename>
+#   .chat/mathtutor/sessions/<unixtimestamp>.context.json
+MATHUTOR_DIR = SCRIPT_DIR / ".chat" / "mathtutor"
+MATHUTOR_UPLOAD_DIR = MATHUTOR_DIR / "uploaded_word_docs"
+MATHUTOR_SESSIONS_DIR = MATHUTOR_DIR / "sessions"
+MATHUTOR_LOCK = threading.RLock()
+MATHUTOR_SESSION_ID_RE = re.compile(r"\d{10,16}")
+MATHUTOR_MAX_FILES = 10
+MATHUTOR_MAX_FILE_BYTES = 8 * 1024 * 1024
+MATHUTOR_MAX_TOTAL_BYTES = 12 * 1024 * 1024
+# The tutor generates practice problems five at a time. The upload creates the
+# first five; the browser asks for another five when the student reaches the
+# end of the current set (problem offset divisible by five).
+MATHUTOR_PROBLEMS_PER_BATCH = 5
+MATHUTOR_GENERATION_ATTEMPTS = 5
+MATHUTOR_GENERATION_TOKENS = 5_000
+MATHUTOR_SOURCE_CHAR_LIMIT = 16_000
+# The mathtutor prompt names ornith:35b as the sole question-generation and
+# answer model. Thinking stays disabled through chat.generate_text /
+# chat.stream_answer defaults.
+MATHUTOR_MODEL = "ornith:35b"
+
+
+def _docx_text_from_bytes(data: bytes) -> str:
+    """Extract readable text from a .docx without requiring python-docx."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            try:
+                document_xml = archive.read("word/document.xml")
+            except KeyError as exc:
+                raise ValueError(
+                    "The Word document has no word/document.xml part"
+                ) from exc
+    except zipfile.BadZipFile as exc:
+        raise ValueError("The .docx file is not a valid Word document") from exc
+
+    try:
+        root = ElementTree.fromstring(document_xml)
+    except ElementTree.ParseError as exc:
+        raise ValueError("The Word document XML could not be parsed") from exc
+
+    parts: list[str] = []
+
+    def walk(element: ElementTree.Element) -> None:
+        tag = element.tag if isinstance(element.tag, str) else ""
+        local = tag.rsplit("}", 1)[-1] if tag else ""
+        if local == "p":
+            if parts and not parts[-1].endswith("\n"):
+                parts.append("\n")
+            for child in element:
+                walk(child)
+            parts.append("\n")
+            return
+        if local == "t":
+            parts.append(element.text or "")
+            return
+        if local == "tab":
+            parts.append("\t")
+            return
+        if local in {"br", "cr"}:
+            parts.append("\n")
+            return
+        for child in element:
+            walk(child)
+
+    walk(root)
+    text = "".join(parts)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _legacy_doc_text_from_bytes(data: bytes) -> str:
+    """Use an installed converter for the old binary .doc format."""
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".doc", delete=False) as handle:
+            handle.write(data)
+            temp_path = handle.name
+        commands = []
+        textutil = shutil.which("textutil")
+        if textutil:
+            commands.append([textutil, "-convert", "txt", "-stdout", temp_path])
+        antiword = shutil.which("antiword")
+        if antiword:
+            commands.append([antiword, temp_path])
+        catdoc = shutil.which("catdoc")
+        if catdoc:
+            commands.append([catdoc, temp_path])
+        errors: list[str] = []
+        for command in commands:
+            try:
+                result = subprocess.run(
+                    command,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=60,
+                )
+                text = result.stdout.decode("utf-8", errors="replace").strip()
+                if text:
+                    return text
+            except (OSError, subprocess.SubprocessError) as exc:
+                errors.append(f"{Path(command[0]).name}: {exc}")
+        raise ValueError(
+            "Could not read the .doc file. Save it as .docx and upload it again"
+            + (f" ({'; '.join(errors)})" if errors else "")
+        )
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
+def _mathtutor_extract_document_text(name: str, data: bytes) -> str:
+    suffix = Path(name).suffix.lower()
+    if suffix == ".docx" or data[:2] == b"PK":
+        text = _docx_text_from_bytes(data)
+    elif suffix == ".doc":
+        text = _legacy_doc_text_from_bytes(data)
+    else:
+        raise ValueError(
+            f"Unsupported file type {suffix or '(none)'}; upload .docx or .doc"
+        )
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if not text:
+        raise ValueError(f"No readable text was found in {name}")
+    return text
+
+
+def _mathtutor_session_path(session_id: str) -> Path:
+    if not MATHUTOR_SESSION_ID_RE.fullmatch(str(session_id or "")):
+        raise ValueError("Invalid mathtutor session id")
+    return MATHUTOR_SESSIONS_DIR / f"{session_id}.context.json"
+
+
+def _mathtutor_public_session(session: dict) -> dict:
+    """Return the browser-safe view (reference answers stay server-side)."""
+    documents = []
+    for document in session.get("documents", []):
+        documents.append(
+            {
+                "name": str(document.get("name", "")),
+                "bytes": int(document.get("bytes", 0) or 0),
+                "characters": int(document.get("characters", 0) or 0),
+            }
+        )
+    problems = []
+    for problem in session.get("problems", []):
+        problems.append(
+            {
+                "id": int(problem.get("id", 0) or 0),
+                "topic": str(problem.get("topic", "")),
+                "question": str(problem.get("question", "")),
+            }
+        )
+    return {
+        "id": str(session.get("id", "")),
+        "created_at": float(session.get("created_at", 0) or 0),
+        "updated_at": float(session.get("updated_at", 0) or 0),
+        "documents": documents,
+        "problems": problems,
+    }
+
+
+def _mathtutor_load_session(session_id: str) -> dict:
+    path = _mathtutor_session_path(session_id)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError("Mathtutor session not found") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read mathtutor session: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("Malformed mathtutor session")
+    data.setdefault("documents", [])
+    data.setdefault("problems", [])
+    data.setdefault("history", [])
+    return data
+
+
+def _mathtutor_latest_session() -> dict | None:
+    try:
+        paths = list(MATHUTOR_SESSIONS_DIR.glob("*.context.json"))
+    except OSError:
+        return None
+
+    def sort_key(path: Path) -> int:
+        stem = path.name.split(".", 1)[0]
+        return int(stem) if stem.isdigit() else 0
+
+    for path in sorted(paths, key=sort_key, reverse=True):
+        session_id = path.name.split(".", 1)[0]
+        try:
+            return _mathtutor_load_session(session_id)
+        except ValueError:
+            continue
+    return None
+
+
+def _mathtutor_save_session(session: dict) -> None:
+    MATHUTOR_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    session["updated_at"] = time.time()
+    path = _mathtutor_session_path(str(session.get("id", "")))
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temp_path.write_text(
+            json.dumps(session, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+
+
+def _mathtutor_source_text(session: dict, limit: int) -> str:
+    chunks: list[str] = []
+    remaining = limit
+    for document in session.get("documents", []):
+        if remaining <= 0:
+            break
+        text = str(document.get("text", "")).strip()
+        if not text:
+            continue
+        name = str(document.get("name", "test paper"))
+        header = f"### {name}\n"
+        take = max(0, remaining - len(header))
+        if take <= 0:
+            break
+        chunks.append(header + text[:take])
+        remaining -= len(header) + min(len(text), take)
+    return "\n\n".join(chunks)
+
+
+def _mathtutor_parse_problems(raw: str, limit: int | None = None) -> list[dict]:
+    """Parse the model's JSON problem list, tolerating prose around it."""
+    text = re.sub(r"^\s*```(?:json)?\s*", "", str(raw or "").strip(), flags=re.I)
+    text = re.sub(r"\s*```\s*$", "", text)
+    candidates = [text]
+    start = text.find("[")
+    end = text.rfind("]")
+    if start >= 0 and end > start:
+        candidates.append(text[start : end + 1])
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(text[start : end + 1])
+
+    payload = None
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+            break
+        except json.JSONDecodeError:
+            continue
+
+    items: list = []
+    if isinstance(payload, dict):
+        payload = payload.get("problems") or payload.get("questions") or []
+    if isinstance(payload, list):
+        items = payload
+    if not items:
+        # Recover complete objects from a truncated array (common when the
+        # model is asked for many problems). raw_decode keeps nested LaTeX
+        # braces inside strings intact.
+        decoder = json.JSONDecoder()
+        index = 0
+        while True:
+            start = text.find("{", index)
+            if start < 0:
+                break
+            try:
+                item, end = decoder.raw_decode(text, start)
+            except json.JSONDecodeError:
+                index = start + 1
+                continue
+            if isinstance(item, dict):
+                items.append(item)
+            index = end
+
+    problems: list[dict] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        topic = str(item.get("topic") or "Practice").strip()
+        if not question or not answer or question in seen:
+            continue
+        seen.add(question)
+        problems.append(
+            {
+                "id": len(problems) + 1,
+                "topic": topic or "Practice",
+                "question": question,
+                "answer": answer,
+            }
+        )
+        if limit is not None and len(problems) >= limit:
+            break
+    if not problems:
+        raise ValueError("The model returned no usable practice problems")
+    for index, problem in enumerate(problems, start=1):
+        problem["id"] = index
+    return problems
+
+
+def _mathtutor_generate_problems(
+    session: dict,
+    count: int = MATHUTOR_PROBLEMS_PER_BATCH,
+    start_id: int = 1,
+) -> list[dict]:
+    source = _mathtutor_source_text(session, MATHUTOR_SOURCE_CHAR_LIMIT)
+    if not source:
+        raise ValueError("The uploaded test papers contain no readable text")
+
+    problems: list[dict] = []
+    # Avoid questions already in the session as well as ones generated in this
+    # batch, so repeated "Next question" requests never duplicate problems.
+    seen: set[str] = {
+        str(problem.get("question", ""))
+        for problem in session.get("problems", [])
+        if isinstance(problem, dict)
+    }
+    last_error = ""
+    attempts = 0
+    while len(problems) < count and attempts < MATHUTOR_GENERATION_ATTEMPTS:
+        attempts += 1
+        remaining = count - len(problems)
+        batch_size = remaining
+        avoid_block = ""
+        existing = [
+            problem
+            for problem in session.get("problems", [])
+            if isinstance(problem, dict)
+        ] + problems
+        if existing:
+            avoid_list = "\n".join(
+                f"- {problem.get('question', '')}" for problem in existing
+            )
+            avoid_block = (
+                "\nDo NOT repeat or paraphrase any of these already generated problems:\n"
+                f"{avoid_list}\n"
+            )
+        prompt = f"""You are an expert math teacher. The student uploaded test papers from their course.
+Study the papers and create exactly {batch_size} NEW practice problems that test the same skills, methods, and difficulty level. Do not copy a problem verbatim.
+{avoid_block}
+<test_papers>
+{source}
+</test_papers>
+
+Return ONLY a valid JSON array containing all {batch_size} problems (no prose, no markdown fences). Each element must be an object with exactly these string fields:
+  "topic": a short topic label,
+  "question": the complete practice problem, including all numbers and wording,
+  "answer": a complete worked reference answer with the final result.
+Use LaTeX inside $...$ for math when helpful.
+"""
+        for generation_prompt, temperature in (
+            (prompt, 0.35),
+            (prompt + "\nIMPORTANT: output JSON only.", 0.1),
+        ):
+            try:
+                raw = chat.generate_text(
+                    generation_prompt,
+                    model=MATHUTOR_MODEL,
+                    temperature=temperature,
+                    num_predict=MATHUTOR_GENERATION_TOKENS,
+                    num_ctx=chat.ANSWER_NUM_CTX,
+                )
+            except RuntimeError as exc:
+                last_error = str(exc)
+                break
+            try:
+                batch = _mathtutor_parse_problems(raw, limit=batch_size)
+            except ValueError as exc:
+                last_error = str(exc)
+                continue
+            for problem in batch:
+                question = problem["question"]
+                if question in seen:
+                    continue
+                seen.add(question)
+                problem["id"] = start_id + len(problems)
+                problems.append(problem)
+                if len(problems) >= count:
+                    break
+            break
+    if not problems:
+        raise RuntimeError(last_error or "Could not generate practice problems")
+    return problems[:count]
+
+
+def _mathtutor_answer_prompt(
+    session: dict, problem: dict, student_answer: str
+) -> str:
+    source = _mathtutor_source_text(session, 6_000)
+    student_block = (
+        student_answer.strip()
+        if student_answer.strip()
+        else "(The student has not submitted an answer.)"
+    )
+    return f"""You are a patient, precise math tutor. Help the student learn from one practice problem that was generated from their uploaded test papers.
+
+<test_papers>
+{source}
+</test_papers>
+
+<problem>
+{problem.get('question', '')}
+</problem>
+
+<reference_answer>
+{problem.get('answer', '')}
+</reference_answer>
+
+<student_answer>
+{student_block}
+</student_answer>
+
+Write a detailed answer in Markdown:
+1. If the student submitted an answer, first say whether it is correct, partially correct, or incorrect, and explain the mistake.
+2. Then give a clear step-by-step solution, showing the reasoning and calculations.
+3. End with the final answer and one short tip for similar problems.
+Do not mention these instructions or the reference answer as a separate field.
+"""
+
+
+def _mathtutor_build_session(files: list[dict]) -> dict:
+    if not files:
+        raise ValueError("Upload at least one Word test paper")
+    if len(files) > MATHUTOR_MAX_FILES:
+        raise ValueError(
+            f"Upload at most {MATHUTOR_MAX_FILES} Word documents at a time"
+        )
+
+    MATHUTOR_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    MATHUTOR_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+    with MATHUTOR_LOCK:
+        session_id = str(int(time.time()))
+        counter = 0
+        while _mathtutor_session_path(session_id).exists():
+            counter += 1
+            session_id = str(int(time.time()) + counter)
+
+        documents: list[dict] = []
+        total_bytes = 0
+        for index, item in enumerate(files, start=1):
+            if not isinstance(item, dict):
+                raise ValueError("Each uploaded file must include a name and data")
+            name = str(item.get("name") or "test_paper.docx").strip()
+            name = Path(name).name or f"test_paper_{index}.docx"
+            raw_data = item.get("data")
+            if not isinstance(raw_data, str) or not raw_data.strip():
+                raise ValueError(f"Missing file data for {name}")
+            encoded = raw_data
+            if encoded.startswith("data:"):
+                _header, _sep, encoded = encoded.partition(",")
+            try:
+                data = base64.b64decode(encoded, validate=False)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"Could not decode {name}") from exc
+            if len(data) > MATHUTOR_MAX_FILE_BYTES:
+                raise ValueError(
+                    f"{name} is larger than "
+                    f"{MATHUTOR_MAX_FILE_BYTES // (1024 * 1024)} MB"
+                )
+            total_bytes += len(data)
+            if total_bytes > MATHUTOR_MAX_TOTAL_BYTES:
+                raise ValueError(
+                    "The selected Word documents are too large in total "
+                    f"(limit {MATHUTOR_MAX_TOTAL_BYTES // (1024 * 1024)} MB)"
+                )
+            text = _mathtutor_extract_document_text(name, data)
+
+            safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+            stored_name = f"{session_id}_{index}_{safe_name}"
+            stored_path = MATHUTOR_UPLOAD_DIR / stored_name
+            stored_path.write_bytes(data)
+            documents.append(
+                {
+                    "name": name,
+                    "stored_name": stored_name,
+                    "path": str(stored_path),
+                    "bytes": len(data),
+                    "characters": len(text),
+                    "text": text,
+                }
+            )
+
+        session = {
+            "id": session_id,
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "documents": documents,
+            "problems": [],
+            "history": [],
+        }
+        try:
+            session["problems"] = _mathtutor_generate_problems(session)
+        except Exception:
+            # Do not leave uploaded files behind when problem generation fails.
+            for document in documents:
+                try:
+                    Path(str(document.get("path", ""))).unlink()
+                except OSError:
+                    pass
+            raise
+        _mathtutor_save_session(session)
+        return session
+
+
+def _mathtutor_append_history(
+    session: dict, problem: dict, student_answer: str, model_answer: str
+) -> None:
+    history = session.setdefault("history", [])
+    history.append(
+        {
+            "problem_id": int(problem.get("id", 0) or 0),
+            "question": str(problem.get("question", "")),
+            "student_answer": student_answer,
+            "model_answer": model_answer,
+            "at": time.time(),
+        }
+    )
+    del history[:-100]
+    _mathtutor_save_session(session)
+
 
 COMMAND_ARGUMENTS = {
     "/youtube",
@@ -5931,6 +6475,10 @@ class ChatState:
         self.article_title: str = ""
         self.article_structure: dict | None = None
         self.article_iterative = False
+        # The /mathtutor session the browser is currently using. Sessions are
+        # also discoverable on disk, so a server restart resumes the latest
+        # uploaded test papers.
+        self.mathtutor_session_id: str | None = None
         self.cache = chat.AnswerCache()
         # /youtube search results are reused by the "More" button instead of
         # rerunning the (network-bound) YouTube search from scratch.
@@ -7221,6 +7769,83 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 reset=bool(payload.get("reset")),
             )
             return
+        if parsed.path == "/api/mathtutor_upload":
+            payload = self._read_json()
+            if payload is None:
+                return
+            raw_files = payload.get("files")
+            if not isinstance(raw_files, list) or not raw_files:
+                self._send_error_json("Upload at least one Word document", 400)
+                return
+            try:
+                session = _mathtutor_build_session(raw_files)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except RuntimeError as exc:
+                self._send_error_json(
+                    f"Could not generate practice problems: {exc}", 502
+                )
+                return
+            except OSError as exc:
+                self._send_error_json(
+                    f"Could not store the uploaded documents: {exc}", 500
+                )
+                return
+            with self.state.lock:
+                self.state.mathtutor_session_id = str(session["id"])
+            self._send_json({"session": _mathtutor_public_session(session)})
+            return
+        if parsed.path == "/api/mathtutor_more":
+            payload = self._read_json()
+            if payload is None:
+                return
+            session_id = str(payload.get("id") or "").strip()
+            try:
+                with MATHUTOR_LOCK:
+                    session = _mathtutor_load_session(session_id)
+                    start_id = len(session.get("problems", [])) + 1
+                    added = _mathtutor_generate_problems(
+                        session,
+                        count=MATHUTOR_PROBLEMS_PER_BATCH,
+                        start_id=start_id,
+                    )
+                    session.setdefault("problems", []).extend(added)
+                    _mathtutor_save_session(session)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except RuntimeError as exc:
+                self._send_error_json(
+                    f"Could not generate more practice problems: {exc}", 502
+                )
+                return
+            except OSError as exc:
+                self._send_error_json(
+                    f"Could not update the mathtutor session: {exc}", 500
+                )
+                return
+            with self.state.lock:
+                self.state.mathtutor_session_id = str(session.get("id", ""))
+            self._send_json(
+                {
+                    "session": _mathtutor_public_session(session),
+                    "added": len(added),
+                }
+            )
+            return
+        if parsed.path == "/api/mathtutor_answer":
+            payload = self._read_json()
+            if payload is None:
+                return
+            session_id = str(payload.get("id") or "").strip()
+            try:
+                index = int(payload.get("index", -1))
+            except (TypeError, ValueError):
+                index = -1
+            student_answer = str(payload.get("answer") or "").strip()
+            self._handle_mathtutor_answer(session_id, index, student_answer)
+            return
         self._send_error_json("Not found", 404)
 
     # ---- SSE: ask / commands -----------------------------------------
@@ -7436,6 +8061,65 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         pass
         finally:
             self.state = previous_state
+
+    def _handle_mathtutor_answer(
+        self, session_id: str, index: int, student_answer: str = ""
+    ) -> None:
+        """Stream a worked solution for one uploaded-paper practice problem."""
+        self._begin_sse()
+        session = None
+        problem = None
+        try:
+            session = _mathtutor_load_session(session_id)
+            problems = session.get("problems", [])
+            if index < 0 or index >= len(problems):
+                raise ValueError("Invalid practice problem index")
+            problem = problems[index]
+            if not isinstance(problem, dict):
+                raise ValueError("Malformed practice problem")
+
+            self._sse(
+                "mathtutor_answer_start",
+                {
+                    "id": str(session.get("id", "")),
+                    "index": index,
+                    "problem_id": int(problem.get("id", 0) or 0),
+                },
+            )
+            prompt = _mathtutor_answer_prompt(session, problem, student_answer)
+            response = chat.stream_answer(
+                prompt,
+                model=MATHUTOR_MODEL,
+                emit=lambda text: self._sse_text("delta", text),
+            )
+            if response:
+                with MATHUTOR_LOCK:
+                    # Reload before recording: another answer request may
+                    # have updated the same session in the meantime.
+                    try:
+                        latest = _mathtutor_load_session(session_id)
+                    except ValueError:
+                        latest = session
+                    _mathtutor_append_history(
+                        latest, problem, student_answer, response
+                    )
+            self._sse(
+                "mathtutor_answer_done",
+                {
+                    "id": str(session.get("id", "")),
+                    "index": index,
+                    "text": response,
+                },
+            )
+            self._sse("done", {})
+        except ClientDisconnected:
+            pass
+        except (ValueError, RuntimeError, OSError) as exc:
+            try:
+                self._sse("error", {"message": str(exc)})
+                self._sse("done", {})
+            except ClientDisconnected:
+                pass
 
     def _run_image_question(self, question: str, image: str) -> None:
         """Answer a question about one attached image with the vision model.
@@ -8528,6 +9212,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_wiki_article(argument)
         elif name == "/article":
             self._command_article(argument)
+        elif name == "/mathtutor":
+            self._command_mathtutor(argument)
         elif name == "/dict":
             self._command_dict(argument)
         elif name == "/depth":
@@ -10177,6 +10863,40 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             ),
         )
         self._sse("meta", state.snapshot())
+
+    def _command_mathtutor(self, argument: str) -> None:
+        """Open the Word-test-paper tutor, resuming the latest session."""
+        state = self.state
+        session = None
+        if state.mathtutor_session_id:
+            try:
+                session = _mathtutor_load_session(state.mathtutor_session_id)
+            except ValueError:
+                session = None
+        if session is None:
+            session = _mathtutor_latest_session()
+        if session is not None:
+            state.mathtutor_session_id = str(session.get("id", ""))
+        self._sse(
+            "mathtutor",
+            {
+                "session": (
+                    _mathtutor_public_session(session) if session else None
+                )
+            },
+        )
+        if session is None:
+            self._sse_text(
+                "output",
+                "\nMath Tutor: upload one or more Microsoft Word test papers "
+                "(.docx or .doc) below to generate similar practice problems.\n",
+            )
+        else:
+            self._sse_text(
+                "output",
+                f"\nMath Tutor: resumed session {session.get('id')} with "
+                f"{len(session.get('problems', []))} practice problem(s).\n",
+            )
 
     def _command_dict(self, argument: str) -> None:
         word = argument.strip()
