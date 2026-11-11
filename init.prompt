@@ -9,35 +9,6 @@ restrictions:
 }
 - if a task is persistent, DO NOT mark it as completed
 
-task git_repo (persistent) {
-  complete tasks in ./prompts/git_repo.prompt  
-}
-
-task.import_japn_knowledge (completed) {
-  txt_files: run cli command: find ~/airesearch/japan_knowledge/knowledge/japan/youtube_transcript/ -type f -name "*.txt" -depth 1
-  youtube_video_hashes: for all the txt_files, extract all the youtube video ids 
-  save youtube_video_hashes into ./japan.knowledge.youtube_video_hashes
-}
-
-group wiki_search.php {
-  task (persistent) {
-    complete tasks in ./prompts/wiki_full_article_search.prompt
-  }
-}
-
-group golang_doc_search.py {
-  task (completed) {
-    enhancement: if the question is about code sample and if there are specific golang packages are mentioned, search "https://pkg.go.dev/{package_name}" as well
-  }
-
-  task (completed) {
-    create ./golang_doc_search.py <question>:
-    - source: https://go.dev/doc/
-    - use {source} as the only source of truth
-    - use ollama local model ornith:35b (no thinking mode) to understand the question, find out keywords to search in {source}
-  }
-}
-
 group search_youtube.py related to ./search_youtube.py {
   task (completed) {
     only return the videos that has english transcript
@@ -192,22 +163,8 @@ group: generate_tags.py {
 
 group app/chat.html and app/chat_server.py {
 
-  document_backed_tags:rust, golang, php
-
-  task (completed) {
-    DO NOT display "ornith:35b" in the chat window UI
-  }
-
-  task (completed) {
-    change the chat window title from "YouTube Local Chat" to "Personal Chatbot"
-  }
-
-  task (completed) {
-    complete tasks in ./prompts/image.prompt
-  }
-
-  task (completed) {
-    complete tasks in ./prompts/openlibrary.prompt
+  task (persistent) {
+    complete tasks in ./prompts/programming.prompt
   }
 
   task (persistent) {
@@ -263,6 +220,25 @@ group app/chat.html and app/chat_server.py {
       complete tasks in ./prompts/programming_language_tips.prompt
     }
   }
+
+  document_backed_tags:rust, golang, php
+
+  task (completed) {
+    DO NOT display "ornith:35b" in the chat window UI
+  }
+
+  task (completed) {
+    change the chat window title from "YouTube Local Chat" to "Personal Chatbot"
+  }
+
+  task (completed) {
+    complete tasks in ./prompts/image.prompt
+  }
+
+  task (completed) {
+    complete tasks in ./prompts/openlibrary.prompt
+  }
+
 
   tag japan {
     task (completed) {
@@ -831,4 +807,33 @@ task (completed) {
   - it should use free youtube api to fetch the transcript of a youtube video
   - use ollama model ornith:35b to summarize transcript into 20 words and store into ./.chat/youtube_transcripts/<youtube_video_hash>.title
   - the transcript should be stored in ./.chat/youtube_transcripts/<youtube_video_hash>.transcript
+}
+
+task git_repo (completed) {
+  complete tasks in ./prompts/git_repo.prompt  
+}
+
+task.import_japn_knowledge (completed) {
+  txt_files: run cli command: find ~/airesearch/japan_knowledge/knowledge/japan/youtube_transcript/ -type f -name "*.txt" -depth 1
+  youtube_video_hashes: for all the txt_files, extract all the youtube video ids 
+  save youtube_video_hashes into ./japan.knowledge.youtube_video_hashes
+}
+
+group wiki_search.php {
+  task (persistent) {
+    complete tasks in ./prompts/wiki_full_article_search.prompt
+  }
+}
+
+group golang_doc_search.py {
+  task (completed) {
+    enhancement: if the question is about code sample and if there are specific golang packages are mentioned, search "https://pkg.go.dev/{package_name}" as well
+  }
+
+  task (completed) {
+    create ./golang_doc_search.py <question>:
+    - source: https://go.dev/doc/
+    - use {source} as the only source of truth
+    - use ollama local model ornith:35b (no thinking mode) to understand the question, find out keywords to search in {source}
+  }
 }

@@ -30,7 +30,10 @@ Endpoints:
                                   names Rust, Go, or PHP uses the official
                                   documentation for that language; a code question
                                   consults the documentation first, before any
-                                  local code generation. A "source" event says
+                                  local code generation. A language-feature
+                                  explanation instead combines related official
+                                  documentation excerpts with the retrieved
+                                  transcript trunks. A "source" event says
                                   whether the currently streaming answer is
                                   coming from the local Ollama model or the
                                   official docs. /news streams "news" events
@@ -1571,6 +1574,41 @@ LANGUAGE_CODE_FENCES = {
     PHP_LANGUAGE: "php",
 }
 
+# The programming_docs_map from ./prompts/programming.prompt. When a question
+# is about a programming language or one of its features, the server loads
+# related excerpts from that language's official documentation in addition to
+# the transcript trunk context. Every entry names the documentation script
+# whose cached index and chunker are reused, the reference URL to cite, and
+# the local knowledge-note directory that supplements the docs.
+PROGRAMMING_DOCS_MAP = {
+    GO_LANGUAGE: {
+        "reference": "https://go.dev/doc/",
+        "source_label": "go.dev/doc",
+        "module": "golang_doc_search",
+        "knowledge_tag": "golang",
+    },
+    RUST_LANGUAGE: {
+        "reference": "https://doc.rust-lang.org/reference",
+        "source_label": "doc.rust-lang.org",
+        "module": "rust_doc_search",
+        "knowledge_tag": "rust",
+    },
+    PHP_LANGUAGE: {
+        "reference": "https://www.php.net/manual/en/",
+        "source_label": "www.php.net/manual/en",
+        "module": "php_doc_search",
+        "knowledge_tag": "php",
+    },
+}
+
+# Bound the documentation that is folded into a normal chat prompt. The
+# excerpts are a reference next to the trunks, not a replacement for them.
+PROGRAMMING_DOCS_TOP_K = 6
+PROGRAMMING_DOCS_CHUNKS_PER_PAGE = 2
+PROGRAMMING_DOCS_MAX_CHARS = 6_000
+_PROGRAMMING_DOCS_INDEX_CACHE: dict[str, tuple] = {}
+_PROGRAMMING_DOCS_INDEX_LOCK = threading.Lock()
+
 
 def normalize_language(language: str | None) -> str:
     """Return the canonical display name for a programming language."""
@@ -1846,6 +1884,23 @@ STRONG_PROGRAMMING_CONCEPT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Language features and mechanics that are the subject of a programming
+# question even when the question does not ask for code. Together with the
+# concept patterns above, this lets a follow-up such as "how does ownership
+# work?" keep consulting the Rust documentation from the previous turn.
+PROGRAMMING_FEATURE_PATTERN = re.compile(
+    r"\b(?:"
+    r"ownership|borrow(?:ing|ed|s)?|borrow\s+checker|lifetimes?|"
+    r"trait(?:s)?|macros?|goroutines?|channels?|defer|generics?|"
+    r"pattern\s+matching|type\s+inference|memory\s+safety|"
+    r"move\s+semantics|smart\s+pointers?|destructors?|drop\s+check|"
+    r"async\s+runtime|iterators?|structs?|enums?|methods?|"
+    r"error\s+handling|exceptions?|reflection|metaprogramming|"
+    r"operator\s+overloading|zero[-\s]cost|compile[-\s]time"
+    r")\b",
+    re.IGNORECASE,
+)
+
 # Opinions and recommendations about a technology are not code requests,
 # even when they mention a programming concept.
 CODING_OPINION_PATTERN = re.compile(
@@ -1882,6 +1937,50 @@ CODE_REQUEST_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+# Explanation questions about a language feature ("what is ownership in
+# Rust?", "how does the borrow checker work?") are not code requests even
+# though CODE_REQUEST_PATTERN's broad "in rust" alternative matches them. The
+# server uses these patterns to keep such questions in the normal answer path,
+# where the language documentation is combined with the transcript context.
+PROGRAMMING_EXPLANATION_PATTERN = re.compile(
+    r"^\s*(?:what\s+(?:is|are|does|do)|why\s+(?:is|are|does|do)|"
+    r"how\s+(?:does|do|is|are)|explain|describe|tell\s+me\s+about|define|"
+    r"definition\s+of|difference\s+between|when\s+(?:should|would|do)\s+"
+    r"(?:i|we)\s+use|walk\s+me\s+through)\b",
+    re.IGNORECASE,
+)
+EXPLICIT_CODE_REQUEST_PATTERN = re.compile(
+    r"(?:\b(?:show|write|give|provide|generate|create|implement|build|code|"
+    r"debug|refactor|fix)\b.{0,60}\b(?:code|sample|snippet|example|function|"
+    r"method|class|program|script|implementation|algorithm|data\s+structure|"
+    r"query|api|endpoint|architecture|design)\b"
+    r"|\b(?:code|sample|example|demo)\s+(?:code|sample|example|snippet|"
+    r"implementation|program|for\s+(?:a|an|the))\b"
+    r"|\bhow\s+(?:do|can|should|would|to)\s+(?:i|we|you)?\s*(?:implement|"
+    r"build|write|code|create|structure|architect|design)\b"
+    r"|\b(?:implement|implementing|code|program|architect)\s+(?:a|an|the|this|"
+    r"that|my|our)\b)",
+    re.IGNORECASE,
+)
+
+
+def programming_explanation_question(question: str) -> bool:
+    """Return True for an explanatory question about a language feature."""
+    text = " ".join(str(question or "").split())
+    return bool(text and PROGRAMMING_EXPLANATION_PATTERN.search(text))
+
+
+def explicit_code_request(question: str) -> bool:
+    """Return True when the question explicitly asks for code or a program."""
+    text = " ".join(str(question or "").split())
+    return bool(
+        text
+        and (
+            EXPLICIT_CODE_REQUEST_PATTERN.search(text)
+            or CHINESE_CODING_PATTERN.search(question)
+        )
+    )
 
 # A pasted code snippet is itself a strong signal that the question is a
 # coding question, even when it is phrased as "why does this fail?".
@@ -1959,14 +2058,29 @@ def github_query_terms(
 def detect_code_language(question: str, fallback: str = "") -> str:
     """Return the programming language named by a question, if any.
 
-    The GitHub language map already recognizes Rust, PHP, and "golang". A
-    separate check covers the short name "go" when it is used in a code
-    context. ``fallback`` keeps the previous language for a follow-up such as
-    "now add error handling" when the new question does not name one.
+    The GitHub language map already recognizes Rust, PHP, and "golang" as
+    well as languages that are not documentation-backed. Only Go, Rust, and
+    PHP are returned because those are the languages with an official-docs
+    answer path. ``fallback`` keeps the previous language for a follow-up
+    such as "now add error handling" when the new question does not name one.
+    """
+    language = detect_explicit_language(question)
+    if language:
+        return language if language in DOCUMENTATION_LANGUAGES else ""
+    return fallback if fallback in DOCUMENTATION_LANGUAGES else ""
+
+
+def detect_explicit_language(question: str) -> str:
+    """Return any programming language explicitly named by a question.
+
+    Unlike :func:`detect_code_language`, this also returns languages such as
+    Python or JavaScript that have no official-docs integration. Callers use
+    that to avoid treating a follow-up in a previous Rust conversation as a
+    Rust question when the new question clearly switches to another language.
     """
     text = " ".join(str(question or "").split())
     _terms, language, _extensions = github_query_terms(text)
-    if language in DOCUMENTATION_LANGUAGES:
+    if language:
         return language
     if re.search(
         r"\b(?:in|with|using)\s+go\b|\bgo\s+(?:program|code|script|cli|"
@@ -1975,7 +2089,45 @@ def detect_code_language(question: str, fallback: str = "") -> str:
         re.IGNORECASE,
     ):
         return GO_LANGUAGE
-    return fallback if fallback in DOCUMENTATION_LANGUAGES else ""
+    return ""
+
+
+def programming_feature_question(question: str) -> bool:
+    """Return True when a question is about a language or language feature.
+
+    This is broader than coding-mode detection: a question such as "how does
+    ownership work?" asks about a Rust feature without requesting code. It is
+    used only to decide whether a previously mentioned language should still
+    supply its official documentation context.
+    """
+    text = " ".join(str(question or "").split())
+    if not text:
+        return False
+    return bool(
+        question_requests_coding(question)
+        or CODE_REQUEST_PATTERN.search(text)
+        or CHINESE_CODING_PATTERN.search(question)
+        or PROGRAMMING_CONCEPT_PATTERN.search(text)
+        or STRONG_PROGRAMMING_CONCEPT_PATTERN.search(text)
+        or PROGRAMMING_FEATURE_PATTERN.search(text)
+    )
+
+
+def programming_docs_language(question: str, fallback: str = "") -> str:
+    """Return the documentation-backed language for a language question.
+
+    An explicitly named language wins. When the question does not name one,
+    the previous programming language is reused only when the new question is
+    clearly about a language or one of its features. This prevents an
+    unrelated question from inheriting stale documentation context.
+    """
+    explicit = normalize_language(detect_explicit_language(question))
+    if explicit:
+        return explicit if explicit in PROGRAMMING_DOCS_MAP else ""
+    if not programming_feature_question(question):
+        return ""
+    previous = normalize_language(fallback)
+    return previous if previous in PROGRAMMING_DOCS_MAP else ""
 
 
 def _github_headers(text_match: bool = False) -> dict[str, str]:
@@ -2703,6 +2855,253 @@ def _run_doc_search(
     if log is not None:
         log(f"[{log_prefix}: {success_message}]")
     return answer, ""
+
+
+def _load_programming_docs_index(
+    language: str,
+) -> tuple[object, list[dict], object | None] | None:
+    """Load the cached official-docs index for ``language``.
+
+    The documentation scripts already crawl and cache their language docs.
+    Reusing that cache avoids a second crawler and guarantees the excerpts
+    shown in a chat answer come from the same reference source described by
+    ``PROGRAMMING_DOCS_MAP``. Returns ``None`` when the language is not in the
+    map or the cache has not been built yet; the caller then keeps the normal
+    transcript-only answer path.
+    """
+    normalized = normalize_language(language)
+    descriptor = PROGRAMMING_DOCS_MAP.get(normalized)
+    if descriptor is None:
+        return None
+    try:
+        module = importlib.import_module(descriptor["module"])
+    except ImportError:
+        return None
+
+    cache_dir = Path(module.DEFAULT_CACHE_DIR).expanduser()
+    try:
+        cache_file = module.cache_path(cache_dir)
+        cache_mtime = cache_file.stat().st_mtime
+    except (AttributeError, OSError):
+        return None
+
+    with _PROGRAMMING_DOCS_INDEX_LOCK:
+        cached = _PROGRAMMING_DOCS_INDEX_CACHE.get(normalized)
+        if (
+            cached is not None
+            and cached[0] == cache_mtime
+            and cached[1] is module
+        ):
+            return module, cached[2], cached[3]
+
+    args = argparse.Namespace(
+        cache_dir=str(cache_dir),
+        offline=True,
+        refresh=False,
+        max_pages=getattr(module, "DEFAULT_MAX_PAGES", 250),
+    )
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            pages = module.get_pages(args)
+    except SystemExit:
+        return None
+    except Exception:
+        return None
+    if not pages:
+        return None
+
+    try:
+        chunks = module.chunk_pages(pages)
+    except Exception:
+        return None
+    if not chunks:
+        return None
+
+    # Curated notes in ./knowledge/<tag> supplement the official manual, just
+    # as they do when the documentation script answers by itself.
+    try:
+        from knowledge_docs import knowledge_chunks
+
+        chunks.extend(
+            knowledge_chunks(
+                descriptor["knowledge_tag"], module.chunk_pages
+            )
+        )
+    except Exception:
+        pass
+
+    bm25 = None
+    bm25_class = getattr(module, "BM25Okapi", None)
+    if bm25_class is not None:
+        try:
+            bm25 = bm25_class(
+                [
+                    module.tokenize(
+                        f"{chunk.get('text', '')} {chunk.get('title', '')}"
+                    )
+                    for chunk in chunks
+                ]
+            )
+        except Exception:
+            bm25 = None
+
+    with _PROGRAMMING_DOCS_INDEX_LOCK:
+        _PROGRAMMING_DOCS_INDEX_CACHE[normalized] = (
+            cache_mtime,
+            module,
+            chunks,
+            bm25,
+        )
+    return module, chunks, bm25
+
+
+def _rank_programming_docs(
+    module,
+    chunks: list[dict],
+    bm25,
+    question: str,
+    limit: int,
+) -> list[tuple[float, dict]]:
+    """Rank documentation excerpts for ``question`` with the docs tokenizer."""
+    keywords = chat.tokenize(question) or [question]
+    if bm25 is None:
+        try:
+            return module.rank_chunks(question, keywords, chunks, limit)
+        except Exception:
+            return []
+
+    query_text = " ".join(keywords * 2) + " " + question
+    query_tokens = module.tokenize(query_text) or [question.lower()]
+    try:
+        scores = [float(score) for score in bm25.get_scores(query_tokens)]
+    except Exception:
+        return []
+    try:
+        from knowledge_docs import boost_knowledge_scores
+
+        boost_knowledge_scores(chunks, scores)
+    except Exception:
+        pass
+
+    order = sorted(
+        range(len(chunks)), key=lambda index: scores[index], reverse=True
+    )
+    selected: list[tuple[float, dict]] = []
+    per_page: dict[str, int] = {}
+    seen_text: set[str] = set()
+    for index in order:
+        if len(selected) >= limit:
+            break
+        score = scores[index]
+        if score <= 0:
+            continue
+        chunk = chunks[index]
+        url = str(chunk.get("url") or "")
+        if (
+            not chunk.get("knowledge")
+            and per_page.get(url, 0) >= PROGRAMMING_DOCS_CHUNKS_PER_PAGE
+        ):
+            continue
+        fingerprint = str(chunk.get("text") or "")[:160]
+        if fingerprint in seen_text:
+            continue
+        seen_text.add(fingerprint)
+        per_page[url] = per_page.get(url, 0) + 1
+        selected.append((score, chunk))
+    return selected
+
+
+def programming_docs_context(
+    language: str, question: str
+) -> tuple[str, dict]:
+    """Build an official-documentation reference block for a chat prompt.
+
+    The block is added next to the normal transcript context, so the model
+    can use the official manual for syntax, APIs, and language semantics while
+    still grounding the rest of the answer in the retrieved trunks.
+    """
+    normalized = normalize_language(language)
+    descriptor = PROGRAMMING_DOCS_MAP.get(normalized)
+    if descriptor is None:
+        return "", {}
+    loaded = _load_programming_docs_index(normalized)
+    if loaded is None:
+        return "", {
+            "language": normalized,
+            "source": descriptor["reference"],
+            "excerpts": 0,
+            "error": "no cached documentation index",
+        }
+
+    module, chunks, bm25 = loaded
+    selected = _rank_programming_docs(
+        module,
+        chunks,
+        bm25,
+        question,
+        PROGRAMMING_DOCS_TOP_K,
+    )
+    if not selected:
+        return "", {
+            "language": normalized,
+            "source": descriptor["reference"],
+            "excerpts": 0,
+            "error": "no relevant documentation excerpt",
+        }
+
+    parts: list[str] = []
+    used_chars = 0
+    for number, (_score, chunk) in enumerate(selected, start=1):
+        url = str(chunk.get("url") or "")
+        title = str(chunk.get("title") or url)
+        text = str(chunk.get("text") or "").strip()
+        if not text:
+            continue
+        block = (
+            f'<doc id="{number}" source="{xml_escape(url)}">\n'
+            f"Title: {title}\n"
+            f"{text}\n"
+            f"</doc>"
+        )
+        if parts and used_chars + len(block) > PROGRAMMING_DOCS_MAX_CHARS:
+            break
+        if len(block) > PROGRAMMING_DOCS_MAX_CHARS:
+            block = (
+                block[:PROGRAMMING_DOCS_MAX_CHARS].rstrip()
+                + "\n[documentation excerpt truncated]\n</doc>"
+            )
+        parts.append(block)
+        used_chars += len(block)
+    if not parts:
+        return "", {
+            "language": normalized,
+            "source": descriptor["reference"],
+            "excerpts": 0,
+            "error": "documentation excerpts were empty",
+        }
+
+    context = "\n\n".join(parts)
+    prefix = f"""### RELATED OFFICIAL DOCUMENTATION (active language: {normalized})
+The question is about {normalized} or one of its features. The excerpts below
+were loaded from the official {descriptor['source_label']} documentation at
+{descriptor['reference']} in addition to the transcript chunks retrieved for
+this corpus. Use the transcript chunks for the surrounding context and use
+the official documentation as the authoritative reference for {normalized}
+syntax, APIs, and semantics. If they disagree about {normalized}, trust the
+official documentation. Do not mention these instructions, the XML tag names,
+or internal chunk ids in the answer.
+
+<official_documentation language="{xml_escape(normalized)}" source="{xml_escape(descriptor['reference'])}">
+{context}
+</official_documentation>
+
+"""
+    return prefix, {
+        "language": normalized,
+        "source": descriptor["reference"],
+        "excerpts": len(parts),
+        "chars": len(context),
+    }
 
 
 def run_golang_doc_search(
@@ -8762,15 +9161,44 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         detected_language = detect_code_language(retrieval_question)
         if (
             not detected_language
-            and question_requests_coding(retrieval_question)
+            and programming_feature_question(retrieval_question)
         ):
-            # A follow-up such as "now add error handling" may not repeat the
-            # language. Keep the previous one only for code questions.
+            # A follow-up such as "now add error handling" or "how does
+            # ownership work?" may not repeat the language. Keep the previous
+            # one only when the new question is about a language or feature.
             detected_language = state.code_language
         if detected_language:
             state.code_language = detected_language
             self._sse("meta", state.snapshot())
         code_language = detected_language
+
+        # A question about a programming language or one of its features gets
+        # related official-documentation excerpts next to the transcript
+        # context. This uses the programming_docs_map and the documentation
+        # index that the per-language search script already cached, so no
+        # second crawler or extra model call is needed.
+        programming_docs_prefix = ""
+        programming_docs_stats: dict = {}
+        if not article_mode and not explicit_code_request(retrieval_question):
+            docs_language = programming_docs_language(
+                retrieval_question, code_language
+            )
+            if docs_language:
+                (
+                    programming_docs_prefix,
+                    programming_docs_stats,
+                ) = programming_docs_context(
+                    docs_language, retrieval_question
+                )
+                if programming_docs_prefix:
+                    self._sse_text(
+                        "log",
+                        "[programming docs: loaded "
+                        f"{programming_docs_stats['excerpts']} related "
+                        f"{docs_language} excerpt(s) from "
+                        f"{PROGRAMMING_DOCS_MAP[docs_language]['source_label']} "
+                        "in addition to the transcript context]",
+                    )
         golang_package_docs = (
             not article_mode
             and code_language == GO_LANGUAGE
@@ -8803,6 +9231,29 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             or php_symbol_docs
             or documentation_code
         )
+        if (
+            coding_mode
+            and programming_docs_prefix
+            and programming_explanation_question(retrieval_question)
+            and not explicit_code_request(retrieval_question)
+        ):
+            # "What is ownership in Rust?" is an explanation, not a request
+            # for a program. Keep the official documentation excerpts, but
+            # answer from the normal prompt so the retrieved trunk context is
+            # used alongside the docs instead of taking the docs-first
+            # code-generation path.
+            coding_mode = False
+            documentation_code = False
+            golang_package_docs = False
+            rust_crate_docs = False
+            rust_code_docs = False
+            php_symbol_docs = False
+            self._sse_text(
+                "log",
+                "[programming question: explanation detected; combining the "
+                "official documentation excerpts with the transcript "
+                "context instead of generating code]",
+            )
         # Go, Rust, and PHP answer with the dedicated programming model for
         # both chat and code generation.
         coding_model = language_coding_model(code_language)
@@ -8897,6 +9348,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     else language_coding_directive(code_language)
                 )
             )
+            if programming_docs_prefix:
+                # Keep the coding-mode rules first (they are the highest
+                # priority), then add the documentation reference next to the
+                # retrieved transcript context.
+                prompt_prefix = prompt_prefix + programming_docs_prefix
             # /article gathers evidence in small rounds and stops as soon as
             # the small model says the gathered paragraphs are sufficient.
             # Apply the same loop to normal transcript questions. Article mode
@@ -9034,6 +9490,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
             if prepare_stats is not None and prepare_stats.get("added"):
                 attempt_stats["article_expansion"] = dict(prepare_stats)
+            if programming_docs_stats:
+                attempt_stats["programming_docs"] = dict(
+                    programming_docs_stats
+                )
             return response, sources or [], attempt_stats, None
 
         scope_label = (

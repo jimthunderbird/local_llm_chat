@@ -1,0 +1,9 @@
+programming_docs_map {
+  rust {
+    - https://doc.rust-lang.org/reference
+  }
+}
+
+task (completed) {
+  if a <question> is about a programming language or its feature, reference {programming_docs_map}, load the related documents from the documents for the language in addition to the context from the trunks
+}
