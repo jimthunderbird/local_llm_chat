@@ -41,7 +41,11 @@ Endpoints:
     POST /api/translate          SSE: paragraph-by-paragraph Simplified Chinese
                                   translation of an answer
     POST /api/tts                one article paragraph -> local text-to-speech
-                                  WAV (used by the news modal's read-aloud icon)
+                                  WAV (used by the news modal's read-aloud icon);
+                                  an optional voice selects a TTS voice
+    POST /api/ai_news_podcast    SSE: draft a 2000-word HOST/GUEST script from
+                                  the /ai_news_podcast stories and return the
+                                  two male voices used by /api/tts
     POST /api/explain_line       SSE: explain one line of a code snippet from a
                                   Go, Rust, or PHP
     POST /api/snippet_question   SSE: answer a free-form question about a whole
@@ -77,6 +81,7 @@ import codecs
 import gc
 import hashlib
 import html
+import importlib.util
 import io
 import json
 import math
@@ -96,7 +101,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, NamedTuple
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, quote_plus, urlparse
 from xml.sax.saxutils import escape as xml_escape
 from xml.etree import ElementTree
 
@@ -129,10 +134,13 @@ WEB_COMMANDS = {
     **chat.COMMANDS,
     "/help": "show commands and keyboard shortcuts",
     "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
-    "learn_playlist <playlist> | search <keyword> | bookmark list",
-    "/news": "list the latest news from wsj, cnn, cbslite, nprtext, yahoo_finance, medium, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count]); /news search <keywords> searches Google News",
+    "learn_playlist <playlist> | search <keyword> | advancesearch <keyword> | "
+    "bookmark list",
+    "/news": "list the latest news from wsj, cnn, cbslite, nprtext, yahoo_finance, medium, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count]); /news search <keywords> [website] searches Google News, optionally only that website",
     "/googlenews": "search Google News for the latest stories: /googlenews <keywords>",
+    "/howstuffworks": "search HowStuffWorks articles by keywords: /howstuffworks <keywords>",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
+    "/ai_news_podcast": "show the top five stories from the last 12 hours and create a two-voice AI news podcast",
     "/gutenberg": "search Project Gutenberg books: /gutenberg search <keywords>; click a book to read it and ask questions",
     "/openlibrary": "search inside Open Library books: /openlibrary search <keywords>",
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
@@ -160,6 +168,136 @@ NEWS_SOURCES = {
 
 NEWS_SOURCE_USAGE = "|".join(NEWS_SOURCES)
 
+# /news search <keywords> <website> restricts a Google News search to one
+# site. Accept a bare hostname (howstuffworks.com), a www host, or a full URL;
+# the site: operator uses the host plus an optional path.
+NEWS_SEARCH_WEBSITE_RE = re.compile(
+    r"^(?:https?://)?(?P<host>(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+"
+    r"[a-z]{2,63})(?P<path>/[^\s]*)?$",
+    re.IGNORECASE,
+)
+# A trailing token such as "node.js" or "notes.md" is far more likely to be a
+# keyword than a website, so these file-like endings only count as a site when
+# the user is explicit (a scheme, www., or a path).
+NEWS_SEARCH_FILE_EXTENSIONS = {
+    "js", "jsx", "ts", "tsx", "py", "rb", "go", "rs", "php", "java",
+    "c", "h", "cpp", "cs", "sh", "md", "html", "htm", "css", "json",
+    "xml", "yaml", "yml", "toml", "csv", "sql", "txt", "ipynb", "pdf",
+    "zip", "tar", "gz", "jpg", "jpeg", "png", "gif", "svg", "webp",
+    "mp3", "mp4", "wav",
+}
+
+
+def split_news_search_website(keywords: str) -> tuple[str, str]:
+    """Split a trailing website off a /news search query.
+
+    ``/news search <keywords> <website>`` searches Google News with a
+    ``site:<website>`` restriction. Only the final token is considered, and
+    only when at least one keyword precedes it, so ordinary searches (and a
+    lone ``node.js`` keyword) are left untouched.
+
+    Returns ``(keywords, website)`` where ``website`` is an empty string when
+    no site was requested.
+    """
+    stripped = keywords.strip()
+    parts = stripped.split()
+    if len(parts) < 2:
+        return stripped, ""
+
+    candidate = parts[-1]
+    match = NEWS_SEARCH_WEBSITE_RE.match(candidate)
+    if match is None:
+        return stripped, ""
+
+    host = match.group("host")
+    path = (match.group("path") or "").rstrip("/")
+    extension = host.rsplit(".", 1)[-1].lower()
+    explicit = (
+        candidate.lower().startswith(("http://", "https://", "www."))
+        or "/" in candidate
+    )
+    if extension in NEWS_SEARCH_FILE_EXTENSIONS and not explicit:
+        return stripped, ""
+
+    return " ".join(parts[:-1]), host + path
+
+# /ai_news_podcast lists the five newest stories from the last 12 hours and
+# turns their full article bodies into a two-host podcast script, read aloud
+# with two distinct male voices.
+AI_NEWS_PODCAST_QUERY = "when:12h news"
+# latest_news_url is https://news.google.com/rss/search?q=when:12h&... ;
+# Google News returns an empty feed for the bare time operator, so the command
+# keeps the same 12-hour window and adds the word "news" to receive stories.
+AI_NEWS_PODCAST_LIMIT = 5
+AI_NEWS_PODCAST_MODEL = chat.CHAT_MODEL
+AI_NEWS_PODCAST_SOURCE_CHARS = 24_000
+AI_NEWS_PODCAST_NUM_PREDICT = 5_000
+AI_NEWS_PODCAST_NUM_CTX = 32_768
+AI_NEWS_PODCAST_PROMPT = """You are the head writer for a daily AI news podcast.
+
+Below is the source material: up to five current news stories with their
+title, source, summary, and full article paragraphs.
+
+Write an engaging podcast episode of approximately 2000 words. It must sound
+like two male co-hosts talking together: HOST leads the show and GUEST adds
+analysis and context. Discuss every story in the source material, in order,
+and never invent facts that are absent from the source.
+
+Formatting rules (follow them exactly):
+- Put exactly one speaker label at the start of every line: HOST: or GUEST:.
+- Every spoken turn starts with one of those two labels and a space.
+- Alternate naturally between HOST and GUEST; do not write stage directions,
+  markdown, headings, bullet points, timestamps, or sound-effect notes.
+- Do not include an episode title or a closing summary section.
+- Aim for roughly 2000 words of spoken dialogue.
+
+Source material:
+{source}
+
+Podcast script:
+"""
+
+
+def _module_available(name: str) -> bool:
+    """Return True when an optional Python package is importable."""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _clean_voice_name(voice: str) -> str:
+    """Keep a user-supplied voice name safe for a subprocess argument."""
+    value = " ".join(str(voice or "").split())
+    if len(value) > 80:
+        value = value[:80].strip()
+    return value.replace("\x00", "")
+
+
+def _podcast_voice_defaults() -> dict[str, str]:
+    """Pick two distinct male voices for the local TTS engine.
+
+    Kokoro uses its two American male voices, while the macOS ``say`` and
+    espeak fallbacks use male voices that ship with those engines. Environment
+    overrides make it easy to choose different voices without code changes.
+    """
+    if _module_available("kokoro") and _module_available("numpy"):
+        host, guest = "am_michael", "am_adam"
+    elif shutil.which("say"):
+        host, guest = "Daniel", "Fred"
+    elif shutil.which("espeak-ng") or shutil.which("espeak"):
+        host, guest = "en-us+m3", "en-us+m4"
+    else:
+        host, guest = "", ""
+    return {
+        "host": _clean_voice_name(
+            os.environ.get("PODCAST_HOST_VOICE", host)
+        ),
+        "guest": _clean_voice_name(
+            os.environ.get("PODCAST_GUEST_VOICE", guest)
+        ),
+    }
+
 # Learned /news stories live beside the transcript corpus. A story is learned
 # once, then its article content and retrieval trunks are reused on disk and
 # included in the global BM25 corpus.
@@ -182,12 +320,12 @@ KOKORO_PIPELINE_LOCK = threading.Lock()
 KOKORO_SYNTH_LOCK = threading.Lock()
 
 
-def _tts_voice() -> str:
-    return os.environ.get("TTS_VOICE", "").strip()
+def _tts_voice(override: str = "") -> str:
+    return _clean_voice_name(override) or os.environ.get("TTS_VOICE", "").strip()
 
 
-def _tts_cache_path(text: str) -> Path:
-    voice = _tts_voice() or os.environ.get("KOKORO_VOICE", "").strip()
+def _tts_cache_path(text: str, voice: str = "") -> Path:
+    voice = _tts_voice(voice) or os.environ.get("KOKORO_VOICE", "").strip()
     digest = hashlib.sha256(
         f"{TTS_ENGINE}\0{voice}\0{text}".encode("utf-8")
     ).hexdigest()
@@ -199,7 +337,7 @@ def _tts_key_lock(key: str) -> threading.Lock:
         return TTS_KEY_LOCKS.setdefault(key, threading.Lock())
 
 
-def _synthesize_kokoro(text: str, out_path: Path) -> None:
+def _synthesize_kokoro(text: str, out_path: Path, voice: str = "") -> None:
     """Render one paragraph with the local Kokoro pipeline from the research."""
     global KOKORO_PIPELINE
     try:
@@ -214,7 +352,7 @@ def _synthesize_kokoro(text: str, out_path: Path) -> None:
             KOKORO_PIPELINE = KPipeline(lang_code=lang_code)
         pipeline = KOKORO_PIPELINE
 
-    voice = os.environ.get("KOKORO_VOICE", "af_heart")
+    voice = _tts_voice(voice) or os.environ.get("KOKORO_VOICE", "af_heart")
     parts = []
     # The pipeline owns a single model instance; serialize inference when the
     # browser prefetches the next paragraph concurrently.
@@ -234,7 +372,7 @@ def _synthesize_kokoro(text: str, out_path: Path) -> None:
         wav.writeframes(pcm.tobytes())
 
 
-def _synthesize_macos(text: str, out_path: Path) -> None:
+def _synthesize_macos(text: str, out_path: Path, voice: str = "") -> None:
     executable = shutil.which("say")
     if not executable:
         raise RuntimeError("macOS 'say' is not available")
@@ -245,7 +383,7 @@ def _synthesize_macos(text: str, out_path: Path) -> None:
         "--file-format=WAVE",
         "--data-format=LEI16@22050",
     ]
-    voice = _tts_voice()
+    voice = _tts_voice(voice)
     if voice:
         command.extend(["-v", voice])
     command.append(text)
@@ -258,12 +396,12 @@ def _synthesize_macos(text: str, out_path: Path) -> None:
     )
 
 
-def _synthesize_espeak(text: str, out_path: Path) -> None:
+def _synthesize_espeak(text: str, out_path: Path, voice: str = "") -> None:
     executable = shutil.which("espeak-ng") or shutil.which("espeak")
     if not executable:
         raise RuntimeError("espeak-ng/espeak is not available")
     command = [executable, "-w", str(out_path)]
-    voice = _tts_voice()
+    voice = _tts_voice(voice)
     if voice:
         command.extend(["-v", voice])
     command.append(text)
@@ -276,13 +414,13 @@ def _synthesize_espeak(text: str, out_path: Path) -> None:
     )
 
 
-def _synthesize_to_file(text: str, out_path: Path) -> None:
+def _synthesize_to_file(text: str, out_path: Path, voice: str = "") -> None:
     engine = TTS_ENGINE
     errors: list[str] = []
 
     if engine in {"auto", "kokoro"}:
         try:
-            _synthesize_kokoro(text, out_path)
+            _synthesize_kokoro(text, out_path, voice)
             return
         except Exception as exc:
             errors.append(f"kokoro: {exc}")
@@ -292,14 +430,14 @@ def _synthesize_to_file(text: str, out_path: Path) -> None:
     if engine in {"auto", "say"}:
         if sys.platform == "darwin" or engine == "say":
             try:
-                _synthesize_macos(text, out_path)
+                _synthesize_macos(text, out_path, voice)
                 return
             except Exception as exc:
                 errors.append(f"say: {exc}")
 
     if engine in {"auto", "espeak"}:
         try:
-            _synthesize_espeak(text, out_path)
+            _synthesize_espeak(text, out_path, voice)
             return
         except Exception as exc:
             errors.append(f"espeak: {exc}")
@@ -319,7 +457,7 @@ def _prewarm_tts() -> None:
         pass
 
 
-def synthesize_speech(text: str) -> bytes:
+def synthesize_speech(text: str, voice: str = "") -> bytes:
     """Return a cached WAV for one article paragraph, synthesizing if needed."""
     text = " ".join(str(text or "").split())
     if not text:
@@ -331,7 +469,7 @@ def synthesize_speech(text: str) -> bytes:
         )
 
     TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_path = _tts_cache_path(text)
+    cache_path = _tts_cache_path(text, voice)
     with _tts_key_lock(cache_path.name):
         try:
             cached = cache_path.read_bytes()
@@ -344,7 +482,7 @@ def synthesize_speech(text: str) -> bytes:
             f".{cache_path.stem}.{os.getpid()}.{threading.get_ident()}.tmp.wav"
         )
         try:
-            _synthesize_to_file(text, temp_path)
+            _synthesize_to_file(text, temp_path, voice)
             if not temp_path.exists() or temp_path.stat().st_size <= 44:
                 raise RuntimeError("The text-to-speech engine produced no audio")
             os.replace(temp_path, cache_path)
@@ -927,6 +1065,7 @@ COMMAND_ARGUMENTS = {
     "/benchmark",
     "/news",
     "/googlenews",
+    "/howstuffworks",
     "/medium",
     "/gutenberg",
     "/openlibrary",
@@ -1027,6 +1166,7 @@ YOUTUBE_SUBCOMMANDS = {
     "learn_topic": "search YouTube for <topic> and learn the top 3 videos",
     "learn_playlist": "learn every video in a YouTube playlist",
     "search": "search YouTube through Google News RSS for <keyword> and show matching video urls and titles",
+    "advancesearch": "load the YouTube search-results page for <keyword> and extract every video with its channel and duration",
     "transcript": "use one transcript by hash/URL, or search titles with ag",
     "search_transcript": "search transcript titles with ag and pick a video",
     "bookmark": "list bookmarked videos, latest first: /youtube bookmark list",
@@ -1037,6 +1177,9 @@ YOUTUBE_SUBCOMMANDS = {
 # Search itself uses Google News RSS (site:youtube.com <keyword>); results are
 # only the YouTube source items, reduced to a video url and title.
 YOUTUBE_SEARCH_PAGE_SIZE = 6
+# /youtube advancesearch reads one YouTube results page, which normally
+# contains about twenty videoRenderer entries.
+YOUTUBE_ADVANCE_SEARCH_SIZE = 20
 # Cache at most this many results per keyword, even after many "More" clicks.
 YOUTUBE_SEARCH_MAX_RESULTS = 200
 # After the first page is painted, quietly fill the cache with a few more
@@ -7713,14 +7856,21 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(text, str) or not text.strip():
                 self._send_error_json("Missing text to read aloud", 400)
                 return
+            voice = str(payload.get("voice") or "")
             try:
-                self._send_wav(synthesize_speech(text))
+                self._send_wav(synthesize_speech(text, voice=voice))
             except ValueError as exc:
                 self._send_error_json(str(exc), 400)
             except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
                 self._send_error_json(
                     f"Could not read the text aloud: {exc}", 502
                 )
+            return
+        if parsed.path == "/api/ai_news_podcast":
+            payload = self._read_json()
+            if payload is None:
+                return
+            self._handle_ai_news_podcast(payload)
             return
         if parsed.path == "/api/explain_line":
             payload = self._read_json()
@@ -9285,8 +9435,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_news(argument)
         elif name == "/googlenews":
             self._command_googlenews(argument)
+        elif name == "/howstuffworks":
+            self._command_howstuffworks(argument)
         elif name == "/medium":
             self._command_medium(argument)
+        elif name == "/ai_news_podcast":
+            self._command_ai_news_podcast(argument)
         elif name == "/gutenberg":
             self._command_gutenberg(argument)
         elif name == "/openlibrary":
@@ -9519,6 +9673,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_learn_playlist(rest)
         elif subcommand == "search":
             self._command_youtube_search(rest)
+        elif subcommand == "advancesearch":
+            self._command_youtube_advance_search(rest)
         elif subcommand == "transcript":
             self._command_transcript(rest, direct=False)
         elif subcommand == "search_transcript":
@@ -9715,6 +9871,113 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             # Warm the next few pages while the user is still looking at the
             # first one, so the "More" button usually needs no network work.
             self._start_youtube_prefetch(keyword)
+
+    def _command_youtube_advance_search(self, argument: str) -> None:
+        """Load YouTube's own search-results page and extract video cards.
+
+        Usage: /youtube advancesearch <keywords>
+        Unlike ``/youtube search`` (Google News RSS), this reads
+        ``https://www.youtube.com/results?search_query=<keywords>`` directly,
+        so the cards also include the channel and video duration.  The page
+        only contains one result set, so no "More" button is shown.
+        """
+        keyword = argument.strip()
+        if (
+            len(keyword) >= 2
+            and keyword[0] == keyword[-1]
+            and keyword[0] in "\"'"
+        ):
+            keyword = keyword[1:-1].strip()
+        if not keyword:
+            self._sse_text(
+                "output", "\nUsage: /youtube advancesearch <keywords>\n"
+            )
+            return
+
+        page_url = (
+            "https://www.youtube.com/results?search_query="
+            + quote_plus(keyword)
+        )
+        self._sse_text(
+            "output",
+            f"\n/youtube advancesearch: loading {page_url}\n",
+        )
+        try:
+            videos = self._run_youtube_advance_search(
+                keyword, YOUTUBE_ADVANCE_SEARCH_SIZE
+            )
+        except RuntimeError as exc:
+            self._sse_text("output", f"\n/youtube advancesearch: {exc}\n")
+            return
+
+        if not videos:
+            self._sse_text(
+                "output",
+                "\n/youtube advancesearch: no videos were found for "
+                f"{keyword!r}.\n",
+            )
+            return
+
+        self._sse_text(
+            "output",
+            f"\n/youtube advancesearch: {len(videos)} video(s) for "
+            f"{keyword!r}. Click a video to play it here, or use Summary "
+            "for an AI overview.\n",
+        )
+        self._sse(
+            "videos",
+            {
+                "keyword": keyword,
+                "items": videos,
+                "has_more": False,
+                "pending": False,
+                "heading": "YouTube videos · search page",
+                "note": (
+                    f"{len(videos)} result"
+                    f"{'' if len(videos) == 1 else 's'} · "
+                    "youtube.com/results"
+                ),
+            },
+        )
+
+    def _run_youtube_advance_search(
+        self, keyword: str, limit: int
+    ) -> list[dict]:
+        """Run ``youtube_news_search.py --search-page`` and normalize it."""
+        command = [
+            sys.executable,
+            "-u",
+            str(SCRIPT_DIR / "youtube_news_search.py"),
+            "--search-page",
+            "--json",
+            "--limit",
+            str(limit),
+            "--",
+            keyword,
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                cwd=SCRIPT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("YouTube search-results page timed out.") from exc
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not run youtube_news_search.py: {exc}"
+            ) from exc
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(
+                "YouTube search-results page failed"
+                + (f": {detail}" if detail else ".")
+            )
+        return self._parse_youtube_json_lines(result.stdout, limit)
 
     def _youtube_search_command(
         self,
@@ -10505,14 +10768,16 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         """Stream the latest news stories to the browser.
 
         Usage: /news [SOURCE ...] [number-of-stories]
-               /news search <keywords>
+               /news search <keywords> [website]
         Each SOURCE is one of wsj, cnn, cbslite, nprtext, yahoo_finance, medium,
         kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch,
         krasia, wccftech, or hackernews.
         Several sources may be selected.
         Without a source, every supported source is shown as its own section.
-        "search <keywords>" is the same as /googlenews <keywords>: it searches
-        Google News and renders the matches exactly like a /news story list.
+        "search <keywords> [website]" is the same as /googlenews <keywords>,
+        except a trailing website restricts the search to that site, for
+        example: /news search black holes howstuffworks.com. It renders the
+        matches exactly like a /news story list.
         """
         stripped = argument.strip()
         search_match = re.match(r"(?i)^search(?:\s+(.*))?$", stripped)
@@ -10521,14 +10786,17 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             if not keywords:
                 self._sse_text(
                     "output",
-                    "\nUsage: /news search <keywords>\n"
-                    "Example: /news search jensen huang\n",
+                    "\nUsage: /news search <keywords> [website]\n"
+                    "Example: /news search jensen huang\n"
+                    "Example: /news search black holes howstuffworks.com\n",
                 )
                 return
+            keywords, website = split_news_search_website(keywords)
+            query = f"site:{website} {keywords}" if website else keywords
             self._stream_news_events(
                 "news_fetch.php",
                 "/news",
-                ["--source", "googlenews", "--search", keywords],
+                ["--source", "googlenews", "--search", query],
             )
             return
 
@@ -10580,6 +10848,35 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             ["--source", "googlenews", "--search", keywords],
         )
 
+    def _command_howstuffworks(self, argument: str) -> None:
+        """Search HowStuffWorks articles by keywords.
+
+        Usage: /howstuffworks <keywords>
+        The command reuses the /news search pipeline: news_fetch.php searches
+        Google News RSS, with the query restricted to
+        site:howstuffworks.com. Its result list and detail modal therefore
+        support Learn, Chat, and read-aloud exactly like a /news story. Full
+        article bodies are fetched on demand when a story is opened.
+        """
+        keywords = argument.strip()
+        if not keywords:
+            self._sse_text(
+                "output",
+                "\nUsage: /howstuffworks <keywords>\n"
+                "Example: /howstuffworks how do black holes work\n",
+            )
+            return
+        self._stream_news_events(
+            "news_fetch.php",
+            "/howstuffworks",
+            [
+                "--source",
+                "googlenews",
+                "--search",
+                f"site:howstuffworks.com {keywords}",
+            ],
+        )
+
     def _command_medium(self, argument: str) -> None:
         """Stream the latest stories from the configured Medium author.
 
@@ -10612,6 +10909,37 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
         self._stream_news_events("news_fetch.php", "/medium", argv)
+
+    def _command_ai_news_podcast(self, argument: str) -> None:
+        """List the five newest stories and offer a two-voice podcast.
+
+        Usage: /ai_news_podcast
+        The list is the same Google News RSS query as the prompt's
+        latest_news_url (the last twelve hours). The browser adds a Podcast
+        button under the five story links; using it drafts a host/guest script
+        from the full article bodies and reads it with two male voices.
+        """
+        if argument.strip():
+            self._sse_text(
+                "output",
+                "\nUsage: /ai_news_podcast\n"
+                "Shows the top five stories from the last 12 hours and adds a "
+                "podcast button underneath them.\n",
+            )
+            return
+        self._stream_news_events(
+            "news_fetch.php",
+            "/ai_news_podcast",
+            [
+                "--source",
+                "googlenews",
+                "--search",
+                AI_NEWS_PODCAST_QUERY,
+                "--limit",
+                str(AI_NEWS_PODCAST_LIMIT),
+            ],
+            podcast=True,
+        )
 
     def _command_gutenberg(self, argument: str) -> None:
         """Search Project Gutenberg; the browser renders clickable book cards.
@@ -10722,8 +11050,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
 
     def _stream_news_events(
-        self, script_name: str, command: str, extra_argv: list[str]
-    ) -> None:
+        self,
+        script_name: str,
+        command: str,
+        extra_argv: list[str],
+        podcast: bool = False,
+    ) -> int:
         """Stream a news fetcher's NDJSON events as `news` SSE events.
 
         news_fetch.php emits one JSON event per line; relaying each one lets
@@ -10737,7 +11069,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._sse_text(
                 "output", f"\n{command}: missing {script.name}.\n"
             )
-            return
+            return 0
 
         argv = ["php", str(script), "--json", "--lazy", *extra_argv]
         log_prefix = command.lstrip("/")
@@ -10778,6 +11110,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         payload["learned"] = bool(
                             news_id and news_is_learned(news_id)
                         )
+                    if podcast:
+                        # Mark every event so the browser can add the podcast
+                        # action underneath this particular story list.
+                        payload["ai_news_podcast"] = True
                     self._sse("news", payload)
                 returncode = process.wait()
             except ClientDisconnected:
@@ -10792,7 +11128,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._sse_text(
                 "output", f"\n{command}: could not run {script.name}: {exc}\n"
             )
-            return
+            return 0
 
         if returncode != 0:
             self._sse_text(
@@ -10803,6 +11139,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._sse_text(
                 "output", f"\n{command}: no stories were found in the feed.\n"
             )
+        return item_count
 
     def _command_ask(self, argument: str) -> None:
         """Answer a quick, self-contained question without retrieval."""
@@ -11142,6 +11479,159 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 self._sse("done", {})
             except ClientDisconnected:
                 pass
+
+    # ---- SSE: AI news podcast ---------------------------------------
+    def _handle_ai_news_podcast(self, payload: dict) -> None:
+        """Draft a 2000-word host/guest podcast from current news stories.
+
+        The browser sends the five stories from /ai_news_podcast. Missing
+        article bodies are fetched on demand here so the script is grounded in
+        the full news content, not just the feed headlines. The script streams
+        back as ``delta`` events; ``start`` carries the two male voices the
+        browser should use with /api/tts.
+        """
+        self._begin_sse()
+        try:
+            stories = self._ai_news_podcast_stories(payload)
+            if not stories:
+                raise RuntimeError(
+                    "No article content was available for the podcast."
+                )
+            source = self._ai_news_podcast_source(stories)
+            voices = _podcast_voice_defaults()
+            self._sse(
+                "start",
+                {
+                    "model": AI_NEWS_PODCAST_MODEL,
+                    "voices": voices,
+                    "stories": len(stories),
+                    "target_words": 2000,
+                },
+            )
+            prompt = AI_NEWS_PODCAST_PROMPT.format(source=source)
+            request = {
+                "model": AI_NEWS_PODCAST_MODEL,
+                "prompt": prompt,
+                "stream": True,
+                "think": False,
+                "keep_alive": chat.OLLAMA_KEEP_ALIVE,
+                "options": {
+                    "temperature": 0.55,
+                    "num_ctx": AI_NEWS_PODCAST_NUM_CTX,
+                    "num_predict": AI_NEWS_PODCAST_NUM_PREDICT,
+                },
+            }
+            text_parts: list[str] = []
+            try:
+                with requests.post(
+                    f"{chat.OLLAMA_HOST}/api/generate",
+                    json=request,
+                    stream=True,
+                    timeout=(10, 1800),
+                ) as response:
+                    response.raise_for_status()
+                    for line in response.iter_lines(decode_unicode=True):
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if event.get("error"):
+                            raise RuntimeError(
+                                f"Ollama error: {event['error']}"
+                            )
+                        token = event.get("response", "")
+                        if token:
+                            text_parts.append(token)
+                            self._sse_text("delta", token)
+                        if event.get("done"):
+                            break
+            except requests.RequestException as exc:
+                raise RuntimeError(
+                    f"Could not reach Ollama at {chat.OLLAMA_HOST}. "
+                    f"Is it running? ({exc})"
+                ) from exc
+            script = "".join(text_parts).strip()
+            if not script:
+                raise RuntimeError(
+                    "The podcast model returned an empty script."
+                )
+            self._sse(
+                "done",
+                {
+                    "stories": len(stories),
+                    "words": len(script.split()),
+                },
+            )
+        except ClientDisconnected:
+            pass
+        except Exception as exc:
+            try:
+                self._sse("error", {"message": f"Podcast failed: {exc}"})
+                self._sse("done", {})
+            except ClientDisconnected:
+                pass
+
+    def _ai_news_podcast_stories(self, payload: dict) -> list[dict]:
+        """Normalize the browser's story list and fill in missing bodies."""
+        raw_stories = payload.get("stories")
+        if not isinstance(raw_stories, list) or not raw_stories:
+            raw_stories = [payload]
+        stories: list[dict] = []
+        for raw in raw_stories[:AI_NEWS_PODCAST_LIMIT]:
+            if not isinstance(raw, dict):
+                continue
+            title = str(raw.get("title") or "").strip()
+            link = str(raw.get("link") or "").strip()
+            summary = str(raw.get("summary") or "").strip()
+            paragraphs = [
+                str(value).strip()
+                for value in (raw.get("paragraphs") or [])
+                if str(value).strip()
+            ]
+            if not paragraphs and re.match(
+                r"^https?://", link, re.IGNORECASE
+            ):
+                try:
+                    article = fetch_news_article(link, title)
+                except (RuntimeError, ValueError, OSError):
+                    article = {}
+                paragraphs = list(article.get("paragraphs") or [])
+                link = str(article.get("link") or link).strip()
+            if not paragraphs and summary:
+                paragraphs = [summary]
+            if not title and not paragraphs:
+                continue
+            stories.append(
+                {
+                    "title": title or "Untitled story",
+                    "source": str(raw.get("source") or "").strip(),
+                    "link": link,
+                    "summary": summary,
+                    "paragraphs": paragraphs,
+                }
+            )
+        return stories
+
+    def _ai_news_podcast_source(self, stories: list[dict]) -> str:
+        """Build the bounded source block that grounds the podcast script."""
+        blocks: list[str] = []
+        for index, story in enumerate(stories, start=1):
+            lines = [
+                f"STORY {index}",
+                f"Title: {story['title']}",
+            ]
+            if story.get("source"):
+                lines.append(f"Source: {story['source']}")
+            if story.get("summary"):
+                lines.append(f"Summary: {story['summary']}")
+            if story.get("link"):
+                lines.append(f"Link: {story['link']}")
+            lines.append("Article:")
+            lines.extend(story.get("paragraphs") or [])
+            blocks.append("\n".join(lines))
+        return "\n\n".join(blocks)[:AI_NEWS_PODCAST_SOURCE_CHARS]
 
     def _stream_translation_paragraph(self, paragraph: str) -> None:
         """Stream one paragraph's Simplified Chinese translation."""

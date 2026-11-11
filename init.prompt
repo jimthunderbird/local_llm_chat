@@ -2,7 +2,11 @@ objective: perform the following tasks
 
 restrictions: 
 - DO NOT perform tasks that are marked as completed
-- after a task is completed, in ./init.prompt or in any prompt files being referenced in a persistent task, mark the task as completed
+- after a task is completed {
+  - in ./init.prompt or in any prompt files being referenced in a persistent task, mark the task as completed
+  - DO NOT write the summary of what has been done regarding this task in the task belonging prompt files!
+  - write a log entry .logs/{prompt_file_name_the_task_belongs_to}-{task_summary_in_10_words}-{timestamp in YYYY-mm-dd-hh-ii-ss}.summary.html, with the summary of what has been done regarding this task
+}
 - if a task is persistent, DO NOT mark it as completed
 
 task git_repo (persistent) {
@@ -204,6 +208,14 @@ group app/chat.html and app/chat_server.py {
 
   task (completed) {
     complete tasks in ./prompts/openlibrary.prompt
+  }
+
+  task (persistent) {
+    complete tasks in ./prompts/howstuffworks.prompt
+  }
+
+  task (persistent) {
+    complete tasks in ./prompts/ai_cohosted_podcast.prompt
   }
 
   task (persistent) {

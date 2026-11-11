@@ -1,3 +1,19 @@
+task (completed) {
+  in task.feature.advancesearch, sort the videos by publish dates in reverse order
+}
+
+task (completed) {
+  bug:
+  /youtube advancesearch: loading https://www.youtube.com/results?search_query=driving+in+japan/youtube advancesearch: YouTube search-results page failed: YouTube search failed: could not read ytInitialData from the search page
+}
+
+task.feature.advancesearch (completed) {
+  add new option to /youtube command:
+  /youtube advancesearch <keywords>
+  it will simply load url like this example: https://www.youtube.com/results?search_query=driving+in+japan
+  extract the video information from the page
+}
+
 task.bug.fail_to_load_more_videos (completed) {
   when click on "More" button, we got error:
   /youtube search: YouTube search failed: usage: youtube_news_search.py [-h] [-n LIMIT] [--json] [--progressive-json]

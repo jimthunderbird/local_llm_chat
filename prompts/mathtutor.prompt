@@ -1,5 +1,3 @@
-restriction: please write the implementation summary inside the task {...} block, not outside!
-
 mathtutor_llm: ollama local model ornith:35b with no thinking
 
 task.graph_linear_equations (completed) {

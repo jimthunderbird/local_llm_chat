@@ -1,0 +1,51 @@
+latest_news_url: https://news.google.com/rss/search?q=when:12h&hl=en-US&gl=US&ceid=US:en
+
+task (completed) {
+  create a new command: /ai_news_podcast {
+    - result: show top 5 result urls from {latest_news_url}
+    - create a podcast button underneath the top 5 result urls:
+      - when click on the button {
+        - on top of the article, show a podcast icon {
+          use 2 male voices, one act as a host and one act as guest 
+          news_content: fetch the detail news content from {result}
+          based on the {news_content}, draft a 2000 words article assuming it is a host/guest podcast, then read by the host and guest ai voice, use similar voice technology related to {directory_of_this_prompt}/news.prompt's task.news_voice_text_to_speech
+        }
+      }
+    }
+  }
+}
+
+Implemented:
+app/chat_server.py
+- Added the `/ai_news_podcast` command. It streams the top five stories from
+the last 12 hours through news_fetch.php's Google News source. The prompt's
+bare `when:12h` operator returns an empty Google News feed, so the command
+keeps that 12-hour window and adds the word "news" to receive stories.
+- Every news event for this command is tagged with `ai_news_podcast`, which
+lets the browser add the podcast action only to this list.
+- Added `POST /api/ai_news_podcast`. It accepts the five stories, fetches any
+missing article bodies on demand, builds a bounded source block, and streams a
+HOST/GUEST script from ornith:35b (approximately 2000 words, 5000-token
+budget). The `start` event returns the two male TTS voices.
+- `/api/tts` now accepts an optional `voice`; the cache key includes the voice.
+`_podcast_voice_defaults()` picks `am_michael`/`am_adam` for Kokoro,
+Daniel/Fred for macOS `say`, or `en-us+m3`/`en-us+m4` for espeak, with
+PODCAST_HOST_VOICE and PODCAST_GUEST_VOICE overrides.
+app/chat.html
+- `/ai_news_podcast` renders its five links and adds a "Create podcast" button
+underneath them.
+- Clicking the button opens the top story and shows a microphone/podcast icon
+at the top of the article. The icon drafts the script (streamed into the story
+panel), then reads it aloud, alternating the host and guest male voices and
+prefetching the next segment. Clicking it again stops playback or cancels a
+script that is still being written.
+- The podcast script is rendered as HOST/GUEST turns; a script without labels
+is split into sentence groups so both voices are still used.
+
+Verified:
+- The command returns five Google News links and marks every event for the
+podcast UI.
+- The podcast endpoint streamed a 1,100+ word HOST/GUEST script for a test
+story with the two Kokoro male voices in its start event.
+- `/api/tts` returned distinct WAV audio for `am_michael` and `am_adam`.
+- py_compile, node --check on the extracted front-end script, and php -l pass.

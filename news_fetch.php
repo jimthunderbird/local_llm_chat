@@ -377,6 +377,103 @@ function googleNewsSource(): ?array
 }
 
 /**
+ * Build exact-phrase matchers for quoted text in a Google News query.
+ *
+ * A query such as /news search "jensen huang" asks for the complete phrase,
+ * but the Google News RSS ranking is fuzzy and can return stories that only
+ * mention one of the words. The query is still sent to Google with its quotes
+ * (for better ranking); these patterns are then used to keep only stories
+ * whose title or summary really contains every quoted phrase.
+ *
+ * @return list<string> PCRE patterns
+ */
+function quotedSearchPhrasePatterns(string $query): array
+{
+    if ($query === '') {
+        return [];
+    }
+    if (!preg_match_all(
+        '/"([^"]+)"|\x{201C}([^\x{201D}]+)\x{201D}|\x{2018}([^\x{2019}]+)\x{2019}|\'([^\']+)\'/u',
+        $query,
+        $matches,
+        PREG_SET_ORDER
+    )) {
+        return [];
+    }
+
+    $patterns = [];
+    foreach ($matches as $match) {
+        $phrase = '';
+        foreach (array_slice($match, 1) as $candidate) {
+            if ($candidate !== '') {
+                $phrase = $candidate;
+                break;
+            }
+        }
+        $words = preg_split('/\s+/u', trim($phrase), -1, PREG_SPLIT_NO_EMPTY);
+        if ($words === false || $words === []) {
+            continue;
+        }
+        // Words in a quoted phrase must stay adjacent, but punctuation between
+        // them (Huang's, Jensen-Huang) is allowed.
+        $body = implode(
+            '[^\\p{L}\\p{N}]+',
+            array_map(
+                static fn(string $word): string => preg_quote($word, '/'),
+                $words
+            )
+        );
+        $pattern = '/(?<![\\p{L}\\p{N}])' . $body . '(?![\\p{L}\\p{N}])/iu';
+        if (!in_array($pattern, $patterns, true)) {
+            $patterns[] = $pattern;
+        }
+    }
+    return $patterns;
+}
+
+/**
+ * Normalise story text before checking it against quoted query phrases.
+ */
+function normalizeQuotedSearchText(string $text): string
+{
+    $text = html_entity_decode(strip_tags($text), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $text = str_replace(
+        ["\xE2\x80\x98", "\xE2\x80\x99", "\xCA\xBC"],
+        "'",
+        $text
+    );
+    $text = str_replace(
+        ["\xE2\x80\x9C", "\xE2\x80\x9D"],
+        '"',
+        $text
+    );
+    $text = mb_strtolower($text, 'UTF-8');
+    $text = preg_replace('/\s+/u', ' ', $text) ?? $text;
+    return trim($text);
+}
+
+/**
+ * True when a story contains every quoted phrase from the search query.
+ *
+ * @param list<string> $patterns
+ */
+function storyMatchesQuotedPhrases(array $story, array $patterns): bool
+{
+    if ($patterns === []) {
+        return true;
+    }
+    $haystack = normalizeQuotedSearchText(
+        (string)($story['title'] ?? '') . ' ' . (string)($story['summary'] ?? '')
+    );
+    foreach ($patterns as $pattern) {
+        if (preg_match($pattern, $haystack) !== 1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
  * Return every source available at runtime: the static feeds plus the
  * configured Medium author feed and Google News query.
  */
@@ -410,7 +507,7 @@ const ARTICLE_CACHE_FAILURE_TTL = 3600; // one hour for articles we could not lo
 // failed mirror lookup on the next news request instead of hiding the story
 // for a full hour.
 const ARTICLE_READER_FAILURE_TTL = 120;
-const ARTICLE_EXTRACTOR_VERSION = 8;   // bump when article extraction logic changes
+const ARTICLE_EXTRACTOR_VERSION = 9;   // bump when article extraction logic changes
 const ARTICLE_MIN_BODY_CHARS = 1200;   // a container this large is a real body, not metadata
 const ARTICLE_PARTIAL_BODY_CHARS = 1200; // shorter fallback bodies may be previews
 const ARTICLE_FETCH_CONCURRENCY = 6;
@@ -1335,7 +1432,7 @@ function isArticleBoilerplate(string $text): bool
     if (isBoilerplate($text)) {
         return true;
     }
-    return (bool)preg_match(
+    if (preg_match(
         '/^(?:skip to|sign in|log in|subscribe|advertisement|ad feedback|'
         . 'we use cookies|this site uses cookies|cookie policy|'
         . 'by continuing|terms of service|privacy policy|follow us|'
@@ -1344,7 +1441,33 @@ function isArticleBoilerplate(string $text): bool
         . 'recommended|most popular|click here|watch:|image:|'
         . 'caption:|photo:|all rights reserved|©)/iu',
         $text
-    );
+    )) {
+        return true;
+    }
+    // Publishers frequently place cross-promotion links between body
+    // paragraphs (for example "READ MORE: ..."). These are not the end of
+    // the article; dropping them here prevents the end-of-body trimmer from
+    // truncating everything that follows them.
+    if (preg_match(
+        '/^(?:read more|read on|see also|related(?: coverage| stories|'
+        . 'articles?| content)?|more (?:from|coverage|stories|news)|'
+        . 'you may also like|latest news|recommended(?: for you)?)\b/iu',
+        $text
+    )) {
+        return true;
+    }
+    // Standalone photo captions ("... Getty", "... Reuters") live in <p>
+    // tags on some publishers but are not article prose.
+    if (mb_strlen($text) <= 240
+        && preg_match(
+            '/\b(?:getty images?|getty|istockphoto|shutterstock|'
+            . 'associated press|ap|afp|reuters|epa|pa media)\s*$/iu',
+            $text
+        )
+    ) {
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -3939,6 +4062,19 @@ function storyStream(array $sourceKeys, ?int $limit, ?string $section, bool $laz
                     $source['label'],
                     $feed['label']
                 );
+            }
+
+            if ($sourceKey === 'googlenews') {
+                $quotedPatterns = quotedSearchPhrasePatterns(googleNewsQuery());
+                if ($quotedPatterns !== []) {
+                    $stories = array_values(array_filter(
+                        $stories,
+                        static fn(array $story): bool => storyMatchesQuotedPhrases(
+                            $story,
+                            $quotedPatterns
+                        )
+                    ));
+                }
             }
 
             $selected = [];

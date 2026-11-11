@@ -1856,6 +1856,76 @@
   .news-tts.is-loading .tts-wave { opacity: .3; }
   .news-tts.is-playing .tts-wave { animation: tts-wave 1s ease-in-out infinite; }
   .news-tts.is-playing .tts-wave:nth-of-type(2) { animation-delay: .15s; }
+  .news-podcast.is-playing svg,
+  .news-podcast.is-loading svg {
+    animation: podcast-pulse 1s ease-in-out infinite;
+  }
+  .news-podcast[hidden] { display: none; }
+  @keyframes podcast-pulse {
+    0%, 100% { opacity: .55; }
+    50% { opacity: 1; }
+  }
+  .news-podcast-actions {
+    margin: 12px 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+  }
+  .news-podcast-create {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 12px;
+    color: #f4e9ff;
+    background: #2b1f3d;
+    border: 1px solid #5b3f86;
+    border-radius: 6px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .news-podcast-create:hover {
+    background: #38284f;
+    border-color: #7c58b3;
+  }
+  .news-podcast-create svg { width: 14px; height: 14px; }
+  .news-podcast-actions .news-podcast-hint {
+    color: var(--dim);
+    font-size: 11px;
+  }
+  .news-podcast-script {
+    margin-top: 18px;
+    padding: 11px 0 0 12px;
+    border-left: 2px solid #5b3f86;
+  }
+  .news-podcast-script-head {
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+    margin-bottom: 8px;
+    color: #d8c2ff;
+    font-size: 11.5px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  .news-podcast-script-status {
+    color: var(--warn);
+    font-size: 12px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .news-podcast-turn { margin: 0 0 .75em; }
+  .news-podcast-speaker {
+    display: inline-block;
+    min-width: 46px;
+    margin-right: 6px;
+    color: #bfa4ef;
+    font-weight: 700;
+    font-size: 11.5px;
+    letter-spacing: .04em;
+  }
+  .news-podcast-turn.is-guest .news-podcast-speaker { color: #8fc8e8; }
+  .news-podcast-turn .error-text { margin-top: 4px; }
   @keyframes tts-wave {
     0%, 100% { opacity: .25; }
     50% { opacity: 1; }
@@ -2552,6 +2622,16 @@
         <div id="news-meta" class="news-modal-meta"></div>
       </div>
       <a id="news-link" class="news-link" href="#" target="_blank" rel="noopener noreferrer">Open article ↗</a>
+      <button id="news-podcast" class="news-tts news-podcast" type="button" hidden
+              title="Create and play an AI news podcast" aria-label="Create and play an AI news podcast">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="9" y="2.5" width="6" height="11" rx="3" fill="currentColor"/>
+          <path d="M5.5 10.5a6.5 6.5 0 0 0 13 0" fill="none"
+                stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+          <path d="M12 17v3.5M8.8 20.5h6.4" fill="none"
+                stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+      </button>
       <button id="news-tts" class="news-tts" type="button" disabled
               title="Read this story aloud" aria-label="Read this story aloud">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -2808,6 +2888,7 @@ const newsMetaEl = $("#news-meta");
 const newsLinkEl = $("#news-link");
 const newsBodyEl = $("#news-body");
 const newsTtsBtn = $("#news-tts");
+const newsPodcastBtn = $("#news-podcast");
 const newsTranslateBtn = $("#news-translate");
 const newsTranslationEl = $("#news-translation");
 const newsTranslationLabelEl = $("#news-translation-label");
@@ -2919,6 +3000,9 @@ let newsTranslationGeneration = 0;
 let newsTranslationRenderPending = false;
 let newsTtsGeneration = 0;
 let newsTtsRun = null;
+let newsPodcastGeneration = 0;
+let newsPodcastRun = null;
+let newsPodcastRenderTimer = 0;
 const newsTranslation = {
   text: "",
   sourceText: "",
@@ -4972,6 +5056,7 @@ function makeEntry(kind, options = {}) {
     newsFeed: "",
     newsSources: [],
     newsDone: false,
+    aiNewsPodcast: false,
     videos: [],
     videosKeyword: "",
     videosHeading: "",
@@ -5262,6 +5347,7 @@ function formatNewsDate(value) {
 
 function addNewsEvent(entry, data) {
   const type = String(data.type || "");
+  if (data.ai_news_podcast) entry.aiNewsPodcast = true;
   if (type === "start") {
     entry.newsSource = data.source || "News";
     entry.newsFeed = data.feed || "";
@@ -5274,6 +5360,9 @@ function addNewsEvent(entry, data) {
       index: Number(data.index) || entry.newsItems.length + 1,
       newsId: String(data.news_id || ""),
       learned: Boolean(data.learned),
+      aiNewsPodcast: Boolean(data.ai_news_podcast || entry.aiNewsPodcast),
+      entry,
+      podcast: null,
       title: data.title || "(untitled)",
       link: data.link || "",
       published: data.published || "",
@@ -5589,6 +5678,39 @@ function renderNewsList(entry) {
     });
     container.appendChild(list);
   }
+
+  if (entry.aiNewsPodcast && items.length) {
+    container.appendChild(newsPodcastAction(entry, items));
+  }
+}
+
+function newsPodcastAction(entry, items) {
+  const actions = document.createElement("div");
+  actions.className = "news-podcast-actions";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "news-podcast-create";
+  button.title = "Draft a 2000-word host/guest podcast from these stories and read it with two male AI voices";
+  button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">'
+    + '<rect x="9" y="2.5" width="6" height="11" rx="3" fill="currentColor"/>'
+    + '<path d="M5.5 10.5a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>'
+    + '<path d="M12 17v3.5M8.8 20.5h6.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>'
+    + '</svg><span></span>';
+  button.querySelector("span").textContent = "Create podcast";
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const item = items[0];
+    if (!item) return;
+    openNewsModal(item);
+    startNewsPodcast(item);
+  });
+  const hint = document.createElement("span");
+  hint.className = "news-podcast-hint";
+  hint.textContent = "two male hosts · ~2000 words · local AI voices";
+  actions.appendChild(button);
+  actions.appendChild(hint);
+  return actions;
 }
 
 function formatVideoDuration(totalSeconds) {
@@ -8007,6 +8129,471 @@ async function startNewsTts() {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ *  /ai_news_podcast: host/guest script and two-voice playback
+ * ------------------------------------------------------------------ */
+function ensureNewsPodcastState(item) {
+  if (!item) return null;
+  if (!item.podcast || typeof item.podcast !== "object") {
+    item.podcast = {
+      text: "",
+      busy: false,
+      done: false,
+      error: "",
+      voices: { host: "", guest: "" },
+      model: "",
+      controller: null,
+    };
+  }
+  if (!item.podcast.voices) item.podcast.voices = { host: "", guest: "" };
+  return item.podcast;
+}
+
+function splitPodcastText(text, maxChars = 900) {
+  const segments = [];
+  let rest = String(text || "").trim();
+  while (rest.length > maxChars) {
+    const windowText = rest.slice(0, maxChars);
+    const sentences = [...windowText.matchAll(/[.!?](?=\s|$)/g)];
+    let cut = sentences.length
+      ? sentences[sentences.length - 1].index + 1
+      : -1;
+    if (cut < 260) {
+      const comma = windowText.lastIndexOf(", ");
+      cut = comma > 260 ? comma + 1 : maxChars;
+    }
+    segments.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  if (rest) segments.push(rest);
+  return segments.filter(Boolean);
+}
+
+function alternatePodcastTurns(turns) {
+  // A small model occasionally writes the whole episode as one speaker. Split
+  // it into sentence groups so both hosts still get a voice.
+  if (turns.length > 1 && turns.some((turn) => turn.speaker === "guest")) {
+    return turns;
+  }
+  const text = turns.map((turn) => turn.text).join(" ");
+  const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
+  const out = [];
+  let chunk = "";
+  let speaker = "host";
+  for (const sentence of sentences) {
+    chunk = (chunk + " " + sentence).trim();
+    if (chunk.length >= 220) {
+      out.push({ speaker, text: chunk });
+      speaker = speaker === "host" ? "guest" : "host";
+      chunk = "";
+    }
+  }
+  if (chunk) out.push({ speaker, text: chunk });
+  return out;
+}
+
+function parsePodcastTurns(text) {
+  const turns = [];
+  let current = null;
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = rawLine.replace(/\*\*/g, "").trim();
+    if (!line) continue;
+    const match = line.match(/^(HOST|GUEST)\s*[:\-–—]\s*(.*)$/i);
+    if (match) {
+      if (current && current.text) turns.push(current);
+      current = {
+        speaker: match[1].toLowerCase(),
+        text: String(match[2] || "").trim(),
+      };
+      continue;
+    }
+    if (current) current.text = `${current.text} ${line}`.trim();
+  }
+  if (current && current.text) turns.push(current);
+  const nonEmpty = turns.filter((turn) => turn.text);
+  if (!nonEmpty.length) {
+    const fallback = String(text || "").trim();
+    if (!fallback) return [];
+    return alternatePodcastTurns([{ speaker: "host", text: fallback }]);
+  }
+  return alternatePodcastTurns(nonEmpty);
+}
+
+function newsPodcastSegments(item) {
+  const state = item?.podcast;
+  if (!state || !state.text) return [];
+  const segments = [];
+  for (const turn of parsePodcastTurns(state.text)) {
+    for (const text of splitPodcastText(turn.text)) {
+      segments.push({ speaker: turn.speaker, text });
+    }
+  }
+  return segments;
+}
+
+function syncNewsPodcastButton() {
+  const button = newsPodcastBtn;
+  if (!button) return;
+  const item = newsItem;
+  const show = Boolean(item && item.aiNewsPodcast);
+  button.hidden = !show;
+  if (!show) {
+    button.disabled = true;
+    return;
+  }
+  const state = ensureNewsPodcastState(item);
+  const playing = Boolean(
+    newsPodcastRun && newsPodcastRun.item === item && !newsPodcastRun.cancelled
+  );
+  button.disabled = false;
+  button.classList.toggle("is-playing", playing);
+  button.classList.toggle("is-loading", Boolean(state.busy && !playing));
+  if (state.busy) {
+    button.title = "Writing the podcast script… click to cancel";
+    button.setAttribute("aria-label", "Cancel podcast generation");
+  } else if (playing) {
+    button.title = "Stop the AI news podcast";
+    button.setAttribute("aria-label", "Stop the AI news podcast");
+  } else if (state.text) {
+    button.title = "Play the AI news podcast";
+    button.setAttribute("aria-label", "Play the AI news podcast");
+  } else {
+    button.title = "Create and play an AI news podcast";
+    button.setAttribute("aria-label", "Create and play an AI news podcast");
+  }
+}
+
+function renderNewsPodcast(item) {
+  let box = newsBodyEl.querySelector(".news-podcast-script");
+  if (!item || !item.aiNewsPodcast) {
+    if (box) box.remove();
+    return;
+  }
+  const state = ensureNewsPodcastState(item);
+  const show = Boolean(state.text || state.busy || state.error);
+  if (!show) {
+    if (box) box.remove();
+    return;
+  }
+  if (!box) {
+    box = document.createElement("div");
+    box.className = "news-podcast-script";
+    newsBodyEl.appendChild(box);
+  }
+  box.textContent = "";
+  const head = document.createElement("div");
+  head.className = "news-podcast-script-head";
+  const label = document.createElement("span");
+  label.textContent = "AI News Podcast";
+  head.appendChild(label);
+  const status = document.createElement("span");
+  status.className = "news-podcast-script-status";
+  if (state.busy) {
+    status.textContent = state.text
+      ? "writing the script…"
+      : "drafting a 2000-word host/guest episode…";
+  } else if (state.error) {
+    status.textContent = "could not create the podcast";
+  } else if (state.done) {
+    status.textContent = `${parsePodcastTurns(state.text).length} turns`;
+  }
+  if (status.textContent) head.appendChild(status);
+  box.appendChild(head);
+  if (state.error) {
+    const error = document.createElement("div");
+    error.className = "error-text";
+    error.textContent = state.error;
+    box.appendChild(error);
+  }
+  if (state.text) {
+    for (const turn of parsePodcastTurns(state.text)) {
+      const p = document.createElement("p");
+      p.className = "news-podcast-turn"
+        + (turn.speaker === "guest" ? " is-guest" : "");
+      const speaker = document.createElement("span");
+      speaker.className = "news-podcast-speaker";
+      speaker.textContent = turn.speaker === "guest" ? "GUEST" : "HOST";
+      p.appendChild(speaker);
+      p.appendChild(document.createTextNode(turn.text));
+      box.appendChild(p);
+    }
+    if (state.busy) {
+      const caret = document.createElement("span");
+      caret.className = "caret";
+      box.appendChild(caret);
+    }
+  }
+}
+
+function scheduleNewsPodcastRender(item) {
+  if (newsPodcastRenderTimer) return;
+  newsPodcastRenderTimer = setTimeout(() => {
+    newsPodcastRenderTimer = 0;
+    if (newsItem === item) {
+      renderNewsPodcast(item);
+      syncNewsPodcastButton();
+    }
+  }, 120);
+}
+
+function resetNewsPodcastPlayback() {
+  newsPodcastGeneration += 1;
+  const run = newsPodcastRun;
+  newsPodcastRun = null;
+  if (!run) {
+    syncNewsPodcastButton();
+    return;
+  }
+  run.cancelled = true;
+  for (const controller of run.controllers) controller.abort();
+  run.controllers.clear();
+  if (run.audioResolve) {
+    run.audioResolve();
+    run.audioResolve = null;
+  }
+  if (run.audio) {
+    run.audio.onended = null;
+    run.audio.onerror = null;
+    run.audio.pause();
+    run.audio.removeAttribute("src");
+    run.audio.load();
+  }
+  for (const url of run.urls.values()) URL.revokeObjectURL(url);
+  run.urls.clear();
+  run.pending.clear();
+  syncNewsPodcastButton();
+}
+
+function fetchNewsPodcastTtsSegment(run, index) {
+  if (run.urls.has(index)) return Promise.resolve(run.urls.get(index));
+  if (run.pending.has(index)) return run.pending.get(index);
+
+  const segment = run.segments[index];
+  const controller = new AbortController();
+  run.controllers.add(controller);
+  const promise = fetch("/api/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text: segment.text,
+      voice: run.voices[segment.speaker] || "",
+    }),
+    signal: controller.signal,
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        let detail = `HTTP ${response.status}`;
+        try {
+          const text = await response.text();
+          if (text) {
+            try {
+              detail = JSON.parse(text).error || detail;
+            } catch {
+              detail = text.slice(0, 200);
+            }
+          }
+        } catch { /* ignore */ }
+        throw new Error(detail);
+      }
+      const blob = await response.blob();
+      if (run.cancelled) throw new DOMException("Cancelled", "AbortError");
+      const url = URL.createObjectURL(blob);
+      run.urls.set(index, url);
+      return url;
+    })
+    .finally(() => {
+      run.pending.delete(index);
+      run.controllers.delete(controller);
+    });
+  run.pending.set(index, promise);
+  return promise;
+}
+
+function prefetchNewsPodcastTts(run, index) {
+  if (run.cancelled || index < 0 || index >= run.segments.length) return;
+  if (run.urls.has(index) || run.pending.has(index)) return;
+  fetchNewsPodcastTtsSegment(run, index).catch(() => {});
+}
+
+function playNewsPodcastSegment(run, url) {
+  return new Promise((resolve, reject) => {
+    const audio = run.audio || new Audio();
+    run.audio = audio;
+    run.audioStarted = true;
+    audio.onended = null;
+    audio.onerror = null;
+    audio.pause();
+    audio.src = url;
+    audio.onended = () => {
+      run.audioResolve = null;
+      resolve();
+    };
+    audio.onerror = () => {
+      run.audioResolve = null;
+      reject(new Error("Could not play the generated podcast audio."));
+    };
+    run.audioResolve = resolve;
+    const playback = audio.play();
+    if (playback?.catch) {
+      playback.catch((error) => {
+        run.audioResolve = null;
+        reject(error);
+      });
+    }
+    syncNewsPodcastButton();
+  });
+}
+
+async function playNewsPodcast(item) {
+  resetNewsPodcastPlayback();
+  const state = ensureNewsPodcastState(item);
+  const segments = newsPodcastSegments(item);
+  if (!segments.length) {
+    toast("There is no podcast script to play yet.");
+    return;
+  }
+  const run = {
+    item,
+    segments,
+    voices: {
+      host: state.voices?.host || "",
+      guest: state.voices?.guest || "",
+    },
+    generation: newsPodcastGeneration,
+    cancelled: false,
+    audioStarted: false,
+    audio: null,
+    audioResolve: null,
+    urls: new Map(),
+    pending: new Map(),
+    controllers: new Set(),
+  };
+  newsPodcastRun = run;
+  syncNewsPodcastButton();
+  prefetchNewsPodcastTts(run, 0);
+  prefetchNewsPodcastTts(run, 1);
+
+  try {
+    for (let index = 0; index < segments.length; index += 1) {
+      if (run.cancelled) return;
+      const url = await fetchNewsPodcastTtsSegment(run, index);
+      if (run.cancelled) return;
+      await playNewsPodcastSegment(run, url);
+      if (run.cancelled) return;
+      prefetchNewsPodcastTts(run, index + 2);
+    }
+  } catch (error) {
+    if (!run.cancelled && error?.name !== "AbortError") {
+      toast(`Podcast playback failed: ${error?.message || String(error)}`);
+    }
+  } finally {
+    if (newsPodcastRun === run) {
+      newsPodcastRun = null;
+      for (const url of run.urls.values()) URL.revokeObjectURL(url);
+      run.urls.clear();
+      run.pending.clear();
+      if (run.audio) {
+        run.audio.onended = null;
+        run.audio.onerror = null;
+      }
+      syncNewsPodcastButton();
+    }
+  }
+}
+
+async function generateNewsPodcast(item) {
+  const state = ensureNewsPodcastState(item);
+  if (!state) return;
+  resetNewsPodcastPlayback();
+  state.busy = true;
+  state.done = false;
+  state.error = "";
+  state.text = "";
+  const controller = new AbortController();
+  state.controller = controller;
+  if (newsItem === item) {
+    renderNewsPodcast(item);
+    syncNewsPodcastButton();
+  }
+  const stories = (
+    item.entry && Array.isArray(item.entry.newsItems)
+      ? item.entry.newsItems
+      : [item]
+  ).slice(0, 5).map((story) => ({
+    title: story.title || "",
+    link: story.link || "",
+    source: story.source || "",
+    summary: story.summary || "",
+    paragraphs: Array.isArray(story.paragraphs) ? story.paragraphs.slice() : [],
+  }));
+  try {
+    await streamSSE("/api/ai_news_podcast", { stories }, {
+      start: (data) => {
+        state.model = String(data?.model || "");
+        state.voices = {
+          host: String(data?.voices?.host || ""),
+          guest: String(data?.voices?.guest || ""),
+        };
+        syncNewsPodcastButton();
+      },
+      delta: (data) => {
+        const text = String(data?.text || "");
+        if (!text) return;
+        state.text += text;
+        scheduleNewsPodcastRender(item);
+      },
+      error: (data) => {
+        state.error = String(data?.message || "Podcast generation failed.");
+      },
+      done: () => {
+        state.busy = false;
+        state.done = true;
+        state.controller = null;
+        if (newsItem === item) {
+          renderNewsPodcast(item);
+          syncNewsPodcastButton();
+        }
+        if (state.text.trim() && newsItem === item) playNewsPodcast(item);
+      },
+    }, controller.signal);
+  } catch (error) {
+    if (error?.name !== "AbortError") {
+      state.error = error?.message || String(error);
+    }
+  } finally {
+    if (state.controller === controller) state.controller = null;
+    state.busy = false;
+    if (newsItem === item) {
+      renderNewsPodcast(item);
+      syncNewsPodcastButton();
+    }
+  }
+}
+
+function startNewsPodcast(item) {
+  if (newsPodcastRun) {
+    resetNewsPodcastPlayback();
+    return;
+  }
+  const state = ensureNewsPodcastState(item);
+  if (!state) return;
+  if (state.busy) {
+    state.controller?.abort();
+    state.controller = null;
+    state.busy = false;
+    if (newsItem === item) {
+      renderNewsPodcast(item);
+      syncNewsPodcastButton();
+    }
+    return;
+  }
+  if (state.text.trim()) {
+    playNewsPodcast(item);
+  } else {
+    generateNewsPodcast(item);
+  }
+}
+
 function syncNewsTranslateButton() {
   const button = newsTranslateBtn;
   if (!button) return;
@@ -8249,15 +8836,29 @@ function renderNewsModal(item) {
   }
   // Keep the (possibly streaming) translation after the article body.
   renderNewsTranslation();
+  renderNewsPodcast(item);
   syncNewsTtsButton();
+  syncNewsPodcastButton();
   newsBodyEl.scrollTop = 0;
 }
 
+function cancelNewsPodcastGeneration(item) {
+  const state = item?.podcast;
+  if (!state) return;
+  if (state.busy) {
+    state.controller?.abort();
+    state.controller = null;
+    state.busy = false;
+  }
+}
+
 function openNewsModal(item) {
+  if (newsItem && newsItem !== item) cancelNewsPodcastGeneration(newsItem);
   newsItem = item;
   resetNewsTts();
   resetNewsTranslation();
   resetNewsChat();
+  resetNewsPodcastPlayback();
   renderNewsModal(item);
   renderNewsAction(item);
   newsPanelEl.hidden = false;
@@ -8378,10 +8979,12 @@ function openNewsStory(newsId, fallbackUrl = "", fallbackTitle = "") {
 }
 
 function closeNewsModal() {
+  cancelNewsPodcastGeneration(newsItem);
   newsItem = null;
   resetNewsTts();
   resetNewsTranslation();
   resetNewsChat();
+  resetNewsPodcastPlayback();
   resetNewsAction();
   newsPanelEl.hidden = true;
   newsBodyEl.textContent = "";
@@ -8776,6 +9379,11 @@ newsTtsBtn.addEventListener("click", (event) => {
   event.preventDefault();
   event.stopPropagation();
   startNewsTts();
+});
+newsPodcastBtn.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  if (newsItem) startNewsPodcast(newsItem);
 });
 newsTranslateBtn.addEventListener("click", (event) => {
   event.preventDefault();
@@ -9501,15 +10109,17 @@ function submitText(text, fromChoice = false) {
       ? "Image"
       : commandName === "news"
         ? "News"
-        : commandName === "medium"
-          ? "Medium"
-          : commandName === "gutenberg"
-            ? "Project Gutenberg"
-            : commandName === "openlibrary"
-              ? "Open Library"
-              : commandName === "mathtutor"
-                ? "Math Tutor"
-              : undefined,
+        : commandName === "howstuffworks"
+          ? "HowStuffWorks"
+          : commandName === "medium"
+            ? "Medium"
+            : commandName === "gutenberg"
+              ? "Project Gutenberg"
+              : commandName === "openlibrary"
+                ? "Open Library"
+                : commandName === "mathtutor"
+                  ? "Math Tutor"
+                  : undefined,
   });
   appendEntry(entry);
   resetAnswerSourceStatus();

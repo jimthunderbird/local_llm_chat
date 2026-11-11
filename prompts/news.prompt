@@ -57,29 +57,6 @@ source: {
 
 task (completed) {
   update news sources {source}
-
-  Implemented:
-  news_fetch.php
-  - Added the static `medium` source from the {source} list: a Google News
-    RSS feed (https://news.google.com/rss/search?q=site:medium.com with
-    hl=en-US, gl=US, ceid=US:en), emitted as its own /news section. Google
-    News links are resolved and full article bodies are fetched through the
-    existing reader-mirror fallback, so Medium stories load completely.
-  - Renamed the dynamic author feed used by /medium to `medium_author` so it
-    no longer collides with the new static `medium` news source. The
-    ~/.medium/username feed, its usage guard, and the --help source list were
-    updated accordingly.
-  app/chat_server.py
-  - Added medium to NEWS_SOURCES and the /news help text, so /news accepts
-    `medium`, the source picker and tab completion include it, and /news with
-    no source fetches it as a section alongside the other sources.
-  - /medium now requests `--source medium_author`.
-
-  Verified: `./news_fetch.php --json --source medium --limit 2` streams
-  Medium stories with resolved medium.com links and full paragraph bodies
-  (the Nvidia/Jensen Huang article loaded through the freedium mirror);
-  `--source medium_author` still streams the configured author feed
-  (~/.medium/username); php -l and the Python syntax check pass.
 }
 
 task (persistent) {
@@ -88,17 +65,27 @@ task (persistent) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
+task.update_search_command_args_include_website (completed) {
+  add support like for /news search <keyword> howstuffworks.com {
+    it will then only search articles from howstuffworks.com
+  }
+
+  it should support any websites:
+  /news search <keyword> <website>
+}
+
+task.search_keyword_double_quote (completed) {
+  when we do /news search "jensen huang", we want to search results that contains the word "jensen huang"
+}
+
+task.bug."https://www.nine.com.au/travel/international/japan/tokyo-travel-day-trips-train-where-to-go-japan-guide-20260420-p5zpfr.html" (completed) {
+  please load the full article of "https://www.nine.com.au/travel/international/japan/tokyo-travel-day-trips-train-where-to-go-japan-guide-20260420-p5zpfr.html" in the news article modal
+  please fix it in a systematic way 
+}
+
 task.ui.search_result_do_not_scroll_to_bottom (completed) {
   when doing: /news search <keywords>, the search result list is scrolled to the bottom, please do not do the auto scrolling, keep the view port at the top
 }
-
-  Implemented:
-  app/chat.html
-  - `/news search <keywords>` now pins its entry to the top of the viewport
-    instead of following the newest story. The story list can keep streaming
-    in underneath while the reader stays on the first results.
-  - Only the search form is pinned; a normal `/news [source]` load keeps the
-    existing follow-the-output scrolling.
 
 task.speedup_news_search (completed) {
   the following command is very slow, why:

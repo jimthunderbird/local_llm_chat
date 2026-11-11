@@ -1,0 +1,5 @@
+task (completed) {
+  create new command: /howstuffworks <keywords> {
+    learn from /news <keywords>, allow me to search articles from https://www.howstuffworks.com/ only   
+  }
+}
