@@ -244,6 +244,50 @@
     display: block;
     font-size: 1.12em;
   }
+  .markdown .graph-figure {
+    margin: .75em 0;
+    padding: 12px 14px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #0f1822;
+  }
+  .markdown .graph-figure .graph-title {
+    margin: 0 0 4px;
+    color: #e6f0f8;
+    font-weight: 600;
+    text-align: center;
+  }
+  .markdown .graph-figure svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: 460px;
+  }
+  .markdown .graph-figure .graph-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    justify-content: center;
+    margin-top: 6px;
+    color: #b4c5d5;
+    font-size: 12px;
+  }
+  .markdown .graph-figure .graph-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .markdown .graph-figure .graph-legend-swatch {
+    display: inline-block;
+    width: 16px;
+    height: 2px;
+    border-radius: 1px;
+  }
+  .markdown .graph-figure .graph-error {
+    color: var(--dim);
+    font-size: 12px;
+    text-align: center;
+  }
   .markdown code {
     background: #1b2734;
     color: #ffd28a;
@@ -3329,6 +3373,561 @@ function looksLikeMath(body) {
   return true;
 }
 
+/* ------------------------------------------------------------------ *
+ *  Graphs
+ *
+ *  A `graph` fenced block carries a small JSON description of a
+ *  Cartesian plane. The mathtutor prompt asks the model to emit this
+ *  format instead of ASCII art, and the renderer draws real SVG axes,
+ *  a grid, labelled series, and point markers.
+ *
+ *  {
+ *    "title": "y = 2x + 1",
+ *    "x": [-5, 5], "y": [-5, 10],
+ *    "lines": [{"points": [[-2,-3],[0,1],[2,5]], "label": "y = 2x + 1"}],
+ *    "points": [{"x": 0, "y": 1, "label": "(0, 1)"}],
+ *    "functions": [{"expr": "2*x + 1", "label": "y = 2x + 1"}]
+ *  }
+ * ------------------------------------------------------------------ */
+const GRAPH_COLORS = [
+  "#5ec8f2", "#ffd28a", "#8be28b", "#f28b8b", "#c69bf2", "#f2b45e",
+];
+const GRAPH_SVG_NS = "http://www.w3.org/2000/svg";
+
+function graphSvgEl(tag, attrs) {
+  const el = document.createElementNS(GRAPH_SVG_NS, tag);
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (value !== undefined && value !== null) el.setAttribute(key, String(value));
+  }
+  return el;
+}
+
+function parseGraphSpec(text) {
+  if (text && typeof text === "object" && !Array.isArray(text)) return text;
+  let raw = String(text || "").trim();
+  raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
+  const attempts = [raw];
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start >= 0 && end > start) attempts.push(raw.slice(start, end + 1));
+  for (const candidate of attempts) {
+    try {
+      const payload = JSON.parse(candidate);
+      if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+        return payload;
+      }
+    } catch (_error) {
+      /* try the next candidate */
+    }
+  }
+  return null;
+}
+
+function graphNumber(value) {
+  if (value === null || value === undefined || value === "") return NaN;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : NaN;
+}
+
+function graphRange(value, fallback) {
+  if (Array.isArray(value) && value.length >= 2) {
+    const a = graphNumber(value[0]);
+    const b = graphNumber(value[1]);
+    if (Number.isFinite(a) && Number.isFinite(b) && a !== b) {
+      return [Math.min(a, b), Math.max(a, b)];
+    }
+  } else if (value && typeof value === "object") {
+    const a = graphNumber(value.min);
+    const b = graphNumber(value.max);
+    if (Number.isFinite(a) && Number.isFinite(b) && a !== b) {
+      return [Math.min(a, b), Math.max(a, b)];
+    }
+  }
+  return fallback;
+}
+
+function graphNiceStep(rough) {
+  if (!Number.isFinite(rough) || rough <= 0) return 1;
+  const power = Math.pow(10, Math.floor(Math.log10(rough)));
+  const fraction = rough / power;
+  let nice = 1;
+  if (fraction > 5) nice = 10;
+  else if (fraction > 2) nice = 5;
+  else if (fraction > 1) nice = 2;
+  return nice * power;
+}
+
+function graphTicks(min, max, target = 9) {
+  const step = graphNiceStep((max - min) / Math.max(1, target));
+  const ticks = [];
+  const first = Math.ceil((min - step * 1e-9) / step) * step;
+  for (let value = first; value <= max + step * 1e-9; value += step) {
+    const cleaned = Math.abs(value) < step * 1e-9 ? 0 : Number(value.toFixed(10));
+    ticks.push(cleaned);
+    if (ticks.length > 100) break;
+  }
+  return ticks;
+}
+
+function graphFormatTick(value, step) {
+  if (Number.isInteger(value)) return String(value);
+  const decimals = Math.min(6, Math.max(1, -Math.floor(Math.log10(step)) + 1));
+  return Number(value.toFixed(decimals)).toString();
+}
+
+/* A deliberately small arithmetic evaluator for graph functions. It only
+ * accepts numbers, x, pi/e, common math functions, parentheses, and the
+ * operators + - * / ^ (plus implicit multiplication such as 2x). */
+function makeGraphFunction(expr) {
+  let source = String(expr || "")
+    .replace(/\s+/g, "")
+    .replace(/\*\*/g, "^")
+    .replace(/[\u2212\u2013\u2014]/g, "-")
+    .replace(/[\u00d7\u00b7\u22c5]/g, "*")
+    .replace(/\u00f7/g, "/")
+    .replace(/\u00b2/g, "^2")
+    .replace(/\u00b3/g, "^3")
+    .replace(/\u00bd/g, "(1/2)")
+    .replace(/\u00bc/g, "(1/4)")
+    .replace(/\u00be/g, "(3/4)")
+    .replace(/\u2153/g, "(1/3)")
+    .replace(/\u2154/g, "(2/3)");
+  // The model sometimes writes a whole equation ("y = ...", "f(x) = ...")
+  // where the evaluator expects only the right-hand side.
+  source = source.replace(/^(?:y|f\(x\))=/i, "");
+  if (!source) return null;
+  const tokens = source.match(/(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?|[A-Za-z_]+|[+\-*/^(),]/g);
+  if (!tokens || tokens.join("") !== source) return null;
+  const functions = {
+    sqrt: Math.sqrt, sin: Math.sin, cos: Math.cos, tan: Math.tan,
+    asin: Math.asin, acos: Math.acos, atan: Math.atan,
+    abs: Math.abs, exp: Math.exp, ln: Math.log, log: Math.log10,
+    floor: Math.floor, ceil: Math.ceil, round: Math.round,
+    sign: Math.sign,
+  };
+  let pos = 0;
+  const peek = () => tokens[pos];
+  const take = () => tokens[pos++];
+  const isPrimaryStart = (token) =>
+    token !== undefined &&
+    (/^(?:\d|\.)/.test(token) || /^[A-Za-z_]/.test(token) || token === "(");
+
+  const parseExpression = (x) => {
+    let value = parseTerm(x);
+    while (peek() === "+" || peek() === "-") {
+      const op = take();
+      const right = parseTerm(x);
+      value = op === "+" ? value + right : value - right;
+    }
+    return value;
+  };
+  const parseTerm = (x) => {
+    let value = parseUnary(x);
+    while (true) {
+      const token = peek();
+      if (token === "*") {
+        take();
+        value *= parseUnary(x);
+      } else if (token === "/") {
+        take();
+        value /= parseUnary(x);
+      } else if (isPrimaryStart(token)) {
+        value *= parseUnary(x);
+      } else {
+        break;
+      }
+    }
+    return value;
+  };
+  const parseUnary = (x) => {
+    if (peek() === "+") { take(); return parseUnary(x); }
+    if (peek() === "-") { take(); return -parseUnary(x); }
+    return parsePower(x);
+  };
+  const parsePower = (x) => {
+    const base = parsePrimary(x);
+    if (peek() === "^") {
+      take();
+      return Math.pow(base, parseUnary(x));
+    }
+    return base;
+  };
+  const parsePrimary = (x) => {
+    const token = take();
+    if (token === undefined) return NaN;
+    if (token === "(") {
+      const value = parseExpression(x);
+      if (peek() === ")") take();
+      return value;
+    }
+    if (/^(?:\d|\.)/.test(token)) return Number(token);
+    if (token === "x" || token === "X") return x;
+    if (token === "pi" || token === "PI") return Math.PI;
+    if (token === "e" || token === "E") return Math.E;
+    const fn = functions[token.toLowerCase()];
+    if (fn) {
+      if (peek() === "(") {
+        take();
+        const value = parseExpression(x);
+        if (peek() === ")") take();
+        return fn(value);
+      }
+      return fn(parseUnary(x));
+    }
+    return NaN;
+  };
+
+  return (x) => {
+    pos = 0;
+    const value = parseExpression(x);
+    return pos === tokens.length ? value : NaN;
+  };
+}
+
+function graphPointList(value) {
+  if (!Array.isArray(value)) return [];
+  const points = [];
+  for (const item of value) {
+    let x;
+    let y;
+    let label = "";
+    if (Array.isArray(item) && item.length >= 2) {
+      x = graphNumber(item[0]);
+      y = graphNumber(item[1]);
+    } else if (item && typeof item === "object") {
+      x = graphNumber(item.x);
+      y = graphNumber(item.y);
+      label = String(item.label || "");
+    }
+    if (Number.isFinite(x) && Number.isFinite(y)) points.push({ x, y, label });
+  }
+  return points;
+}
+
+function collectGraphSeries(spec) {
+  const series = [];
+  const pushFunction = (item, colorIndex) => {
+    const source = typeof item === "string"
+      ? item
+      : String(
+          item?.expr ?? item?.expression ?? item?.function ??
+          item?.equation ?? item?.formula ?? ""
+        );
+    const fn = makeGraphFunction(source);
+    if (!fn) return false;
+    const domain = graphRange(
+      item && typeof item === "object" ? item.domain || item.x : null,
+      null
+    );
+    series.push({
+      kind: "function",
+      fn,
+      domain,
+      label: String(item?.label || item?.name || source),
+      color: String(item?.color || GRAPH_COLORS[colorIndex % GRAPH_COLORS.length]),
+      dashed: Boolean(item?.dashed || item?.dash),
+      width: Math.max(1, Math.min(6, graphNumber(item?.width) || 2)),
+    });
+    return true;
+  };
+
+  // Models frequently put function expressions directly in `lines` (for
+  // example a system of equations) instead of in the `functions` array.
+  // Treat a line with no points but with an expression as a function series,
+  // so every equation still gets drawn.
+  const rawLines = Array.isArray(spec.lines)
+    ? spec.lines
+    : Array.isArray(spec.series)
+      ? spec.series
+      : [];
+  rawLines.forEach((item, index) => {
+    let points = [];
+    let label = "";
+    let color = "";
+    let dashed = false;
+    let width = 2;
+    if (Array.isArray(item)) {
+      points = graphPointList(item);
+    } else if (item && typeof item === "object") {
+      points = graphPointList(item.points || item.data || item.coordinates);
+      label = String(item.label || item.name || "");
+      color = String(item.color || "");
+      dashed = Boolean(item.dashed || item.dash);
+      width = Math.max(1, Math.min(6, graphNumber(item.width) || 2));
+    }
+    if (points.length) {
+      series.push({
+        kind: "line",
+        points,
+        label,
+        color: color || GRAPH_COLORS[index % GRAPH_COLORS.length],
+        dashed,
+        width,
+      });
+      return;
+    }
+    if (item && typeof item !== "string") {
+      if (pushFunction({ ...item, color: color || item.color }, index)) return;
+    }
+  });
+
+  const functionLists = [spec.functions, spec.equations].filter(Array.isArray);
+  let functionIndex = 0;
+  for (const list of functionLists) {
+    list.forEach((item) => {
+      if (pushFunction(item, rawLines.length + functionIndex)) functionIndex += 1;
+    });
+  }
+
+  const markers = graphPointList(spec.points || spec.markers);
+  return { series, markers };
+}
+
+function makeGraphFigure(source) {
+  const spec = parseGraphSpec(source);
+  if (!spec) return null;
+  const { series, markers } = collectGraphSeries(spec);
+  if (!series.length && !markers.length) return null;
+
+  const rawX = [];
+  const rawY = [];
+  const pushPoint = (point) => {
+    if (Number.isFinite(point.x)) rawX.push(point.x);
+    if (Number.isFinite(point.y)) rawY.push(point.y);
+  };
+  series.forEach((item) => {
+    if (item.kind === "line") item.points.forEach(pushPoint);
+  });
+  markers.forEach(pushPoint);
+
+  const explicitX = graphRange(spec.x || spec.x_range || spec.xRange, null);
+  const explicitY = graphRange(spec.y || spec.y_range || spec.yRange, null);
+
+  // Sample functions before deciding on an automatic range.
+  const sampled = [];
+  for (const item of series) {
+    if (item.kind !== "function") continue;
+    const domain = item.domain || explicitX || [-10, 10];
+    const samples = [];
+    const count = 401;
+    for (let step = 0; step <= count; step += 1) {
+      const x = domain[0] + ((domain[1] - domain[0]) * step) / count;
+      const y = item.fn(x);
+      if (Number.isFinite(y)) {
+        samples.push({ x, y });
+        if (!explicitX) rawX.push(x);
+        if (!explicitY) rawY.push(y);
+      }
+    }
+    item.samples = samples;
+    sampled.push(item);
+  }
+
+  const autoRange = (values) => {
+    if (!values.length) return [-10, 10];
+    let min = Math.min(...values);
+    let max = Math.max(...values);
+    if (min === max) {
+      min -= 1;
+      max += 1;
+    }
+    const pad = (max - min) * 0.08;
+    return [min - pad, max + pad];
+  };
+  const xRange = explicitX || autoRange(rawX);
+  const yRange = explicitY || autoRange(rawY);
+  if (!(xRange[1] > xRange[0]) || !(yRange[1] > yRange[0])) return null;
+
+  const width = 640;
+  const height = 430;
+  const margin = { left: 54, right: 22, top: 18, bottom: 42 };
+  const plotW = width - margin.left - margin.right;
+  const plotH = height - margin.top - margin.bottom;
+  const sx = (x) => margin.left + ((x - xRange[0]) / (xRange[1] - xRange[0])) * plotW;
+  const sy = (y) => margin.top + plotH - ((y - yRange[0]) / (yRange[1] - yRange[0])) * plotH;
+
+  const svg = graphSvgEl("svg", {
+    viewBox: `0 0 ${width} ${height}`,
+    role: "img",
+    "aria-label": String(spec.title || spec.alt || "Cartesian graph"),
+  });
+  const plot = graphSvgEl("g");
+  svg.appendChild(plot);
+
+  const xTicks = graphTicks(xRange[0], xRange[1]);
+  const yTicks = graphTicks(yRange[0], yRange[1]);
+  const xStep = xTicks.length > 1 ? xTicks[1] - xTicks[0] : 1;
+  const yStep = yTicks.length > 1 ? yTicks[1] - yTicks[0] : 1;
+
+  // Grid.
+  for (const tick of xTicks) {
+    plot.appendChild(graphSvgEl("line", {
+      x1: sx(tick), y1: margin.top, x2: sx(tick), y2: margin.top + plotH,
+      stroke: "#223345", "stroke-width": 1,
+    }));
+  }
+  for (const tick of yTicks) {
+    plot.appendChild(graphSvgEl("line", {
+      x1: margin.left, y1: sy(tick), x2: margin.left + plotW, y2: sy(tick),
+      stroke: "#223345", "stroke-width": 1,
+    }));
+  }
+
+  // Axes, clamped into view so a range that excludes zero still reads well.
+  const axisX = Math.max(margin.left, Math.min(margin.left + plotW, sx(0)));
+  const axisY = Math.max(margin.top, Math.min(margin.top + plotH, sy(0)));
+  plot.appendChild(graphSvgEl("line", {
+    x1: margin.left, y1: axisY, x2: margin.left + plotW, y2: axisY,
+    stroke: "#8fa6ba", "stroke-width": 1.4,
+  }));
+  plot.appendChild(graphSvgEl("line", {
+    x1: axisX, y1: margin.top, x2: axisX, y2: margin.top + plotH,
+    stroke: "#8fa6ba", "stroke-width": 1.4,
+  }));
+  plot.appendChild(graphSvgEl("polygon", {
+    points: `${margin.left + plotW},${axisY} ${margin.left + plotW - 8},${axisY - 4} ${margin.left + plotW - 8},${axisY + 4}`,
+    fill: "#8fa6ba",
+  }));
+  plot.appendChild(graphSvgEl("polygon", {
+    points: `${axisX},${margin.top} ${axisX - 4},${margin.top + 8} ${axisX + 4},${margin.top + 8}`,
+    fill: "#8fa6ba",
+  }));
+
+  // Tick labels.
+  for (const tick of xTicks) {
+    if (Math.abs(tick) < xStep * 1e-9 && xRange[0] < 0 && xRange[1] > 0) continue;
+    const text = graphSvgEl("text", {
+      x: sx(tick), y: margin.top + plotH + 16,
+      fill: "#8fa6ba", "font-size": 11, "text-anchor": "middle",
+      "font-family": "ui-monospace, SFMono-Regular, Menlo, monospace",
+    });
+    text.textContent = graphFormatTick(tick, xStep);
+    plot.appendChild(text);
+  }
+  for (const tick of yTicks) {
+    if (Math.abs(tick) < yStep * 1e-9 && yRange[0] < 0 && yRange[1] > 0) continue;
+    const text = graphSvgEl("text", {
+      x: margin.left - 8, y: sy(tick) + 4,
+      fill: "#8fa6ba", "font-size": 11, "text-anchor": "end",
+      "font-family": "ui-monospace, SFMono-Regular, Menlo, monospace",
+    });
+    text.textContent = graphFormatTick(tick, yStep);
+    plot.appendChild(text);
+  }
+
+  // Axis labels.
+  const xLabel = graphSvgEl("text", {
+    x: margin.left + plotW, y: margin.top + plotH + 34,
+    fill: "#b4c5d5", "font-size": 12, "text-anchor": "end",
+    "font-style": "italic",
+  });
+  xLabel.textContent = String(spec.xlabel || "x");
+  plot.appendChild(xLabel);
+  const yLabel = graphSvgEl("text", {
+    x: margin.left - 8, y: margin.top - 6,
+    fill: "#b4c5d5", "font-size": 12, "text-anchor": "start",
+    "font-style": "italic",
+  });
+  yLabel.textContent = String(spec.ylabel || "y");
+  plot.appendChild(yLabel);
+
+  // Clip series to the plot so a steep curve cannot draw over the labels.
+  const clipId = `graph-clip-${Math.random().toString(36).slice(2, 9)}`;
+  const defs = graphSvgEl("defs");
+  const clipPath = graphSvgEl("clipPath", { id: clipId });
+  clipPath.appendChild(graphSvgEl("rect", {
+    x: margin.left, y: margin.top, width: plotW, height: plotH,
+  }));
+  defs.appendChild(clipPath);
+  svg.insertBefore(defs, plot);
+  const dataGroup = graphSvgEl("g", { "clip-path": `url(#${clipId})` });
+  plot.appendChild(dataGroup);
+
+  const drawLine = (points, color, widthValue, dashed) => {
+    if (!points.length) return;
+    if (points.length === 1) {
+      dataGroup.appendChild(graphSvgEl("circle", {
+        cx: sx(points[0].x), cy: sy(points[0].y), r: 3.5,
+        fill: color, stroke: "none",
+      }));
+      return;
+    }
+    const path = points
+      .map((point, index) => `${index ? "L" : "M"}${sx(point.x).toFixed(2)} ${sy(point.y).toFixed(2)}`)
+      .join(" ");
+    dataGroup.appendChild(graphSvgEl("path", {
+      d: path,
+      fill: "none",
+      stroke: color,
+      "stroke-width": widthValue,
+      "stroke-linejoin": "round",
+      "stroke-linecap": "round",
+      "stroke-dasharray": dashed ? "7 5" : undefined,
+    }));
+  };
+
+  for (const item of series) {
+    drawLine(
+      item.kind === "function" ? item.samples : item.points,
+      item.color,
+      item.width,
+      item.dashed
+    );
+  }
+
+  for (const marker of markers) {
+    dataGroup.appendChild(graphSvgEl("circle", {
+      cx: sx(marker.x), cy: sy(marker.y), r: 4.5,
+      fill: "#ffd28a", stroke: "#0f1822", "stroke-width": 1.5,
+    }));
+    if (marker.label) {
+      const label = graphSvgEl("text", {
+        x: sx(marker.x) + 7, y: sy(marker.y) - 7,
+        fill: "#e6f0f8", "font-size": 11,
+        "font-family": "ui-monospace, SFMono-Regular, Menlo, monospace",
+      });
+      label.textContent = marker.label;
+      dataGroup.appendChild(label);
+    }
+  }
+
+  const figure = document.createElement("div");
+  figure.className = "graph-figure";
+  const title = String(spec.title || "").trim();
+  if (title) {
+    const titleEl = document.createElement("div");
+    titleEl.className = "graph-title";
+    titleEl.textContent = title;
+    figure.appendChild(titleEl);
+  }
+  figure.appendChild(svg);
+
+  const legendItems = series.filter((item) => item.label);
+  if (legendItems.length) {
+    const legend = document.createElement("div");
+    legend.className = "graph-legend";
+    for (const item of legendItems) {
+      const row = document.createElement("span");
+      row.className = "graph-legend-item";
+      const swatch = document.createElement("span");
+      swatch.className = "graph-legend-swatch";
+      swatch.style.background = item.color;
+      row.appendChild(swatch);
+      const label = document.createElement("span");
+      label.textContent = item.label;
+      row.appendChild(label);
+      legend.appendChild(row);
+    }
+    figure.appendChild(legend);
+  }
+  return figure;
+}
+
+function isGraphFenceLanguage(lang) {
+  const value = String(lang || "").trim().toLowerCase();
+  return value === "graph" || value === "chart" || value === "plot" || value === "cartesian";
+}
+
 function makeMathElement(latex, display = false) {
   const el = document.createElement(display ? "div" : "span");
   el.className = display ? "math-display" : "math-inline";
@@ -4092,6 +4691,7 @@ function renderMarkdown(text, clickable = true, annotations = null, options = nu
     // Fenced code block.
     if (/^\s*```/.test(line)) {
       const fenceMatch = /^\s*```\s*([^\s`]*)/.exec(line);
+      const rawFenceLang = String(fenceMatch?.[1] || "").trim().toLowerCase();
       const fenceLang = normalizeCodeLang(
         fenceMatch?.[1] || options?.language || ""
       );
@@ -4106,6 +4706,13 @@ function renderMarkdown(text, clickable = true, annotations = null, options = nu
         i += 1;
       }
       if (i < lines.length) i += 1;
+      if (isGraphFenceLanguage(rawFenceLang)) {
+        const graphFigure = makeGraphFigure(codeLines.join("\n"));
+        if (graphFigure) {
+          container.appendChild(graphFigure);
+          continue;
+        }
+      }
       const pre = document.createElement("pre");
       const code = document.createElement("code");
       const commentFlags = lineHelpEnabled

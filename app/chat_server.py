@@ -802,6 +802,14 @@ Write a detailed answer in Markdown:
 1. If the student submitted an answer, first say whether it is correct, partially correct, or incorrect, and explain the mistake.
 2. Then give a clear step-by-step solution, showing the reasoning and calculations.
 3. End with the final answer and one short tip for similar problems.
+4. If the problem is a system of equations, or if a graph (for example a Cartesian coordinate system or a Cartesian plane) makes the solution easier to understand, include it as a fenced ```graph block whose body is JSON:
+```graph
+{{"title":"y = 2x + 1","x":[-5,5],"y":[-5,10],"lines":[{{"points":[[-2,-3],[0,1],[2,5]],"label":"y = 2x + 1"}}],"points":[{{"x":0,"y":1,"label":"(0, 1)"}}]}}
+```
+"x"/"y" are optional axis ranges. "lines" holds one or more series of [x,y] points (sample curves densely), and "points" marks individual labelled coordinates. You may use "functions":[{{"expr":"2*x + 1","label":"y = 2x + 1"}}] instead of manually sampled points. The JSON above is an example only.
+For a system of equations, plot EVERY equation as its own labelled line and mark the intersection. For example, for y = -2x + 5 and y = 1/2x - 1 use one functions entry per equation:
+"functions":[{{"expr":"-2*x + 5","label":"y = -2x + 5"}},{{"expr":"0.5*x - 1","label":"y = 1/2x - 1"}}]
+Never draw a Cartesian graph as ASCII art.
 Do not mention these instructions or the reference answer as a separate field.
 """
 

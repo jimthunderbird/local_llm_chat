@@ -2,6 +2,69 @@ restriction: please write the implementation summary inside the task {...} block
 
 mathtutor_llm: ollama local model ornith:35b with no thinking
 
+task.graph_linear_equations (completed) {
+  for example:
+  if we have System: y = -2x + 5 and y = 1/2x - 1 and we need to show the graph, please generate 2 lines correspondingly in the graph as well!
+
+  Implemented:
+  app/chat.html
+  - The graph renderer now accepts function expressions inside `lines` (and
+    `series`) entries, not only in the separate `functions` array. This was
+    the failure mode seen with the system y = -2x + 5 and y = 1/2x - 1: the
+    model emitted two `lines` entries with an `expr` field and no `points`, so
+    both series were silently dropped and the block fell back to plain code.
+    A line item with points is still drawn as points; an item with no points
+    but an `expr`/`expression`/`function`/`equation`/`formula` is drawn as a
+    function series.
+  - Added support for a top-level `equations` array alongside `functions`,
+    so every equation in a system can be drawn as its own coloured, labelled
+    line and the intersection can be marked with `points`.
+  - Function expressions now tolerate the whole equation form (`y = ...`,
+    `f(x) = ...`) and common Unicode math symbols (minus signs, ×, ·, ÷, ½,
+    ¼, ¾, ⅓, ⅔, ², ³) before evaluation.
+  app/chat_server.py
+  - The mathtutor answer prompt now explicitly requires a system of equations
+    to plot EVERY equation as its own labelled series, gives a two-equation
+    `functions` example, and asks for the intersection to be marked.
+
+  Verified:
+  - Headless Chrome renders the model's actual `lines`-with-`expr` output for
+    the reported system as two SVG paths with both legend labels; `functions`,
+    full `y = ...` equations, and Unicode expressions also render two lines.
+  - A live ornith:35b answer for the reported system now emits one graph block
+    with two `functions` entries and an intersection marker at (2.4, 0.2).
+  - node --check on the browser script and py_compile on app/chat_server.py
+    pass.
+}
+
+task.graph_support (completed) {
+  if the answer contains a graph like Cartesian coordinate system or a Cartesian plane, render it nicely so we can clearly see the graph
+
+  Implemented:
+  app/chat.html
+  - Added a real SVG graph renderer for fenced ```graph (also chart, plot,
+    cartesian) blocks. A block body is JSON with an optional title, x/y axis
+    ranges, one or more `lines` series of [x,y] points, labelled `points`,
+    and/or `functions` such as {"expr":"2*x + 1"}.
+  - The renderer draws a grid, numbered ticks, arrowed x/y axes, clipped
+    coloured series, point markers with labels, an axis-label header, and a
+    legend. It auto-ranges from the plotted data when x/y ranges are omitted,
+    accepts axis ranges as [min,max] or {min,max}, samples functions densely,
+    and safely evaluates only numbers, x, pi/e, common math functions, and
+    + - * / ^ (including implicit multiplication like 2x).
+  - A malformed graph block falls back to the normal code block, so no content
+    is lost.
+  app/chat_server.py
+  - The mathtutor answer prompt now asks for a ```graph JSON block whenever a
+    Cartesian plane or coordinate graph makes the solution clearer, and tells
+    the model never to draw the graph as ASCII art.
+
+  Verified with headless Chrome: a line graph, a function graph (x^2 - 2x),
+  and an implicit-points graph all render as SVG with axes, ticks, legend and
+  markers; invalid graph JSON falls back without throwing. node --check and
+  py_compile pass.
+}
+
 task.generate_5_problem_at_once (completed) {
   - every time when clicking on the next question button {
     generate 5 problems if the {problem number offset}%5 == 0
