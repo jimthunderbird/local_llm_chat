@@ -1,3 +1,7 @@
+task.stream_answer (completed) {
+  do we use streaming when answer is being generated? please make sure we do so
+}
+
 task.action.super_small_model.milodule3/LFM3-1.7B-aura-grounded:latest.stubborn (completed) {
   based on the section "14. If LFM3-1.7B-aura-grounded must be the primary answer writer" in {diretory_of_this_prompt}/../research/performance_improvement.html, make milodule3/LFM3-1.7B-aura-grounded:latest the only model and try the best configuration, architecture and prompt engineering tweaks
 }

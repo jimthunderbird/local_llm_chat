@@ -2804,6 +2804,213 @@ def _lfm_request_json(
     return (parsed if isinstance(parsed, dict) else None), event
 
 
+def _lfm_parse_json_object(raw: str) -> dict | None:
+    """Parse a schema-constrained JSON object, salvaging chatty wrappers."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+class _LfmJsonStringStream:
+    """Incrementally decode one JSON string value from a token stream.
+
+    Ollama applies ``format`` to a streaming response, so the writer emits
+    ``{"answer": "..."}`` one small chunk at a time. This decoder skips the
+    JSON wrapper and yields the decoded answer text as soon as each token
+    arrives, including multi-chunk ``\\uXXXX`` escapes and surrogate pairs.
+    """
+
+    _ESCAPES = {
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+    }
+
+    def __init__(self, key: str = "answer") -> None:
+        self.key = key
+        self.buffer = ""
+        self.position = 0
+        self.started = False
+        self.finished = False
+        self._escaped = False
+        self._unicode: str | None = None
+        self._high_surrogate: int | None = None
+
+    def feed(self, chunk: str) -> str:
+        if self.finished or not chunk:
+            return ""
+        self.buffer += chunk
+        if not self.started:
+            marker = f'"{self.key}"'
+            key_at = self.buffer.find(marker)
+            if key_at < 0:
+                return ""
+            colon_at = self.buffer.find(":", key_at + len(marker))
+            if colon_at < 0:
+                return ""
+            quote_at = self.buffer.find('"', colon_at + 1)
+            if quote_at < 0:
+                return ""
+            self.position = quote_at + 1
+            self.started = True
+
+        output: list[str] = []
+        index = self.position
+        length = len(self.buffer)
+        while index < length:
+            char = self.buffer[index]
+            index += 1
+            if self._unicode is not None:
+                self._unicode += char
+                if len(self._unicode) < 4:
+                    continue
+                digits, self._unicode = self._unicode, None
+                try:
+                    codepoint = int(digits, 16)
+                except ValueError:
+                    continue
+                if 0xD800 <= codepoint <= 0xDBFF:
+                    self._high_surrogate = codepoint
+                elif (
+                    0xDC00 <= codepoint <= 0xDFFF
+                    and self._high_surrogate is not None
+                ):
+                    codepoint = (
+                        0x10000
+                        + ((self._high_surrogate - 0xD800) << 10)
+                        + (codepoint - 0xDC00)
+                    )
+                    self._high_surrogate = None
+                    output.append(chr(codepoint))
+                else:
+                    self._high_surrogate = None
+                    output.append(chr(codepoint))
+                continue
+            if self._escaped:
+                self._escaped = False
+                if char == "u":
+                    self._unicode = ""
+                else:
+                    output.append(self._ESCAPES.get(char, char))
+                continue
+            if char == "\\":
+                self._escaped = True
+                continue
+            if char == '"':
+                self.finished = True
+                index = length
+                break
+            output.append(char)
+        self.position = index
+        return "".join(output)
+
+
+def _lfm_request_json_stream(
+    system: str,
+    prompt: str,
+    schema: dict,
+    model: str,
+    temperature: float,
+    num_predict: int,
+    key: str,
+    emit: Callable[[str], None] | None = None,
+) -> tuple[dict | None, dict, float | None]:
+    """Stream one schema-constrained call, decoding ``key`` as it arrives.
+
+    Returns ``(parsed_json, final_event, first_text_monotonic)``. The final
+    event carries Ollama's timing/count fields; ``first_text_monotonic`` is
+    measured when the first decoded character is produced so TTFT reflects
+    the answer the user actually sees, not the end of the JSON envelope.
+    """
+    payload = {
+        "model": model,
+        "system": system,
+        "prompt": prompt,
+        "stream": True,
+        "think": False,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+        "format": schema,
+        "options": {
+            "num_ctx": ANSWER_NUM_CTX,
+            "temperature": temperature,
+            "top_k": 50,
+            "top_p": 0.95,
+            "repeat_penalty": 1.1,
+            "num_predict": num_predict,
+        },
+    }
+    decoder = _LfmJsonStringStream(key)
+    chunks: list[str] = []
+    decoded_parts: list[str] = []
+    final_event: dict = {}
+    first_text_monotonic: float | None = None
+    try:
+        with requests.post(
+            f"{OLLAMA_HOST}/api/generate",
+            json=payload,
+            stream=True,
+            timeout=(10, 300),
+        ) as response:
+            response.raise_for_status()
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("error"):
+                    raise RuntimeError(f"Ollama error: {event['error']}")
+                token = str(event.get("response", "") or "")
+                if token:
+                    chunks.append(token)
+                    text = decoder.feed(token)
+                    if text:
+                        decoded_parts.append(text)
+                        if first_text_monotonic is None:
+                            first_text_monotonic = time.monotonic()
+                        if emit is not None:
+                            emit(text)
+                if event.get("done"):
+                    final_event = event
+                    break
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Could not reach Ollama at {OLLAMA_HOST}. Is it running? ({exc})"
+        ) from exc
+
+    parsed = _lfm_parse_json_object("".join(chunks))
+    streamed_text = "".join(decoded_parts)
+    if not parsed:
+        if not streamed_text:
+            return None, final_event, first_text_monotonic
+        parsed = {key: streamed_text}
+    elif key in parsed and not streamed_text and emit is not None:
+        # The decoder failed (for example the envelope was malformed) but the
+        # complete reply parsed. Emit it once so the browser is never blank.
+        text = str(parsed.get(key, ""))
+        if text:
+            emit(text)
+            first_text_monotonic = time.monotonic()
+    return parsed, final_event, first_text_monotonic
+
+
 def lfm_relevance_gate(
     question: str,
     context: str,
@@ -2836,8 +3043,23 @@ def lfm_write_answer(
     model: str = CHAT_MODEL,
     answer_language: str | None = None,
     prompt_prefix: str = "",
+    emit: Callable[[str], None] | None = None,
+    stream_output: bool = True,
 ) -> tuple[str, dict]:
-    """Run the JSON answer writer and return (clean text, event)."""
+    """Stream the JSON answer writer and return (clean text, event).
+
+    ``emit`` receives decoded answer deltas as they arrive. With no ``emit``
+    the deltas are printed to stdout, matching the legacy streaming path. Set
+    ``stream_output=False`` to decode silently (used when the caller will
+    translate the finished answer).
+    """
+    output: Callable[[str], None] | None
+    if not stream_output:
+        output = None
+    elif emit is not None:
+        output = emit
+    else:
+        output = lambda text: print(text, end="", flush=True)
     system = LFM_ANSWER_SYSTEM_PROMPT
     if answer_language:
         system += (
@@ -2866,14 +3088,18 @@ def lfm_write_answer(
         prompt += f"\n\nAnswer in {answer_language}."
         if "chinese" in answer_language.lower():
             prompt += " 只用简体中文回答，不要保留英文句子。"
-    parsed, event = _lfm_request_json(
+    parsed, event, first_text = _lfm_request_json_stream(
         system,
         prompt,
         LFM_ANSWER_SCHEMA,
         model=model,
         temperature=0.1,
         num_predict=_lfm_output_budget(question),
+        key="answer",
+        emit=output,
     )
+    if first_text is not None:
+        event["_first_text_monotonic"] = first_text
     if not parsed:
         return "", event
     return clean_lfm_answer(str(parsed.get("answer", ""))), event
@@ -2910,6 +3136,13 @@ def answer_with_lfm_pipeline(
         # The gate itself failed (model/parse). Let the caller use the legacy
         # prompt path rather than guessing a refusal.
         return None
+
+    def write_output(text: str) -> None:
+        if emit is not None:
+            emit(text)
+        else:
+            print(text, end="", flush=True)
+
     if not relevant:
         answer = LFM_REFUSAL
         if translate_answer:
@@ -2917,8 +3150,7 @@ def answer_with_lfm_pipeline(
                 answer = translate_to_chinese(answer)
             except RuntimeError:
                 pass
-        if emit is not None:
-            emit(answer + "\n")
+        write_output(answer + "\n")
         if metrics is not None:
             metrics.update(_lfm_metrics(started, [gate_event]))
         return answer
@@ -2929,6 +3161,8 @@ def answer_with_lfm_pipeline(
             model=model,
             answer_language=answer_language,
             prompt_prefix=prompt_prefix,
+            emit=emit,
+            stream_output=not translate_answer,
         )
     except RuntimeError:
         raise
@@ -2939,11 +3173,23 @@ def answer_with_lfm_pipeline(
             answer = translate_to_chinese(answer)
         except RuntimeError:
             pass
-    if emit is not None:
-        emit(answer + "\n")
+        write_output(answer + "\n")
+    elif emit is None and not answer.endswith("\n"):
+        # The writer already streamed the answer to stdout.
+        print()
     if metrics is not None:
+        first_text = writer_event.pop("_first_text_monotonic", None)
+        request_ttft = (
+            max(0.0, first_text - started)
+            if first_text is not None
+            else None
+        )
         metrics.update(
-            _lfm_metrics(started, [gate_event, writer_event])
+            _lfm_metrics(
+                started,
+                [gate_event, writer_event],
+                request_ttft=request_ttft,
+            )
         )
     return answer
 
@@ -2951,8 +3197,9 @@ def answer_with_lfm_pipeline(
 def _lfm_metrics(
     started: float,
     events: list[dict],
+    request_ttft: float | None = None,
 ) -> dict:
-    """Map two non-streamed Ollama calls onto stream_answer's metric keys."""
+    """Map the gate and writer calls onto stream_answer's metric keys."""
     elapsed = time.monotonic() - started
     prompt_eval = sum(
         int(event.get("prompt_eval_count", 0) or 0) for event in events
@@ -2970,9 +3217,9 @@ def _lfm_metrics(
         int(event.get("load_duration", 0) or 0) for event in events
     )
     return {
-        # The writer is emitted only after its JSON is complete, so the first
-        # user-visible token arrives at the end of the pipeline.
-        "request_ttft": elapsed,
+        # For a streamed writer this is the first decoded answer token. The
+        # gate call and JSON envelope are included in the elapsed time.
+        "request_ttft": elapsed if request_ttft is None else request_ttft,
         "load_duration": load_ns / 1e9,
         "prompt_eval_count": prompt_eval,
         "prompt_eval_cached_count": 0,
