@@ -20,6 +20,7 @@ Optional environment variables:
     WEBSHARE_PROXY_PASSWORD   youtube-transcript-api
     YT_COOKIES_FROM_BROWSER   e.g. "chrome" for the yt-dlp fallback
     YT_COOKIES_FILE           path to a Netscape cookies.txt for yt-dlp
+    OLLAMA_YOUTUBE_MODEL      title-summary model (default: ornith:35b)
 """
 
 import argparse
@@ -59,7 +60,7 @@ def normalize_argv(argv):
     Recognized switches are moved in front of the positional value, so
     ``--force -PcBFgkrR2o`` and ``-- -PcBFgkrR2o`` both work.
     """
-    known_switches = {"-h", "--help", "--force", "--"}
+    known_switches = {"-h", "--help", "--force", "--reuse-transcript", "--"}
     switches = [arg for arg in argv if arg in known_switches and arg != "--"]
     positionals = [arg for arg in argv if arg not in known_switches]
     if any(arg.startswith("-") for arg in positionals):
@@ -67,9 +68,8 @@ def normalize_argv(argv):
     return [*switches, *positionals]
 
 
-MODEL = os.environ.get(
-    "OLLAMA_LFM_MODEL", "milodule3/LFM3-1.7B-aura-grounded:latest"
-)
+# The YouTube-learning pipeline always uses the large answer model.
+MODEL = os.environ.get("OLLAMA_YOUTUBE_MODEL", "ornith:35b")
 OUTPUT_DIR = Path.cwd() / ".chat" / "articles_cache"
 YOUTUBE_PREFIX = "youtube_"
 
@@ -468,22 +468,48 @@ def main() -> None:
         action="store_true",
         help="ignore an already cached .transcript file and fetch again",
     )
+    parser.add_argument(
+        "--reuse-transcript",
+        action="store_true",
+        help="use the cached transcript without fetching or rewriting it "
+        "(used by the relearn pipeline)",
+    )
     args = parser.parse_args(normalize_argv(sys.argv[1:]))
 
     video_id = args.youtube_video_hash.strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", video_id):
         sys.exit(f"Invalid YouTube video hash: {video_id!r}")
 
-    try:
-        transcript = fetch_transcript(video_id, use_cache=not args.force)
-    except Exception as exc:
-        sys.exit(f"Error: {exc}")
+    if args.reuse_transcript:
+        if args.force:
+            sys.exit(
+                "Error: --reuse-transcript and --force cannot be used together"
+            )
+        transcript_path = _transcript_path(video_id)
+        try:
+            transcript = transcript_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            sys.exit(
+                f"Error: --reuse-transcript requires the saved transcript at "
+                f"{transcript_path} ({exc})"
+            )
+        if not transcript:
+            sys.exit(
+                f"Error: the saved transcript at {transcript_path} is empty"
+            )
+        print(f"Using existing transcript without modifying it: {transcript_path}")
+    else:
+        try:
+            transcript = fetch_transcript(video_id, use_cache=not args.force)
+        except Exception as exc:
+            sys.exit(f"Error: {exc}")
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    transcript_path = _transcript_path(video_id)
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        transcript_path = _transcript_path(video_id)
+        transcript_path.write_text(transcript + "\n", encoding="utf-8")
+        print(f"Saved transcript: {transcript_path}")
+
     title_path = _title_path(video_id)
-    transcript_path.write_text(transcript + "\n", encoding="utf-8")
-    print(f"Saved transcript: {transcript_path}")
 
     # Reuse an existing title when re-running an already-learned video; this
     # avoids a pointless model call and keeps repeated runs fast.

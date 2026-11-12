@@ -24,9 +24,10 @@ For each question:
        a deterministic JSON relevance gate followed by a JSON answer writer.
        The gate owns refusal decisions; the writer never sees a refusal
        instruction, so it cannot append a second refusal paragraph.
-    6. Stream the written answer from Ollama's LFM3 model. Retrieval / filter /
-       prefill / TTFT / prompt-token measurements are hidden by default and
-       can be shown with `/benchmark` (or continuously with `/benchmark on`).
+    6. Stream the written answer from Ollama's ornith:35b model. Retrieval /
+       filter / prefill / TTFT / prompt-token measurements are hidden by
+       default and can be shown with `/benchmark` (or continuously with
+       `/benchmark on`).
 
 Simplified Chinese questions are detected automatically and translated into
 English only for BM25 retrieval; the answer is requested in Simplified
@@ -57,6 +58,9 @@ Commands:
                        Search transcript titles with ag and pick a video.
     /youtube learn <hash|url>
                        Fetch, rewrite, chunk, and embed a video.
+    /youtube relearn <hash|url>
+                       Rebuild one video's title and trunks from its saved
+                       transcript without downloading the transcript again.
     /wiki <question>   For a narrow fact question, search the full Wikipedia
                        article excerpts with ag and answer directly. Otherwise
                        output the summary for each main entity.
@@ -122,22 +126,29 @@ except ImportError as exc:  # pragma: no cover - dependency guard
         "python3 -m pip install --user prompt_toolkit"
     )
 
-# The server intentionally runs one local model only. Every helper call
-# (query expansion, candidate filtering, translation, follow-ups) and the
-# answer writer use the same LFM3-aura-grounded artifact, so Ollama never has
-# to load or evict a second model. Override the artifact with
-# OLLAMA_LFM_MODEL when a different local build is installed.
+# The server uses ornith:35b to write answers, tutor math, and generate code.
+# The small LFM3-aura-grounded artifact remains the helper model for query
+# expansion, candidate filtering, conversation rewriting, translation, and
+# dictionary lookups, so Ollama keeps a cheap model for those short calls.
+# Override each artifact with OLLAMA_LFM_MODEL / OLLAMA_ANSWER_MODEL.
 LFM_MODEL = os.environ.get(
     "OLLAMA_LFM_MODEL", "milodule3/LFM3-1.7B-aura-grounded:latest"
 )
+# The answer writer, the math tutor, and code generation use the larger
+# ornith:35b model. The small LFM3 artifact stays the helper model (query
+# expansion, candidate filtering, conversation, translation, dictionary) so
+# those frequent short calls remain cheap.
+ANSWER_MODEL = os.environ.get("OLLAMA_ANSWER_MODEL", "ornith:35b")
 EXPANSION_MODEL = LFM_MODEL
 # Model used to filter BM25 candidates before synthesis.
 FILTER_MODEL = LFM_MODEL
 CHAT_MODEL = LFM_MODEL
+# Models that must stay resident: the helper model and the answer model.
+RESIDENT_MODELS = tuple(dict.fromkeys((CHAT_MODEL, ANSWER_MODEL)))
 # Coding questions (code samples for a language feature, structure, or
 # architecture) are routed to the code-generation model from
 # ./prompts/programming_language_tips.prompt, without thinking enabled.
-CODING_MODEL = LFM_MODEL
+CODING_MODEL = ANSWER_MODEL
 # Local model used by /ask for quick questions that do not use retrieval.
 SIMPLE_ANSWER_MODEL = LFM_MODEL
 # Local model used to translate Simplified Chinese questions for retrieval.
@@ -251,6 +262,10 @@ FUZZY_ENTITY_TOPIC_STOPWORDS = FUZZY_ANCHOR_STOPWORDS | frozenset(
 # BM25 cannot bridge the two forms on its own, so the expansion is mined from
 # the documents that contain the acronym and added to the query.
 ACRONYM_QUERY_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]{1,7}\b")
+# Each acronym lookup scans the documents that contain it. A real question
+# names only a few acronyms; a generated hint can contain a dozen capitalized
+# words and once made one BM25 query take over 20 seconds. Cap the lookups.
+ACRONYM_QUERY_MAX_LOOKUPS = 4
 ACRONYM_STOPWORDS = frozenset(
     "a an the of and for in on to from with".split()
 )
@@ -655,6 +670,9 @@ Return only JSON: {"relevant": true} or {"relevant": false}."""
 LFM_ANSWER_SYSTEM_PROMPT = """You are the primary answer writer for a retrieval-augmented assistant. The
 user message contains evidence and a question. Use ONLY the evidence.
 
+- The text after [n] is a grouping label, not evidence. Never treat the label
+  itself as a fact, and never infer a person's gender or family relationship
+  from it.
 - Answer the specific question that was asked, not a related topic. Answer only
   about the entity or subject named in the question. Use only facts explicitly
   attributed to that entity; never transfer facts from another entity mentioned
@@ -1141,7 +1159,7 @@ LIST_PREFIX = re.compile(r"^(\s*(?:\d+[.)]|[-*+]))\s+")
 COMMANDS = {
     "/memory": "show memory used by the BM25 index",
     "/refresh": "reload the global trunk corpus",
-    "/youtube": "YouTube commands: /youtube learn <hash|url> | transcript <hash|URL|keyword> | search_transcript <keyword>",
+    "/youtube": "YouTube commands: /youtube learn <hash|url> | relearn <hash|url> | transcript <hash|URL|keyword> | search_transcript <keyword>",
     "/ask": "ask a quick question directly (no knowledge-base retrieval)",
     "/wiki": "answer narrow fact questions from Wikipedia article excerpts, else show entity summaries",
     "/wiki_article": "print the full Wikipedia article for each main entity of <question>",
@@ -1158,6 +1176,7 @@ COMMANDS = {
 # Subcommands grouped under /youtube.
 YOUTUBE_SUBCOMMANDS = {
     "learn": "fetch, rewrite, chunk, and embed one video",
+    "relearn": "rebuild one video's title and trunks from its saved transcript",
     "transcript": "use one transcript by hash/URL, or search titles with ag",
     "search_transcript": "search transcript titles with ag and pick a video",
 }
@@ -1208,10 +1227,11 @@ def annotate_section_headings(chunks: list[Chunk]) -> None:
     for chunk in chunks:
         grouped.setdefault(chunk.video_id, []).append(chunk)
     for video_id, video_chunks in grouped.items():
-        article = video_id.startswith(ARTICLE_CHUNK_PREFIXES) or any(
-            chunk.trunk_path.parent == ARTICLES_DIR for chunk in video_chunks
-        )
-        if not article:
+        # Only learned web/news articles have section headings. YouTube
+        # transcripts now live in the same articles_cache directory, so a
+        # path check would classify every transcript paragraph as an article
+        # and read the whole corpus on the first question.
+        if not video_id.startswith(ARTICLE_CHUNK_PREFIXES):
             continue
         heading = ""
         for chunk in sorted(video_chunks, key=lambda item: item.index):
@@ -1521,13 +1541,16 @@ def index_chunks_in_sqlite(
     chunks: list[Chunk],
     corpus_key: str | None = None,
     optimize: bool = True,
+    prune: bool = False,
 ) -> dict[str, object]:
     """Persist newly learned chunks in the SQLite BM25 index immediately.
 
     Used by the article learning paths so a learned article has both its trunk
     files and its search index on disk even before the next question.  News
     articles always join the global corpus; an explicit article file gets its
-    own scoped table.
+    own scoped table.  ``prune`` also drops global rows whose trunk file was
+    removed, which is what a re-learn needs when a transcript produces fewer
+    paragraphs than before.
     """
     if not chunks:
         return {"added": 0, "updated": 0, "unchanged": 0}
@@ -1536,15 +1559,39 @@ def index_chunks_in_sqlite(
         corpus_key = _bm25_corpus_key(chunks, keys)
     backend = sqlite_bm25.get_index(BM25_DB_PATH, corpus_key)
     result = backend.sync(_bm25_sync_entries(chunks, corpus_key))
+    if prune and corpus_key == "global":
+        backend.prune(keys)
     # A bulk learn appends a few FTS5 segments at a time.  Merge them now,
     # while we are already off the question path, so later MATCH scans do not
     # pay for a fragmented b-tree.
-    if optimize and (result.get("added") or result.get("updated")):
+    if optimize and (result.get("added") or result.get("updated") or prune):
         try:
             backend.optimize()
         except sqlite3.Error:
             pass
     return result
+
+
+def delete_chunks_in_sqlite(
+    keys: list[str], corpus_key: str = "global"
+) -> int:
+    """Remove specific trunk rows from the SQLite BM25 index.
+
+    A re-learn deletes the old trunk files before writing replacement trunks.
+    Removing those rows first keeps stale paragraph documents (and their
+    effect on BM25's document count) out of the corpus.
+    """
+    keys = [key for key in keys if key]
+    if not keys:
+        return 0
+    backend = sqlite_bm25.get_index(BM25_DB_PATH, corpus_key)
+    removed = backend.delete_keys(keys)
+    if removed:
+        try:
+            backend.optimize()
+        except sqlite3.Error:
+            pass
+    return removed
 
 
 def get_bm25_index(chunks: list[Chunk], prune: bool = False) -> BM25Index:
@@ -1642,11 +1689,15 @@ def question_acronym_expansions(
     """Return corpus-derived full forms for acronyms in ``question``."""
     expansions: list[str] = []
     seen: set[str] = set()
+    lookups = 0
     for acronym in ACRONYM_QUERY_PATTERN.findall(question):
         key = acronym.upper()
         if key in seen:
             continue
         seen.add(key)
+        lookups += 1
+        if lookups > ACRONYM_QUERY_MAX_LOOKUPS:
+            break
         expansion = acronym_expansion(key, chunks, index)
         if expansion:
             expansions.append(expansion)
@@ -1922,8 +1973,10 @@ def chat_status_report(
         loaded_label = f"{len(video_ids):,} video(s)"
 
     lines = [
-        f"  models:      {CHAT_MODEL} "
-        "(chat, query expansion, filter, translation)",
+        f"  models:      {ANSWER_MODEL} "
+        "(chat, math tutor, code generation)",
+        f"               {CHAT_MODEL} "
+        "(query expansion, filter, translation, dictionary)",
         f"  Ollama host: {OLLAMA_HOST}",
         f"  scope:       {scope}",
         f"  loaded:      {len(chunks):,} trunks from {loaded_label}",
@@ -1953,6 +2006,8 @@ class CommandCompleter(Completer):
                     if subcommand.lower() in {
                         "transcript",
                         "search_transcript",
+                        "learn",
+                        "relearn",
                     }:
                         video_prefix = subargument.lstrip()
                         for video_id in available_video_ids():
@@ -2155,6 +2210,7 @@ def make_prompt_session(history: PlainFileHistory) -> PromptSession:
         if buffer.text in {
             "/youtube",
             "/youtube learn",
+            "/youtube relearn",
             "/youtube transcript",
             "/youtube search_transcript",
             "/wiki",
@@ -2876,23 +2932,83 @@ def build_context(chunks: list[Chunk], start_index: int = 1) -> str:
     return "\n".join(parts)
 
 
-def _lfm_chunk_title(chunk: Chunk) -> str:
-    """Return the shortest useful title for native ``[n] Title`` evidence."""
+# Source titles are metadata, not evidence. A headline is often sensational,
+# truncated, or simply wrong about a detail that the article body corrects.
+# The small writer treats the ``[n] Title`` label as a fact, so a source title
+# such as "Alice Huang ... husband of Jensen Huang" makes it repeat a false
+# claim even when the paragraph body refers to the same person as "she".
+# The evidence label therefore comes from the user's own question phrase or a
+# short structural section heading, never from the source title verbatim.
+LFM_HEADING_LABEL_MAX_WORDS = 8
+
+
+def _lfm_question_phrase_in_title(question: str, title: str) -> str:
+    """Return the longest question phrase that appears verbatim in ``title``.
+
+    For ``who is alice huang?`` and a headline beginning ``Alice Huang, ...``
+    this returns ``Alice Huang``. Using the question's own words as the label
+    anchors the paragraph to the entity without copying the title's claims.
+    """
+    if not question or not title:
+        return ""
+    question_tokens = [
+        token
+        for token in tokenize(question)
+        if len(token) > 1 and token not in FUZZY_ANCHOR_STOPWORDS
+    ]
+    if not question_tokens:
+        return ""
+    matches = list(TOKEN_PATTERN.finditer(title))
+    if not matches:
+        return ""
+    title_tokens = [normalize_token(match.group(0).lower()) for match in matches]
+    # Prefer the longest contiguous question phrase. Two words are the minimum
+    # because a single generic word ("market") is not a useful entity label.
+    for start in range(len(question_tokens)):
+        for length in range(len(question_tokens) - start, 1, -1):
+            phrase = question_tokens[start : start + length]
+            for position in range(len(title_tokens) - length + 1):
+                if title_tokens[position : position + length] == phrase:
+                    return title[
+                        matches[position].start() : matches[
+                            position + length - 1
+                        ].end()
+                    ]
+    return ""
+
+
+def _lfm_heading_label(chunk: Chunk) -> str:
+    """Return a short structural section heading, or an empty string."""
     heading = " ".join((chunk.section_heading or "").split())
+    if not heading or len(heading.split()) > LFM_HEADING_LABEL_MAX_WORDS:
+        return ""
+    if heading.endswith(("?", "!")):
+        return ""
+    return heading
+
+
+def _lfm_chunk_title(chunk: Chunk, question: str = "") -> str:
+    """Return a neutral grouping label for native ``[n] Title`` evidence."""
+    title = " ".join(video_title(chunk.video_id).split())
+    if title and question:
+        question_phrase = _lfm_question_phrase_in_title(question, title)
+        if question_phrase:
+            return question_phrase
+    heading = _lfm_heading_label(chunk)
     if heading:
         return heading
-    title = " ".join(video_title(chunk.video_id).split())
-    if title:
-        return title
     return "Knowledge"
 
 
-def build_lfm_context(chunks: list[Chunk], start_index: int = 1) -> str:
+def build_lfm_context(
+    chunks: list[Chunk], start_index: int = 1, question: str = ""
+) -> str:
     """Build the native ``[n] Title`` evidence block used by LFM3-aura.
 
     The fine-tune was trained on this format, not on ``<chunk id="n">`` XML.
     Each paragraph gets its own numbered block so the writer can keep the
-    entity boundaries straight.
+    entity boundaries straight. ``question`` supplies the user-owned phrase
+    used as a neutral label; source titles themselves are never evidence.
     """
     parts: list[str] = []
     number = start_index
@@ -2900,7 +3016,9 @@ def build_lfm_context(chunks: list[Chunk], start_index: int = 1) -> str:
         text = paragraph_text(chunk)
         if not text:
             continue
-        parts.append(f"[{number}] {_lfm_chunk_title(chunk)}\n{text}")
+        parts.append(
+            f"[{number}] {_lfm_chunk_title(chunk, question)}\n{text}"
+        )
         number += 1
     return "\n\n".join(parts)
 
@@ -3358,7 +3476,7 @@ def answer_with_lfm_pipeline(
     writer call.
     """
     started = time.monotonic()
-    context = build_lfm_context(chunks)
+    context = build_lfm_context(chunks, question=question)
     if not context.strip():
         return None
     try:
@@ -5438,17 +5556,22 @@ def run_learn_step(script: str, argv: list[str]) -> bool:
     return True
 
 
-def learn_video(value: str) -> str | None:
+def learn_video(value: str, relearn: bool = False) -> str | None:
     """Run the youtube_video_learn.py pipeline for a video hash/URL.
+
+    ``relearn`` removes the video's generated title/trunks/legacy artifacts
+    first, then rebuilds them from the cached transcript.  The transcript
+    itself is preserved.
 
     Returns the normalized video id on success, or None when the input is
     invalid or a pipeline step fails.
     """
+    label = "/youtube relearn" if relearn else "/youtube learn"
     try:
         import youtube_video_learn as learn
     except ImportError as exc:  # pragma: no cover - ships alongside
         print(
-            f"/youtube learn is unavailable: cannot import "
+            f"{label} is unavailable: cannot import "
             f"youtube_video_learn.py ({exc})",
             file=sys.stderr,
         )
@@ -5457,17 +5580,27 @@ def learn_video(value: str) -> str | None:
     try:
         video_id = learn.extract_video_hash(value)
     except ValueError as exc:
-        print(f"/youtube learn: {exc}", file=sys.stderr)
+        print(f"{label}: {exc}", file=sys.stderr)
         return None
 
-    print(f"/youtube learn: {video_id}")
-    for script, script_args in learn.STEPS:
+    print(f"{label}: {video_id}")
+    if relearn:
+        try:
+            removed = learn.remove_generated_artifacts(video_id)
+        except OSError as exc:
+            print(f"{label}: could not remove old artifacts: {exc}", file=sys.stderr)
+            return None
+        print(
+            f"{label}: removed {len(removed)} generated file(s); "
+            "the transcript is unchanged."
+        )
+    for script, script_args in learn.steps_for(relearn):
         argv = [arg.replace("<hash>", video_id) for arg in script_args]
         print(f"\n=== {script} {' '.join(argv)} ===", flush=True)
         if not run_learn_step(script, argv):
             return None
 
-    print(f"\n/youtube learn: {video_id} added to the knowledge base.")
+    print(f"\n{label}: {video_id} added to the knowledge base.")
     return video_id
 
 
@@ -5851,7 +5984,11 @@ def answer(
         else:
             print(message, file=sys.stderr)
 
-    answer_model = model or CHAT_MODEL
+    answer_model = model or ANSWER_MODEL
+    # The JSON gate/writer pipeline is specific to the LFM3-aura fine-tune.
+    # A different answer model (ornith:35b) uses the regular streaming RAG
+    # prompt instead.
+    lfm_pipeline = LFM_PIPELINE_ENABLED and answer_model == LFM_MODEL
 
     if cache is not None and cache_key is not None:
         cached = cache.get(cache_key)
@@ -6059,7 +6196,7 @@ def answer(
     if (
         progressive
         and len(selected) > PROGRESSIVE_FIRST_PASS
-        and not LFM_PIPELINE_ENABLED
+        and not lfm_pipeline
     ):
         first_selected = selected[:PROGRESSIVE_FIRST_PASS]
         expansion_selected = selected[PROGRESSIVE_FIRST_PASS:]
@@ -6139,7 +6276,7 @@ def answer(
         # reason, fall back to the legacy streaming prompt (still the same
         # local model).
         response = None
-        if LFM_PIPELINE_ENABLED:
+        if lfm_pipeline:
             prompt_done = time.monotonic()
             response = answer_with_lfm_pipeline(
                 question,
@@ -6254,13 +6391,13 @@ def show_sources(sources: list[tuple[Chunk, float]]) -> None:
 
 
 def prewarm() -> None:
-    """Load the single chat model and keep it resident.
+    """Load the helper and answer models and keep them resident.
 
-    Warm the model with the same ``num_ctx`` the real calls use. Ollama
+    Warm each model with the same ``num_ctx`` the real calls use. Ollama
     reloads a model whenever the requested context size changes, so every
     helper and answer call now shares one context size.
     """
-    targets = ((CHAT_MODEL, ANSWER_NUM_CTX),)
+    targets = tuple((model, ANSWER_NUM_CTX) for model in RESIDENT_MODELS)
     for model, num_ctx in dict.fromkeys(targets):
         try:
             requests.post(
@@ -6342,7 +6479,7 @@ def main() -> None:
     session = make_prompt_session(history)
     print(
         f"RAG chatbot ready ({EXPANSION_MODEL} expansion/filter + "
-        f"{CHAT_MODEL} chat, global corpus, top {depth} BM25 matching "
+        f"{ANSWER_MODEL} chat, global corpus, top {depth} BM25 matching "
         "trunks "
         f"by default, prompt {PROMPT_TEMPLATE_PATH.name or 'fallback'}). "
         "Type /exit to quit."
@@ -6357,7 +6494,8 @@ def main() -> None:
     )
     print(
         "Commands: /refresh, /youtube transcript <hash|keyword>, "
-        "/youtube learn <hash|url>, /ask <question>, /wiki <question>, "
+        "/youtube learn <hash|url>, /youtube relearn <hash|url>, "
+        "/ask <question>, /wiki <question>, "
         "/wiki_article <question>, /dict <word>, /depth <n|auto>, "
         "/memory, /status, /sources, /benchmark [on|off], /exit. "
         "Tab completes them."
@@ -6403,13 +6541,16 @@ def main() -> None:
                             f"Now answering only from transcript {transcript!r}."
                         )
                     continue
-                if subcommand != "learn":
+                if subcommand not in {"learn", "relearn"}:
                     print(
                         "Usage: /youtube learn <youtube_video_hash|url> | "
+                        "relearn <youtube_video_hash|url> | "
                         "transcript <hash|URL|keyword> | "
                         "search_transcript <keyword>"
                     )
                     continue
+                relearn = subcommand == "relearn"
+                command_label = "/youtube relearn" if relearn else "/youtube learn"
                 if not value:
                     try:
                         value = session.prompt("Video hash or URL: ").strip()
@@ -6418,12 +6559,12 @@ def main() -> None:
                         continue
                     if not value:
                         print(
-                            "Usage: /youtube learn "
+                            f"Usage: {command_label} "
                             "<youtube_video_hash|url>"
                         )
                         continue
 
-                video_id = learn_video(value)
+                video_id = learn_video(value, relearn=relearn)
                 if video_id is None:
                     continue
                 clear_bm25_cache()
@@ -6478,7 +6619,7 @@ def main() -> None:
                         # during the learn command, not on the next question.
                         try:
                             index_chunks_in_sqlite(
-                                chunks, corpus_key="global"
+                                chunks, corpus_key="global", prune=True
                             )
                         except Exception:
                             pass
@@ -6604,7 +6745,8 @@ def main() -> None:
                     f"Unknown command: {name}. "
                     "Try /refresh, "
                     "/youtube transcript <hash|keyword>, "
-                    "/youtube learn <hash|url>, /ask <question>, /wiki <question>, "
+                    "/youtube learn <hash|url>, /youtube relearn <hash|url>, "
+                    "/ask <question>, /wiki <question>, "
                     "/wiki_article <question>, /dict <word>, "
                     "/depth <n|auto>, /memory, /status, /sources, "
                     "/benchmark [on|off], /exit."

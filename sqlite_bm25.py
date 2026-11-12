@@ -274,6 +274,47 @@ class SQLiteBM25:
             self._doc_keys = None
         return {"added": added, "updated": updated, "unchanged": unchanged}
 
+    def delete_keys(self, keys: Iterable[str]) -> int:
+        """Delete specific documents from this corpus by chunk key.
+
+        Re-learning a video replaces its trunk files.  The new trunks are
+        indexed with the same keys, but paragraphs that disappeared with the
+        old transcript would otherwise remain as stale FTS5 documents and
+        skew this corpus's document count and average length.
+        """
+        wanted = {key for key in keys if key}
+        if not wanted:
+            return 0
+        removed = 0
+        with self._lock:
+            connection = self._connect()
+            stale = [
+                int(row[0])
+                for row in connection.execute(
+                    "SELECT doc_id, chunk_key FROM chunk_documents "
+                    "WHERE corpus_key = ?",
+                    (self.corpus_key,),
+                )
+                if row[1] in wanted
+            ]
+            for start in range(0, len(stale), INSERT_BATCH_SIZE):
+                batch = stale[start : start + INSERT_BATCH_SIZE]
+                placeholders = ",".join("?" for _ in batch)
+                connection.execute(
+                    f'DELETE FROM "{self.fts_table}" '
+                    f"WHERE rowid IN ({placeholders})",
+                    batch,
+                )
+                connection.execute(
+                    "DELETE FROM chunk_documents "
+                    f"WHERE corpus_key = ? AND doc_id IN ({placeholders})",
+                    [self.corpus_key, *batch],
+                )
+                connection.commit()
+                removed += len(batch)
+            self._doc_keys = None
+        return removed
+
     def prune(self, valid_keys: Iterable[str]) -> int:
         """Delete this corpus's documents whose trunk no longer exists."""
         keys = set(valid_keys)

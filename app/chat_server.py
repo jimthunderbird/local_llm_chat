@@ -74,7 +74,9 @@ Endpoints:
                                   transcript inside the video modal, using a
                                   session isolated from the main chat
     POST /api/video_learn        start the youtube_video_learn.py pipeline in
-                                  the background for a /youtube search card
+                                  the background for a /youtube search card;
+                                  {"relearn": true} rebuilds the title and
+                                  trunks from the saved transcript
     GET  /api/video_learn_status current background learn progress (all jobs,
                                   or ?id=<video_id> for one)
     POST /api/gutenberg_chat     SSE: answer a question about one Project
@@ -155,8 +157,8 @@ CHANGELOG_TIMESTAMP_RE = re.compile(
 WEB_COMMANDS = {
     **chat.COMMANDS,
     "/help": "show commands and keyboard shortcuts",
-    "/youtube": "YouTube commands: learn <hash|url> | learn_topic <topic> | "
-    "learn_playlist <playlist> | search <keyword> | bookmark list",
+    "/youtube": "YouTube commands: learn <hash|url> | relearn <hash|url> | "
+    "learn_topic <topic> | learn_playlist <playlist> | search <keyword> | bookmark list",
     "/news": "list the latest news from wsj, cnn, cbslite, nprtext, yahoo_finance, medium, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count]); /news search <keywords> [website] searches Google News, optionally only that website",
     "/mdn": "search MDN Web Docs by keywords: /mdn <keywords>",
     "/googlenews": "search Google News for the latest stories: /googlenews <keywords>",
@@ -497,31 +499,32 @@ def _keepalive_watchdog() -> None:
 
     Ollama evicts a model after ``OLLAMA_KEEP_ALIVE`` without traffic. Any
     request refreshes that timer, so a one-token generation every few minutes
-    keeps the single chat model resident. The request uses the same
-    ``num_ctx`` as the real calls, so it never triggers a context-size reload.
+    keeps the resident models warm. Each request uses the same ``num_ctx`` as
+    the real calls, so it never triggers a context-size reload.
     """
     while True:
         time.sleep(KEEPALIVE_WATCHDOG_INTERVAL_SECONDS)
-        try:
-            response = requests.post(
-                f"{chat.OLLAMA_HOST}/api/generate",
-                json={
-                    "model": chat.CHAT_MODEL,
-                    "prompt": "",
-                    "stream": False,
-                    "think": False,
-                    "keep_alive": chat.OLLAMA_KEEP_ALIVE,
-                    "options": {
-                        "num_predict": 1,
-                        "num_ctx": chat.ANSWER_NUM_CTX,
+        for model_name in chat.RESIDENT_MODELS:
+            try:
+                response = requests.post(
+                    f"{chat.OLLAMA_HOST}/api/generate",
+                    json={
+                        "model": model_name,
+                        "prompt": "",
+                        "stream": False,
+                        "think": False,
+                        "keep_alive": chat.OLLAMA_KEEP_ALIVE,
+                        "options": {
+                            "num_predict": 1,
+                            "num_ctx": chat.ANSWER_NUM_CTX,
+                        },
                     },
-                },
-                timeout=(2, 60),
-            )
-            response.close()
-        except requests.RequestException:
-            # The watchdog is best-effort; a stopped Ollama simply retries.
-            pass
+                    timeout=(2, 60),
+                )
+                response.close()
+            except requests.RequestException:
+                # The watchdog is best-effort; a stopped Ollama simply retries.
+                pass
 
 
 def synthesize_speech(text: str, voice: str = "") -> bytes:
@@ -1393,9 +1396,9 @@ MATHUTOR_PROBLEMS_PER_BATCH = 5
 MATHUTOR_GENERATION_ATTEMPTS = 5
 MATHUTOR_GENERATION_TOKENS = 5_000
 MATHUTOR_SOURCE_CHAR_LIMIT = 16_000
-# The mathtutor uses the same single local LFM3 model as every other path.
-# Thinking stays disabled through chat.generate_text / stream_answer defaults.
-MATHUTOR_MODEL = chat.CHAT_MODEL
+# The mathtutor uses the answer model (ornith:35b), as required by
+# performance_improvement.prompt's back_to_ornith_35b task.
+MATHUTOR_MODEL = chat.ANSWER_MODEL
 
 
 def _docx_text_from_bytes(data: bytes) -> str:
@@ -2028,6 +2031,7 @@ GUTENBERG_BOOK_ID_RE = re.compile(r"\d{1,8}")
 # completion and the /help panel.
 YOUTUBE_SUBCOMMANDS = {
     "learn": "fetch one transcript and chunk it into RAG trunks",
+    "relearn": "rebuild one video's title and trunks from its saved transcript",
     "learn_topic": "search YouTube for <topic> and learn the top 3 videos",
     "learn_playlist": "learn every video in a YouTube playlist",
     "search": "load the YouTube search-results page for <keyword> and show matching videos with channel, duration, and publish date",
@@ -2364,9 +2368,9 @@ try:
 except ValueError:
     KEEPALIVE_WATCHDOG_INTERVAL_SECONDS = 300
 
-# Code-generation uses the same single local LFM3 model as chat, per the
-# single-model requirement. Every code snippet the browser produces uses it.
-CODE_GENERATION_MODEL = chat.CHAT_MODEL
+# Code-generation uses ornith:35b, matching the answer and math tutor models.
+# The small LFM3 model remains the helper model for short internal calls.
+CODE_GENERATION_MODEL = chat.ANSWER_MODEL
 
 # For Go, Rust, and PHP, every chat answer and every generated code sample
 # uses the dedicated programming model instead of the general transcript chat
@@ -2506,7 +2510,7 @@ def language_chat_model(language: str | None) -> str:
     return (
         PROGRAMMING_MODEL
         if language_uses_official_docs(language)
-        else chat.CHAT_MODEL
+        else chat.ANSWER_MODEL
     )
 
 
@@ -5399,6 +5403,14 @@ YOUTUBE_ITERATIVE_EVIDENCE_TOKENS = 16000
 YOUTUBE_ITERATIVE_BATCH = 4
 YOUTUBE_ITERATIVE_ENUMERATIVE_BATCH = 6
 YOUTUBE_ITERATIVE_CANDIDATES = 50
+# A long-form request ("write me a 1000 word article about ...") is judged by
+# its output, not by whether the evidence can answer a factual question. Asking
+# the sufficiency checker three times can only return NO, and each extra round
+# adds latency before the writer starts. Gather one broad evidence batch and
+# let the writer produce the article instead.
+LONGFORM_ITERATIVE_FIRST_BATCH = 16
+LONGFORM_ITERATIVE_CANDIDATES = 20
+MISSING_TERMS_MAX = 10
 YOUTUBE_ITERATIVE_PROMPT_PREFIX = """### RETRIEVED EVIDENCE
 The context below was gathered in several retrieval rounds from the knowledge
 base and is sufficient for the complete question. Answer every part of the
@@ -6178,6 +6190,33 @@ def _article_excerpts_for_check(
     return "\n".join(lines)
 
 
+def _missing_search_terms(missing: str) -> str:
+    """Reduce a checker's prose answer to a few safe BM25 hint terms.
+
+    The sufficiency model is asked for a short gap, but it often returns a
+    sentence or a run of upper-case headings. Appending that verbatim made the
+    next BM25 query treat every capitalized word as an acronym, scanning the
+    whole corpus once per word (tens of seconds on a large corpus). Keep only
+    a bounded set of normalized content words; these are retrieval hints, not
+    part of the user's question.
+    """
+    terms: list[str] = []
+    seen: set[str] = set()
+    for token in chat.tokenize(missing):
+        if (
+            len(token) <= 1
+            or token.isdigit()
+            or token in chat.BM25_QUERY_STOPWORDS
+            or token in seen
+        ):
+            continue
+        seen.add(token)
+        terms.append(token)
+        if len(terms) >= MISSING_TERMS_MAX:
+            break
+    return " ".join(terms)
+
+
 def _article_sufficiency_check(
     question: str, evidence: list[tuple[chat.Chunk, float]]
 ) -> dict:
@@ -6256,11 +6295,18 @@ def _iterative_paragraph_chunks(chunks: list[chat.Chunk]) -> list[chat.Chunk]:
     # eat in Izumo" even though those paragraphs do not repeat the word
     # "eat".
     chat.annotate_section_headings(chunks)
-    filtered = [
-        chunk
-        for chunk in chunks
-        if chunk.index > 0 and not _is_article_heading_chunk(chunk)
-    ]
+    filtered: list[chat.Chunk] = []
+    for chunk in chunks:
+        if chunk.index <= 0:
+            continue
+        # Heading chunks only exist in learned articles. Checking every
+        # transcript paragraph here read the whole corpus on the first
+        # question, so keep YouTube chunks without an extra file read.
+        if chunk.video_id.startswith(chat.ARTICLE_CHUNK_PREFIXES) and (
+            _is_article_heading_chunk(chunk)
+        ):
+            continue
+        filtered.append(chunk)
     _PARAGRAPH_CHUNKS_CACHE[key] = (chunks, filtered)
     while len(_PARAGRAPH_CHUNKS_CACHE) > 4:
         _PARAGRAPH_CHUNKS_CACHE.pop(next(iter(_PARAGRAPH_CHUNKS_CACHE)))
@@ -6332,6 +6378,12 @@ def _iterative_evidence(
     used = 0
     search_question = question
     sufficient = False
+    # A generative request has no factual "sufficient" state: the checker sees
+    # "write me a 1000 word article" and can only ask for the article itself.
+    # Make one wide retrieval pass and hand a useful context to the writer.
+    long_form = chat.is_article_format_request(question)
+    if long_form:
+        max_rounds = 1
     paragraph_chunks = _iterative_paragraph_chunks(chunks)
     # The original question does not change between rounds, so expand it once.
     # Later rounds append the sufficiency checker's ``missing`` terms to the
@@ -6387,6 +6439,8 @@ def _iterative_evidence(
         # expensive step in the loop, so front-loading a few extra paragraphs
         # often answers the question after one check instead of two or three.
         round_batch = batch * 2 if round_number == 1 else batch
+        if long_form:
+            round_batch = max(round_batch, LONGFORM_ITERATIVE_FIRST_BATCH)
         for chunk, score in candidates:
             key = (chunk.video_id, chunk.index)
             if key in seen:
@@ -6406,6 +6460,15 @@ def _iterative_evidence(
             f"[{label} iterative: round {round_number}/{max_rounds}, "
             f"added {added} paragraph(s), evidence ~{used:,} token(s)]"
         )
+        if long_form:
+            # One broad batch is the whole retrieval phase for an article,
+            # essay, report, or guide request.
+            sufficient = True
+            log(
+                f"[{label} iterative: long-form request; using the "
+                f"{len(evidence)} gathered paragraph(s)]"
+            )
+            break
         # Fast path: for a simple question, evidence that already contains all
         # of the question's content words is sufficient by inspection. This
         # skips a small-model call on most direct fact questions.
@@ -6434,7 +6497,8 @@ def _iterative_evidence(
             log(f"[{label} iterative: evidence is sufficient; stopping]")
             break
         if verdict["missing"]:
-            missing_key = verdict["missing"].strip().lower()
+            missing_terms = _missing_search_terms(verdict["missing"])
+            missing_key = missing_terms or verdict["missing"].strip().lower()
             if round_number > 1 and missing_key == previous_missing:
                 # The last round did not change what the model says is
                 # missing, so another identical search will not help.
@@ -6444,7 +6508,8 @@ def _iterative_evidence(
                 )
                 break
             previous_missing = missing_key
-            search_question = f"{question} {verdict['missing']}"
+            if missing_terms:
+                search_question = f"{question} {missing_terms}"
 
     if require_sufficient and not sufficient:
         if not accept_insufficient:
@@ -6578,6 +6643,12 @@ def _youtube_iterative_evidence(
     candidate_limit = (
         depth if depth is not None and depth > 0 else YOUTUBE_ITERATIVE_CANDIDATES
     )
+    if chat.is_article_format_request(question):
+        # A long-form answer needs a broader evidence base than a factual
+        # question, and it gets only one retrieval pass. Keep enough
+        # candidates for the writer without exceeding the relevance filter's
+        # bounded range.
+        candidate_limit = max(candidate_limit, LONGFORM_ITERATIVE_CANDIDATES)
     # Keep the generic relevance filter to remove off-topic BM25 matches.
     base_apply_filter = not enumerative
     cache_key = (
@@ -8533,10 +8604,15 @@ def _update_video_learn_job(
 
 
 def start_video_learn_job(
-    state: ChatState, video_id: str, title: str = ""
+    state: ChatState, video_id: str, title: str = "", relearn: bool = False
 ) -> tuple[str, dict | None]:
-    """Start a background learn job, or report that one already exists."""
-    if video_is_learned(video_id):
+    """Start a background learn job, or report that one already exists.
+
+    ``relearn`` deliberately ignores an already-learned video: it removes the
+    generated title/trunks first, then rebuilds them from the saved
+    transcript.
+    """
+    if not relearn and video_is_learned(video_id):
         return "learned", None
 
     with state.video_learn_lock:
@@ -8549,9 +8625,10 @@ def start_video_learn_job(
             "status": "queued",
             "progress": 0.0,
             "step": "queued",
-            "message": "Queued for learning",
+            "message": "Queued for relearning" if relearn else "Queued for learning",
             "error": "",
             "learned": False,
+            "relearn": relearn,
             "started_at": time.time(),
             "finished_at": None,
         }
@@ -8560,27 +8637,46 @@ def start_video_learn_job(
 
     threading.Thread(
         target=_run_video_learn_job,
-        args=(state, video_id),
+        args=(state, video_id, relearn),
         name=f"video-learn-{video_id}",
         daemon=True,
     ).start()
     return "started", snapshot
 
 
-def _run_video_learn_job(state: ChatState, video_id: str) -> None:
-    """Run youtube_video_learn.STEPS and publish progress to the UI."""
+def _run_video_learn_job(
+    state: ChatState, video_id: str, relearn: bool = False
+) -> None:
+    """Run youtube_video_learn.steps_for() and publish progress to the UI."""
     _update_video_learn_job(
         state,
         video_id,
         status="running",
         progress=0.0,
-        step="starting",
-        message="Starting learn pipeline",
+        step="relearning" if relearn else "starting",
+        message="Starting relearn pipeline" if relearn else "Starting learn pipeline",
     )
     try:
         import youtube_video_learn as learn
 
-        steps = list(learn.STEPS)
+        if relearn:
+            _update_video_learn_job(
+                state,
+                video_id,
+                step="relearning",
+                message="Removing previous title and trunks",
+            )
+            removed = learn.remove_generated_artifacts(video_id)
+            _update_video_learn_job(
+                state,
+                video_id,
+                message=(
+                    f"Removed {len(removed)} generated file(s); "
+                    "the transcript is unchanged"
+                ),
+            )
+
+        steps = list(learn.steps_for(relearn))
         if len(steps) == len(VIDEO_LEARN_STEP_WEIGHTS):
             weights = list(VIDEO_LEARN_STEP_WEIGHTS)
         else:
@@ -8678,7 +8774,9 @@ def _refresh_knowledge_after_learn(state: ChatState, video_id: str) -> None:
             # Persist the new trunks and merge the FTS5 segments now, while
             # this background learn job is already off the question path.
             try:
-                chat.index_chunks_in_sqlite(chunks, corpus_key="global")
+                chat.index_chunks_in_sqlite(
+                    chunks, corpus_key="global", prune=True
+                )
             except Exception:
                 pass
             if state.article_path is not None or state.transcript is not None:
@@ -9324,8 +9422,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 self._send_error_json("Missing or invalid YouTube video id", 400)
                 return
             title = str(payload.get("title") or "").strip()
+            relearn = bool(payload.get("relearn"))
             status, job = start_video_learn_job(
-                self.state, video_id, title=title
+                self.state, video_id, title=title, relearn=relearn
             )
             response = {"id": video_id, "status": status}
             if status == "learned":
@@ -11213,6 +11312,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return
         if subcommand == "learn":
             self._command_learn(rest)
+        elif subcommand == "relearn":
+            self._command_learn(rest, relearn=True)
         elif subcommand == "learn_topic":
             self._command_learn_topic(rest)
         elif subcommand == "learn_playlist":
@@ -11850,30 +11951,32 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         )
         self._start_youtube_prefetch(keyword)
 
-    def _command_learn(self, argument: str) -> None:
+    def _command_learn(self, argument: str, relearn: bool = False) -> None:
+        label = "/youtube relearn" if relearn else "/youtube learn"
         if not argument:
             self._sse_text(
-                "output", "\nUsage: /youtube learn <youtube_video_hash|url>\n"
+                "output",
+                f"\nUsage: {label} <youtube_video_hash|url>\n",
             )
             return
         try:
             import youtube_video_learn as learn
         except ImportError as exc:
             self._sse_text(
-                "output", f"\n/youtube learn is unavailable: cannot import "
+                "output", f"\n{label} is unavailable: cannot import "
                 f"youtube_video_learn.py ({exc})\n"
             )
             return
         try:
             video_id = learn.extract_video_hash(argument)
         except ValueError as exc:
-            self._sse_text("output", f"\n/youtube learn: {exc}\n")
+            self._sse_text("output", f"\n{label}: {exc}\n")
             return
 
-        self._sse_text("output", f"\n/youtube learn: {video_id}\n")
-        if not self._learn_video(video_id, label="/youtube learn"):
+        self._sse_text("output", f"\n{label}: {video_id}\n")
+        if not self._learn_video(video_id, label=label, relearn=relearn):
             return
-        self._finish_learn([video_id], label="/youtube learn")
+        self._finish_learn([video_id], label=label)
 
     def _command_learn_topic(self, argument: str) -> None:
         topic = argument.strip()
@@ -12071,7 +12174,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return
         self._finish_learn(learned, label="/youtube learn_playlist")
 
-    def _learn_video(self, video_id: str, label: str = "/youtube learn") -> bool:
+    def _learn_video(
+        self,
+        video_id: str,
+        label: str = "/youtube learn",
+        relearn: bool = False,
+    ) -> bool:
         """Run the youtube_video_learn.py pipeline for one video."""
         try:
             import youtube_video_learn as learn
@@ -12083,7 +12191,26 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             return False
 
-        for script, script_args in learn.STEPS:
+        if relearn:
+            self._sse_text(
+                "output",
+                f"\n{label}: removing previous title and trunks; "
+                "the transcript is unchanged.\n",
+            )
+            try:
+                removed = learn.remove_generated_artifacts(video_id)
+            except OSError as exc:
+                self._sse_text(
+                    "output",
+                    f"\n{label}: could not remove old artifacts: {exc}\n",
+                )
+                return False
+            self._sse_text(
+                "output",
+                f"\n{label}: removed {len(removed)} generated file(s).\n",
+            )
+
+        for script, script_args in learn.steps_for(relearn):
             argv = [arg.replace("<hash>", video_id) for arg in script_args]
             if not self._run_learn_step(script, argv, label=label):
                 return False
@@ -12163,7 +12290,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             # here, during the learn command rather than on the next question.
             try:
                 chat.index_chunks_in_sqlite(
-                    global_chunks, corpus_key="global"
+                    global_chunks, corpus_key="global", prune=True
                 )
             except Exception:
                 pass
@@ -13790,6 +13917,13 @@ def main() -> None:
         startup_index.bm25.vacuum()
     except Exception:
         # Index maintenance is best-effort; a later question rebuilds lazily.
+        pass
+    try:
+        # Build the paragraph-only retrieval list as well. The first question
+        # otherwise paid for article heading annotation and filtering before
+        # its first retrieval round.
+        _iterative_paragraph_chunks(state.chunks)
+    except Exception:
         pass
 
     ChatRequestHandler.state = state

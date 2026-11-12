@@ -2912,6 +2912,7 @@
             <div class="video-action-title">This video</div>
             <div id="video-action-note" class="video-action-note"></div>
             <button id="video-action-btn" class="video-action-btn" type="button" hidden></button>
+            <button id="video-relearn-btn" class="video-action-btn" type="button" hidden>Relearn</button>
             <div id="video-action-progress" class="video-action-progress" hidden>
               <div id="video-action-fill" class="video-action-fill"></div>
             </div>
@@ -3090,6 +3091,7 @@ const videoSummaryEl = $("#video-summary");
 const videoActionEl = $("#video-action");
 const videoActionNoteEl = $("#video-action-note");
 const videoActionBtnEl = $("#video-action-btn");
+const videoActionRelearnEl = $("#video-relearn-btn");
 const videoActionProgressEl = $("#video-action-progress");
 const videoActionFillEl = $("#video-action-fill");
 const videoChatEl = $("#video-chat");
@@ -6889,6 +6891,24 @@ function renderVideoResults(entry) {
     });
     updateVideoLearnButton(learnBtn, videoLearnState.get(item.id));
     actions.appendChild(learnBtn);
+
+    const relearnBtn = document.createElement("button");
+    relearnBtn.type = "button";
+    relearnBtn.className = "video-summary-btn video-relearn-btn";
+    relearnBtn.textContent = "Relearn";
+    relearnBtn.title =
+      "Rebuild this video's title and trunks from the saved transcript";
+    relearnBtn.dataset.videoRelearnId = item.id;
+    relearnBtn.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+    });
+    relearnBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      startVideoLearn(item, { relearn: true });
+    });
+    updateVideoRelearnButton(relearnBtn, videoLearnState.get(item.id));
+    actions.appendChild(relearnBtn);
     meta.appendChild(actions);
 
     const learnProgress = document.createElement("div");
@@ -6942,13 +6962,20 @@ function updateVideoLearnButton(button, state) {
   const status = state?.status;
   if (status === "running" || status === "queued") {
     button.disabled = true;
-    button.textContent = "Learning…";
+    button.textContent = state?.relearn ? "Relearning…" : "Learning…";
     return;
   }
   button.disabled = false;
   if (status === "error") button.textContent = "Retry";
   else if (status === "done" || status === "learned") button.textContent = "Learned";
   else button.textContent = "Learn";
+}
+
+function updateVideoRelearnButton(button, state) {
+  if (!button) return;
+  const running = state?.status === "running" || state?.status === "queued";
+  button.hidden = !videoStateIsLearned(state) || running;
+  button.disabled = running;
 }
 
 function videoLearnPercent(state) {
@@ -6975,9 +7002,11 @@ function applyVideoLearnUi(container, state) {
   if (state.status === "done") {
     text = "Learned · 100%";
   } else if (state.status === "error") {
-    text = state.error ? `Learn failed: ${state.error}` : "Learn failed";
+    text = state.error
+      ? `${state.relearn ? "Relearn" : "Learn"} failed: ${state.error}`
+      : `${state.relearn ? "Relearn" : "Learn"} failed`;
   } else if (state.status === "queued") {
-    text = "Queued for learning · 0%";
+    text = `Queued for ${state.relearn ? "relearning" : "learning"} · 0%`;
   } else {
     const step = String(state.step || "Learning")
       .replace(/\.py$/i, "")
@@ -7000,6 +7029,11 @@ function refreshVideoLearnUi(videoId) {
     `.video-learn-btn[data-video-learn-id="${videoId}"]`
   )) {
     updateVideoLearnButton(button, state);
+  }
+  for (const button of document.querySelectorAll(
+    `.video-relearn-btn[data-video-relearn-id="${videoId}"]`
+  )) {
+    updateVideoRelearnButton(button, state);
   }
   if (videoItem?.id === videoId) renderVideoAction(videoItem);
 }
@@ -7033,8 +7067,9 @@ async function pollVideoLearnJobs() {
   if (active) videoLearnPollTimer = window.setTimeout(pollVideoLearnJobs, 1000);
 }
 
-async function startVideoLearn(item) {
+async function startVideoLearn(item, options = {}) {
   if (!item?.id) return;
+  const relearn = Boolean(options.relearn);
   const existing = videoLearnState.get(item.id);
   if (existing?.status === "running" || existing?.status === "queued") return;
 
@@ -7042,7 +7077,7 @@ async function startVideoLearn(item) {
     id: item.id,
     status: "queued",
     progress: 0,
-    step: "checking",
+    step: relearn ? "relearning" : "checking",
   });
   refreshVideoLearnUi(item.id);
 
@@ -7050,7 +7085,11 @@ async function startVideoLearn(item) {
     const response = await fetch("/api/video_learn", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: item.id, title: item.title || "" }),
+      body: JSON.stringify({
+        id: item.id,
+        title: item.title || "",
+        relearn,
+      }),
     });
     let data = null;
     try {
@@ -7090,7 +7129,10 @@ async function startVideoLearn(item) {
       error: error?.message || String(error),
     });
     refreshVideoLearnUi(item.id);
-    toast(`Could not start learning: ${error?.message || error}`);
+    toast(
+      `Could not start ${relearn ? "relearning" : "learning"}: ` +
+        `${error?.message || error}`
+    );
   }
 }
 
@@ -7098,8 +7140,9 @@ function showVideoLearnedModal(item) {
   if (!learnPanelEl) return;
   const title = item?.title || item?.id || "This video";
   learnMessageEl.textContent =
-    `“${title}” has already been learned, so its transcript, rewrite, ` +
-    "trunks, and embeddings are ready to use.";
+    `“${title}” has already been learned, so its transcript and ` +
+    "trunks are ready to use. Use Relearn to rebuild them from the saved " +
+    "transcript.";
   learnPanelEl.hidden = false;
 }
 
@@ -7244,6 +7287,9 @@ function resetVideoAction() {
   videoActionBtnEl.disabled = false;
   videoActionBtnEl.onclick = null;
   videoActionBtnEl.className = "video-action-btn";
+  videoActionRelearnEl.hidden = true;
+  videoActionRelearnEl.disabled = false;
+  videoActionRelearnEl.onclick = null;
   videoActionProgressEl.hidden = true;
   videoActionFillEl.style.width = "0%";
 }
@@ -7487,6 +7533,9 @@ function renderVideoAction(item) {
   videoActionBtnEl.disabled = false;
   videoActionBtnEl.className = "video-action-btn";
   videoActionBtnEl.onclick = null;
+  videoActionRelearnEl.hidden = true;
+  videoActionRelearnEl.disabled = false;
+  videoActionRelearnEl.onclick = null;
   videoActionProgressEl.hidden = !running;
 
   if (running) {
@@ -7497,17 +7546,27 @@ function renderVideoAction(item) {
       .replace(/_/g, " ");
     videoActionNoteEl.textContent = `${step} · ${Math.round(percent)}%`;
     videoActionBtnEl.hidden = true;
+    videoActionRelearnEl.hidden = true;
     return;
   }
 
   if (learned) {
     videoActionNoteEl.textContent =
-      "This video is learned. Chat here, without leaving this window.";
+      "This video is learned. Chat here, or relearn it from the saved transcript.";
     videoActionBtnEl.textContent = "Chat";
     videoActionBtnEl.classList.add("is-chat");
     videoActionBtnEl.title = "Chat about this video in this window";
     videoActionBtnEl.onclick = () => {
       openVideoChat();
+    };
+    videoActionRelearnEl.hidden = false;
+    videoActionRelearnEl.textContent = "Relearn";
+    videoActionRelearnEl.title =
+      "Rebuild this video's title and trunks from the saved transcript";
+    videoActionRelearnEl.onclick = () => {
+      startVideoLearn(item, { relearn: true }).then(() =>
+        renderVideoAction(item)
+      );
     };
     return;
   }

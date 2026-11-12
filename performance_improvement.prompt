@@ -1,3 +1,23 @@
+task.bug.long_article_slow (completed) {
+  bug:
+  when ask question: write me a 1000 word article about living alone in japan
+  it takes a long time before even displaying:
+  [youtube iterative: round 1/3, added 8 paragraph(s), evidence ~845 token(s)][youtube iterative: round 2/3, added 4 paragraph(s), evidence ~1,337 token(s)][youtube iterative: round 3/3, added 4 paragraph(s), evidence ~1,884 token(s)][youtube iterative: checker still wanted more after 3 round(s); using the 16 gathered paragraph(s)]
+
+  please speed it up in a systematic way
+}
+
+task.back_to_ornith_35b (completed) {
+  Keep ornith:35b as the answer model, math tutor model and code generation model
+}
+
+task.answer_quality_2 (completed) {
+  question: who is alice huang?
+  answer: Alice Huang is a nurse turned tech tycoon and the husband of Jensen Huang...
+  - this is incorrect! why Alice Huang, a woman, is husband of Jensen Huang?
+  please fix in a systematic way
+}
+
 task.answer_quality_1 (completed) {
   bug:
   question: write me a 400 word article about what should i need to know when driving in japan
