@@ -32,7 +32,9 @@ def normalize_argv(argv):
     return argv
 
 
-MODEL = "ornith:35b"
+MODEL = os.environ.get(
+    "OLLAMA_LFM_MODEL", "milodule3/LFM3-1.7B-aura-grounded:latest"
+)
 OUTPUT_DIR = Path.cwd() / ".chat" / "articles_cache"
 YOUTUBE_PREFIX = "youtube_"
 

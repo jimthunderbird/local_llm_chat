@@ -16,7 +16,7 @@ How it works:
        (default: ~/.cache/php_doc_search/index.json). The crawl is bounded per
        manual section so the language reference, the function reference, and
        the class reference all contribute to the index.
-    2. Ask Ollama model ornith:35b (thinking disabled) to turn the question
+    2. Ask the local LFM3 model (thinking disabled) to turn the question
        into search keywords, to detect whether the question asks for a code
        sample, and to find function, class, or extension names it mentions.
     3. Rank cached manual chunks with BM25 using those keywords.
@@ -29,7 +29,7 @@ How it works:
        as one complete context block. A long note is a reference
        implementation, so chunking it into BM25 fragments would hide most of
        its code; the remaining context slots are filled with manual excerpts.
-    6. Ask ornith:35b (thinking disabled) to answer from the best matching
+    6. Ask the local LFM3 model (thinking disabled) to answer from the best matching
        excerpts and the complete reference implementation when one applies,
        citing the www.php.net/manual/en/ URLs used.
 
@@ -86,7 +86,9 @@ except ImportError:  # pragma: no cover - optional dependency
 DOC_ROOT = "https://www.php.net/manual/en/"
 DOC_HOST = "www.php.net"
 DOC_PATH_PREFIX = "/manual/en/"
-MODEL = "ornith:35b"
+MODEL = os.environ.get(
+    "OLLAMA_LFM_MODEL", "milodule3/LFM3-1.7B-aura-grounded:latest"
+)
 
 # Manual sections to crawl. Priorities keep the language reference and the
 # most useful reference chapters ahead of installation and appendices, and the

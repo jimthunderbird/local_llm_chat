@@ -1,0 +1,52 @@
+task.action.super_small_model.milodule3/LFM3-1.7B-aura-grounded:latest.stubborn (completed) {
+  based on the section "14. If LFM3-1.7B-aura-grounded must be the primary answer writer" in {diretory_of_this_prompt}/../research/performance_improvement.html, make milodule3/LFM3-1.7B-aura-grounded:latest the only model and try the best configuration, architecture and prompt engineering tweaks
+}
+
+task.research.super_small_model.milodule3/LFM3-1.7B-aura-grounded:latest.stubborn (completed) {
+  research only and save the research result to {diretory_of_this_prompt}/../research/performance_improvement.html {
+    you mentioned that "Make LFM3 the primary answer model (not recommended). It requires adopting its [n] Title evidence format, removing the app's competing refusal instruction, capping answers at a few sentences, and accepting weaker synthesis, code, math, and translation. It would save memory (2.05 GB vs 21.4 GB) and prefill time, but the product would answer less, not better."
+    
+    what if I just want to use milodule3/LFM3-1.7B-aura-grounded:latest for primary answer model, what will be the best tweak or configuration, or prompt engineering tricks can be used to make it very suitable to be a primary answer model? we have very limited amount of memory but we also require high quality answers, I know we have constrains here, but please, try your best to work out the best possible results in very high constraints.
+  }
+}
+
+task.research.super_small_model.milodule3/LFM3-1.7B-aura-grounded:latest (completed) {
+  research only and save the research result to {diretory_of_this_prompt}/../research/performance_improvement.html {
+    please do a thorough research on local model milodule3/LFM3-1.7B-aura-grounded:latest:
+    - would it be a good replacement for qwen3:1.7b?
+    - how fast is this model?
+    - how is the quality of answer that is generated from milodule3/LFM3-1.7B-aura-grounded:latest compared to qwen3:1.7b and ornith:35b?
+    - what would be the best configuration for milodule3/LFM3-1.7B-aura-grounded:latest?
+  }
+}
+
+task.research.super_small_model.followup (completed) {
+  research only and save the research result to {diretory_of_this_prompt}/../research/performance_improvement.html {
+    I would really want to just use qwen3:1.7b, given this constraint, please come up with your best recommendation on the configuration and maybe prompt engineering tweaking even
+    please think hard and take utmost effort to optimize everything given the small model constaint!!!
+  }
+}
+
+task.research.super_small_model (completed) {
+  research only and save the research result to {diretory_of_this_prompt}/../research/performance_improvement.html {
+    is it feasible to just use qwen3:1.7b and replace ornith:35b? what will be the impact and what kind of configuration should we use?
+  }
+}
+
+task.unified_model (completed) {
+  reference task.research.list_of_models:
+  - do not use qwen3:1.7b, ministral-3:3b and gemma3:latest, only use ornith:35b
+  - refer to "7.1 Highest leverage: keep the models resident" in {diretory_of_this_prompt}/../research/performance_improvement.html, Add a lightweight keepalive watchdog to the server.
+}
+
+task.research.list_of_models (completed) {
+  research only and save the research result to {diretory_of_this_prompt}/../research/performance_improvement.html {
+    how many different models are being used in the chat_server.py? if so, what does each model do?
+  }
+}
+
+task.research.warm_up (completed) {
+  research only and save the research result to {diretory_of_this_prompt}/../research/performance_improvement.html {
+    looks like right now, if i ask the question, it is slow, or if i did not ask question for a while, the first question will be slow, but if i keep asking questions, the speed is ok, why?
+  }
+}

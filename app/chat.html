@@ -3127,21 +3127,30 @@ const URL_TRAILING_PUNCT_RE = /[.,!?;:'"”’]+$/;
 const CLOSING_BRACKETS = { ")": "(", "]": "[", "}": "{" };
 
 /* Model names are implementation details: the chat window should not expose
- * the specific local model (ornith:35b). Every model name and every message
- * that may contain one goes through these helpers before it reaches the DOM. */
-const HIDDEN_MODEL_NAME = "ornith:35b";
+ * the specific local model. The app now runs one LFM3 artifact; the legacy
+ * ornith name stays in the list so older cached status payloads are hidden
+ * too. Every model name and every message that may contain one goes through
+ * these helpers before it reaches the DOM. */
+const HIDDEN_MODEL_NAMES = [
+  "milodule3/LFM3-1.7B-aura-grounded:latest",
+  "LFM3-1.7B-aura-grounded",
+  "ornith:35b",
+];
 function displayModelName(value) {
   const name = String(value ?? "").trim();
   if (!name) return "—";
-  return name.includes(HIDDEN_MODEL_NAME) ? "local LLM" : name;
+  return HIDDEN_MODEL_NAMES.some((hidden) => name.includes(hidden))
+    ? "local LLM"
+    : name;
 }
 function scrubModelNames(text) {
-  return String(text ?? "")
-    .split(`local LLM ${HIDDEN_MODEL_NAME}`).join("local LLM")
-    .split(`via ${HIDDEN_MODEL_NAME}`).join("")
-    .split(HIDDEN_MODEL_NAME).join("local LLM")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
+  let cleaned = String(text ?? "");
+  for (const hidden of HIDDEN_MODEL_NAMES) {
+    cleaned = cleaned.split(`local LLM ${hidden}`).join("local LLM");
+    cleaned = cleaned.split(`via ${hidden}`).join("");
+    cleaned = cleaned.split(hidden).join("local LLM");
+  }
+  return cleaned.replace(/[ \t]{2,}/g, " ").trim();
 }
 
 function splitUrlToken(raw) {

@@ -23,11 +23,11 @@ For each question:
          a. Add the next 3 new trunks. For list/exhaustive questions, gather
             a minimum number of trunks before the first check so the checker
             can see whether the list is complete.
-         b. Ask qwen3:1.7b to build a small checklist of what a complete
+         b. Ask the local LFM3 model to build a small checklist of what a complete
             answer requires and to state whether the accumulated context
             contains enough of that checklist.
          c. Stop when the checklist is covered or the context cap is reached.
-    6. Stream the answer from Ollama model ornith:35b.
+    6. Stream the answer from the local LFM3 model.
 
 Simplified Chinese questions are translated into English before retrieval;
 answers are translated back into Simplified Chinese while they stream.
@@ -82,11 +82,14 @@ except ImportError as exc:  # pragma: no cover - dependency guard
     )
 
 EMBED_MODEL = "embeddinggemma-2:570m"
-CHAT_MODEL = "qwen3:1.7b"
+LFM_MODEL = os.environ.get(
+    "OLLAMA_LFM_MODEL", "milodule3/LFM3-1.7B-aura-grounded:latest"
+)
+CHAT_MODEL = LFM_MODEL
 # Local model used to translate Simplified Chinese questions/answers.
-TRANSLATION_MODEL = "qwen3:1.7b"
+TRANSLATION_MODEL = LFM_MODEL
 # Local model used by /dict to generate definitions.
-DICT_MODEL = "gemma3:1b"
+DICT_MODEL = LFM_MODEL
 MIN_SIMILARITY = 0.75
 FALLBACK_TOP_N = 10
 # Default maximum number of gradually gathered trunks (see /depth).

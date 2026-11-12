@@ -12,7 +12,7 @@ Source of truth:
 How it works:
     1. Crawl https://go.dev/doc/ once and cache the page text locally
        (default: ~/.cache/golang_doc_search/index.json).
-    2. Ask Ollama model ornith:35b (thinking disabled) to turn the question
+    2. Ask the local LFM3 model (thinking disabled) to turn the question
        into search keywords, and to detect whether the question asks for a
        code sample and which Go import paths it names.
     3. Rank cached documentation chunks with BM25 using those keywords.
@@ -22,7 +22,7 @@ How it works:
        mentions, then fetches and ranks https://pkg.go.dev/{package} for each
        related package. Package pages are cached under the same cache
        directory.
-    5. Ask ornith:35b (thinking disabled) to answer strictly from the best
+    5. Ask the local LFM3 model (thinking disabled) to answer strictly from the best
        matching excerpts, citing the go.dev/doc/ and pkg.go.dev/ URLs used.
 
 The index is refreshed automatically when it is older than seven days. Use
@@ -74,7 +74,9 @@ DOC_ROOT = "https://go.dev/doc/"
 DOC_HOST = "go.dev"
 DOC_PATH_PREFIX = "/doc/"
 PKG_ROOT = "https://pkg.go.dev/"
-MODEL = "ornith:35b"
+MODEL = os.environ.get(
+    "OLLAMA_LFM_MODEL", "milodule3/LFM3-1.7B-aura-grounded:latest"
+)
 
 DEFAULT_CACHE_DIR = Path(
     os.environ.get("GOLANG_DOC_SEARCH_CACHE", "~/.cache/golang_doc_search")

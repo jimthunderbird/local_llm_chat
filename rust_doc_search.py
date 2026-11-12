@@ -16,7 +16,7 @@ How it works:
        locally (default: ~/.cache/rust_doc_search/index.json). The crawl is
        bounded per documentation section so the Book, the reference, and the
        standard library all contribute to the index.
-    2. Ask Ollama model ornith:35b (thinking disabled) to turn the question
+    2. Ask the local LFM3 model (thinking disabled) to turn the question
        into search keywords, and to detect whether the question asks for a
        code sample and which crates it names.
     3. Rank cached documentation chunks with BM25 using those keywords.
@@ -25,7 +25,7 @@ How it works:
        crate", ``serde_json::Value``, or ``use tokio::...``), then fetch and
        rank https://docs.rs/{crate} for each related crate. Crate pages are
        cached under the same cache directory.
-    5. Ask ornith:35b (thinking disabled) to answer strictly from the best
+    5. Ask the local LFM3 model (thinking disabled) to answer strictly from the best
        matching excerpts, citing the doc.rust-lang.org/ and docs.rs/ URLs used.
 
 The index is refreshed automatically when it is older than seven days. Use
@@ -77,7 +77,9 @@ except ImportError:  # pragma: no cover - optional dependency
 DOC_ROOT = "https://doc.rust-lang.org/"
 DOC_HOST = "doc.rust-lang.org"
 CRATE_ROOT = "https://docs.rs/"
-MODEL = "ornith:35b"
+MODEL = os.environ.get(
+    "OLLAMA_LFM_MODEL", "milodule3/LFM3-1.7B-aura-grounded:latest"
+)
 
 # Documentation sections to crawl. Priorities keep the Book and the language
 # reference ahead of the enormous standard-library tree, and the per-section

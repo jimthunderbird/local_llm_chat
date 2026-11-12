@@ -265,7 +265,7 @@ AI_NEWS_PODCAST_LIMIT = 5
 AI_NEWS_PODCAST_MODEL = chat.CHAT_MODEL
 AI_NEWS_PODCAST_SOURCE_CHARS = 24_000
 AI_NEWS_PODCAST_NUM_PREDICT = 5_000
-AI_NEWS_PODCAST_NUM_CTX = 32_768
+AI_NEWS_PODCAST_NUM_CTX = chat.ANSWER_NUM_CTX
 AI_NEWS_PODCAST_PROMPT = """You are the head writer for a daily AI news podcast.
 
 Below is the source material: up to five current news stories with their
@@ -490,6 +490,38 @@ def _prewarm_tts() -> None:
     except Exception:
         # TTS is optional; a missing engine must not affect chat startup.
         pass
+
+
+def _keepalive_watchdog() -> None:
+    """Refresh Ollama's keep-alive timer without generating a real answer.
+
+    Ollama evicts a model after ``OLLAMA_KEEP_ALIVE`` without traffic. Any
+    request refreshes that timer, so a one-token generation every few minutes
+    keeps the single chat model resident. The request uses the same
+    ``num_ctx`` as the real calls, so it never triggers a context-size reload.
+    """
+    while True:
+        time.sleep(KEEPALIVE_WATCHDOG_INTERVAL_SECONDS)
+        try:
+            response = requests.post(
+                f"{chat.OLLAMA_HOST}/api/generate",
+                json={
+                    "model": chat.CHAT_MODEL,
+                    "prompt": "",
+                    "stream": False,
+                    "think": False,
+                    "keep_alive": chat.OLLAMA_KEEP_ALIVE,
+                    "options": {
+                        "num_predict": 1,
+                        "num_ctx": chat.ANSWER_NUM_CTX,
+                    },
+                },
+                timeout=(2, 60),
+            )
+            response.close()
+        except requests.RequestException:
+            # The watchdog is best-effort; a stopped Ollama simply retries.
+            pass
 
 
 def synthesize_speech(text: str, voice: str = "") -> bytes:
@@ -1361,10 +1393,9 @@ MATHUTOR_PROBLEMS_PER_BATCH = 5
 MATHUTOR_GENERATION_ATTEMPTS = 5
 MATHUTOR_GENERATION_TOKENS = 5_000
 MATHUTOR_SOURCE_CHAR_LIMIT = 16_000
-# The mathtutor prompt names ornith:35b as the sole question-generation and
-# answer model. Thinking stays disabled through chat.generate_text /
-# chat.stream_answer defaults.
-MATHUTOR_MODEL = "ornith:35b"
+# The mathtutor uses the same single local LFM3 model as every other path.
+# Thinking stays disabled through chat.generate_text / stream_answer defaults.
+MATHUTOR_MODEL = chat.CHAT_MODEL
 
 
 def _docx_text_from_bytes(data: bytes) -> str:
@@ -2025,10 +2056,9 @@ YOUTUBE_SEARCH_PREFETCH_RESULTS = YOUTUBE_SEARCH_PAGE_RESULTS
 YOUTUBE_PREFETCH_WAIT_SECONDS = 8.0
 
 # The browser's "中文" button translates a finished answer paragraph by
-# paragraph. The larger chat model preserves technical terminology and names
-# better than the small question-translation model used by chat.py.
-ANSWER_TRANSLATION_MODEL = "ornith:35b"
-ANSWER_TRANSLATION_NUM_CTX = 8192
+# paragraph. The single chat model preserves technical terminology and names.
+ANSWER_TRANSLATION_MODEL = chat.CHAT_MODEL
+ANSWER_TRANSLATION_NUM_CTX = chat.ANSWER_NUM_CTX
 MAX_TRANSLATION_CHARS = 200_000
 TRANSLATION_PARAGRAPH_PATTERN = re.compile(r"\n[ \t]*\n+")
 TRANSLATION_LABEL_PATTERN = re.compile(
@@ -2040,7 +2070,7 @@ TRANSLATION_LABEL_PATTERN = re.compile(
 # For Go, Rust, and PHP code, every line gets a "?" affordance in the browser.
 # Clicking it streams a short explanation of that one line from the programming
 # model, using the surrounding snippet as context.
-LINE_EXPLAIN_NUM_CTX = 16384
+LINE_EXPLAIN_NUM_CTX = chat.ANSWER_NUM_CTX
 MAX_LINE_EXPLAIN_CODE_CHARS = 60_000
 LINE_EXPLAIN_PROMPT = """You are an expert {language} developer. Explain exactly one line from a code snippet.
 
@@ -2064,7 +2094,7 @@ Line {line_number}: {line}
 # Every code snippet in the browser also gets an "Ask" affordance.
 # The question and the full snippet are sent to the code-generation model and
 # the answer streams back inline, directly under the snippet.
-SNIPPET_QUESTION_NUM_CTX = 32768
+SNIPPET_QUESTION_NUM_CTX = chat.ANSWER_NUM_CTX
 MAX_SNIPPET_QUESTION_CODE_CHARS = 60_000
 SNIPPET_QUESTION_PROMPT = """You are an expert {language} developer. Answer the user's question about the code snippet below.
 
@@ -2090,8 +2120,8 @@ SNIPPET_QUESTION_PROMPT = """You are an expert {language} developer. Answer the 
 # video's English transcript and streams a short overview into a centered
 # modal.  The transcript can be long, so cap it to keep the prompt inside the
 # model's context window while still covering most 5-60 minute videos.
-VIDEO_SUMMARY_MODEL = "ornith:35b"
-VIDEO_SUMMARY_NUM_CTX = 32768
+VIDEO_SUMMARY_MODEL = chat.CHAT_MODEL
+VIDEO_SUMMARY_NUM_CTX = chat.ANSWER_NUM_CTX
 MAX_VIDEO_SUMMARY_TRANSCRIPT_CHARS = 80_000
 VIDEO_SUMMARY_PROMPT = """You summarize YouTube videos for a viewer who is deciding whether to watch one.
 
@@ -2135,19 +2165,17 @@ YOUTUBE_BOOKMARK_LIMIT = 500
 # sends it as a data URL in the /api/ask JSON body; the server validates it and
 # forwards the raw base64 payload to the vision model through Ollama's
 # `images` field. Questions and answers still use the normal SSE stream.
-IMAGE_MODEL = os.environ.get("OLLAMA_IMAGE_MODEL", "ornith:35b")
-# `ornith:35b` is the configured image model, but some Ollama builds expose it
-# as a text-only model. When Ollama rejects the image, retry with a local
-# vision-capable model instead of failing the question. Override the fallback
-# list with OLLAMA_IMAGE_FALLBACK_MODELS (comma separated).
+IMAGE_MODEL = os.environ.get("OLLAMA_IMAGE_MODEL", chat.CHAT_MODEL)
+# The server runs only the chat model. If a local build exposes it as a
+# text-only model, the image question reports that no vision model is
+# available instead of loading a second model. Operators who need a vision
+# model can still opt in with OLLAMA_IMAGE_FALLBACK_MODELS (comma separated).
 IMAGE_FALLBACK_MODELS = tuple(
     name.strip()
-    for name in os.environ.get(
-        "OLLAMA_IMAGE_FALLBACK_MODELS", "gemma3:latest"
-    ).split(",")
+    for name in os.environ.get("OLLAMA_IMAGE_FALLBACK_MODELS", "").split(",")
     if name.strip()
 )
-IMAGE_NUM_CTX = 16384
+IMAGE_NUM_CTX = chat.ANSWER_NUM_CTX
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_QUESTION_CHARS = 8_000
 MAX_IMAGE_CONTEXT_CHARS = 4_000
@@ -2317,13 +2345,28 @@ def format_youtube_duration(seconds: int) -> str:
 # before BM25 runs. A completely unrelated question starts a fresh context.
 CONVERSATION_MAX_TURNS = 8
 CONVERSATION_ANSWER_CHARS = 900
-# A small instruct model with reliable pronoun resolution. If it is not
-# installed, rewrite_follow_up() falls back to chat.EXPANSION_MODEL.
-CONVERSATION_MODEL = "ministral-3:3b"
+# One model handles follow-up rewriting as well; keeping it identical to the
+# answer model avoids loading a second model for a short classification call.
+CONVERSATION_MODEL = chat.CHAT_MODEL
 
-# Code-generation model from ./prompts/programming_language_tips.prompt.
-# Every code snippet the browser produces uses this model.
-CODE_GENERATION_MODEL = "ornith:35b"
+# Ollama unloads a model after OLLAMA_KEEP_ALIVE without traffic, which makes
+# the first question after an idle gap pay the multi-second model load. A tiny
+# request every few minutes refreshes that timer. Set
+# OLLAMA_KEEPALIVE_WATCHDOG=0 to disable it, or OLLAMA_KEEPALIVE_INTERVAL to
+# change the interval in seconds (minimum 60).
+KEEPALIVE_WATCHDOG_ENABLED = os.environ.get(
+    "OLLAMA_KEEPALIVE_WATCHDOG", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
+try:
+    KEEPALIVE_WATCHDOG_INTERVAL_SECONDS = max(
+        60, int(os.environ.get("OLLAMA_KEEPALIVE_INTERVAL", "300"))
+    )
+except ValueError:
+    KEEPALIVE_WATCHDOG_INTERVAL_SECONDS = 300
+
+# Code-generation uses the same single local LFM3 model as chat, per the
+# single-model requirement. Every code snippet the browser produces uses it.
+CODE_GENERATION_MODEL = chat.CHAT_MODEL
 
 # For Go, Rust, and PHP, every chat answer and every generated code sample
 # uses the dedicated programming model instead of the general transcript chat
@@ -4680,7 +4723,7 @@ def rewrite_follow_up(
                 model=model,
                 temperature=0.0,
                 num_predict=256,
-                num_ctx=8192,
+                num_ctx=chat.ANSWER_NUM_CTX,
                 stop=["\n\n", "</latest_question>"],
             )
         except RuntimeError:
@@ -5960,7 +6003,7 @@ def _article_classify_with_model(
             model=ARTICLE_ROUTER_MODEL,
             temperature=0.0,
             num_predict=32,
-            num_ctx=8192,
+            num_ctx=chat.ANSWER_NUM_CTX,
             stop=["\n"],
         )
     except RuntimeError:
@@ -6151,7 +6194,7 @@ def _article_sufficiency_check(
             model=ARTICLE_ROUTER_MODEL,
             temperature=0.0,
             num_predict=64,
-            num_ctx=8192,
+            num_ctx=chat.ANSWER_NUM_CTX,
             stop=["\n\n"],
         )
     except RuntimeError:
@@ -9805,12 +9848,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     if isinstance(exc, ImageModelUnsupported):
                         raise RuntimeError(
                             "No installed Ollama model can read images. Pull a "
-                            "vision model such as gemma3, or set "
-                            "OLLAMA_IMAGE_MODEL to one that is installed."
+                            "vision model or set OLLAMA_IMAGE_MODEL to one that is "
+                            "installed."
                         ) from exc
                     raise RuntimeError(
-                        "No local image model is available. Pull a vision model "
-                        "such as gemma3, or set OLLAMA_IMAGE_MODEL."
+                        "No local image model is available. Install a vision "
+                        "model or set OLLAMA_IMAGE_MODEL."
                     ) from exc
                 reason = (
                     "cannot read images"
@@ -13768,6 +13811,8 @@ def main() -> None:
     # chat server is ready. The news read-aloud button then responds quickly
     # on its first paragraph instead of paying the model-load cost.
     threading.Thread(target=_prewarm_tts, daemon=True).start()
+    if KEEPALIVE_WATCHDOG_ENABLED:
+        threading.Thread(target=_keepalive_watchdog, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

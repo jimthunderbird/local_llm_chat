@@ -1,0 +1,2232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Performance research: why the first question is slow</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a22;
+    --panel-2: #1d2130;
+    --text: #e6e8ee;
+    --muted: #9aa3b2;
+    --line: #2b3142;
+    --accent: #7aa2ff;
+    --accent-2: #5ee0b5;
+    --warn: #ffcc66;
+    --bad: #ff7a7a;
+    --good: #6ee7a8;
+    --code: #0b0d12;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    padding: 44px 28px 28px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #171b26 0%, #0f1117 100%);
+  }
+  header .wrap, main { max-width: 1080px; margin: 0 auto; }
+  h1 { margin: 0 0 10px; font-size: 2.05rem; line-height: 1.2; letter-spacing: -0.02em; }
+  h2 { margin: 42px 0 14px; font-size: 1.38rem; letter-spacing: -0.01em; }
+  h3 { margin: 26px 0 8px; font-size: 1.08rem; color: #dfe4ef; }
+  p { margin: 10px 0; }
+  .sub { color: var(--muted); margin: 0; }
+  .sub code { color: #cfd6e6; }
+  main { padding: 18px 28px 80px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, kbd { font-family: var(--mono); font-size: 0.9em; }
+  code { background: #232838; color: #dbe3f7; padding: 0.12em 0.35em; border-radius: 4px; }
+  pre {
+    background: var(--code);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    line-height: 1.45;
+  }
+  pre code { background: none; padding: 0; color: #d7dcea; }
+  .callout {
+    border: 1px solid #33405d;
+    background: #182033;
+    border-left: 4px solid var(--accent);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 16px 0;
+  }
+  .callout.good { border-left-color: var(--good); background: #15241f; border-color: #24483a; }
+  .callout.warn { border-left-color: var(--warn); background: #241f14; border-color: #4a3d1e; }
+  .callout.bad  { border-left-color: var(--bad);  background: #241818; border-color: #4a2424; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 16px 0; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .card .k { color: var(--muted); font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  .card .v { font-size: 1.35rem; font-weight: 650; margin-top: 4px; }
+  .card .n { color: var(--muted); font-size: 0.86rem; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.94rem; }
+  th, td { border-bottom: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { color: #cbd4e6; background: #1b2030; font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .bar-row { display: grid; grid-template-columns: 120px 1fr 74px; gap: 10px; align-items: center; margin: 8px 0; }
+  .bar-track { height: 14px; background: #242a3a; border-radius: 20px; overflow: hidden; }
+  .bar-fill { height: 100%; background: linear-gradient(90deg, #5b8cff, #7aa2ff); border-radius: 20px; }
+  .bar-fill.warn { background: linear-gradient(90deg, #d9a23a, #ffcc66); }
+  .bar-fill.bad { background: linear-gradient(90deg, #c94c4c, #ff7a7a); }
+  .bar-label { color: var(--muted); font-size: 0.9rem; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 7px 0; }
+  .toc { columns: 2; column-gap: 30px; margin: 16px 0 0; }
+  .toc a { display: block; padding: 3px 0; color: #c2cce4; }
+  .tag {
+    display: inline-block;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 1px 9px;
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin-left: 6px;
+  }
+  .muted { color: var(--muted); }
+  .small { font-size: 0.9rem; }
+  .sep { border: 0; border-top: 1px solid var(--line); margin: 34px 0; }
+  .kv { font-family: var(--mono); font-size: 0.9em; }
+  @media (max-width: 720px) {
+    .toc { columns: 1; }
+    h1 { font-size: 1.55rem; }
+    header, main { padding-left: 16px; padding-right: 16px; }
+    .bar-row { grid-template-columns: 88px 1fr 62px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>Why the first question is slow — and why continuous questions feel fast</h1>
+    <p class="sub">Research for <code>app/chat.html</code> + <code>app/chat_server.py</code> · 2026-11-11 · macOS, 36 GiB unified memory, Ollama 0.40.14 · <span class="tag">research only</span></p>
+  </div>
+</header>
+
+<main>
+  <section id="tldr">
+    <h2>TL;DR</h2>
+    <div class="callout">
+      <strong>The dominant cost is model load, not retrieval.</strong>
+      The app tells Ollama to keep each model for <code>30m</code> after the last request.
+      Every question resets that timer. If you stop asking for longer than the timer — or if
+      Ollama evicts a model to make room — the next question must load the 21.4 GB
+      answer model again. Measured on this machine today, loading <code>ornith:35b</code>
+      took a median of <strong>5.9 s</strong> (up to 9.9 s), and the small
+      <code>qwen3:1.7b</code> took 1.3 s. That time is paid before retrieval and before
+      the first token.
+    </div>
+    <p>Once you keep asking, the model stays resident, the OS page cache and prompt/KV
+      cache stay warm, and the Python-side retrieval caches stay populated, so questions
+      feel normal. A second, independent cause makes the problem look intermittent:
+      the code calls the same answer model with <strong>different context sizes</strong>
+      (32768, 16384, 8192), and Ollama reloads a model when the requested context length
+      changes. So the first question after <code>/wiki</code>, 中文 translation, a line
+      explanation, or an image question can be slow even inside the 30-minute window.</p>
+
+    <div class="toc">
+      <a href="#symptom">1. The observed symptom</a>
+      <a href="#path">2. Request path and models</a>
+      <a href="#evidence">3. Measurements and evidence</a>
+      <a href="#causes">4. Root causes, ranked</a>
+      <a href="#fast">5. Why continuous questions are fast</a>
+      <a href="#not">6. What is not the cause</a>
+      <a href="#fixes">7. Recommendations</a>
+      <a href="#verify">8. How to verify</a>
+      <a href="#appendix">9. Appendix: code map</a>
+      <a href="#models">10. Complete model inventory</a>
+      <a href="#small-model">11. Replacing ornith:35b with qwen3:1.7b</a>
+      <a href="#qwen-only">12. qwen3:1.7b-only configuration and prompt playbook</a>
+      <a href="#lfm3-aura">13. LFM3-aura-grounded vs qwen3 and ornith</a>
+    </div>
+  </section>
+
+  <section id="symptom">
+    <h2>1. The observed symptom</h2>
+    <p>Reported behaviour:</p>
+    <ul>
+      <li>The first question of a session is slow.</li>
+      <li>If no question has been asked for a while, the next question is slow.</li>
+      <li>If questions are asked back-to-back, the speed is acceptable.</li>
+    </ul>
+    <p>That is the classic shape of a <strong>cold model / cold cache</strong> penalty.
+      The work that is repeated on every question — BM25 retrieval, prompt construction,
+      and generation — is not the part that changes. The part that changes is whether the
+      large model and its runtime state are still resident.</p>
+  </section>
+
+  <section id="path">
+    <h2>2. Request path and models</h2>
+    <p>A normal question in the browser goes through roughly this path:</p>
+    <pre><code>app/chat.html
+  └─ POST /api/ask
+       └─ ChatState._run_question
+            ├─ conversation resolver (only for follow-ups)  → ministral-3:3b, 8192 ctx
+            ├─ _iterative_evidence
+            │    ├─ query expansion                         → qwen3:1.7b, 8192 ctx
+            │    ├─ SQLite FTS5 / BM25 over 26,334 chunks
+            │    └─ sufficiency / candidate filter          → qwen3:1.7b, 8192 ctx
+            └─ chat.answer → chat.stream_answer
+                 └─ answer generation                       → ornith:35b, 32768 ctx</code></pre>
+
+    <table>
+      <thead>
+        <tr><th>Role</th><th>Model</th><th class="num">Resident size</th><th>Context used by the normal path</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Answer / dict / coding / wiki</td><td><code>ornith:35b</code> (34.7B Q4_K_M)</td><td class="num">21.4 GB</td><td>32768 for answers; 8192–16384 in some helper paths</td></tr>
+        <tr><td>Query expansion / filter / translation</td><td><code>qwen3:1.7b</code> (2.0B Q4_K_M)</td><td class="num">1.9 GB</td><td>8192</td></tr>
+        <tr><td>Conversation follow-up resolver</td><td><code>ministral-3:3b</code></td><td class="num">~3 GB</td><td>8192</td></tr>
+      </tbody>
+    </table>
+
+    <p>The important code constants are in <code>chat.py</code> and
+      <code>app/chat_server.py</code>:</p>
+    <pre><code>chat.py:126   EXPANSION_MODEL = "qwen3:1.7b"
+chat.py:129   CHAT_MODEL      = "ornith:35b"
+chat.py:201   EXPANSION_NUM_CTX = 8192
+chat.py:245   ANSWER_NUM_CTX    = 32768
+chat.py:247   OLLAMA_KEEP_ALIVE = "30m"
+app/chat_server.py:2322  CONVERSATION_MODEL = "ministral-3:3b"</code></pre>
+
+    <p><code>OLLAMA_KEEP_ALIVE</code> is sent with every Ollama request
+      (<code>chat.py:2516</code>, <code>chat.py:2868</code>,
+      <code>chat.py:5217</code>, and the six request sites in
+      <code>app/chat_server.py</code>). The timer is therefore
+      <strong>refreshed by each question</strong>, not fixed from load time.</p>
+  </section>
+
+  <section id="evidence">
+    <h2>3. Measurements and evidence</h2>
+
+    <div class="grid">
+      <div class="card">
+        <div class="k">Resident at 21:13 PST</div>
+        <div class="v">21.4 GB + 1.9 GB</div>
+        <div class="n"><code>ornith:35b</code> @ 32768 ctx + <code>qwen3:1.7b</code> @ 8192 ctx, both 100% GPU. <code>ollama ps</code> showed “29 minutes from now” / “28 minutes from now”.</div>
+      </div>
+      <div class="card">
+        <div class="k">ornith:35b load today</div>
+        <div class="v">5.9 s median</div>
+        <div class="n">14 load events; min 1.5 s, max 9.9 s. All-time median 6.3 s, max 15.9 s (169 events).</div>
+      </div>
+      <div class="card">
+        <div class="k">qwen3:1.7b load today</div>
+        <div class="v">1.3 s median</div>
+        <div class="n">16 load events; min 0.5 s, max 1.5 s. All-time max 2.3 s.</div>
+      </div>
+      <div class="card">
+        <div class="k">Prompt prefill (warm)</div>
+        <div class="v">~1.6 ms / token</div>
+        <div class="n">2.7–5.6 s for the 1.6k–3.4k-token prompts seen in the server log (~610 tokens/s).</div>
+      </div>
+      <div class="card">
+        <div class="k">Generation (warm)</div>
+        <div class="v">~42.8 tok/s</div>
+        <div class="n">~23.3 ms per generated token. This is why long answers still take seconds even when warm.</div>
+      </div>
+      <div class="card">
+        <div class="k">Retrieval corpus</div>
+        <div class="v">26,334 chunks</div>
+        <div class="n">2.38 M indexed tokens; 24 MB SQLite DB; 14.1 MiB of trunk text. Retrieval is not the bottleneck.</div>
+      </div>
+    </div>
+
+    <h3>3.1 A controlled cold-vs-warm test with the small model</h3>
+    <p>To isolate the load penalty without touching the answer model, I sent the same
+      one-token request to <code>qwen3:1.7b</code> twice, 30 seconds apart:</p>
+    <table>
+      <thead><tr><th>Request</th><th class="num">Total</th><th class="num">load_duration</th><th class="num">prompt_eval</th></tr></thead>
+      <tbody>
+        <tr><td>Cold (model not loaded)</td><td class="num">1.636 s</td><td class="num">1.543 s</td><td class="num">0.089 s / 11 tokens</td></tr>
+        <tr><td>Warm (model resident)</td><td class="num">0.0337 s</td><td class="num">0.0039 s</td><td class="num">0.0269 s / 12 tokens</td></tr>
+      </tbody>
+    </table>
+    <p>Even the 1.9 GB model spends <strong>1.54 s loading</strong> when cold. The
+      answer model is 11× larger, so its load penalty is correspondingly larger. This is
+      the mechanism behind the user-visible delay.</p>
+
+    <h3>3.2 Model-load durations from <code>~/.ollama/logs/server.log</code></h3>
+    <p>I paired each “loading model via llama-server” event with the following “waiting for
+      llama-server to start responding”. The distribution on 2026-11-11:</p>
+
+    <div class="bar-row">
+      <div class="bar-label">ornith:35b</div>
+      <div class="bar-track"><div class="bar-fill bad" style="width:59%"></div></div>
+      <div class="bar-label">5.9 s med</div>
+    </div>
+    <div class="bar-row">
+      <div class="bar-label">ministral-3:3b</div>
+      <div class="bar-track"><div class="bar-fill warn" style="width:24%"></div></div>
+      <div class="bar-label">2.4 s med</div>
+    </div>
+    <div class="bar-row">
+      <div class="bar-label">qwen3:1.7b</div>
+      <div class="bar-track"><div class="bar-fill" style="width:13%"></div></div>
+      <div class="bar-label">1.3 s med</div>
+    </div>
+    <p class="small muted">Bar widths are scaled to a 10 s maximum; labels show today's median. The absolute
+      numbers vary with context size and memory pressure, but the ordering is stable.</p>
+
+    <table>
+      <thead><tr><th>Model</th><th class="num">Loads today</th><th class="num">Median</th><th class="num">Max</th><th class="num">All-time loads</th><th class="num">All-time median / max</th></tr></thead>
+      <tbody>
+        <tr><td><code>ornith:35b</code></td><td class="num">14</td><td class="num">5.9 s</td><td class="num">9.9 s</td><td class="num">169</td><td class="num">6.3 s / 15.9 s</td></tr>
+        <tr><td><code>ministral-3:3b</code></td><td class="num">8</td><td class="num">2.4 s</td><td class="num">3.0 s</td><td class="num">32</td><td class="num">2.3 s / 3.0 s</td></tr>
+        <tr><td><code>qwen3:1.7b</code></td><td class="num">16</td><td class="num">1.3 s</td><td class="num">1.5 s</td><td class="num">144</td><td class="num">1.3 s / 2.3 s</td></tr>
+      </tbody>
+    </table>
+
+    <h3>3.3 Different <code>num_ctx</code> values are being loaded for the same model</h3>
+    <p>Ollama starts a separate runner for a given <code>(model, context length)</code>.
+      The llama-server command lines in the log show that the same model is loaded at
+      several context sizes:</p>
+    <table>
+      <thead><tr><th>Model</th><th>Context-size occurrences in the log</th></tr></thead>
+      <tbody>
+        <tr><td><code>ornith:35b</code></td><td><code>-c 32768</code> ×118, <code>-c 4096</code> ×25, <code>-c 8192</code> ×17, <code>-c 16384</code> ×9, <code>-c 2048</code> ×1</td></tr>
+        <tr><td><code>qwen3:1.7b</code></td><td><code>-c 8192</code> ×106, <code>-c 32768</code> ×21, <code>-c 4096</code> ×16, <code>-c 2048</code> ×1</td></tr>
+        <tr><td><code>ministral-3:3b</code></td><td><code>-c 8192</code> ×31, <code>-c 32768</code> ×1</td></tr>
+      </tbody>
+    </table>
+    <p>Some of those events are historical, but the current code still contains live
+      mismatches for the large model:</p>
+    <pre><code>chat.py:245                 ANSWER_NUM_CTX = 32768             # normal answers
+app/chat_server.py:2031     ANSWER_TRANSLATION_NUM_CTX = 8192   # 中文 button, ornith:35b
+app/chat_server.py:2043     LINE_EXPLAIN_NUM_CTX = 16384        # code line “?” button
+app/chat_server.py:2150     IMAGE_NUM_CTX = 16384               # image questions
+chat.py:2494                generate_text(..., num_ctx=8192)    # default; /wiki helpers omit it</code></pre>
+    <p>The <code>/wiki</code> path uses <code>WIKI_ENTITY_MODEL</code>,
+      <code>WIKI_KEYWORD_MODEL</code>, and <code>WIKI_ANSWER_MODEL</code>, all aliases of
+      <code>CHAT_MODEL = "ornith:35b"</code> (<code>chat.py:440–442</code>), and calls
+      <code>generate_text()</code> without an explicit context, so those calls load
+      ornith at 8192. The next ordinary question then asks for 32768 and forces a reload.
+      The same applies after the 中文 translation button (8192), a line explanation (16384),
+      or an image question (16384).</p>
+
+    <h3>3.4 Ollama is actively evicting models to fit memory</h3>
+    <p>The server log contains repeated scheduler lines such as:</p>
+    <pre><code>... msg="llama-server model predicted to exceed available memory, evicting"
+    predicted="21.0 GiB" predicted_num_ctx=32768 ...
+    available="22.7 GiB" gpu_free="26.2 GiB" system_free="22.7 GiB" system_limited=true</code></pre>
+    <p>This happened at 15:56, 16:05, 17:10, and elsewhere. At 17:10:57 ornith was
+      predicted at 21.0 GiB / 32768 context and evicted other models; qwen loaded again at
+      17:11:17, and ministral at 17:11:33. The scheduler is doing the right thing for
+      memory safety, but every eviction turns a later question into a cold question.</p>
+
+    <h3>3.5 macOS memory pressure is high on this machine</h3>
+    <table>
+      <thead><tr><th>Metric</th><th class="num">Value</th><th>Implication</th></tr></thead>
+      <tbody>
+        <tr><td>Physical RAM</td><td class="num">36.0 GiB</td><td>Shared by macOS, Chrome, Docker VM, and the models.</td></tr>
+        <tr><td>Swap used</td><td class="num">11.16 / 12.0 GiB</td><td>Very high; the system is already under pressure.</td></tr>
+        <tr><td>System-wide free</td><td class="num">13%</td><td>Little headroom for another large model.</td></tr>
+        <tr><td>Compressor pages used</td><td class="num">326,946</td><td>Resident model pages can be compressed or swapped.</td></tr>
+        <tr><td>Swapins / swapouts</td><td class="num">33.7 M / 49.6 M</td><td>Page faults and swap I/O are not rare.</td></tr>
+      </tbody>
+    </table>
+    <p>Even while <code>ollama ps</code> says a model is “loaded”, parts of its weight
+      pages may have been compressed or swapped. The first question after an idle period
+      can therefore pay page-in cost in addition to (or instead of) a formal model load.
+      Continuous questions keep those pages hot.</p>
+
+    <h3>3.6 The first question of a server also warms process-level caches</h3>
+    <p>The server does a good job at startup: it prewarms Ollama
+      (<code>chat.py:5196</code>), loads the corpus, and builds/optimizes the global FTS5
+      index before serving (<code>app/chat_server.py:13697–13730</code>). But a few
+      one-time costs still land on the first question:</p>
+    <ul>
+      <li><code>_iterative_paragraph_chunks()</code> builds a stable paragraph-only list
+        for the iterative retrieval path and caches it in
+        <code>_PARAGRAPH_CHUNKS_CACHE</code> (<code>app/chat_server.py:6174</code>).</li>
+      <li><code>get_bm25_index()</code> caches by list identity
+        (<code>chat.py:1103</code>, <code>chat.py:1257</code>). The filtered list is a
+        different identity from the startup list, so its first use syncs and loads the
+        index metadata again.</li>
+      <li>The expansion/filter cache (<code>_EXPANSION_FILTER_CACHE</code>,
+        <code>chat.py:2181</code>), the 32-entry answer cache
+        (<code>AnswerCache</code>, <code>chat.py:937</code>), and the acronym cache are
+        empty.</li>
+    </ul>
+    <p>These costs are small compared with a 21 GB model load, but they explain why the
+      very first question after a fresh server start is slower than the second one even
+      when the model is already warm.</p>
+  </section>
+
+  <section id="causes">
+    <h2>4. Root causes, ranked</h2>
+
+    <h3>Cause 1 — <code>keep_alive</code> expiry reloads the 21.4 GB answer model <span class="tag">primary</span></h3>
+    <p><code>OLLAMA_KEEP_ALIVE = "30m"</code> means each model stays loaded for 30 minutes
+      after the <em>last</em> request that used it. Asking a question resets the timer, so a
+      continuous session keeps the model resident. After more than 30 minutes of inactivity,
+      Ollama unloads it. The next question pays the full cold load before retrieval and
+      prefill. Today's median ornith load was 5.9 s; the all-time maximum was 15.9 s.</p>
+    <p><strong>Why it matches the symptom:</strong> the delay appears only on the first
+      question after a gap, and disappears when questions are frequent. That is exactly
+      what a per-model idle timer produces.</p>
+
+    <h3>Cause 2 — Ollama evicts models when memory is tight <span class="tag">primary on this machine</span></h3>
+    <p>With 21.4 GB for ornith, 1.9 GB for qwen, and ~3 GB for ministral, the working set
+      is around 26 GB against a 28.1 GiB Metal budget and a 36 GiB machine that is also
+      running macOS, Chrome, and a Docker VM. The scheduler logs
+      <code>predicted to exceed available memory, evicting</code> and
+      <code>system_limited=true</code>. A model can therefore disappear sooner than the
+      30-minute timer suggests, especially when a helper call asks for a different model
+      or context size.</p>
+    <p><strong>Why it matches the symptom:</strong> it explains why the first question is
+      sometimes slow even when the user thinks the gap was shorter than 30 minutes, and why
+      memory pressure (other apps open) changes the behaviour.</p>
+
+    <h3>Cause 3 — context-size switching forces reloads <span class="tag">intermittent</span></h3>
+    <p>Ollama reloads a model when the requested <code>num_ctx</code> changes. The answer
+      path uses 32768; translation uses 8192; line explanation and image questions use
+      16384; the wiki helpers use 8192. After any of those features, the next ordinary
+      question reloads ornith at 32768. The log's <code>-c</code> distribution confirms
+      that this happens in practice (17 loads at 8192, 25 at 4096, 9 at 16384 for ornith).</p>
+    <p><strong>Why it matches the symptom:</strong> it makes the “first question after a
+      while” look unpredictable, because the trigger is not only wall-clock idle time but
+      also what the previous feature did.</p>
+
+    <h3>Cause 4 — macOS memory pressure and swap <span class="tag">secondary</span></h3>
+    <p>The machine currently has 13% free memory and 11.16 GiB of swap in use. Even a
+      “resident” model can have pages compressed or swapped out. The first post-idle
+      request faults those pages back in; the second request finds them hot. This adds
+      latency on top of the formal load timer and is worse when Chrome/Docker are busy.</p>
+
+    <h3>Cause 5 — first-question cache warmup <span class="tag">small but real</span></h3>
+    <p>The first question after server start (or after switching scope) builds the
+      paragraph-only BM25 view and populates the expansion/filter/answer caches. Startup
+      prewarming covers the answer model and the small model but not every cache used by
+      the iterative path. This is a one-time cost in the hundreds of milliseconds to a
+      couple of seconds, not the main 6–16 s penalty.</p>
+  </section>
+
+  <section id="fast">
+    <h2>5. Why continuous questions are fast</h2>
+    <ul>
+      <li><strong>The keep-alive timer is refreshed on every request.</strong> A question
+        every few minutes keeps ornith and qwen loaded; <code>ollama ps</code> shows the
+        expiry moving forward.</li>
+      <li><strong>Weights stay hot in the OS page cache and Metal residency set.</strong>
+        No disk read, no GPU upload, no runner startup.</li>
+      <li><strong>Prompt/KV cache can be reused.</strong> The prompt template and the
+        leading part of the context are stable; Ollama reports cached prompt tokens in the
+        benchmark line (<code>prompt_tokens ... (cached ...)</code>). A new context or a
+        different model still pays prefill, but not the load.</li>
+      <li><strong>Retrieval caches are already populated:</strong>
+        <code>_BM25_CACHE</code> (by list identity), the paragraph list cache, the
+        512-entry expansion/filter cache, the 32-entry answer cache, and the acronym cache.
+        Repeated questions and repeated evidence avoid duplicate small-model calls and
+        index work.</li>
+    </ul>
+    <p>Even warm, a question is not free: the log shows 2.7–5.6 s of prompt prefill for
+      1.6k–3.4k prompt tokens, plus retrieval (~0.5–2 s), plus generation at ~43 tokens/s.
+      “Fast” here means “no 6–16 s model load and no cold cache”, not “instant”.</p>
+  </section>
+
+  <section id="not">
+    <h2>6. What is not the cause</h2>
+    <table>
+      <thead><tr><th>Candidate</th><th>Evidence</th></tr></thead>
+      <tbody>
+        <tr><td>BM25 / SQLite is too slow</td><td>The whole index is 24 MB, covers 26,334 chunks and 2.38 M tokens, and lives on disk with FTS5 scoring. The log shows retrieval in the sub-second-to-low-second range, while prefill alone is several seconds.</td></tr>
+        <tr><td>The corpus is reloaded for every question</td><td>Chunks are loaded once at server startup; <code>get_bm25_index()</code> caches by list identity and the server prebuilds the global index before accepting requests.</td></tr>
+        <tr><td>Network / downloads</td><td>Ollama is local. First-token delay remains even with no network activity; the measured cold penalty is in <code>load_duration</code>.</td></tr>
+        <tr><td>Python import / startup</td><td>Imports happen once when the server process starts, not per question. The per-question cold cost is in the Ollama runner and the retrieval caches.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="fixes">
+    <h2>7. Recommendations</h2>
+    <p class="muted small">These are research recommendations; no code was changed for this task.</p>
+
+    <h3>7.1 Highest leverage: keep the models resident</h3>
+    <p>Add a lightweight keepalive watchdog to the server. Every 5–10 minutes, send a
+      one-token (or empty) request with the <em>same</em> <code>num_ctx</code> the real
+      calls use, for each model in the answer path — ornith (32768), qwen (8192), and
+      ministral (8192). This refreshes the 30-minute timer without generating a real
+      answer.</p>
+    <pre><code># pseudo-code, not implemented
+targets = [("ornith:35b", 32768), ("qwen3:1.7b", 8192), ("ministral-3:3b", 8192)]
+while True:
+    sleep(5 * 60)
+    for model, num_ctx in targets:
+        POST /api/generate {
+            "model": model, "prompt": "", "stream": false,
+            "keep_alive": "30m",
+            "options": {"num_predict": 1, "num_ctx": num_ctx}
+        }</code></pre>
+    <p><strong>Expected effect:</strong> removes the 1.3–16 s cold load from the first
+      question after a long gap. The first question then approaches warm latency.
+      <strong>Tradeoff:</strong> the 21.4 GB answer model stays in memory (and in the
+      Metal residency set) even when idle. On this 36 GiB machine that can increase memory
+      pressure, so combine with the memory tuning below.</p>
+    <p>Alternative: set <code>OLLAMA_KEEP_ALIVE=-1</code> (never unload) for the answer
+      model. This is simpler but has the same memory tradeoff and can make the whole
+      machine less responsive.</p>
+
+    <h3>7.2 Use one <code>num_ctx</code> per model</h3>
+    <p>Make every call to <code>ornith:35b</code> use the same context length (for example
+      32768), and every call to <code>qwen3:1.7b</code>/<code>ministral-3:3b</code> use
+      8192. In particular, change:</p>
+    <ul>
+      <li><code>ANSWER_TRANSLATION_NUM_CTX</code> (8192) to the answer context;</li>
+      <li><code>LINE_EXPLAIN_NUM_CTX</code> (16384) and <code>IMAGE_NUM_CTX</code> (16384)
+        to the answer context;</li>
+      <li>the <code>generate_text()</code> calls used by <code>/wiki</code> to pass
+        <code>num_ctx=ANSWER_NUM_CTX</code>.</li>
+    </ul>
+    <p><strong>Expected effect:</strong> removes reloads after 中文 translation, line
+      explanation, image questions, and wiki questions. <strong>Tradeoff:</strong> a larger
+      context allocates a larger KV cache; if memory is the limiting factor, choose a
+      single smaller context (for example 16384) and use it everywhere instead.</p>
+
+    <h3>7.3 Prewarm the full answer path at startup</h3>
+    <ul>
+      <li>Add <code>CONVERSATION_MODEL</code> (ministral, 8192) to
+        <code>prewarm()</code> targets; it is currently not prewarmed, so the first
+        follow-up can pay a ~2–3 s load.</li>
+      <li>Prewarm the filtered paragraph list used by <code>_iterative_paragraph_chunks()</code>
+        and call <code>get_bm25_index()</code> on it, so the first question does not build
+        its metadata.</li>
+      <li>Keep the existing behavior of waiting for prewarm before serving; the current
+        120 s cap is reasonable, but log a warning if it expires so the first question is
+        not silently cold.</li>
+    </ul>
+
+    <h3>7.4 Reduce memory pressure / evictions</h3>
+    <ul>
+      <li>Use <code>ollama ps</code> to see what is resident. Stop unused large models with
+        <code>ollama stop &lt;model&gt;</code>.</li>
+      <li>Avoid keeping other 20 GB+ models loaded. The scheduler logs
+        <code>predicted to exceed available memory, evicting</code>; each eviction becomes
+        a future cold load.</li>
+      <li>If 36 GiB is consistently tight, consider a smaller answer model or a lower
+        quantization, or close memory-heavy apps (Docker VM, many Chrome tabs) during long
+        chat sessions.</li>
+      <li>Do not set <code>OLLAMA_MAX_LOADED_MODELS=1</code> unless you accept model
+        thrashing; keeping the answer model plus one small model is the useful minimum.</li>
+    </ul>
+
+    <h3>7.5 Hide the unavoidable cold start</h3>
+    <p>If keeping a 21 GB model resident is not acceptable, warm it on user intent: when
+      the browser input gains focus after an idle period, send a no-op warm request and
+      show a small “warming model…” indicator. The user can start typing while the model
+      loads, and the first real question is less likely to pay the full penalty. This does
+      not remove the cost; it moves it off the critical path.</p>
+
+    <h3>Expected impact summary</h3>
+    <table>
+      <thead><tr><th>Change</th><th>What it removes</th><th>Rough saving</th></tr></thead>
+      <tbody>
+        <tr><td>Keepalive watchdog / <code>keep_alive=-1</code></td><td>Cold load of ornith + qwen after idle</td><td>1.3–16 s per first question</td></tr>
+        <tr><td>Unify <code>num_ctx</code> per model</td><td>Reload after translation / line explain / image / wiki</td><td>2–10 s per feature switch</td></tr>
+        <tr><td>Prewarm conversation + filtered index</td><td>First follow-up load; first-question index metadata</td><td>~2–3 s + ~0.5–2 s once</td></tr>
+        <tr><td>Memory tuning</td><td>Some scheduler evictions</td><td>Variable; fewer cold questions</td></tr>
+        <tr><td>Further BM25 work</td><td>Almost nothing</td><td>Already milliseconds / 24 MB</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="verify">
+    <h2>8. How to verify</h2>
+    <ol>
+      <li><strong>Use the built-in benchmark.</strong> In the chat, run
+        <code>/benchmark on</code> and ask a question after an idle period. The benchmark
+        line reports <code>load</code>, <code>prefill</code>, <code>TTFT</code>, and
+        <code>prompt_tokens ... (cached ...)</code>. A cold question has
+        <code>load &gt; 0.5 s</code>; a warm one has <code>load &lt; 0.05 s</code>.</li>
+      <li><strong>Check residency.</strong> <code>ollama ps</code> shows model size,
+        processor, context, and <code>UNTIL</code>. If the answer model is absent, the next
+        question will be cold.</li>
+      <li><strong>Read the runner log.</strong>
+        <pre><code>grep -aE 'loading model via llama-server|predicted to exceed available memory' \
+  ~/.ollama/logs/server.log | tail -40</code></pre>
+      </li>
+      <li><strong>Check memory pressure.</strong> <code>memory_pressure</code> and
+        <code>sysctl vm.swapusage</code> show whether macOS is paging the model out.</li>
+      <li><strong>Acceptance target.</strong> After the keepalive/unified-context changes,
+        a question following 10 minutes of idle should report
+        <code>load &lt; 0.05 s</code>, and its TTFT should be within roughly 1 s of a
+        back-to-back warm question.</li>
+    </ol>
+
+    <h3>Reproduction of the cold-vs-warm measurement</h3>
+    <pre><code># Cold (unload first if needed): remove the model from memory, then:
+curl -s http://localhost:11434/api/generate \
+  -d '{"model":"qwen3:1.7b","prompt":"hi","stream":false,"keep_alive":"30m",
+       "options":{"num_predict":1,"num_ctx":8192}}'
+
+# Warm: repeat immediately
+curl -s http://localhost:11434/api/generate \
+  -d '{"model":"qwen3:1.7b","prompt":"hi again","stream":false,"keep_alive":"30m",
+       "options":{"num_predict":1,"num_ctx":8192}}'</code></pre>
+    <p class="small muted">The JSON response includes <code>load_duration</code>,
+      <code>prompt_eval_duration</code>, and <code>total_duration</code> in nanoseconds.
+      The values quoted in this report are from the run at 21:12–21:13 PST on
+      2026-11-11.</p>
+  </section>
+
+  <section id="appendix">
+    <h2>9. Appendix: code map</h2>
+    <table>
+      <thead><tr><th>Area</th><th>Location</th><th>Why it matters</th></tr></thead>
+      <tbody>
+        <tr><td>Model names</td><td><code>chat.py:126–139</code></td><td>ornith:35b is the answer model; qwen3:1.7b handles expansion/filter/translation.</td></tr>
+        <tr><td>Context sizes</td><td><code>chat.py:201</code>, <code>chat.py:245</code></td><td>8192 for small helpers, 32768 for answers.</td></tr>
+        <tr><td>Keep-alive</td><td><code>chat.py:247</code>, <code>chat.py:2516</code>, <code>chat.py:2868</code>, <code>chat.py:5217</code></td><td>Every request asks Ollama to keep the model for 30 minutes.</td></tr>
+        <tr><td>Prewarm</td><td><code>chat.py:5196–5223</code></td><td>Warms qwen (8192) and ornith (32768); does not warm ministral.</td></tr>
+        <tr><td>Server prewarm wait</td><td><code>app/chat_server.py:13697–13720</code></td><td>Starts prewarm in a thread, waits up to 120 s, then serves anyway.</td></tr>
+        <tr><td>Translation context</td><td><code>app/chat_server.py:2030–2031</code></td><td>ornith at 8192 for the 中文 button.</td></tr>
+        <tr><td>Line-explain context</td><td><code>app/chat_server.py:2043</code></td><td>ornith at 16384 for the code “?” affordance.</td></tr>
+        <tr><td>Image context</td><td><code>app/chat_server.py:2150</code></td><td>ornith at 16384 for image questions.</td></tr>
+        <tr><td>Conversation model</td><td><code>app/chat_server.py:2322</code></td><td>ministral-3:3b, 8192; loaded only on follow-up detection.</td></tr>
+        <tr><td>BM25 index cache</td><td><code>chat.py:1103–1276</code></td><td>Cached by list identity; startup builds the global index.</td></tr>
+        <tr><td>Paragraph list cache</td><td><code>app/chat_server.py:6174–6223</code></td><td>Stable filtered list for iterative retrieval; first use builds it.</td></tr>
+        <tr><td>Expansion/filter cache</td><td><code>chat.py:2181–2268</code></td><td>512 entries; avoids repeated small-model calls.</td></tr>
+        <tr><td>Answer cache</td><td><code>chat.py:937–967</code></td><td>32-entry LRU; repeated questions return instantly.</td></tr>
+        <tr><td>SQLite index</td><td><code>sqlite_bm25.py:521</code></td><td>One cached handle per corpus; on-disk FTS5, 24 MB.</td></tr>
+      </tbody>
+    </table>
+
+    <hr class="sep">
+    <p class="small muted">Scope and caveats: the log-derived load statistics cover many
+      days and several code revisions, so they are indicative rather than a controlled
+      benchmark. The cold-vs-warm qwen measurement is controlled. The memory-pressure
+      snapshot is from 2026-11-11 21:13 PST. No application code was changed during this
+      research task.</p>
+  </section>
+
+  <section id="models">
+    <h2>10. Complete model inventory</h2>
+    <p><code>app/chat_server.py</code> reaches Ollama through two paths: directly with
+      <code>requests.post(.../api/generate)</code>, and indirectly through the helpers
+      imported from <code>chat.py</code>. Looking at both paths, the server references
+      <strong>four distinct local model names</strong>. Three participate in normal text
+      chat; one is only a fallback for image questions. No cloud model or external LLM
+      API is used by the server.</p>
+
+    <div class="grid">
+      <div class="card">
+        <div class="k">Distinct model names</div>
+        <div class="v">4</div>
+        <div class="n"><code>ornith:35b</code>, <code>qwen3:1.7b</code>,
+          <code>ministral-3:3b</code>, <code>gemma3:latest</code></div>
+      </div>
+      <div class="card">
+        <div class="k">Normal text pipeline</div>
+        <div class="v">3</div>
+        <div class="n">Answer + helper + follow-up resolver. The fourth model is
+          image-only and conditional.</div>
+      </div>
+      <div class="card">
+        <div class="k">Warmed at startup</div>
+        <div class="v">2</div>
+        <div class="n"><code>ornith:35b</code> and <code>qwen3:1.7b</code>; the
+          conversation and vision models are not prewarmed.</div>
+      </div>
+      <div class="card">
+        <div class="k">Cloud / third-party LLMs</div>
+        <div class="v">0</div>
+        <div class="n">The server only calls the local Ollama host. TTS is a separate
+          local engine, not an LLM.</div>
+      </div>
+    </div>
+
+    <h3>Models by name</h3>
+    <table>
+      <thead>
+        <tr><th>Model</th><th>Role</th><th class="num">Resident size</th><th>How it is used</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>ornith:35b</code></td>
+          <td>Main answer and generation model</td>
+          <td class="num">21.4 GB</td>
+          <td>Normal RAG answers, coding, wiki, math tutor, dictionary, summaries,
+            translation, podcast, image questions, and the Go/Rust/PHP documentation
+            subprocesses. Most context sizes are 32768; helper paths use 8192 or 16384.</td>
+        </tr>
+        <tr>
+          <td><code>qwen3:1.7b</code></td>
+          <td>Small routing / retrieval helper</td>
+          <td class="num">1.9 GB</td>
+          <td>Expands the question into BM25 terms, filters candidate chunks, classifies
+            article questions and checks evidence sufficiency, and translates a Chinese
+            question to English. Always at 8192 context.</td>
+        </tr>
+        <tr>
+          <td><code>ministral-3:3b</code></td>
+          <td>Conversation follow-up resolver</td>
+          <td class="num">~3 GB</td>
+          <td>Rewrites a follow-up such as “what does he think about AI?” into a
+            standalone retrieval question, or decides that the topic changed. Only called
+            when conversation turns exist; falls back to <code>qwen3:1.7b</code>.</td>
+        </tr>
+        <tr>
+          <td><code>gemma3:latest</code></td>
+          <td>Vision fallback</td>
+          <td class="num">3.3 GB</td>
+          <td>Used only if the configured image model (<code>ornith:35b</code> by default)
+            is text-only or unavailable. Text questions never use it. The fallback list can
+            be overridden with <code>OLLAMA_IMAGE_FALLBACK_MODELS</code>.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Every model constant and what it does</h3>
+    <table>
+      <thead>
+        <tr><th>Model</th><th>Constant(s)</th><th>Feature / endpoint</th><th>Where</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td rowspan="10"><code>ornith:35b</code></td>
+          <td><code>chat.CHAT_MODEL</code></td>
+          <td>Default RAG answer used by <code>/api/ask</code>, /article, /news,
+            /video, /gutenberg and other scoped chats</td>
+          <td><code>chat.py:129</code>; <code>app/chat_server.py:10440</code></td>
+        </tr>
+        <tr>
+          <td><code>chat.SIMPLE_ANSWER_MODEL</code></td>
+          <td><code>/ask</code> quick answers without retrieval</td>
+          <td><code>chat.py:135</code>; <code>app/chat_server.py:12734</code></td>
+        </tr>
+        <tr>
+          <td><code>chat.CODING_MODEL</code>,<br><code>CODE_GENERATION_MODEL</code>,<br><code>PROGRAMMING_MODEL</code>,<br><code>CODING_MODE_MODEL</code></td>
+          <td>Coding-mode answers, documentation code rescue, code-snippet line
+            explanation, and the snippet “Ask” button</td>
+          <td><code>chat.py:133</code>;
+            <code>app/chat_server.py:2326–2338, 4257, 13417</code></td>
+        </tr>
+        <tr>
+          <td><code>ANSWER_TRANSLATION_MODEL</code></td>
+          <td>Paragraph-by-paragraph Simplified Chinese translation of a finished answer
+            (the 中文 button)</td>
+          <td><code>app/chat_server.py:2030, 13220</code></td>
+        </tr>
+        <tr>
+          <td><code>MATHUTOR_MODEL</code></td>
+          <td>Generate math practice problems and stream worked solutions</td>
+          <td><code>app/chat_server.py:1367, 1717, 9713</code></td>
+        </tr>
+        <tr>
+          <td><code>VIDEO_SUMMARY_MODEL</code></td>
+          <td>Summarize a YouTube transcript in the /youtube card modal</td>
+          <td><code>app/chat_server.py:2093, 13586</code></td>
+        </tr>
+        <tr>
+          <td><code>IMAGE_MODEL</code></td>
+          <td>Primary model for image questions (default; can be overridden with
+            <code>OLLAMA_IMAGE_MODEL</code>)</td>
+          <td><code>app/chat_server.py:2138, 9781–9801</code></td>
+        </tr>
+        <tr>
+          <td><code>AI_NEWS_PODCAST_MODEL</code></td>
+          <td>Draft the 2000-word two-host AI news podcast script</td>
+          <td><code>app/chat_server.py:265, 13086, 13094</code></td>
+        </tr>
+        <tr>
+          <td><code>chat.WIKI_ENTITY_MODEL</code>,<br><code>chat.WIKI_KEYWORD_MODEL</code>,<br><code>chat.WIKI_ANSWER_MODEL</code></td>
+          <td>Extract wiki entities/keywords and synthesize the /wiki and /wiki_article
+            answer</td>
+          <td><code>chat.py:440–442, 3032, 3596, 3738</code></td>
+        </tr>
+        <tr>
+          <td><code>MODEL</code> in each documentation script</td>
+          <td>Analyze the programming question and answer from official Go, Rust, or PHP
+            documentation (spawned by the server)</td>
+          <td><code>golang_doc_search.py:77</code>;
+            <code>rust_doc_search.py:80</code>;
+            <code>php_doc_search.py:89</code></td>
+        </tr>
+
+        <tr>
+          <td rowspan="4"><code>qwen3:1.7b</code></td>
+          <td><code>chat.EXPANSION_MODEL</code></td>
+          <td>Expand the question into BM25 search terms (synonyms, acronyms, related
+            terms)</td>
+          <td><code>chat.py:126</code>; <code>app/chat_server.py:6299</code></td>
+        </tr>
+        <tr>
+          <td><code>chat.FILTER_MODEL</code>,<br><code>ARTICLE_ROUTER_MODEL</code></td>
+          <td>Filter BM25 candidates before synthesis; classify an article question as
+            overview/section/narrow; check whether evidence is sufficient</td>
+          <td><code>chat.py:128</code>;
+            <code>app/chat_server.py:5348, 5960, 6151, 6332</code></td>
+        </tr>
+        <tr>
+          <td><code>chat.TRANSLATION_MODEL</code></td>
+          <td>Translate a Simplified Chinese question to English before retrieval</td>
+          <td><code>chat.py:137</code>; <code>app/chat_server.py:9915</code></td>
+        </tr>
+        <tr>
+          <td>Fallback for <code>CONVERSATION_MODEL</code></td>
+          <td>Resolve a follow-up if <code>ministral-3:3b</code> is not installed or fails</td>
+          <td><code>app/chat_server.py:4676</code></td>
+        </tr>
+
+        <tr>
+          <td><code>ministral-3:3b</code></td>
+          <td><code>CONVERSATION_MODEL</code></td>
+          <td>Pronoun/reference resolution and “is this a new topic?” detection for
+            multi-turn chat</td>
+          <td><code>app/chat_server.py:2322, 4676</code></td>
+        </tr>
+
+        <tr>
+          <td><code>gemma3:latest</code></td>
+          <td><code>IMAGE_FALLBACK_MODELS</code></td>
+          <td>Retry image questions when <code>ornith:35b</code> rejects the image or is
+            not installed</td>
+          <td><code>app/chat_server.py:2143–2146, 9789–9801</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>Performance consequence.</strong> There are only three text models, but
+      <code>ornith:35b</code> is requested with several context sizes: 32768 for normal
+      answers, 16384 for line explanation and image questions, and 8192 for the 中文
+      button and some helper paths. Ollama treats a changed <code>num_ctx</code> as a
+      different runtime configuration and reloads the model. In addition,
+      <code>chat.prewarm()</code> warms only <code>ornith:35b</code> (32768) and
+      <code>qwen3:1.7b</code> (8192); it does not warm <code>ministral-3:3b</code> or
+      <code>gemma3:latest</code>. A first follow-up or the first image question can
+      therefore still pay a cold-load penalty.
+    </div>
+
+    <p class="small muted">Inventory method: every <code>*_MODEL</code> constant in
+      <code>app/chat_server.py</code>, the model defaults in the <code>chat.py</code>
+      helpers it imports, and the model constants in the documentation subprocesses were
+      enumerated. Other models installed in Ollama (for example
+      <code>embeddinggemma-2:570m</code> or <code>gemma3:1b</code>) are not referenced by
+      the current server. TTS uses Kokoro, macOS <code>say</code>, or espeak and is not
+      counted as a language model.</p>
+
+  <section id="small-model">
+    <h2>11. Replacing <code>ornith:35b</code> with <code>qwen3:1.7b</code></h2>
+    <p class="muted small">Added 2026-11-11. Research only; no application code was changed for this task.
+      This section answers: is it feasible to use only <code>qwen3:1.7b</code> and remove
+      <code>ornith:35b</code>, what breaks, and what configuration would be required?</p>
+
+    <div class="callout bad">
+      <strong>Verdict: not feasible as a wholesale replacement.</strong>
+      <code>qwen3:1.7b</code> is fast, small, and adequate for narrow helper tasks
+      (query expansion, relevance filtering, translation, dictionary lookups, a simple
+      <code>/ask</code> path). It is not a safe replacement for the final RAG answer,
+      code generation, the math tutor, image questions, or long-context synthesis.
+      The practical configuration is a <strong>hybrid</strong>: keep
+      <code>ornith:35b</code> for the high-stakes answer path and use
+      <code>qwen3:1.7b</code> where a small model is enough.
+    </div>
+
+    <h3>11.1 What was measured</h3>
+    <p>All measurements were made on the same machine as the rest of this report:
+      macOS, 36 GiB unified memory, Ollama 0.40.14, <code>qwen3:1.7b</code> Q4_K_M,
+      <code>ornith:35b</code> Q4_K_M, thinking disabled, temperature 0.1–0.2.
+      The answer-style test used a 186-token RAG prompt; the long-context test used a
+      15.9k-token prompt with 30 numbered passages and one needle. These are spot
+      measurements, not a formal benchmark suite, but they reproduce the behaviour
+      that matters for this app.</p>
+
+    <table>
+      <thead>
+        <tr><th>Signal</th><th class="num">qwen3:1.7b</th><th class="num">ornith:35b</th><th>Implication</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Resident size, <code>num_ctx=8192</code></td>
+          <td class="num">2.0 GB</td>
+          <td class="num">not measured at 8k</td>
+          <td>Fits beside another model without forcing swap.</td>
+        </tr>
+        <tr>
+          <td>Resident size, <code>num_ctx=32768</code></td>
+          <td class="num">4.9 GB</td>
+          <td class="num">21 GB</td>
+          <td>The small model saves roughly 16 GB of unified memory.</td>
+        </tr>
+        <tr>
+          <td>Cold-ish load at 32k</td>
+          <td class="num">0.8–1.3 s</td>
+          <td class="num">1.9–6 s (page cache dependent; median 5.9 s in §3.2)</td>
+          <td>Cold-start penalty is far smaller.</td>
+        </tr>
+        <tr>
+          <td>Short-prompt decode</td>
+          <td class="num">85–106 tok/s</td>
+          <td class="num">41–50 tok/s</td>
+          <td>About 2× faster token generation.</td>
+        </tr>
+        <tr>
+          <td>15.9k-token prompt: prefill</td>
+          <td class="num">19.5 s</td>
+          <td class="num">31.2 s</td>
+          <td>The small model also prefills long context faster.</td>
+        </tr>
+        <tr>
+          <td>15.9k-token prompt: decode</td>
+          <td class="num">34.4 tok/s</td>
+          <td class="num">37.5 tok/s</td>
+          <td>Decode advantage mostly disappears at long context.</td>
+        </tr>
+        <tr>
+          <td>15.9k-token needle retrieval</td>
+          <td class="num">found [23]</td>
+          <td class="num">found [23]</td>
+          <td>Raw retrieval from a long context still works.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>Memory pressure is the strongest argument for the small model on this machine.
+      While both models were resident at 32k, <code>vm.swapusage</code> reported about
+      <strong>7.3 of 8.0 GiB of swap used</strong>. A single 21 GB answer model plus a
+      4.9 GB model plus normal macOS/Chrome/Docker usage is already at the edge; the
+      2 GB/4.9 GB footprint of <code>qwen3:1.7b</code> leaves real headroom.</p>
+
+    <h3>11.2 Quality is the blocker, not speed</h3>
+    <p>The speed and memory results are good. The failure is instruction-following,
+      grounded synthesis, and code generation. The table below records the actual
+      outputs from head-to-head prompts that mirror app workloads.</p>
+
+    <table>
+      <thead>
+        <tr><th>App-like task</th><th><code>qwen3:1.7b</code></th><th><code>ornith:35b</code></th><th>Impact if replaced</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Query expansion to JSON</td>
+          <td>Valid JSON; terms correct but thin. Omitted the model's own “Osaka”
+            hallucination.</td>
+          <td>Valid JSON; richer synonyms, but invented “Osaka” as an entity.</td>
+          <td>Acceptable for BM25 expansion; keep a JSON validator.</td>
+        </tr>
+        <tr>
+          <td>Relevance filter to JSON</td>
+          <td><code>{"selected":[1,5]}</code> — correct.</td>
+          <td><code>{"selected":[1,5]}</code> — correct.</td>
+          <td>Acceptable; this is a good small-model job.</td>
+        </tr>
+        <tr>
+          <td>Follow-up rewrite</td>
+          <td>Returned “what time does it open on sunday” unchanged. It did
+            <strong>not</strong> resolve “it” to Nijo Market.</td>
+          <td>Returned “what time does Nijo Market open on sunday?”.</td>
+          <td><strong>Breaks multi-turn retrieval</strong> unless the prompt is
+            hardened or an <code>ornith</code> fallback is used.</td>
+        </tr>
+        <tr>
+          <td>PHP CLI code generation</td>
+          <td>Invented a page-scraping <code>/timedtext</code> flow and did not produce
+            a complete, runnable script (the 420-token test cap truncated both
+            answers, but the visible logic was already wrong).</td>
+          <td>Better structure and error handling; still not guaranteed correct.</td>
+          <td><strong>Not acceptable</strong> for the document-backed code path.</td>
+        </tr>
+        <tr>
+          <td>Grounded RAG answer with risk analysis</td>
+          <td>Missed the relevant “open until 18:00” and “may close early on Sunday”
+            passages, did not cite them, and over-refused. It did find the walking
+            directions.</td>
+          <td>Cited [1], [4], and [7], separated the general closing time from the
+            Sunday risk, and answered with appropriate uncertainty.</td>
+          <td><strong>Not acceptable</strong> for the main answer path.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>The Qwen3 technical report confirms the general size gap even though it does
+      not benchmark <code>ornith:35b</code>: the non-thinking Qwen3-1.7B scores
+      <strong>64.4 on MMLU-Redux</strong>, <strong>73.0 on MATH-500</strong>, and
+      <strong>11.6 on LiveCodeBench v5</strong> (Table 20 of the report). Those are
+      respectable for 1.7B, but they are not the profile of a model that should own
+      a code-generation, math-tutoring, or citation-sensitive RAG answer path.</p>
+
+    <h3>11.3 Impact by application role</h3>
+    <table>
+      <thead>
+        <tr><th>Role in this app</th><th>Can <code>qwen3:1.7b</code> replace it?</th><th>Why</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Final RAG answer synthesis</td><td><strong>No</strong></td>
+          <td>Groundedness and citation behaviour degrade; answers become shorter and
+            miss relevant passages.</td></tr>
+        <tr><td>Programming / document-backed code answers</td><td><strong>No</strong></td>
+          <td>Invented APIs and incomplete code; this is already the most fragile path
+            with a larger model.</td></tr>
+        <tr><td>Math tutor, problem generation, step-by-step grading</td><td><strong>No</strong></td>
+          <td>Multi-step arithmetic and strict JSON problem batches need the stronger
+            model; the failure mode is a wrong worked answer, not just style.</td></tr>
+        <tr><td>Image questions</td><td><strong>No</strong></td>
+          <td><code>qwen3:1.7b</code> is text-only. Keep <code>ornith:35b</code> (or the
+            configured vision fallback).</td></tr>
+        <tr><td>Wiki / article synthesis</td><td><strong>No</strong></td>
+          <td>Long-context synthesis and entity handling are weaker; the existing
+            article path already relies on a larger model.</td></tr>
+        <tr><td>Query expansion</td><td><strong>Yes</strong></td>
+          <td>Fast, valid JSON, good enough terms. Validate output and keep the current
+            fallback.</td></tr>
+        <tr><td>Relevance filtering / evidence sufficiency</td><td><strong>Yes</strong></td>
+          <td>Simple classification; measured correct. Use low temperature and a JSON
+            schema.</td></tr>
+        <tr><td>Chinese ↔ English translation</td><td><strong>Probably</strong></td>
+          <td>Qwen3 has strong multilingual training and the app translates short
+            sentence groups. Spot-check terminology; fall back on failure.</td></tr>
+        <tr><td>Conversation follow-up resolver</td><td><strong>Only with hardening</strong></td>
+          <td>The measured rewrite failed. Require a standalone question containing a
+            named entity, or fall back to <code>ornith:35b</code>.</td></tr>
+        <tr><td>Dictionary lookup</td><td><strong>Yes, with a quality check</strong></td>
+          <td>Short, constrained generation. It may be less nuanced; keep the existing
+            structured output format.</td></tr>
+        <tr><td>Simple <code>/ask</code></td><td><strong>Yes</strong></td>
+          <td>The command is explicitly for quick answers; a smaller model is an
+            acceptable trade.</td></tr>
+        <tr><td>TTS / podcast voice</td><td><strong>Unaffected</strong></td>
+          <td>Kokoro, macOS <code>say</code>, and espeak are not LLM calls.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>11.4 Recommended configuration</h3>
+    <h4>Option A — recommended hybrid (keep both)</h4>
+    <p>Keep <code>ornith:35b</code> as the answer model and move only narrow helper
+      roles to <code>qwen3:1.7b</code>:</p>
+    <pre><code># Answer / code / math / image / wiki / podcast
+CHAT_MODEL          = "ornith:35b"   # num_ctx 32768, think=False, keep_alive=30m
+CODE_GENERATION_MODEL = "ornith:35b"
+MATHUTOR_MODEL      = "ornith:35b"
+
+# Narrow helpers
+EXPANSION_MODEL     = "qwen3:1.7b"   # num_ctx 8192, think=False
+FILTER_MODEL        = "qwen3:1.7b"
+TRANSLATION_MODEL   = "qwen3:1.7b"
+DICT_MODEL          = "qwen3:1.7b"
+SIMPLE_ANSWER_MODEL = "qwen3:1.7b"
+
+# Follow-up resolver: prefer ornith; use qwen only with a rewrite validator
+CONVERSATION_MODEL  = "ornith:35b"</code></pre>
+    <p>Use <strong>one <code>num_ctx</code> per model</strong> and prewarm both at
+      those exact values (see §7.1–7.3). With <code>qwen3:1.7b</code> at 8192 the
+      combined resident set is roughly 21 GB + 2 GB, which is much safer than
+      21 GB + 4.9 GB. If the machine is still swapping, lower the answer model's
+      <code>num_ctx</code> to 16384 and retrieve fewer trunks rather than keeping a
+      32k KV cache resident.</p>
+
+    <h4>Option B — full replacement (not recommended)</h4>
+    <p>If the larger model must be removed anyway, use this configuration and accept
+      a visible quality drop:</p>
+    <ul>
+      <li><strong>Model:</strong> <code>qwen3:1.7b</code>, non-thinking mode
+        (<code>"think": false</code>); do not enable thinking for normal chat, because
+        it adds latency and the app's prompts are not written for a reasoning trace.</li>
+      <li><strong>Context:</strong> one value everywhere, preferably
+        <strong>16384</strong> (32768 also works but doubles KV memory and prefill
+        time). Native Qwen3-1.7B context is 32,768 tokens; do not exceed it without
+        YaRN.</li>
+      <li><strong>Sampling:</strong> Qwen3's non-thinking recommendation is
+        temperature 0.7, top_p 0.8, top_k 20, min_p 0. For RAG/JSON extraction use a
+        lower temperature (0.1–0.3); if repetition appears, add
+        <code>presence_penalty</code> up to 1.5.</li>
+      <li><strong>Output budget:</strong> cap normal answers at roughly
+        1024–2048 tokens. A 1.7B model does not benefit from a 32k output budget and
+        long outputs are more likely to drift.</li>
+      <li><strong>Retrieval:</strong> reduce depth from 25 to about 8–12 trunks.
+        The smaller model is more easily distracted by tangential passages; the
+        measured long-context test still retrieved a needle, but answer quality in
+        the short RAG test was worse.</li>
+      <li><strong>Guards:</strong> validate JSON, require citations, reject answers
+        without a context citation, and fall back to a larger model for code, math,
+        image, and low-confidence answers. Without these guards the failure is
+        silent: the answer looks fluent but omits the relevant passage.</li>
+      <li><strong>Keepalive:</strong> the existing 30-minute keepalive is fine; a
+        1.3 s cold load is cheap compared with 6 s for the large model.</li>
+    </ul>
+
+    <h3>11.5 Expected impact summary</h3>
+    <table>
+      <thead><tr><th>Change</th><th>Benefit</th><th>Cost / risk</th></tr></thead>
+      <tbody>
+        <tr><td>Full replacement</td>
+          <td>~16 GB less resident memory; ~2× decode speed; ~1 s cold load</td>
+          <td>Weaker grounded answers, code, math, follow-up resolution; text-only;
+            needs prompt/guard rework.</td></tr>
+        <tr><td>Hybrid (recommended)</td>
+          <td>Keeps answer quality; removes small-model loads from the answer path;
+            helper calls become nearly free</td>
+          <td>Two models to warm; still holds the 21 GB answer model resident when
+            used.</td></tr>
+        <tr><td>Helper-only replacement</td>
+          <td>Most of the latency/memory benefit with little quality risk</td>
+          <td>Conversation rewrite and dictionary output need validation.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>Note on §10.</strong> The inventory in §10 describes the pre-unification
+      code, when expansion/filter/translation used <code>qwen3:1.7b</code> and
+      conversation used <code>ministral-3:3b</code>. The current code uses
+      <code>ornith:35b</code> for all text roles. This section is the feasibility
+      analysis for deliberately moving some of those roles back to a small model.
+    </div>
+
+    <p class="small muted">Sources: local Ollama measurements above; Qwen3-1.7B model
+      card (32,768-token context, 1.7B parameters, thinking/non-thinking modes),
+      <a href="https://huggingface.co/Qwen/Qwen3-1.7B">huggingface.co/Qwen/Qwen3-1.7B</a>;
+      Qwen3 Technical Report, <a href="https://arxiv.org/html/2505.09388">arXiv:2505.09388</a>
+      (Tables 8, 19, 20, and 23).</p>
+  </section>
+  </section>
+
+  <section id="qwen-only">
+    <h2>12. If we commit to <code>qwen3:1.7b</code> only: configuration and prompt-engineering playbook</h2>
+    <p class="small muted">Added 2026-11-11. Research only; no application code was changed for this task.
+      This is the follow-up to §11: assume the constraint is fixed — <strong>only
+      <code>qwen3:1.7b</code></strong> may be used — and design the best possible
+      configuration and prompt engineering around that constraint.</p>
+
+    <div class="callout bad">
+      <strong>Bottom line.</strong> A model swap alone will make this application worse.
+      A 1.7B model can be made surprisingly competitive for <em>narrow, schema-shaped</em>
+      jobs (query expansion, relevance selection, translation, dictionary lookup, a quick
+      <code>/ask</code>) by giving it one job per call, a short context, an explicit output
+      shape, and a validator. It cannot be prompt-engineered into a reliable replacement for
+      grounded multi-paragraph synthesis, code generation, or multi-step math. The best
+      qwen-only design is therefore <strong>extract → verify → write</strong>, with
+      deterministic guards, not a larger prompt.
+    </div>
+
+    <h3>12.1 What changes when the engine is 1.7B instead of 35B</h3>
+    <table>
+      <thead><tr><th>Property</th><th><code>ornith:35b</code> behaviour</th><th><code>qwen3:1.7b</code> behaviour</th><th>Design response</th></tr></thead>
+      <tbody>
+        <tr><td>Instruction following</td><td>Handles several rules and negative constraints in one prompt</td><td>Follows 2–3 short, positive rules; long rule lists are partially ignored</td><td>One task per call, short checklist, show an example instead of describing the format</td></tr>
+        <tr><td>Long-context synthesis</td><td>Composes facts across 10–20 passages and resolves conflicts</td><td>Finds a needle but misses surrounding qualifications; loses middle context</td><td>8–12 short passages, strongest evidence first and last, extract sentences before writing</td></tr>
+        <tr><td>Groundedness</td><td>Usually cites the passage it used</td><td>Writes fluent prose that silently omits or blends passages</td><td>Require a quote/ID per claim; verify each claim against a retrieved span; delete unsupported claims</td></tr>
+        <tr><td>Structured output</td><td>Mostly valid JSON from description alone</td><td>Valid JSON usually, but field names drift and long arrays truncate</td><td>Use Ollama structured outputs (<code>format</code> schema), small arrays, parse-and-repair</td></tr>
+        <tr><td>Code</td><td>Complete scripts with plausible APIs</td><td>Invents APIs and truncates logic</td><td>Doc-first retrieval, signature skeleton, fill-in, compile/lint loop; never trust one pass</td></tr>
+        <tr><td>Math</td><td>Multi-step arithmetic is mostly correct</td><td>Arithmetic slips; strict JSON problem batches break</td><td>Thinking mode for solving, verify by substitution, schema for generation, small batches</td></tr>
+        <tr><td>Speed / memory</td><td>41–50 tok/s at 32k, ~21 GB resident</td><td>85–106 tok/s at 8k, ~2 GB; ~4.9 GB at 32k</td><td>One model, one context size, keep it resident; spend the saved time on verification passes</td></tr>
+      </tbody>
+    </table>
+
+    <h3>12.2 Runtime configuration: one model, one context size</h3>
+    <p>Because only one model remains, the dominant configuration mistake changes. It is no
+      longer “which model is loaded”; it is “does any call use a different <code>num_ctx</code>?”.
+      Ollama treats a changed context size as a different runtime and reloads the model.
+      With a 2–5 GB model the reload is short, but it still costs 0.8–1.3 s on the first
+      affected call, and it breaks the prompt cache. Use <strong>one context size for every
+      role</strong>.</p>
+
+    <pre><code># Recommended environment for a qwen3:1.7b-only deployment
+export OLLAMA_KEEP_ALIVE=30m
+export OLLAMA_NUM_PARALLEL=1              # this app is single-user; avoid KV duplication
+export OLLAMA_MAX_LOADED_MODELS=1
+export OLLAMA_FLASH_ATTENTION=1
+export OLLAMA_KV_CACHE_TYPE=q8_0          # roughly halves KV memory; quality loss is small
+# Optional on a 36 GB machine that also runs Chrome/Docker:
+# export OLLAMA_CONTEXT_LENGTH=16384</code></pre>
+
+    <table>
+      <thead><tr><th>Setting</th><th>Value for every call</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><code>model</code></td><td><code>qwen3:1.7b</code></td><td>Only model; never load a helper or fallback model</td></tr>
+        <tr><td><code>num_ctx</code></td><td><code>16384</code></td><td>Fits the RAG budget, costs ~3 GB instead of ~4.9 GB at 32k, and avoids reloads. Drop to 12288 only if memory pressure demands it.</td></tr>
+        <tr><td><code>keep_alive</code></td><td><code>"30m"</code> plus the watchdog</td><td>Keeps the 1–2 s cold load off the user’s first question (§7.1)</td></tr>
+        <tr><td><code>think</code></td><td><code>false</code> by default; <code>true</code> for math/debugging only</td><td>Thinking adds latency and consumes the small output budget; it is worth it only when reasoning depth matters</td></tr>
+        <tr><td><code>num_predict</code></td><td>96–256 helpers, 512–900 normal answer, 1200 lists</td><td>A 1.7B model drifts and repeats after long generations; a hard cap is a quality control</td></tr>
+        <tr><td><code>temperature</code></td><td>0.0–0.2 extraction/JSON, 0.3–0.5 prose</td><td>Qwen3’s generic non-thinking recipe (0.7/0.8/20) is for open chat, not grounded extraction</td></tr>
+        <tr><td><code>top_p</code> / <code>top_k</code></td><td>0.8 / 20</td><td>The Qwen3 non-thinking recommendation; keeps sampling stable without making output rigid</td></tr>
+        <tr><td><code>min_p</code></td><td>0.0</td><td>Official non-thinking default; a higher value tends to truncate valid low-probability names</td></tr>
+        <tr><td><code>repeat_penalty</code></td><td>1.05–1.1, or <code>presence_penalty</code> 0.3–1.0 if loops appear</td><td>Small models loop on long list answers; the penalty is a cheap stabilizer</td></tr>
+        <tr><td><code>format</code></td><td>JSON schema for every machine-read reply</td><td>Schema-constrained decoding removes the most common failure (invalid JSON) instead of repairing it</td></tr>
+        <tr><td><code>stop</code></td><td>Role-specific (<code>"\n"</code> for one-line replies, <code>"&lt;/text&gt;"</code> for fenced replies)</td><td>Prevents the model from continuing into an imaginary next turn</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>Do not</strong> keep the current mix of 8192, 16384, and 32768 for helper,
+      translation, and answer calls once only qwen is loaded. One value everywhere is worth
+      more than a perfectly sized context per role. If a particular prompt does not fit,
+      shorten the prompt or retrieve fewer passages.
+    </div>
+
+    <h3>12.3 Ten prompt-engineering rules that actually move a 1.7B model</h3>
+    <ol>
+      <li><strong>One job per call.</strong> Do not combine “decide if this is a follow-up”,
+        “rewrite it”, and “classify the topic” in one prompt. Split them; each call is cheap
+        at 85–106 tok/s.</li>
+      <li><strong>Put the instruction last, the immutable prefix first.</strong> Static role
+        text and schema come first (so Ollama can reuse the prompt cache), the variable
+        context next, and the actual task in the final lines. Small models overweight the
+        most recent instruction.</li>
+      <li><strong>Show the output shape; do not describe it.</strong> A two-line example is
+        more reliable than a paragraph of formatting rules. For JSON, pass a schema in
+        <code>format</code> and still show one example.</li>
+      <li><strong>Use positive checklists, not prohibitions.</strong> “Write 3 bullets, one
+        fact each” works better than “do not write long paragraphs”. Keep the list to three
+        items.</li>
+      <li><strong>Quote first, answer second.</strong> Require the model to copy the exact
+        supporting sentence (or its <code>[S#]</code> id) before writing the answer. This is
+        the single largest groundedness improvement available without a bigger model.</li>
+      <li><strong>Use short IDs and require citations.</strong> Label passages
+        <code>[S1]…[S8]</code>, require <code>[S#]</code> after each claim, then verify the
+        cited span with a string/token overlap check.</li>
+      <li><strong>Decompose lists and comparisons.</strong> “List every level of wagyu” is
+        six smaller questions to a 1.7B model. Split the query, answer each part against its
+        own retrieved evidence, then merge deterministically.</li>
+      <li><strong>Validate, then repair once.</strong> Parse the output; if it fails, send
+        the exact error and the schema back with “return only valid JSON”. A second attempt
+        fixes most format errors; a third is rarely worth it.</li>
+      <li><strong>Keep the working set small.</strong> Target 4–6k tokens of evidence, not
+        16k. The measured long-context needle test passed, but short-RAG answer quality was
+        worse; a 1.7B model is more easily distracted by tangential passages.</li>
+      <li><strong>Calibrate refusal.</strong> Replace “if the context is insufficient, say
+        so” with “answer the part the context supports, then list what is missing in one
+        sentence”. The current small-model failure mode is over-refusal, not only
+        hallucination.</li>
+    </ol>
+
+    <h3>12.4 Role-by-role prompt rewrites</h3>
+
+    <h4>12.4.1 Final RAG answer: extract, then write</h4>
+    <p>The current answer template asks for grounding, no citations, conflict handling,
+      aggregation, and refusal in one prompt. A 1.7B model will follow roughly half of that.
+      Replace it with a two-pass pipeline:</p>
+    <pre><code># Pass 1 — extraction (JSON schema, temperature 0.0, num_predict 256)
+System: You extract evidence for a question. Return only JSON.
+User:
+Question: {question}
+
+Passages:
+[S1] {passage_1}
+[S2] {passage_2}
+...
+[S8] {passage_8}
+
+Select at most 6 passages that directly help answer the question.
+For each, copy the shortest supporting sentence exactly.
+If no passage helps, return {{"evidence": []}}.
+
+Schema:
+{{"type":"object","properties":{{
+  "evidence":{{"type":"array","maxItems":6,"items":{{
+    "type":"object","properties":{{
+      "id":{{"type":"string"}},
+      "quote":{{"type":"string"}}
+    }},"required":["id","quote"]}}
+  }}
+}},"required":["evidence"]}}</code></pre>
+    <pre><code># Pass 2 — answer (temperature 0.3, num_predict 700, think=false)
+System: You answer from the evidence below. Use only that evidence.
+User:
+Evidence:
+{for each selected passage}
+[{id}] {quote}
+{end}
+
+Question: {question}
+
+Write:
+1. A direct answer in 1–2 sentences.
+2. Supporting details as 2–5 bullets. End every bullet with its [id].
+3. If the evidence covers only part of the question, add one final line:
+   "Not covered by the evidence: ...".
+
+Rules:
+- Use the same language as the question.
+- Do not mention "passages", "chunks", or "the context".
+- Do not add facts that are not in the evidence.</code></pre>
+    <p>Why this works for 1.7B: pass 1 is a copy/classification task (its strongest mode),
+      pass 2 sees only 3–6 short quotes instead of 20 mixed paragraphs, and the citation
+      requirement gives a deterministic verifier something to check. If pass 1 returns no
+      evidence, skip generation and return a calibrated “not found” message instead of
+      letting the model improvise.</p>
+
+    <h4>12.4.2 Query expansion: schema, five terms, no prose</h4>
+    <p>The current prompt is already close. Make the output machine-checkable and cap it hard:</p>
+    <pre><code>System: You write BM25 search terms. Return JSON only.
+User:
+Question: {question}
+
+Return up to 6 terms that would appear in a document that answers the question:
+synonyms, the full name of an acronym, and alternate spellings. Do not add
+places, people, or facts that are not implied by the question.
+
+Schema: {{"type":"object","properties":{{
+  "terms":{{"type":"array","maxItems":6,"items":{{"type":"string"}}}}
+}},"required":["terms"]}}
+
+# options: temperature 0.1, num_predict 96, format = schema</code></pre>
+    <p>Keep the existing corpus validation (a term must co-occur with a rare question
+      anchor in at least 35% of its documents). A 1.7B model’s expansion is thinner but also
+      less likely to invent an entity; the validation step matters more than the prompt.</p>
+
+    <h4>12.4.3 Relevance filter / evidence sufficiency</h4>
+    <p>This is a good small-model job, but only with a schema and a bounded candidate list:</p>
+    <pre><code>Schema: {{"type":"object","properties":{{
+  "keep":{{"type":"array","maxItems":12,"items":{{"type":"integer"}}}},
+  "sufficient":{{"type":"boolean"}}
+}},"required":["keep","sufficient"]}}
+
+Prompt: Select the candidate numbers that contain information useful for
+answering the question. Prefer recall: keep a candidate that covers part of
+the question. Set sufficient=true only when the kept candidates contain every
+fact the question asks for. Do not use outside knowledge.
+Question: ...
+Candidates: [1] ... [2] ...</code></pre>
+    <p>Keep the existing rule that never discards the top lexical matches when the model
+      returns an empty list. A 1.7B filter is most useful as a <em>ranker</em>, not as a
+      veto.</p>
+
+    <h4>12.4.4 Follow-up rewrite: few-shot plus a deterministic validator</h4>
+    <p>§11 measured the failure directly: qwen returned “what time does it open on sunday”
+      unchanged. A rule list alone does not fix that. Use two short examples and validate
+      the result:</p>
+    <pre><code>System: Rewrite the latest question as a standalone question, or return UNRELATED.
+User:
+Conversation:
+Q: where is nijo market
+A: Nijo Market is in Sapporo, near Odori Park.
+
+Latest: when does it open
+Standalone: When does Nijo Market open?
+
+Conversation:
+Q: where is nijo market
+A: Nijo Market is in Sapporo, near Odori Park.
+
+Latest: how do i cook pasta
+Standalone: UNRELATED
+
+Conversation:
+{recent turns}
+
+Latest: {question}
+Standalone:</code></pre>
+    <p>Then apply a validator before accepting the rewrite:</p>
+    <ul>
+      <li>The answer must differ from the input (normalized case/punctuation).</li>
+      <li>It must contain a named entity or content word from the conversation.</li>
+      <li>It must end with a question mark for interrogative input.</li>
+      <li>If validation fails, fall back to the existing lexical relatedness heuristic and
+        the original question. Never let a malformed rewrite replace a standalone question.</li>
+    </ul>
+
+    <h4>12.4.5 Translation (question and answer)</h4>
+    <p>Qwen3’s multilingual training is a genuine strength, so translation is one of the
+      safest roles. Two changes make it robust:</p>
+    <ul>
+      <li>Translate one line or sentence group at a time, never a whole answer, and preserve
+        list markers deterministically (the code already restores dropped prefixes).</li>
+      <li>Supply a small glossary block built from the conversation’s proper nouns
+        (Nijo Market, Kyoto, Sapporo, ...) and say “keep these in Latin spelling”. This
+        removes the main observable failure: translated place names.</li>
+    </ul>
+
+    <h4>12.4.6 Dictionary lookup</h4>
+    <p>The four-field popup prompt is already schema-like. For 1.7B, make the shape
+      non-negotiable and keep it under 80 words:</p>
+    <pre><code>Word: {word}
+IPA: {ipa or —}
+Part of Speech: {pos or —}
+Contextual Meaning: {one or two sentences, using the surrounding words}
+
+Rules: exactly these four lines, one blank line between them; no quote section;
+no title; if the word is unknown, say so in Contextual Meaning.</code></pre>
+    <p>Validate that the reply contains the four labels; if not, retry once, then fall back
+      to a plain “meaning / IPA / part of speech” template without the contextual sentence.</p>
+
+    <h4>12.4.7 Code generation: retrieval, skeleton, then fill</h4>
+    <p>This is the weakest role. Do not ask a 1.7B model to write “a complete CLI” in one
+      shot. Use a staged prompt with the documentation excerpts already in context:</p>
+    <ol>
+      <li><strong>Plan:</strong> “List the functions and the exact API names needed, one per
+        line. Use only names that appear in the documentation excerpts.”</li>
+      <li><strong>Skeleton:</strong> generate signatures and types only, no bodies
+        (<code>num_predict</code> 200).</li>
+      <li><strong>Fill:</strong> one function per call, with the relevant doc excerpt and the
+        skeleton in the prompt.</li>
+      <li><strong>Check:</strong> run the language’s static checker (<code>php -l</code>,
+        <code>go vet</code>, <code>rustc --emit=metadata</code>) and feed the first error
+        back for one repair attempt.</li>
+    </ol>
+    <p>Without a checker, at minimum reject code that references an identifier not present
+      in the documentation excerpts or the skeleton. The existing per-language doc-search
+      scripts (<code>golang_doc_search.py</code>, <code>rust_doc_search.py</code>,
+      <code>php_doc_search.py</code>) are more valuable than any prompt trick here: they
+      supply the correct API surface a small model cannot recall.</p>
+
+    <h4>12.4.8 Math tutor: thinking for solving, schema for generation</h4>
+    <ul>
+      <li>Problem <em>generation</em>: keep <code>think=false</code>, temperature 0.1–0.2,
+        batches of 3–5 (not 10), and a JSON schema with exactly
+        <code>topic</code>/<code>question</code>/<code>answer</code>. A 1.7B model truncates
+        long arrays; small batches plus the existing avoid-list are the fix.</li>
+      <li>Solving/grading: <code>think=true</code> is worth the tokens. Cap thinking with
+        <code>num_predict</code> and require a final “Check by substitution” line. The
+        verifier pass (“substitute the answer back into the original equation”) catches
+        more arithmetic errors than a longer explanation.</li>
+      <li>Graphs: keep the existing JSON contract and validate it; a 1.7B model will
+        occasionally emit malformed JSON, and the front end already falls back to a code
+        block.</li>
+    </ul>
+
+    <h4>12.4.9 Simple <code>/ask</code> and the podcast</h4>
+    <p><code>/ask</code> is explicitly a quick-answer path; 1.7B is acceptable there. For
+      the AI podcast, generate an <strong>outline first</strong> (5–8 HOST/GUEST beats as
+      JSON), then expand one beat per call. A single prompt asking for 2,000 words will
+      drift or repeat; per-beat generation keeps the two voices and the story arc stable.</p>
+
+    <h3>12.5 Retrieval changes that compensate for model size</h3>
+    <table>
+      <thead><tr><th>Change</th><th>Current</th><th>qwen-only recommendation</th><th>Reason</th></tr></thead>
+      <tbody>
+        <tr><td>Depth</td><td>20 (up to 50 candidates)</td><td>8–12 final passages</td><td>Less distraction; the filter is less reliable at larger candidate counts</td></tr>
+        <tr><td>Context budget</td><td>4,096 / 6,144 tokens</td><td>3,000–5,000 tokens</td><td>Short-RAG quality was better than long-context quality in §11</td></tr>
+        <tr><td>Ordering</td><td>BM25 order</td><td>Best passage first, second-best last; put source/title headers on each</td><td>Mitigates lost-in-the-middle</td></tr>
+        <tr><td>Unit</td><td>Transcript paragraph</td><td>Paragraph plus its heading/title and video/article id</td><td>Gives the model a topic anchor without a long preamble</td></tr>
+        <tr><td>Duplicates</td><td>Jaccard 0.90</td><td>Keep the current dedupe; additionally collapse near-identical list items</td><td>A 1.7B model copies duplicates into “counts”</td></tr>
+        <tr><td>Aggregation</td><td>Single retrieval pass</td><td>Decompose enumerations; one retrieval per sub-question; merge with a deterministic set union</td><td>The model cannot reliably enumerate from one mixed context</td></tr>
+        <tr><td>Sources</td><td>Implicit</td><td>Require <code>[S#]</code> and map IDs back to video/article links in the UI</td><td>Citations become verifiable and the user can inspect the evidence</td></tr>
+      </tbody>
+    </table>
+
+    <h3>12.6 Guardrails: the part that replaces model capability</h3>
+    <ol>
+      <li><strong>Schema-constrained JSON.</strong> Pass a schema in <code>format</code> for
+        expansion, filtering, extraction, follow-up classification, math batches, and the
+        podcast outline. Never parse free-form JSON with a regex alone.</li>
+      <li><strong>Citation verifier.</strong> For each <code>[S#]</code>, require the cited
+        passage to share a minimum token overlap with the claim (or contain a quoted span).
+        Unsupported claims are dropped or marked.</li>
+      <li><strong>Entity/number check.</strong> Extract capitalized entities and numeric
+        values from the answer and confirm each appears in the evidence; flag or remove
+        unsupported ones. This catches the classic 1.7B failure of inventing a price or a
+        date.</li>
+      <li><strong>Repair loop.</strong> One retry with the parser error and the schema. Stop
+        after two attempts and return a deterministic fallback.</li>
+      <li><strong>Refusal policy.</strong> Distinguish “no evidence at all” (state not found)
+        from “partial evidence” (answer the supported part, name the gap). The current
+        all-or-nothing refusal is wrong for a small model.</li>
+      <li><strong>Evaluation set.</strong> Keep 30–50 real questions with known answers from
+        the current corpus. Track: supported-answer rate, unsupported-claim rate, citation
+        accuracy, refusal on answerable questions, JSON validity, and p50/p95 latency. Prompt
+        changes must be measured against this set, not judged by one impressive answer.</li>
+    </ol>
+
+    <h3>12.7 Concrete code changes in this repository</h3>
+    <table>
+      <thead><tr><th>File / symbol</th><th>Change</th><th>Priority</th></tr></thead>
+      <tbody>
+        <tr><td><code>chat.py</code> model constants</td><td>Set every text role to <code>qwen3:1.7b</code>; keep the constant names so the status/benchmark UI still reports the role.</td><td>Required</td></tr>
+        <tr><td><code>chat.ANSWER_NUM_CTX</code></td><td>Use one value (<code>16384</code>) for every call; remove per-role 8192/16384/32768 differences.</td><td>Required</td></tr>
+        <tr><td><code>chat.generate_text()</code></td><td>Add <code>format</code>, <code>think</code>, <code>top_p</code>, <code>top_k</code>, <code>min_p</code>, <code>repeat_penalty</code>, and a role default for <code>num_predict</code>.</td><td>Required</td></tr>
+        <tr><td><code>chat.stream_answer()</code></td><td>Accept the same sampling options; add an optional extraction pass before the streaming call.</td><td>High</td></tr>
+        <tr><td><code>QUERY_EXPANSION_PROMPT</code> + <code>expand_query()</code></td><td>Schema output, max 6 terms, validate against the corpus (already present).</td><td>High</td></tr>
+        <tr><td><code>FILTER_PROMPT</code> + <code>filter_candidates()</code></td><td>Schema output with <code>keep</code>/<code>sufficient</code>; keep the top-lexical floor.</td><td>High</td></tr>
+        <tr><td><code>CONVERSATION_REWRITE_PROMPT</code> + resolver</td><td>Two few-shot examples (follow-up and UNRELATED) and a validator with lexical fallback.</td><td>High</td></tr>
+        <tr><td><code>research/100_trunks_prompt.txt</code></td><td>Replace with the extract-then-answer contract; keep the file-based override so prompts remain tunable.</td><td>High</td></tr>
+        <tr><td><code>_mathtutor_generate_problems()</code></td><td>Batches of 3–5, JSON schema, <code>think=false</code>, temperature 0.1–0.2; solving prompt uses <code>think=true</code>.</td><td>Medium</td></tr>
+        <tr><td><code>CODE_GENERATION_MODEL</code> path</td><td>Plan → skeleton → fill → static-check; doc excerpts must precede generation.</td><td>Medium</td></tr>
+        <tr><td><code>chat.prewarm()</code></td><td>Warm the single model at the single context size and with the same <code>keep_alive</code>; the watchdog already refreshes it.</td><td>Required</td></tr>
+        <tr><td>Logging / <code>/benchmark</code></td><td>Record the extractor’s accepted evidence count, verifier drop count, JSON repair count, and per-role latency. These are the signals that tell you whether the small model is actually working.</td><td>Medium</td></tr>
+      </tbody>
+    </table>
+
+    <h3>12.8 Acceptance criteria before calling the migration successful</h3>
+    <table>
+      <thead><tr><th>Check</th><th>Pass criterion</th></tr></thead>
+      <tbody>
+        <tr><td>JSON validity</td><td>&gt; 99% of helper calls parse on the first attempt with a schema; 100% after one repair</td></tr>
+        <tr><td>Follow-up rewrite</td><td>&ge; 90% correct on a 20-turn set (Nijo Market, Terence Tao, a Rust follow-up); 0 stale-topic leaks</td></tr>
+        <tr><td>Grounded answer</td><td>Every factual bullet has a verified <code>[S#]</code>; unsupported-claim rate &lt; 5% on the eval set</td></tr>
+        <tr><td>Answerable coverage</td><td>&ge; 85% of answerable questions get a supported partial/full answer; over-refusal &lt; 15%</td></tr>
+        <tr><td>Code</td><td>Generated samples pass the language’s syntax checker; no invented API name in the final sample</td></tr>
+        <tr><td>Math</td><td>Worked answers pass substitution verification on the eval set; problem batches are valid JSON</td></tr>
+        <tr><td>Latency</td><td>p50 first token &lt; 2 s warm; helper calls &lt; 1 s; no model reload during a normal session</td></tr>
+      </tbody>
+    </table>
+
+    <h3>12.9 Recommendation</h3>
+    <div class="callout warn">
+      <strong>If “only qwen3:1.7b” is a hard constraint, build the extract → verify → write
+      pipeline before touching another prompt.</strong> That pipeline, plus schema-constrained
+      JSON and a repair loop, is worth more than any wording change. Expect helper roles to
+      match the current behaviour, expect simple factual RAG answers to remain usable, and
+      expect code generation, multi-step math, and high-stakes synthesis to stay below
+      <code>ornith:35b</code>. Keep the evaluation set and the calibrated “partial answer +
+      gap” response so the remaining quality loss is visible instead of silent.
+    </div>
+    <p>If the constraint can be relaxed later, the cheapest upgrade is not a 35B model for
+      everything: it is a single larger answer/code/math model used only on the paths that
+      fail the acceptance criteria, with qwen3:1.7b handling all helpers. That preserves most
+      of the memory and speed benefit while keeping the risky paths reliable.</p>
+
+    <p class="small muted">Sources: local Ollama measurements in §11; Qwen3-1.7B model card
+      (32,768-token native context, thinking/non-thinking modes, recommended sampling),
+      <a href="https://huggingface.co/Qwen/Qwen3-1.7B">huggingface.co/Qwen/Qwen3-1.7B</a>;
+      Qwen3 Technical Report, <a href="https://arxiv.org/html/2505.09388">arXiv:2505.09388</a>
+      (Tables 8, 19, 20, and 23); Ollama structured-output and context/KV-cache options.</p>
+  </section>
+
+  <section id="lfm3-aura">
+    <h2>13. <code>milodule3/LFM3-1.7B-aura-grounded</code> as a replacement for <code>qwen3:1.7b</code></h2>
+    <p class="small muted">Added 2026-11-11. Research only; no application code was changed for this task.
+      The model was pulled and evaluated on the same machine as the rest of this report:
+      macOS, 36 GiB unified memory, Ollama 0.40.14, Metal offload, thinking disabled.
+      This section answers: would it be a good replacement for <code>qwen3:1.7b</code>,
+      how fast is it, how does its answer quality compare with <code>qwen3:1.7b</code>
+      and <code>ornith:35b</code>, and what is the best configuration?</p>
+
+    <div class="callout warn">
+      <strong>Verdict: a strong grounding/refusal gate, not a drop-in general replacement.</strong>
+      <code>milodule3/LFM3-1.7B-aura-grounded</code> is the best of the three models tested at
+      <em>refusing when the evidence does not contain the answer</em>, and it is dramatically
+      cheaper on long context: at 32k it is <strong>2.4&times; smaller</strong> than
+      <code>qwen3:1.7b</code> (2.05 GB vs 4.94 GB) and prefills a 29k-token prompt
+      <strong>2.3&times; faster</strong>. But it is a DPO-aligned RAG model whose baked system
+      prompt requires answers of one or two sentences and a fixed refusal sentence. As the
+      <em>writer</em> it conflicts with this application's long answer prompt, over-refuses
+      partially answerable questions, and is weaker than both alternatives at free-form
+      synthesis, translation, code, and math. Replace <code>qwen3:1.7b</code> with it only for
+      verifier / relevance / refusal roles; keep a larger writer for the final answer.
+    </div>
+
+    <h3>13.1 What the model actually is</h3>
+    <p>The Ollama tag <code>milodule3/LFM3-1.7B-aura-grounded:latest</code> is a third-party
+      fine-tune, not an official Liquid AI model. It is built on
+      <a href="https://huggingface.co/LiquidAI/LFM3-1.7B">LiquidAI/LFM3-1.7B</a>, a 1.73B
+      text model with a 24-layer tri-hybrid architecture (13 gated short convolutions,
+      5 sliding-window-attention layers with a 256-token window, 6 global-attention layers),
+      a 128k vocabulary, a 256K-token context window, and 16 supported languages.
+      The local artifact is <strong>Q8_0</strong> (1.8 GB on disk) and is text-only
+      (no vision).</p>
+
+    <p>The fine-tune (<a href="https://huggingface.co/LeanProgressIQ/LFM3-1.7B-aura-grounded">LeanProgressIQ/LFM3-1.7B-aura-grounded</a>)
+      applies a rank-16 LoRA on nine projection heads and then DPO (beta 0.1, full FP32)
+      on grounded question-answer pairs. Its own model card reports:</p>
+
+    <table>
+      <thead><tr><th>Metric (model card)</th><th class="num">Base LFM3-1.7B</th><th class="num">aura-grounded</th><th>Net gain</th></tr></thead>
+      <tbody>
+        <tr><td>Missing-evidence refusal, training domains</td><td class="num">3.4%</td><td class="num">83.9%</td><td>+80.5 points</td></tr>
+        <tr><td>Missing-evidence refusal, unseen domains</td><td class="num">5.8%</td><td class="num">74.4%</td><td>+68.6 points</td></tr>
+        <tr><td>Answerable accuracy, unseen domains</td><td class="num">38.6%</td><td class="num">47.4%</td><td>+8.8 points</td></tr>
+      </tbody>
+    </table>
+
+    <p>The important number is the last one: the fine-tune improves <em>refusal calibration</em>,
+      not knowledge or reasoning. It does not become a better general model; it becomes much
+      more willing to say “I couldn't find the answer in the provided documents.” That is
+      exactly the failure mode this application has fought (see §11 and §12), but it also means
+      the model is not a capability upgrade over <code>qwen3:1.7b</code> for writing, code, or math.</p>
+
+    <p>The Ollama manifest bakes in this system prompt and a simple ChatML-style template:</p>
+    <pre><code>System: Answer the user's question using only the documents they provide.
+Answer in the language of the question, in one or two sentences. If the documents
+don't contain the answer, reply with exactly this sentence and nothing else:
+I couldn't find the answer in the provided documents.
+
+User: [1] Document Title
+&lt;Document Text&gt;
+
+Question: &lt;User Question&gt;</code></pre>
+
+    <p>Two consequences matter for integration:</p>
+    <ul>
+      <li>The model was trained on the <code>[n] Title</code> evidence format, not on this app's
+        <code>&lt;chunk id="n"&gt;</code> format or its long “precise analytical assistant” prompt.</li>
+      <li>Although the GGUF metadata advertises <code>thinking</code> and <code>tools</code>
+        capabilities, the manifest template has no reasoning or tool-call channel. With
+        <code>think=true</code> the chain of thought is emitted into the normal
+        <code>response</code> field, so it must stay <code>false</code>.</li>
+    </ul>
+
+    <h3>13.2 Speed and memory on this machine</h3>
+    <p>Measured with <code>num_ctx=32768</code>, <code>think=false</code>, temperature 0.1–0.2,
+      streaming enabled. “Prefill” is prompt processing; “decode” is generation. The 29k test
+      is a 28,998–29,856-token prompt with one needle fact; all three models found it.</p>
+
+    <table>
+      <thead>
+        <tr><th>Signal</th><th class="num">LFM3 aura Q8_0</th><th class="num">qwen3:1.7b</th><th class="num">ornith:35b</th><th>Reading</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Resident size at 32k</td><td class="num">2.05 GB</td><td class="num">4.94 GB</td><td class="num">21.36 GB</td><td>LFM uses 58% less memory than qwen at the same context.</td></tr>
+        <tr><td>Cold load</td><td class="num">0.58 s</td><td class="num">1.33 s</td><td class="num">6.38 s</td><td>Cheapest cold start of the three.</td></tr>
+        <tr><td>Short-prompt decode</td><td class="num">59–65 tok/s</td><td class="num">85–90 tok/s</td><td class="num">42–48 tok/s</td><td>Qwen still generates tokens fastest; LFM is between the two.</td></tr>
+        <tr><td>12k-token prefill</td><td class="num">1,452 tok/s</td><td class="num">1,081 tok/s</td><td class="num">553 tok/s</td><td>LFM is 34% faster than qwen, 2.6&times; faster than ornith.</td></tr>
+        <tr><td>29k-token prefill</td><td class="num">1,185 tok/s (25.2 s)</td><td class="num">505 tok/s (57.4 s)</td><td class="num">420 tok/s (69.2 s)</td><td>The gap grows with context: LFM is 2.3&times; faster than qwen, 2.8&times; faster than ornith.</td></tr>
+        <tr><td>29k-token needle</td><td class="num">found</td><td class="num">found</td><td class="num">found</td><td>Raw long-context retrieval works in all three.</td></tr>
+        <tr><td>123k-token needle</td><td class="num">found (442 tok/s prefill)</td><td class="num">not tested</td><td class="num">not tested</td><td>The 256K claim is real, but 282 s to prefill 123k is not interactive.</td></tr>
+        <tr><td>600-word answer*</td><td class="num">450 tok / 7.7 s</td><td class="num">501 tok / 6.1 s</td><td class="num">700 tok / 17.1 s</td><td>*With the baked system overridden; see §13.4 for the grounding cost.</td></tr>
+      </tbody>
+    </table>
+
+    <p>The prefill advantage comes from the architecture: only six of 24 layers use global
+      attention, and the local layers are short convolutions or 256-token sliding-window
+      attention, so the KV cache at 32k is about 384 MiB instead of the several gigabytes a
+      dense 1.7B model needs. The decode disadvantage is explained by the artifact, not the
+      architecture: the local model is Q8_0 (1.8 GB) while <code>qwen3:1.7b</code> is a Q4
+      Ollama build, and the hybrid convolution path is less decode-optimized in this Ollama
+      build. A Q4_K_M quant of the fine-tune might recover decode speed, but DPO alignment can
+      be sensitive to quantization; it must be evaluated, not assumed.</p>
+
+    <div class="callout">
+      <strong>Do not repeat the vendor's speed claim blindly.</strong> Liquid AI's “1.8–2.8&times;
+      faster decode” measurement is for the official Q4_0 LFM3 build against other Q4 models.
+      The aura fine-tune here is Q8_0, and on this Mac its decode is slower than
+      <code>qwen3:1.7b</code>'s. The reliable wins are <em>prefill</em>, <em>memory</em>, and
+      <em>cold load</em>.
+    </div>
+
+    <h3>13.3 Behaviour by application role</h3>
+    <p>Each role was run with a short, representative prompt, not the full application prompt,
+      so the comparison isolates model behaviour. “App prompt” is the real
+      <code>research/100_trunks_prompt.txt</code> answer prompt with four real corpus chunks.</p>
+
+    <table>
+      <thead><tr><th>Role / test</th><th>LFM3 aura</th><th>qwen3:1.7b</th><th>ornith:35b</th><th>Use LFM?</th></tr></thead>
+      <tbody>
+        <tr><td>Short grounded answer (“Where is Nijo Market and what does it sell?”)</td><td>Correct, one sentence</td><td>Correct, adds unasked opening time</td><td>Correct, bullet list</td><td>Yes</td></tr>
+        <tr><td>Unanswerable (“How many stalls?”)</td><td>Exact fixed refusal, 53 chars</td><td>Refuses in 455 chars</td><td>Echoed “[1] Nijo Market” in this format</td><td>Yes, strongest</td></tr>
+        <tr><td>Unanswerable with a plausible distractor (“How much does an IDP cost?”)</td><td>Clean refusal</td><td><strong>Invents “around 100 yen”</strong></td><td>Natural refusal (“not specified”)</td><td>Yes</td></tr>
+        <tr><td>Answerable list (“all wagyu A5 cuts”)</td><td>6/6, clean bullets</td><td>6/6</td><td>6/6</td><td>Yes</td></tr>
+        <tr><td>Partially answerable (“Where can I get an IDP?” with “get one before you arrive / at home”)</td><td><strong>Over-refuses</strong></td><td>Answers from the evidence</td><td>Answers from the evidence</td><td>No</td></tr>
+        <tr><td>App answer prompt, answerable question</td><td><strong>Contradictory:</strong> states the fact, then appends the app's refusal sentence</td><td>Direct answer</td><td>Direct answer</td><td>No, without prompt adaptation</td></tr>
+        <tr><td>App answer prompt, unsupported question (“levels of wagyu”)</td><td>Correct refusal</td><td><strong>Hallucinates A1–A5 from outside knowledge</strong></td><td>Correct refusal</td><td>Yes</td></tr>
+        <tr><td>Relevance filter JSON</td><td>Semantically right but <code>{"keep":[[2]]}</code> (nested array)</td><td>Over-keeps <code>[2,7]</code></td><td>Exact <code>{"keep":[2]}</code></td><td>Yes, with a JSON schema</td></tr>
+        <tr><td>Relevance filter with Ollama <code>format</code> schema</td><td><code>{"keep":[1,2],"sufficient":true}</code> — valid</td><td>not tested with schema</td><td>not tested with schema</td><td>Yes</td></tr>
+        <tr><td>Follow-up rewrite (“when does it open” → standalone)</td><td><strong>Answers the question instead of rewriting it</strong></td><td>Returns <code>/when_does_it_open</code></td><td>Invents “10:00 AM–8:00 PM”</td><td>No, needs few-shot + validator</td></tr>
+        <tr><td>Translation to Simplified Chinese</td><td>Mistranslates 二条 → 宁子, crab → lobster</td><td>Keeps “Nijo” in Latin, otherwise usable</td><td>Best: 二条市场, 螃蟹, 扇贝</td><td>No</td></tr>
+        <tr><td>Dictionary four-field output</td><td>Correct definition/IPA, but omits the required labels</td><td>Wrong word (“crab”)</td><td>Close, also omits labels</td><td>Only with schema/examples</td></tr>
+        <tr><td>PHP CLI code sample</td><td>Complete, syntax-valid, simple <code>shell_exec</code> + <code>substr</code></td><td>Syntax-valid after fence strip, logically broken nested <code>proc_open</code></td><td>Complete, syntax-valid, adds <code>--sub-lang en</code></td><td>Roughly qwen-level; below ornith</td></tr>
+        <tr><td>Linear-system math + graph JSON</td><td><strong>Wrong solution</strong> (3, 1); no graph fence</td><td>Wrong solution (2, 1)</td><td>Correct (2.4, 0.2) with graph JSON</td><td>No</td></tr>
+        <tr><td>600-word article with system override</td><td>~600 words, but invents Sapporo Bay, comals, “since time immemorial”</td><td>~600 words, invents “7:00 AM–5:00 PM”</td><td>~600 words, invents surrounding-sea detail</td><td>No, grounding drops</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout bad">
+      <strong>The critical integration failure.</strong> With the real application answer prompt,
+      LFM3 produced this for “What time does Nijo Market open?”:
+      <pre><code>The provided context states that Nijo Market opens at 7am on Tuesday mornings...
+The provided context does not contain sufficient information to answer this question.</code></pre>
+      It answers <em>and</em> refuses in the same reply. The cause is a direct contract conflict:
+      the baked system prompt says “one or two sentences” and “reply with exactly: I couldn't find
+      the answer in the provided documents”, while <code>100_trunks_prompt.txt</code> asks for a
+      synthesis and a <em>different</em> refusal sentence. The reply shows both refusal contracts
+      firing: the app's sentence appears after a correct fact, and in the Tao test the model's own
+      fixed sentence appears as well. The same alignment makes it refuse the IDP question even
+      though the evidence says “get one before you arrive” and “at home”, which is a partial
+      answer to “where”. This model must not be dropped into the existing answer path unchanged.
+    </div>
+
+    <h3>13.4 Is it a good replacement for <code>qwen3:1.7b</code>?</h3>
+    <p>It depends on which job <code>qwen3:1.7b</code> was doing. The current working tree has
+      already unified every text role on <code>ornith:35b</code> (§7.1), so the practical question
+      is really “should this model enter the stack at all?” The role-by-role answer:</p>
+
+    <table>
+      <thead><tr><th>Job previously done by qwen3:1.7b</th><th>LFM3 aura verdict</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Query expansion / BM25 terms</td><td>Usable with a JSON schema, not better than qwen</td><td>Default baked system distorts the reply; with <code>format</code> it returns valid terms, but they are generic and still need the existing corpus validation.</td></tr>
+        <tr><td>Candidate relevance filter</td><td><strong>Yes, with a schema</strong></td><td>Semantically correct; enforce <code>{"keep":[int],"sufficient":bool}</code> with Ollama <code>format</code> to stop the nested-array error.</td></tr>
+        <tr><td>Evidence-sufficiency / refusal gate</td><td><strong>Yes — best of the three</strong></td><td>Clean fixed refusal, no invented prices, and 2.3&times; faster prefill over long evidence than qwen.</td></tr>
+        <tr><td>Follow-up rewrite</td><td>No</td><td>It answers instead of rewriting. Needs few-shot examples and a validator; even then it is biased toward answering.</td></tr>
+        <tr><td>Translation</td><td>No</td><td>Worse than both qwen and ornith on place names and seafood vocabulary.</td></tr>
+        <tr><td>Dictionary lookup</td><td>Marginal</td><td>Correct content, wrong shape unless forced by schema/examples.</td></tr>
+        <tr><td>Final RAG answer</td><td>No, as a drop-in</td><td>1–2 sentence cap, contradictory refusal with the app prompt, over-refusal on partial evidence.</td></tr>
+        <tr><td>Long answer / article writing</td><td>No</td><td>Requires overriding the alignment that makes it valuable; then it fabricates like the others.</td></tr>
+        <tr><td>Code generation</td><td>Roughly qwen-level, below ornith</td><td>Valid simple scripts, but weaker API reasoning and no documentation grounding of its own.</td></tr>
+        <tr><td>Math tutor</td><td>No</td><td>Wrong solution on a simple linear system; no graph output.</td></tr>
+        <tr><td>Image / vision</td><td>No</td><td>Text-only.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout good">
+      <strong>Best fit in this codebase.</strong> Add it as a second, small
+      <em>grounding verifier</em> alongside the writer: use it to decide whether the retrieved
+      evidence can answer the question, and/or to check each claim in a generated answer against
+      the evidence. At 32k, <code>ornith:35b</code> (21.4 GB) plus this model (2.05 GB) fits in
+      36 GB with room for the browser, so both can stay resident. This addresses the exact failure
+      seen in §11/§12 — a small model that hallucinates on unanswerable questions — without
+      accepting its short-answer limitation.
+    </div>
+
+    <h3>13.5 Best configuration</h3>
+    <p>These settings keep one model resident, avoid Ollama reloads, and preserve the DPO
+      alignment. The model tag is long; an alias is convenient:</p>
+    <pre><code>ollama cp milodule3/LFM3-1.7B-aura-grounded:latest lfm3-aura
+# Same blobs, shorter name. Load only one alias at a time.
+
+export OLLAMA_KEEP_ALIVE=30m
+export OLLAMA_NUM_PARALLEL=1              # single-user app; avoid KV duplication
+export OLLAMA_MAX_LOADED_MODELS=2         # 1 for LFM-only; 2 for ornith + verifier
+export OLLAMA_FLASH_ATTENTION=1
+export OLLAMA_KV_CACHE_TYPE=q8_0          # optional; LFM's KV is already small</code></pre>
+
+    <table>
+      <thead><tr><th>Setting</th><th>Value</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><code>num_ctx</code></td><td><code>32768</code> for every call</td><td>Same as the rest of the app; avoids reloads. LFM costs only 2.05 GB at 32k. Raise to 131072 only for a deliberate long-document job (~3.4 GB and ~280 s to prefill 123k here).</td></tr>
+        <tr><td><code>think</code></td><td><code>false</code></td><td>Mandatory. The manifest has no reasoning channel; <code>think=true</code> leaks “We need to answer...” into the answer. A stray <code>&lt;/think&gt;</code> was seen once on a cold call, so strip reasoning tags and duplicate prefixes as a guard.</td></tr>
+        <tr><td><code>temperature</code></td><td>0.1 general; 1.0 for math</td><td>Liquid's recommended general sampling; math uses <code>1.0/0.95/20</code>.</td></tr>
+        <tr><td><code>top_k</code> / <code>top_p</code></td><td>50 / 0.95 (0.95 only for math)</td><td>Liquid's published LFM3 sampling.</td></tr>
+        <tr><td><code>repeat_penalty</code></td><td>1.1</td><td>Liquid's general recommendation; keeps short grounded answers from looping.</td></tr>
+        <tr><td><code>num_predict</code></td><td>96–160 verifier/JSON; 256–400 short answer; 700 only with a system override</td><td>The model is trained for 1–2 sentences; a hard cap is a quality control.</td></tr>
+        <tr><td><code>format</code></td><td>JSON schema for every machine-read reply</td><td>Fixes the nested-array and duplicate-JSON failures. Schema-constrained decoding worked for relevance and query expansion.</td></tr>
+        <tr><td><code>keep_alive</code></td><td><code>30m</code> plus the existing watchdog</td><td>Keeps the 0.6 s cold load off the first question; if two models are resident, refresh both.</td></tr>
+        <tr><td>System prompt</td><td>Keep the baked one for grounding; override per request only for JSON/verifier roles</td><td>Overriding enables long-form but weakens grounding. Do not use one prompt for both jobs.</td></tr>
+      </tbody>
+    </table>
+
+    <h4>13.5.1 Recommended prompt shapes</h4>
+    <p><strong>Native short answer</strong> (keep the baked system; do not add a competing refusal rule):</p>
+    <pre><code>[1] Nijo Market
+Nijo Market is a public market in Chuo ward, Sapporo, Hokkaido. It sells crab,
+salmon, scallops and sea urchin. It opens at 7am.
+
+Question: What time does Nijo Market open?</code></pre>
+    <p>Post-process the exact fallback sentence
+      “I couldn't find the answer in the provided documents.” into the application's own
+      refusal text. Do not ask for a different refusal sentence in the same prompt.</p>
+
+    <p><strong>Grounding verifier</strong> (the recommended production use):</p>
+    <pre><code>System: You are a strict grounding verifier. Decide whether the proposed answer is
+fully supported by the evidence. Return JSON only.
+
+Evidence:
+[1] ... retrieved passage ...
+[2] ... retrieved passage ...
+
+Question: {question}
+Proposed answer: {answer}
+
+Schema: {"type":"object","properties":{
+  "verdict":{"type":"string","enum":["SUPPORTED","UNSUPPORTED"]},
+  "unsupported_claims":{"type":"array","items":{"type":"string"}}
+},"required":["verdict","unsupported_claims"]}</code></pre>
+    <p>On five hand-checked cases (true/false location, price, stall count, Fields Medal),
+      LFM3 returned the right verdict 5/5 at 0.31–0.33 s warm. qwen and ornith also passed 5/5;
+      the difference is that LFM does it with 2.4&times; less memory and much faster prefill when
+      the evidence is long.</p>
+
+    <p><strong>JSON helper</strong> (relevance/expansion): pass the schema in <code>format</code>,
+      keep the system short, and include one example. The default system otherwise returns a
+      bare array plus a fenced duplicate. Validate the parsed object; keep the existing
+      “never discard the top lexical matches when the filter returns empty” guard.</p>
+
+    <p><strong>Long-form writing</strong>: not recommended for this model. If it is unavoidable,
+      override the system, generate, then run the grounding verifier over each claim. Expect
+      fabricated atmosphere and venue details even then; the 600-word test invented “Sapporo
+      Bay”, “wooden stalls”, “comals”, and “crab cakes” from a passage that mentioned only
+      location, seafood, and opening time.</p>
+
+    <h3>13.6 How to integrate without breaking the current stack</h3>
+    <p>The working tree currently uses <code>ornith:35b</code> for every text role. Three options,
+      in order of preference:</p>
+    <ol>
+      <li><strong>Verifier alongside ornith (recommended).</strong> Add a
+        <code>GROUNDING_MODEL</code> constant and a small verification module. Use it only for:
+        (a) pre-answer sufficiency on contexts above roughly 8k tokens or high-risk questions
+        (prices, dates, visa/medical/legal rules), and (b) post-answer claim checks. Keep
+        <code>ornith:35b</code> as the writer. Set <code>OLLAMA_MAX_LOADED_MODELS=2</code> and
+        refresh both models in the watchdog. Expected benefit: fewer confident wrong answers and
+        no change to answer style.</li>
+      <li><strong>Retire qwen3:1.7b, keep one small model.</strong> Since qwen is already gone
+        from the text roles, this is mostly a documentation change. Use LFM3 for verifier /
+        relevance / refusal, and keep ornith for generation. This is the cheapest way to get the
+        anti-hallucination benefit.</li>
+      <li><strong>Make LFM3 the primary answer model (not recommended).</strong> It requires
+        adopting its <code>[n] Title</code> evidence format, removing the app's competing refusal
+        instruction, capping answers at a few sentences, and accepting weaker synthesis, code,
+        math, and translation. It would save memory (2.05 GB vs 21.4 GB) and prefill time, but
+        the product would answer less, not better.</li>
+    </ol>
+
+    <div class="callout warn">
+      <strong>Do not put it behind the same <code>num_ctx</code>-changing code path.</strong>
+      Ollama reloads a model whenever the requested context size changes, and the app currently
+      uses 32,768 everywhere. Keep that single value for LFM too. If a verifier needs 64k or
+      128k, it will pay a reload; pass the same 32,768 unless the job genuinely needs more.
+    </div>
+
+    <h3>13.7 Acceptance criteria before adopting</h3>
+    <table>
+      <thead><tr><th>Check</th><th>Pass criterion</th><th>Measured now</th></tr></thead>
+      <tbody>
+        <tr><td>Clean refusal on unanswerable questions</td><td>&ge; 90% exact fixed refusal with the production prompt</td><td>2/2 with the native prompt; 1/2 with the current app prompt (IDP over-refusal)</td></tr>
+        <tr><td>No over-refusal on partially answerable questions</td><td>&le; 10% false refusals</td><td>Fails the IDP “where” case; must be fixed in the integration prompt or routed around</td></tr>
+        <tr><td>Unsupported-claim rate</td><td>&lt; 5% on a 30–50 question corpus set</td><td>Not yet measured in production; the 5-case verifier spot check passed 5/5</td></tr>
+        <tr><td>JSON validity</td><td>&ge; 99% first try with <code>format</code></td><td>Valid for relevance and expansion when a schema was supplied; invalid without it</td></tr>
+        <tr><td>29k-token needle</td><td>&ge; 95%</td><td>1/1 found</td></tr>
+        <tr><td>Verifier latency, typical 4–8k context</td><td>p50 &lt; 3 s warm</td><td>0.31–0.33 s for 5 short cases; longer evidence scales with ~1.2k tok/s prefill</td></tr>
+        <tr><td>Verifier latency, 29k context</td><td>&lt; 30 s</td><td>~25 s prefill; still 2.3&times; faster than qwen and 2.8&times; faster than ornith</td></tr>
+        <tr><td>Coexistence with ornith</td><td>No swap, no reload during a session</td><td>21.4 + 2.05 GB fits 36 GB; requires <code>OLLAMA_MAX_LOADED_MODELS=2</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>13.8 Recommendation</h3>
+    <div class="callout good">
+      <strong>Adopt LFM3-aura-grounded as a grounding/refusal verifier, not as the answer
+      writer.</strong> It is the best model tested at the one thing this RAG stack most needs:
+      declining when the evidence is insufficient, without inventing a price, a stall count, or
+      a location. Its 32k footprint (2.05 GB) and prefill speed (1.2–1.5k tok/s) make it practical
+      to run beside <code>ornith:35b</code> and to verify long evidence cheaply. Its weaknesses
+      are exactly the roles that need free-form generation: long answers, follow-up rewriting,
+      translation, code, and math. Do not replace <code>qwen3:1.7b</code> wholesale with it;
+      replace only the verifier/relevance/refusal roles, keep deterministic validation and JSON
+      schemas, and keep a larger writer for the final response.
+    </div>
+    <p>If the goal is simply to retire <code>qwen3:1.7b</code>, this model is a defensible
+      replacement for <em>grounding</em> and a regression for <em>generation</em>. If the goal is
+      to make the existing ornith-based app more trustworthy, adding it as a second model is the
+      highest-value use. If the goal is to make the app cheaper and faster overall, the memory
+      and prefill savings are real, but decode is slower than qwen and the current ornith writer
+      is still the quality ceiling.</p>
+
+    <p class="small muted">Sources: local Ollama measurements in §13.2–13.3;
+      <a href="https://huggingface.co/LeanProgressIQ/LFM3-1.7B-aura-grounded">LeanProgressIQ/LFM3-1.7B-aura-grounded</a>
+      (DPO training, refusal/accuracy table, system contract, GGUF);
+      <a href="https://ollama.com/milodule3/LFM3-1.7B-aura-grounded">ollama.com/milodule3/LFM3-1.7B-aura-grounded</a>;
+      <a href="https://huggingface.co/LiquidAI/LFM3-1.7B">LiquidAI/LFM3-1.7B</a>
+      (1.73B params, 256K context, tri-hybrid architecture, sampling defaults);
+      <a href="https://www.liquid.ai/blog/lfm3">Liquid AI, “Introducing LFM3”</a>;
+      <a href="https://www.llmbits.com/lfm3-1-7b-cpu-llama-cpp-ollama/">LLMBits LFM3 Q4/Q8 CPU measurements</a>
+      (KV-cache size, Q4_K_M vs QAD-Q4_0 speed); Ollama structured-output <code>format</code>
+      and keep-alive/context options. Local artifact:
+      <code>milodule3/LFM3-1.7B-aura-grounded:latest</code>, digest
+      <code>fbf3f3f8f06d</code>, Q8_0, 1.8 GB.</p>
+  </section>
+
+  <section id="lfm3-primary">
+    <h2>14. If <code>LFM3-1.7B-aura-grounded</code> must be the primary answer writer</h2>
+    <p class="small muted">Added 2026-11-11. Research only; no application code was changed.
+      Section 13 asked whether LFM3-aura is a good replacement for <code>qwen3:1.7b</code> and
+      concluded it is a strong grounding verifier, not a drop-in writer. This section answers the
+      harder follow-up: <strong>if we insist on using it as the primary answer model, what is the
+      best configuration, prompt engineering, and retrieval shape we can build around it under a
+      tight memory budget?</strong> All measurements below are on the same Mac (36 GiB unified
+      memory, Ollama 0.40.14, Metal offload, <code>think=false</code>) and use the local
+      <code>milodule3/LFM3-1.7B-aura-grounded:latest</code> artifact (Q8_0, 1.8 GB on disk).</p>
+
+    <div class="callout good">
+      <strong>Verdict: feasible for short and medium grounded answers, with a two-call gate +
+      writer pipeline and JSON-schema output. Not a free upgrade.</strong>
+      With the right prompt contract, LFM3-aura can answer Nijo Market location/opening questions,
+      refuse unanswerable questions cleanly, answer partially answerable questions without a false
+      refusal, list explicitly stated items, detect conflicts, and answer in Simplified Chinese.
+      It does this in ~0.3 s for the gate plus ~1–5 s for the answer, at ~2.0 GB resident.
+      It remains weaker than <code>ornith:35b</code> at long-form 200+ word articles, multi-entity
+      synthesis, dense grading taxonomies, visa/legal synthesis, code, and math. The best LFM-only
+      product is therefore a <em>shorter, more conservative, better-grounded</em> assistant, not an
+      equal-quality replacement for the 35B writer.
+    </div>
+
+    <h3>14.1 Why the current answer path fails, and what can be overridden</h3>
+    <p>The local manifest bakes in a system prompt that says “answer in one or two sentences” and
+      “if the documents don't contain the answer, reply with exactly: I couldn't find the answer in
+      the provided documents.” The application's <code>research/100_trunks_prompt.txt</code> adds a
+      different refusal sentence and asks for a synthesis. The two contracts conflict. In the
+      synthetic test suite, the unmodified path produced:</p>
+    <ul>
+      <li><strong>Answer then refusal:</strong> for “What time does Nijo Market open, what does it
+        sell, and where is it?”, it answered correctly and then appended “The provided context does
+        not contain sufficient information to answer this question.”</li>
+      <li><strong>Reasoning leakage:</strong> for “List all the wagyu cuts mentioned”, it emitted
+        “Wait, let me re-read the chunks…”, quoted chunk text, and then appended the refusal
+        sentence, even though it had already listed all six cuts.</li>
+      <li><strong>Blanket refusal:</strong> for the 250-word Nijo article it returned only the
+        refusal sentence, because the baked “one or two sentences” contract was still active.</li>
+    </ul>
+    <p>The good news is that Ollama's <code>system</code> request field <em>replaces</em> the baked
+      system prompt. Passing a custom system prompt removed the one-or-two-sentence cap and the
+      baked refusal sentence. The remaining problem is that a prompt-only fix is not enough: the
+      DPO alignment still tends to append a refusal after a substantive answer, and it treats
+      “the evidence does not contain a complete answer” as “the evidence is insufficient.” The
+      pipeline below fixes both with structure, not with more prose.</p>
+
+    <h3>14.2 Recommended architecture: a relevance gate, then a writer</h3>
+    <p>Do not ask one call to decide relevance, completeness, refusal, length, style, and entity
+      scope at once. Split the job into two JSON-schema calls:</p>
+    <ol>
+      <li><strong>Gate call (cheap, deterministic).</strong> Ask only: “Does the evidence contain at
+        least one fact that directly helps answer the question?” Return
+        <code>{"relevant": true|false}</code>. Use <code>temperature=0</code>,
+        <code>num_predict=32</code>, and no few-shot examples. This call is the refusal decision.
+        If it returns false, return the application's refusal sentence without asking the writer to
+        refuse.</li>
+      <li><strong>Writer call (grounded, complete).</strong> Ask the model to answer every part the
+        evidence supports, in its own words, with no refusal instruction at all. Return
+        <code>{"answer": "..."}</code>. Use <code>temperature=0.1</code>,
+        <code>num_predict=600–1200</code>. Because the output is schema-constrained to one JSON
+        object, the model cannot append a second refusal paragraph or an “Evidence:” section.</li>
+    </ol>
+    <p>This split is the single most important trick in this section. The model is good at the
+      narrow gate question, and it is good at writing once it has been told that the evidence is
+      relevant. It is bad at doing both at once. The gate also gives us a clean place to implement
+      “partial answer” behavior: a question about <em>where</em> to get an IDP is
+      <code>relevant=true</code> because “obtain it before arriving in Japan” is a partial answer,
+      while a question about the number of stalls is <code>relevant=false</code> because the
+      evidence only names the market and never discusses stalls.</p>
+
+    <table>
+      <thead><tr><th>Test case</th><th>Gate</th><th>Expected writer behavior</th><th>Measured</th></tr></thead>
+      <tbody>
+        <tr><td>Nijo Market: opening time, products, location</td><td class="num">true</td><td>Answer all three</td><td>Correct, 33 words, 1.33 s</td></tr>
+        <tr><td>Nijo Market: how many stalls?</td><td class="num">false</td><td>Application refusal</td><td>Correct refusal, 0.29 s gate</td></tr>
+        <tr><td>IDP: how much does it cost?</td><td class="num">false</td><td>Application refusal; no invented price</td><td>Correct refusal, 0.27 s gate</td></tr>
+        <tr><td>IDP: where can I get one?</td><td class="num">true</td><td>Answer the partial fact; say the exact office is not specified</td><td>Partial answer, 1.01 s</td></tr>
+        <tr><td>List all wagyu cuts mentioned</td><td class="num">true</td><td>All six cuts, deduplicated</td><td>Correct, 13 words</td></tr>
+        <tr><td>250-word Nijo leisure article</td><td class="num">true</td><td>Grounded article; length is a separate problem</td><td>124 words first pass; see §14.6</td></tr>
+        <tr><td>Conflicting opening times (7am vs 8am)</td><td class="num">true</td><td>State both values and the conflict</td><td>Correct, 29 words</td></tr>
+        <tr><td>Simplified Chinese question</td><td class="num">true</td><td>Answer in Simplified Chinese</td><td>Correct with an explicit language block</td></tr>
+        <tr><td>Ten chunks, only one relevant</td><td class="num">true</td><td>Use the relevant chunk; ignore distractors</td><td>Correct, 13 words</td></tr>
+      </tbody>
+    </table>
+
+    <p>Gate latency was 0.25–0.40 s warm (0.9–1.3 s on the first call after a model load). Writer
+      latency was 0.8–5.4 s depending on length. The gate adds about 0.3 s to the answer path, which
+      is a good trade for removing a whole class of false refusals and appended refusals.</p>
+
+    <h3>14.3 Exact prompts and payloads</h3>
+    <p><strong>Gate prompt.</strong> Keep it short. Do not add a refusal example; the few-shot gate
+      test made the model over-refuse the article question.</p>
+    <pre><code>System:
+You are a retrieval sufficiency gate. Decide whether the evidence contains
+information that directly helps answer the question, even if the answer is
+incomplete.
+
+- relevant=true if at least one fact in the evidence can answer part of the
+  question.
+- relevant=false if the evidence only mentions the topic but contains no fact
+  that answers the question.
+
+Return only JSON: {"relevant": true} or {"relevant": false}.
+
+User:
+&lt;context&gt;
+[1] Nijo Market
+Nijo Market is a public market in Chuo ward, Sapporo. It sells crab, salmon,
+scallops and sea urchin. It opens at 7am and closes around 6pm.
+&lt;/context&gt;
+
+Question: What time does Nijo Market open?</code></pre>
+
+    <p><strong>Writer prompt.</strong> The key rules are: answer the specific attribute asked;
+      answer only the named entity; use own words; never mention evidence or sources; answer in the
+      question's language; follow the requested format; do not add outside facts. Do not include a
+      refusal instruction; the gate owns that decision.</p>
+    <pre><code>System:
+You are the primary answer writer for a retrieval-augmented assistant. The
+user message contains evidence and a question. Use ONLY the evidence.
+
+- Answer the specific question that was asked, not a related topic. Answer only
+  about the entity or subject named in the question. Use only facts explicitly
+  attributed to that entity; never transfer facts from another entity mentioned
+  in the same passage.
+- Answer every part that the evidence supports. If only part is supported,
+  answer that part; never refuse a partially answerable question.
+- Write the answer in your own words. Do not copy sentences from the evidence.
+  Do not mention chunks, sources, titles, brackets, citations, "the provided
+  context", "the evidence", or "the documents".
+- Answer in the language of the question.
+- Follow the requested format and length. For lists, give every distinct item
+  and deduplicate; if the question asks for "all" and the evidence lists only
+  some, list what is present and say the list may be incomplete. For articles,
+  write flowing prose of the requested length. For conflicts, state both values
+  and say that they conflict.
+- Do not add facts from outside the evidence.
+
+Return only JSON: {"answer": "the complete answer"}.</code></pre>
+
+    <p><strong>Schemas.</strong> Pass these as Ollama's <code>format</code> field. Schema-constrained
+      decoding is what stops the appended refusal paragraph and the duplicate answer blocks.</p>
+    <pre><code>gate_schema = {
+  "type": "object",
+  "properties": {"relevant": {"type": "boolean"}},
+  "required": ["relevant"]
+}
+
+answer_schema = {
+  "type": "object",
+  "properties": {"answer": {"type": "string"}},
+  "required": ["answer"]
+}</code></pre>
+
+    <p><strong>Ollama payloads.</strong> The alias keeps the tag short and avoids accidental
+      re-loads from a different name.</p>
+    <pre><code>ollama cp milodule3/LFM3-1.7B-aura-grounded:latest lfm3-aura
+
+gate = {
+  "model": "lfm3-aura",
+  "system": GATE_PROMPT,
+  "prompt": gate_user_prompt,
+  "stream": False,
+  "think": False,
+  "keep_alive": "30m",
+  "format": gate_schema,
+  "options": {
+    "num_ctx": 8192,
+    "temperature": 0.0,
+    "top_k": 50,
+    "top_p": 0.95,
+    "repeat_penalty": 1.1,
+    "num_predict": 32
+  }
+}
+
+writer = {
+  "model": "lfm3-aura",
+  "system": ANSWER_PROMPT,
+  "prompt": writer_user_prompt,
+  "stream": False,
+  "think": False,
+  "keep_alive": "30m",
+  "format": answer_schema,
+  "options": {
+    "num_ctx": 8192,
+    "temperature": 0.1,
+    "top_k": 50,
+    "top_p": 0.95,
+    "repeat_penalty": 1.1,
+    "num_predict": 900
+  }
+}</code></pre>
+
+    <h3>14.4 Evidence format and retrieval changes</h3>
+    <p>LFM3-aura was trained on the <code>[n] Title</code> evidence format, not on this app's
+      <code>&lt;chunk id="n"&gt;</code> format. Use the native format. The model still occasionally
+      writes <code>[1]</code> or “the provided context” into the answer, so post-process those
+      markers out, but the evidence itself should look like training data:</p>
+    <pre><code>&lt;context&gt;
+[1] Nijo Market
+Nijo Market is a public market in Chuo ward, Sapporo, Hokkaido. It sells crab,
+salmon, scallops and sea urchin. It opens at 7am and closes around 6pm.
+
+[2] Sapporo travel notes
+Sapporo is the capital of Hokkaido. Nijo Market is one of its main seafood
+markets.
+&lt;/context&gt;
+
+Question: What time does Nijo Market open, what does it sell, and where is it?</code></pre>
+    <p>More important than the format is precision. The current app can feed the model up to
+      20 BM25 chunks and 4,096 estimated context tokens. LFM3-aura is much more distractible than
+      <code>ornith:35b</code>. In a real-corpus test, a Nijo Market article retrieved two chunks
+      whose bodies were about the adjacent <em>Sapporo Morning Market</em> (5am opening, blankets
+      and folding chairs). The model transferred those facts into the Nijo article. A wagyu
+      “levels” question retrieved a video chunk about “ten levels of Wagyu” and the model answered
+      about the video instead of the grading taxonomy. These are retrieval-side failures that no
+      prompt can fully repair.</p>
+    <p>For an LFM-primary stack, change retrieval in four ways:</p>
+    <ol>
+      <li><strong>Prefer precision over depth.</strong> Use 8–12 chunks, not 20. On the wagyu test,
+        the top 8 chunks still contained the grading facts; the distractor video entered at position
+        10. A smaller, cleaner context is better for a 1.7B writer. Keep the existing relevance
+        filter if it is available, or run the LFM gate as a per-chunk filter with a JSON schema.</li>
+      <li><strong>Apply an entity-body filter.</strong> If the question names an entity (“Nijo
+        Market”, “Terence Tao”, “wagyu”), drop chunks whose <em>body</em> does not mention that
+        entity, even if the title does. This removes sibling-entity chunks that mention the target
+        only in a title or intro. Do not drop the top lexical match; apply the filter only when it
+        leaves enough evidence.</li>
+      <li><strong>Drop junk and duplicates.</strong> The real corpus contains nav text, photo
+        captions, “Delicious Beautiful Spectacular JAPAN”, “#Foreign Tourists#Hokkaido#Tourism”,
+        “### CARTOON OF THE DAY”, and duplicate bodies with different ids. Deduplicate by normalized
+        paragraph text and require at least a handful of content words. This alone removed several
+        distractors from the Nijo context.</li>
+      <li><strong>Add intent terms for list/taxonomy questions.</strong> For “levels of wagyu”,
+        include grading vocabulary in the BM25 expansion: <code>grade</code>, <code>A1</code>,
+        <code>A2</code>, <code>A3</code>, <code>A4</code>, <code>A5</code>, <code>BMS</code>,
+        <code>yield</code>, <code>quality</code>, <code>marbling</code>. This pushes the grading
+        chunks above the “ten levels of Wagyu” cooking video.</li>
+    </ol>
+
+    <h3>14.5 Prompt-engineering tricks that worked and failed</h3>
+    <table>
+      <thead><tr><th>Trick</th><th>Result</th><th>Use it?</th></tr></thead>
+      <tbody>
+        <tr><td>Override the baked system prompt with the <code>system</code> field</td><td>Removes the 1–2 sentence cap and the baked refusal sentence. Verified directly.</td><td><strong>Yes, mandatory</strong></td></tr>
+        <tr><td>JSON schema for every machine-read reply</td><td>Stops appended refusal paragraphs, duplicate XML/answer blocks, reasoning leakage, and “Evidence:” sections. JSON validity was effectively 100% with <code>format</code>.</td><td><strong>Yes, mandatory</strong></td></tr>
+        <tr><td>Gate + writer split</td><td>Fixes over-refusal on partially answerable questions and keeps refusals clean. Gate adds ~0.3 s.</td><td><strong>Yes, recommended</strong></td></tr>
+        <tr><td>Native <code>[n] Title</code> evidence format</td><td>Better than <code>&lt;chunk id&gt;</code> for this fine-tune; fewer “Chunk 1” references and more direct answers.</td><td><strong>Yes</strong></td></tr>
+        <tr><td>“Answer only the named entity; do not transfer facts from another entity”</td><td>Reduces sibling-entity transfer but does not eliminate it when the same passage contains both entities. Pair it with the entity-body filter.</td><td>Yes, with retrieval filter</td></tr>
+        <tr><td>Explicit Simplified Chinese language block + example</td><td>Without it, the model sometimes answered in English. With “你必须用简体中文回答” plus noun examples (crab=螃蟹, salmon=鲑鱼, scallops=扇贝, sea urchin=海胆), the answer was fully Chinese and correctly translated.</td><td><strong>Yes, for Chinese</strong></td></tr>
+        <tr><td>“Write exactly four paragraphs” article prompt</td><td>Improved a 118-word grounded draft to 159 words with four coherent paragraphs and no Sapporo Morning Market conflation on the cleaned context. Still short of 200 words.</td><td>Yes, partial fix</td></tr>
+        <tr><td>“Synthesize in your own words; do not copy evidence; use headings” for lists</td><td>Improved a copied-chunk answer into a structured 141-word grading summary. Still omitted some details and produced a stray JSON block inside the answer.</td><td>Yes, partial fix</td></tr>
+        <tr><td>Few-shot refusal example in the gate prompt</td><td><strong>Harmful.</strong> The gate started refusing the article question. Remove refusal examples from the gate.</td><td>No</td></tr>
+        <tr><td>“Do not mention missing information”</td><td><strong>Harmful.</strong> The model over-refused partial questions (IDP where, conflict, Chinese). Allow one short missing-information sentence and post-process instead.</td><td>No</td></tr>
+        <tr><td>Unique token such as <code>[[NO_ANSWER]]</code></td><td>Over-refused partial questions and distractors. The model used the token whenever it felt incomplete.</td><td>No</td></tr>
+        <tr><td>Two-pass extract-then-answer in one response</td><td>Verbose, leaked reasoning, duplicated the answer. A separate gate is cleaner and faster.</td><td>No</td></tr>
+        <tr><td><code>temperature=0.0</code> for the writer</td><td>No consistent quality gain; one article run refused at 0.0. Use 0.1 for the writer, 0.0 only for the gate.</td><td>No</td></tr>
+        <tr><td>Self-expansion pass to hit a word count</td><td>Weak: 118→126 words in one run, 131→170 in another, and the expansion reintroduced sibling-market facts. Prefer a structured paragraph prompt first.</td><td>Only as a last resort</td></tr>
+      </tbody>
+    </table>
+
+    <h3>14.6 Measured results on the real corpus</h3>
+    <p>These runs used the real 26,356-trunk global corpus, top-12 BM25 contexts, the gate + writer
+      pipeline above, and <code>ornith:35b</code> with the current
+      <code>research/100_trunks_prompt.txt</code> as the quality reference. They are small
+      spot-checks, not a production benchmark.</p>
+    <table>
+      <thead><tr><th>Question</th><th>LFM gate + writer</th><th>ornith + app prompt</th><th>Reading</th></tr></thead>
+      <tbody>
+        <tr><td>Where is Nijo Market?</td><td>Correct: Chuo Ward, Sapporo, Hokkaido; lively market with seafood restaurants and fresh seafood. 31 words, 1.9 s.</td><td>Correct and shorter. 3.2 s.</td><td>LFM is competitive.</td></tr>
+        <tr><td>What time does Nijo Market open?</td><td>Correct: 7am. 6 words, 1.6 s.</td><td>Correct: 7am. 3.9 s.</td><td>LFM is competitive and faster.</td></tr>
+        <tr><td>List all levels of wagyu in details</td><td>First run was distracted by a “ten levels of Wagyu” video and quoted it. With a cleaned context and a “synthesize, use headings” prompt: 141 words covering yield grades, quality grades, BMS 1–12, and brand requirements, but still partial and with a stray JSON block.</td><td>18.7 s, detailed and well-structured: yield A–C, quality 1–5, A5/B5/A4/B4/A3/B3, BMS, brand requirements.</td><td>LFM is clearly weaker at taxonomy synthesis; retrieval cleanup helps but does not close the gap.</td></tr>
+        <tr><td>200-word Nijo leisure article</td><td>First run: 131 words with Sapporo Morning Market facts (5am, blankets/chairs) transferred into Nijo. With cleaned context + four-paragraph prompt: 159 words, grounded, no sibling-market facts, decent leisure tone.</td><td>8.7 s, ~210 words, well-structured, grounded, no conflation.</td><td>LFM can produce a short grounded article, not an ornith-quality 200+ word feature.</td></tr>
+        <tr><td>Can I turn left on a red light in Japan?</td><td>Correct: no left turn on red unless a green arrow permits it. 96 words, 3.1 s.</td><td>Correct, similar rule. 6.0 s.</td><td>LFM is competitive.</td></tr>
+        <tr><td>90-day long-stay visa requirements</td><td>Conflated visa-free tourist stays with long-stay/digital-nomad options and produced an over-broad answer. 125 words, 4.3 s.</td><td>Also repeated the questionable “¥30 million” figure; not a clean reference.</td><td>Both are weak on this noisy, high-risk question; do not treat LFM as a legal/visa authority.</td></tr>
+        <tr><td>Did Terence Tao write a new book?</td><td>Correct: <em>Six Math Essentials</em>. 12 words, 1.3 s.</td><td>Correct. 2.9 s.</td><td>LFM is competitive.</td></tr>
+      </tbody>
+    </table>
+
+    <p>Memory and context measurements for the local artifact:</p>
+    <table>
+      <thead><tr><th><code>num_ctx</code></th><th>Resident size</th><th>Cold load</th><th>Prompt / prefill observed</th><th>Recommendation</th></tr></thead>
+      <tbody>
+        <tr><td class="num">4,096</td><td class="num">1.9 GB</td><td class="num">0.85 s</td><td>2,050 tokens / 1.32 s</td><td>Enough only if the answer context stays well under 4k.</td></tr>
+        <tr><td class="num">8,192</td><td class="num">2.0 GB</td><td class="num">0.57 s</td><td>5,692 tokens / 3.73 s</td><td><strong>Recommended.</strong> Covers the app's 4,096-token context plus prompt and output.</td></tr>
+        <tr><td class="num">16,384</td><td class="num">2.0 GB</td><td class="num">0.56 s</td><td>Same prompt / 3.72 s</td><td>Optional for larger article contexts.</td></tr>
+        <tr><td class="num">32,768</td><td class="num">2.1 GB</td><td class="num">0.56 s</td><td>Same prompt / 3.73 s</td><td>Only if the app really uses &gt;16k contexts; otherwise it is wasted KV.</td></tr>
+      </tbody>
+    </table>
+    <p>The memory difference between 8k and 32k is small (~0.1 GB), but the important point is that
+      LFM does not need 32k for this app's 4k answer context. Keep one <code>num_ctx</code> value for
+      every LFM call so Ollama never reloads the model between the gate and the writer.</p>
+
+    <h3>14.7 Recommended runtime configuration</h3>
+    <table>
+      <thead><tr><th>Setting</th><th>Value</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Alias</td><td><code>ollama cp milodule3/LFM3-1.7B-aura-grounded:latest lfm3-aura</code></td><td>Short name; same blobs; load only one alias.</td></tr>
+        <tr><td><code>num_ctx</code></td><td><code>8192</code></td><td>Covers the current 4,096-token context budget plus prompt/output; avoids a needless 32k KV cache. Use 16,384 only for long article contexts.</td></tr>
+        <tr><td><code>think</code></td><td><code>false</code></td><td>Mandatory. The manifest has no reasoning channel; <code>think=true</code> leaks “We need to answer…” into the response.</td></tr>
+        <tr><td>Gate sampling</td><td><code>temperature=0.0</code>, <code>top_k=50</code>, <code>top_p=0.95</code>, <code>repeat_penalty=1.1</code>, <code>num_predict=32</code></td><td>Deterministic, cheap relevance decision.</td></tr>
+        <tr><td>Writer sampling</td><td><code>temperature=0.1</code>, <code>top_k=50</code>, <code>top_p=0.95</code>, <code>repeat_penalty=1.1</code>, <code>num_predict=600–1200</code></td><td>Liquid's recommended general sampling; 0.1 is more stable than 0.0 in the article test.</td></tr>
+        <tr><td><code>keep_alive</code></td><td><code>30m</code> plus the existing watchdog</td><td>Keeps the 0.6 s cold load off the first question.</td></tr>
+        <tr><td>Ollama environment</td><td><code>OLLAMA_KEEP_ALIVE=30m</code>, <code>OLLAMA_MAX_LOADED_MODELS=1</code>, <code>OLLAMA_NUM_PARALLEL=1</code>, <code>OLLAMA_FLASH_ATTENTION=1</code>, <code>OLLAMA_KV_CACHE_TYPE=q8_0</code></td><td>Single-user app; avoid KV duplication and unnecessary eviction. If ornith is kept as an escalation model, raise <code>MAX_LOADED_MODELS</code> to 2.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>14.8 Quality boundaries and escalation policy</h3>
+    <p><strong>Use LFM as the primary writer for:</strong> short factual questions, single-entity
+      questions, explicit lists, yes/no rule questions with direct evidence, partial answers,
+      conflict detection, and Simplified Chinese questions with the explicit language block.</p>
+    <p><strong>Do not expect ornith-level quality for:</strong> 200+ word features, multi-entity
+      comparisons, dense taxonomies (wagyu grades, visa categories), code generation, math, or
+      translation of nuanced prose. On those tasks the measured gap is large, not marginal.</p>
+    <p>If the product can keep a second model on disk but not resident, use an escalation policy:
+      LFM handles the default path; route to <code>ornith:35b</code> (load on demand) when the
+      question matches a long-form/code/math/translation intent, when the gate is true but the
+      writer answer is shorter than the requested length, or when the answer mentions a sibling
+      entity that the question did not ask about. If only LFM may run, accept shorter answers and
+      invest in the retrieval filters in §14.4. Do not promise 35B-quality long-form from a 1.7B
+      writer; the measurements do not support it.</p>
+
+    <h3>14.9 Integration sketch (research only)</h3>
+    <pre><code>REFUSAL = ("The provided context does not contain sufficient information "
+           "to answer this question.")
+
+def answer_with_lfm(question, chunks):
+    selected = retrieve_precise(question, chunks, limit=8..12)  # §14.4
+    context = build_native_context(selected)                    # [n] Title
+    gate = ollama_json(
+        model="lfm3-aura",
+        system=GATE_PROMPT,
+        prompt=gate_user(context, question),
+        schema=gate_schema,
+        temperature=0.0,
+        num_predict=32,
+    )
+    if not gate["relevant"]:
+        return REFUSAL
+
+    result = ollama_json(
+        model="lfm3-aura",
+        system=ANSWER_PROMPT,
+        prompt=writer_user(context, question),
+        schema=answer_schema,
+        temperature=0.1,
+        num_predict=900,
+    )
+    text = clean_answer(result["answer"])
+    if not text:
+        return REFUSAL
+    if asks_for_long_article(question) and word_count(text) &lt; target * 0.8:
+        text = structured_article_rewrite(context, question, text)  # four paragraphs
+    return text
+
+def clean_answer(text):
+    text = re.sub(r"\[\d+(?:,\s*\d+)*\]", "", text)
+    text = re.sub(r"\b(?:chunk|source|note|document)\s*\d+\b", "", text,
+                  flags=re.I)
+    text = re.sub(r"^(?:The provided context|The evidence|The documents)\s+"
+                  r"(?:states?|says?|shows?)\s+(?:that\s+)?", "", text, flags=re.I)
+    text = re.sub(r"\bthe provided context\b", "", text, flags=re.I)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text</code></pre>
+    <p>Post-processing is intentionally small. The gate decides refusal; the writer should not be
+      asked to produce a refusal sentence, and the JSON schema prevents most of the old leakage.
+      The cleaner is only a safety net for <code>[1]</code>, “the provided context”, and stray
+      whitespace.</p>
+
+    <h3>14.10 Acceptance criteria and recommendation</h3>
+    <table>
+      <thead><tr><th>Check</th><th>Pass criterion</th><th>Measured in this research</th></tr></thead>
+      <tbody>
+        <tr><td>Gate relevance on answerable/partial questions</td><td>No false refusals on partial evidence</td><td>IDP “where” true; conflict true; Chinese true; article true with the gate prompt (few-shot gate failed the article)</td></tr>
+        <tr><td>Gate relevance on unanswerable questions</td><td>False on stalls/price; no invented number</td><td>2/2 false</td></tr>
+        <tr><td>Writer JSON validity</td><td>&ge; 99% first try</td><td>Schema-constrained calls parsed successfully in these runs</td></tr>
+        <tr><td>Appended refusal</td><td>0 occurrences after gate + schema + cleaner</td><td>0 in the gate + writer runs; the old single-call path had many</td></tr>
+        <tr><td>Typical latency</td><td>Gate &lt; 1 s; writer &lt; 5 s for short answers</td><td>Gate 0.25–1.3 s; writer 0.8–5.4 s</td></tr>
+        <tr><td>Long-form length</td><td>Within 20% of requested, grounded, no sibling-entity transfer</td><td>159/200 words with cleaned context + four-paragraph prompt; conflation removed but length still short</td></tr>
+        <tr><td>Taxonomy synthesis</td><td>All levels present, own words, structured</td><td>Partial (141 words); ornith clearly better</td></tr>
+        <tr><td>Resident memory</td><td>Leave room for the browser and OS in 36 GB</td><td>~2.0 GB at 8k; 21.4 GB + 2.0 GB fits if ornith is also resident</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>Best possible LFM-only configuration, in one sentence:</strong> override the baked
+      system prompt, use native <code>[n] Title</code> evidence with 8–12 cleaned chunks, run a
+      deterministic JSON <code>relevant</code> gate first, then a JSON <code>answer</code> writer
+      with explicit partial-answer/entity/language/length rules, post-process citations and meta
+      phrases, and keep <code>num_ctx=8192</code>, <code>think=false</code>,
+      <code>temperature=0.1</code>. This is a substantial improvement over the current path, but it
+      is still a 1.7B writer: expect shorter, more conservative answers and weaker long-form
+      synthesis than <code>ornith:35b</code>.
+    </div>
+
+    <p class="small muted">Sources: local Ollama measurements and prompt experiments in §14.2–14.6;
+      <a href="https://huggingface.co/LeanProgressIQ/LFM3-1.7B-aura-grounded">LeanProgressIQ/LFM3-1.7B-aura-grounded</a>
+      (DPO alignment, baked system contract, training evidence format);
+      <a href="https://huggingface.co/LiquidAI/LFM3-1.7B">LiquidAI/LFM3-1.7B</a>
+      (sampling defaults and 256K context);
+      <a href="https://ollama.com/milodule3/LFM3-1.7B-aura-grounded">ollama.com/milodule3/LFM3-1.7B-aura-grounded</a>;
+      Ollama structured-output <code>format</code>, <code>keep_alive</code>, and
+      <code>num_ctx</code> options. Local artifact: <code>milodule3/LFM3-1.7B-aura-grounded:latest</code>,
+      digest <code>fbf3f3f8f06d</code>, Q8_0, 1.8 GB. Research only: no application code was changed
+      for this task.</p>
+  </section>
+
+</main>
+</body>
+</html>

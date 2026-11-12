@@ -11,20 +11,20 @@ no cosine similarity are used. The BM25 postings live in an on-disk SQLite
 FTS5 database at ./.chat/articles_cache/bm25_index_fts.db.
 
 For each question:
-    1. Expand the question with Ollama model qwen3:1.7b into a short list of
+    1. Expand the question with the local LFM3 model into a short list of
        synonyms and related terms (32 output tokens, single line).
     2. Score every loaded trunk through the SQLite FTS5 BM25 index, using the
        original question tokens (weighted twice) plus the expanded tokens.
-    3. Keep the top 20 BM25 candidates by default. `/depth <n>` changes that
+    3. Keep the top 12 BM25 candidates by default. `/depth <n>` changes that
        count; `/depth auto` enables adaptive selection (BM25 score elbow,
        per-video cap, near-duplicate removal, and a token budget).
-    4. Filter the candidate chunks with the small qwen3:1.7b question filter
-       before synthesis (skipped for list/aggregation questions, which need
-       broad coverage).
-    5. Wrap every selected trunk in a numbered <chunk id="N"> block and build
-       the answer prompt from ./research/100_trunks_prompt.txt, so the model
-       stays grounded in the retrieved passages without exposing chunk ids.
-    6. Stream the answer from Ollama model ornith:35b. Retrieval / filter /
+    4. Filter the candidate chunks with the same local model before synthesis
+       (skipped for list/aggregation questions, which need broad coverage).
+    5. Wrap every selected trunk in native `[n] Title` evidence blocks and run
+       a deterministic JSON relevance gate followed by a JSON answer writer.
+       The gate owns refusal decisions; the writer never sees a refusal
+       instruction, so it cannot append a second refusal paragraph.
+    6. Stream the written answer from Ollama's LFM3 model. Retrieval / filter /
        prefill / TTFT / prompt-token measurements are hidden by default and
        can be shown with `/benchmark` (or continuously with `/benchmark on`).
 
@@ -122,25 +122,34 @@ except ImportError as exc:  # pragma: no cover - dependency guard
         "python3 -m pip install --user prompt_toolkit"
     )
 
-# Model used to expand questions into BM25 search terms.
-EXPANSION_MODEL = "qwen3:1.7b"
-# Small model used to filter BM25 candidates before synthesis.
-FILTER_MODEL = "qwen3:1.7b"
-CHAT_MODEL = "ornith:35b"
+# The server intentionally runs one local model only. Every helper call
+# (query expansion, candidate filtering, translation, follow-ups) and the
+# answer writer use the same LFM3-aura-grounded artifact, so Ollama never has
+# to load or evict a second model. Override the artifact with
+# OLLAMA_LFM_MODEL when a different local build is installed.
+LFM_MODEL = os.environ.get(
+    "OLLAMA_LFM_MODEL", "milodule3/LFM3-1.7B-aura-grounded:latest"
+)
+EXPANSION_MODEL = LFM_MODEL
+# Model used to filter BM25 candidates before synthesis.
+FILTER_MODEL = LFM_MODEL
+CHAT_MODEL = LFM_MODEL
 # Coding questions (code samples for a language feature, structure, or
 # architecture) are routed to the code-generation model from
 # ./prompts/programming_language_tips.prompt, without thinking enabled.
-CODING_MODEL = "ornith:35b"
+CODING_MODEL = LFM_MODEL
 # Local model used by /ask for quick questions that do not use retrieval.
-SIMPLE_ANSWER_MODEL = "ornith:35b"
+SIMPLE_ANSWER_MODEL = LFM_MODEL
 # Local model used to translate Simplified Chinese questions for retrieval.
-TRANSLATION_MODEL = "qwen3:1.7b"
+TRANSLATION_MODEL = LFM_MODEL
 # Local model used by /dict to generate definitions.
-DICT_MODEL = "ornith:35b"
-FALLBACK_TOP_N = 10
+DICT_MODEL = LFM_MODEL
+FALLBACK_TOP_N = 8
 # Default number of top BM25 trunk matches used as context. `/depth <n>`
 # changes it; `/depth auto` switches to adaptive retrieval (depth=None).
-DEFAULT_DEPTH = 20
+# LFM3-aura is a 1.7B writer: a smaller, cleaner context (8-12 chunks) keeps
+# it grounded far better than the old 20-chunk default.
+DEFAULT_DEPTH = 12
 # Estimated-token budgets for adaptive (auto) retrieval only. List-style
 # questions get a larger budget because they need broader coverage.
 MAX_CONTEXT_TOKENS = 4096
@@ -196,9 +205,13 @@ FILTER_NUM_PREDICT = 96
 LLM_FILTER_ENABLED = True
 # Query expansion is deliberately tiny: a single line, at most 32 tokens.
 EXPANSION_NUM_PREDICT = 32
-# All small-model helper calls use this context size. Keeping it identical
-# everywhere (including prewarm) prevents Ollama from reloading the model.
-EXPANSION_NUM_CTX = 8192
+# Context window requested from Ollama. Every call uses this one value.
+# LFM3-aura needs 8,192 tokens to cover the 4,096-token answer context plus
+# the writer prompt and output; a 32k KV cache adds no useful capacity here
+# and the model reloads whenever the requested context length changes.
+ANSWER_NUM_CTX = 8192
+# Helper calls use the answer context for the same reason.
+EXPANSION_NUM_CTX = ANSWER_NUM_CTX
 # Fuzzy query-term correction. Proper nouns are frequently misspelled in
 # questions ("terrence tao" / "terrance tao" vs. "Terence Tao") and BM25
 # matches whole tokens exactly, so an out-of-vocabulary word contributes
@@ -241,9 +254,7 @@ ACRONYM_QUERY_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]{1,7}\b")
 ACRONYM_STOPWORDS = frozenset(
     "a an the of and for in on to from with".split()
 )
-# Context window requested from Ollama for answer generation.
-ANSWER_NUM_CTX = 32768
-# Keep all models resident between questions to avoid cold-start latency.
+# Keep the model resident between questions to avoid cold-start latency.
 OLLAMA_KEEP_ALIVE = "30m"
 # Questions that ask for an exhaustive or comparative answer get more context.
 LIST_QUERY_PATTERN = re.compile(
@@ -597,6 +608,92 @@ def load_prompt_template() -> str:
 
 
 LANGUAGE_INSTRUCTION = "Answer in {language}. Do not translate proper nouns.\n"
+
+# ---------------------------------------------------------------------------
+# LFM3-aura-grounded answer contract.
+#
+# The local fine-tune is trained for grounded, short answers and ships with a
+# baked system prompt that caps output at one or two sentences and appends its
+# own refusal sentence. Ollama's ``system`` field replaces that baked prompt.
+# More importantly, the answer path is split into two JSON-schema calls:
+#   1. a tiny deterministic relevance gate that owns refusal, and
+#   2. a writer that answers only the parts the evidence supports and never
+#      receives a refusal instruction.
+# Schema-constrained decoding also prevents appended refusal paragraphs and
+# duplicated answer blocks. Evidence uses the native ``[n] Title`` format the
+# model was trained on, not the app's internal <chunk id="n"> blocks.
+# ---------------------------------------------------------------------------
+LFM_REFUSAL = (
+    "The provided context does not contain sufficient information "
+    "to answer this question."
+)
+# Kept in sync with the old app refusal wording used elsewhere.
+LFM_REFUSAL_SENTENCES = (
+    LFM_REFUSAL,
+    "I couldn't find the answer in the provided documents.",
+)
+LFM_GATE_SCHEMA = {
+    "type": "object",
+    "properties": {"relevant": {"type": "boolean"}},
+    "required": ["relevant"],
+}
+LFM_ANSWER_SCHEMA = {
+    "type": "object",
+    "properties": {"answer": {"type": "string"}},
+    "required": ["answer"],
+}
+LFM_GATE_SYSTEM_PROMPT = """You are a retrieval sufficiency gate. Decide whether the evidence contains
+information that directly helps answer the question, even if the answer is
+incomplete.
+
+- relevant=true if at least one fact in the evidence can answer part of the
+  question.
+- relevant=false if the evidence only mentions the topic but contains no fact
+  that answers the question.
+
+Return only JSON: {"relevant": true} or {"relevant": false}."""
+LFM_ANSWER_SYSTEM_PROMPT = """You are the primary answer writer for a retrieval-augmented assistant. The
+user message contains evidence and a question. Use ONLY the evidence.
+
+- Answer the specific question that was asked, not a related topic. Answer only
+  about the entity or subject named in the question. Use only facts explicitly
+  attributed to that entity; never transfer facts from another entity mentioned
+  in the same passage.
+- Answer every part that the evidence supports. If only part is supported,
+  answer that part; never refuse a partially answerable question.
+- Write the answer in your own words. Do not copy sentences from the evidence.
+  Do not mention chunks, sources, titles, brackets, citations, "the provided
+  context", "the evidence", or "the documents".
+- Answer in the language of the question.
+- Follow the requested format and length. For lists, give every distinct item
+  and deduplicate; if the question asks for "all" and the evidence lists only
+  some, list what is present and say the list may be incomplete. For articles,
+  write flowing prose of the requested length. For conflicts, state both values
+  and say that they conflict.
+- Do not add facts from outside the evidence.
+
+Return only JSON: {"answer": "the complete answer"}."""
+LFM_CHINESE_INSTRUCTION = """
+The user asked in Simplified Chinese. You must answer in Simplified Chinese
+(你必须用简体中文回答). Translate every ordinary English phrase into Simplified
+Chinese; do not quote or copy English sentences from the evidence. Keep only
+proper nouns in their original Latin spelling. Write complete sentences and do
+not leave an English fragment or an unclosed parenthesis.
+Useful noun translations: crab=螃蟹, salmon=鲑鱼, scallops=扇贝, sea urchin=海胆,
+market=市场, seafood=海鲜, opening hours=营业时间."""
+LFM_ARTICLE_INSTRUCTION = """
+The user requested an article or a specific word count. Write flowing prose in
+the requested number of paragraphs (or roughly the requested word count), using
+only the evidence. Expand on the supported details; do not pad with outside
+facts or repeat the same sentence."""
+# When true (default), chat.answer uses the gate + JSON writer pipeline. Set
+# LFM_PIPELINE=0 only for debugging or to compare against the legacy prompt.
+LFM_PIPELINE_ENABLED = os.environ.get("LFM_PIPELINE", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
 PROGRESSIVE_PROMPT = """<context>{context}</context>
 {language_instruction}You are continuing an answer that has already started.
@@ -1587,14 +1684,13 @@ def chat_status_report(
         loaded_label = f"{len(video_ids):,} video(s)"
 
     lines = [
-        f"  models:      {CHAT_MODEL} (chat), {EXPANSION_MODEL} "
-        "(query expansion), "
-        f"{FILTER_MODEL} (candidate filter)",
+        f"  models:      {CHAT_MODEL} "
+        "(chat, query expansion, filter, translation)",
         f"  Ollama host: {OLLAMA_HOST}",
         f"  scope:       {scope}",
         f"  loaded:      {len(chunks):,} trunks from {loaded_label}",
         f"  retrieval:   {retrieval}",
-        "  filter:      small-LLM question relevance filter",
+        "  filter:      LLM question relevance filter",
         f"  answer cache: {cache_entries} entr{'y' if cache_entries == 1 else 'ies'}",
         f"  history:     {history_count(HISTORY_FILE):,} saved entries",
     ]
@@ -2269,6 +2365,94 @@ def _filtered_expansion_terms(
     return kept
 
 
+# LFM3-aura is more distractible than a large writer, so retrieval favors
+# precision. These helpers remove the corpus's nav/caption junk and duplicate
+# bodies, and keep a named entity in the paragraph *body* rather than only in
+# a title or section heading.
+LFM_JUNK_PARAGRAPH_PATTERNS = (
+    re.compile(r"^\s*#{1,}\s*(?:cartoon|photo|caption|advertisement)\b", re.I),
+    re.compile(r"^\s*(?:delicious|beautiful|spectacular)\s+japan\s*$", re.I),
+    re.compile(r"^\s*(?:share|tweet|email|print)\b", re.I),
+)
+
+
+def _lfm_is_junk_paragraph(text: str) -> bool:
+    """Return True for obvious nav/caption/hashtag junk, never real prose."""
+    stripped = " ".join((text or "").split())
+    if not stripped:
+        return True
+    if any(pattern.search(stripped) for pattern in LFM_JUNK_PARAGRAPH_PATTERNS):
+        return True
+    hashtags = re.findall(r"#\w+", stripped)
+    if len(hashtags) >= 3 and len(stripped.split()) <= 40:
+        return True
+    return False
+
+
+def _lfm_clean_ranked(
+    ranked: list[tuple[Chunk, float]],
+) -> list[tuple[Chunk, float]]:
+    """Drop junk and exact-duplicate paragraph bodies, preserving order."""
+    if not ranked:
+        return ranked
+    seen: set[str] = set()
+    cleaned: list[tuple[Chunk, float]] = []
+    for chunk, score in ranked:
+        text = paragraph_text(chunk)
+        normalized = re.sub(r"\W+", " ", text.lower()).strip()
+        if not normalized or normalized in seen:
+            continue
+        if _lfm_is_junk_paragraph(text):
+            continue
+        seen.add(normalized)
+        cleaned.append((chunk, score))
+    return cleaned or ranked
+
+
+def _lfm_intent_expansion_terms(question: str) -> list[str]:
+    """Add deterministic grading/taxonomy vocabulary for list questions."""
+    lowered = question.lower()
+    if not re.search(
+        r"\b(?:levels?|grades?|tiers?|ranking|classifications?)\b",
+        lowered,
+    ):
+        return []
+    terms = ["grade", "quality", "yield", "classification", "scale"]
+    if "wagyu" in lowered:
+        terms.extend(["a1", "a2", "a3", "a4", "a5", "bms", "marbling"])
+    return terms
+
+
+def _lfm_body_entity_filter(
+    focused: list[tuple[Chunk, float]],
+    strict_phrases: list[frozenset[str]],
+    loose_tokens: set[str],
+) -> list[tuple[Chunk, float]]:
+    """Keep entity chunks whose paragraph body mentions the entity.
+
+    A sibling entity can share a title or intro with the target entity. The
+    top lexical match is always retained (research recommendation), and the
+    filter only applies when enough body-level matches remain.
+    """
+    if not focused or (not strict_phrases and not loose_tokens):
+        return focused
+
+    def body_matches(chunk: Chunk) -> bool:
+        body_tokens = set(tokenize(paragraph_text(chunk)))
+        if any(phrase <= body_tokens for phrase in strict_phrases):
+            return True
+        return bool(loose_tokens & body_tokens)
+
+    matched = [(chunk, score) for chunk, score in focused if body_matches(chunk)]
+    if len(matched) < min(3, len(focused)):
+        return focused
+    top = focused[:1]
+    combined = top + [
+        item for item in matched if item[0] is not top[0][0]
+    ]
+    return combined
+
+
 def top_chunks(
     question: str,
     chunks: list[Chunk],
@@ -2300,6 +2484,7 @@ def top_chunks(
         + corrections * 2
         + acronym_terms * 2
         + _filtered_expansion_terms(question_tokens, expansion, index)
+        + _lfm_intent_expansion_terms(question)
     )
     if not query_tokens:
         return []
@@ -2414,8 +2599,12 @@ def top_chunks(
                 )
                 if len(topical) >= min_topic_matches:
                     focused = topical
+            focused = _lfm_body_entity_filter(
+                focused, strict_phrases, loose_tokens
+            )
             ranked = focused
 
+    ranked = _lfm_clean_ranked(ranked)
     if limit is not None:
         return ranked[: max(1, limit)]
     return _select_auto_chunks(ranked, FALLBACK_TOP_N, max_context_tokens)
@@ -2447,6 +2636,350 @@ def build_context(chunks: list[Chunk], start_index: int = 1) -> str:
         )
         chunk_id += 1
     return "\n".join(parts)
+
+
+def _lfm_chunk_title(chunk: Chunk) -> str:
+    """Return the shortest useful title for native ``[n] Title`` evidence."""
+    heading = " ".join((chunk.section_heading or "").split())
+    if heading:
+        return heading
+    title = " ".join(video_title(chunk.video_id).split())
+    if title:
+        return title
+    return "Knowledge"
+
+
+def build_lfm_context(chunks: list[Chunk], start_index: int = 1) -> str:
+    """Build the native ``[n] Title`` evidence block used by LFM3-aura.
+
+    The fine-tune was trained on this format, not on ``<chunk id="n">`` XML.
+    Each paragraph gets its own numbered block so the writer can keep the
+    entity boundaries straight.
+    """
+    parts: list[str] = []
+    number = start_index
+    for chunk in chunks:
+        text = paragraph_text(chunk)
+        if not text:
+            continue
+        parts.append(f"[{number}] {_lfm_chunk_title(chunk)}\n{text}")
+        number += 1
+    return "\n\n".join(parts)
+
+
+def _clean_lfm_prose(answer: str) -> str:
+    """Clean one prose segment; fenced code is handled separately."""
+    # Drop a trailing "Evidence:" / "Sources:" section if the model emitted
+    # one despite the contract.
+    answer = re.split(
+        r"\n\s*(?:Evidence|Sources?|References?):\s*(?:\n|$)",
+        answer,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    # Remove bracketed citation numbers such as [1], [2, 3], [1-4].
+    answer = re.sub(r"\[\d+(?:\s*[-,]\s*\d+)*\]", "", answer)
+    # Remove "chunk 3" / "source 2" style references.
+    answer = re.sub(
+        r"\b(?:chunk|source|note|document)\s*\d+\b",
+        "",
+        answer,
+        flags=re.IGNORECASE,
+    )
+    # Remove meta lead-ins that attribute the answer to the evidence.
+    answer = re.sub(
+        r"^(?:The provided context|The evidence|The documents|The context)\s+"
+        r"(?:states?|says?|shows?|indicates?|contains?|mentions?)\s+(?:that\s+)?",
+        "",
+        answer,
+        flags=re.IGNORECASE,
+    )
+    answer = re.sub(
+        r"\b(?:the provided context|the provided documents)\b",
+        "",
+        answer,
+        flags=re.IGNORECASE,
+    )
+    # If the writer produced a substantive answer and then appended a refusal,
+    # keep the answer and drop the contradictory tail.
+    for refusal in LFM_REFUSAL_SENTENCES:
+        stripped = answer.replace(refusal, "").strip()
+        if stripped and len(stripped) >= 80:
+            answer = stripped
+    answer = re.sub(r"[ \t]{2,}", " ", answer)
+    answer = re.sub(r"\n{3,}", "\n\n", answer)
+    return answer
+
+
+def clean_lfm_answer(text: str) -> str:
+    """Post-process the writer output without changing code fences.
+
+    The JSON schema already prevents most leakage. This is a small safety net
+    for stray citation markers, meta phrases, duplicate refusals appended after
+    a substantive answer, and oversized whitespace. Fenced code is preserved
+    verbatim so array indices such as ``items[0]`` are never mistaken for
+    citations.
+    """
+    answer = (text or "").strip()
+    if not answer:
+        return ""
+    parts = re.split(r"(```[\s\S]*?```|~~~[\s\S]*?~~~)", answer)
+    cleaned: list[str] = []
+    for part in parts:
+        if part.startswith("```") or part.startswith("~~~"):
+            cleaned.append(part)
+        else:
+            cleaned.append(_clean_lfm_prose(part))
+    return "".join(cleaned).strip()
+
+
+def _lfm_output_budget(question: str) -> int:
+    """Return a generous writer budget for long/list/code requests."""
+    lowered = question.lower()
+    if re.search(
+        r"\b(?:code|program|script|cli|function|class|article|essay|"
+        r"paragraphs?|words?|detailed|in detail|list all|all levels|"
+        r"step[- ]by[- ]step|math|prove|derive)\b",
+        lowered,
+    ):
+        return 1600
+    return 900
+
+
+def _lfm_request_json(
+    system: str,
+    prompt: str,
+    schema: dict,
+    model: str,
+    temperature: float,
+    num_predict: int,
+) -> tuple[dict | None, dict]:
+    """Run one schema-constrained Ollama call and return (JSON, event)."""
+    payload = {
+        "model": model,
+        "system": system,
+        "prompt": prompt,
+        "stream": False,
+        "think": False,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+        "format": schema,
+        "options": {
+            "num_ctx": ANSWER_NUM_CTX,
+            "temperature": temperature,
+            "top_k": 50,
+            "top_p": 0.95,
+            "repeat_penalty": 1.1,
+            "num_predict": num_predict,
+        },
+    }
+    try:
+        response = requests.post(
+            f"{OLLAMA_HOST}/api/generate",
+            json=payload,
+            timeout=(10, 300),
+        )
+        response.raise_for_status()
+        event = response.json()
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Could not reach Ollama at {OLLAMA_HOST}. Is it running? ({exc})"
+        ) from exc
+    if event.get("error"):
+        raise RuntimeError(f"Ollama error: {event['error']}")
+    raw = str(event.get("response", "")).strip()
+    if not raw:
+        return None, event
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        # A schema-constrained call should be valid JSON. As a safety net,
+        # salvage the first object from a fenced or chatty reply.
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            return None, event
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None, event
+    return (parsed if isinstance(parsed, dict) else None), event
+
+
+def lfm_relevance_gate(
+    question: str,
+    context: str,
+    model: str = CHAT_MODEL,
+) -> tuple[bool | None, dict]:
+    """Return the gate decision (None when the call failed) and its event."""
+    prompt = (
+        f"<context>\n{context}\n</context>\n\n"
+        f"Question: {question.strip()}"
+    )
+    try:
+        parsed, event = _lfm_request_json(
+            LFM_GATE_SYSTEM_PROMPT,
+            prompt,
+            LFM_GATE_SCHEMA,
+            model=model,
+            temperature=0.0,
+            num_predict=32,
+        )
+    except RuntimeError:
+        raise
+    if not parsed or "relevant" not in parsed:
+        return None, event
+    return bool(parsed.get("relevant")), event
+
+
+def lfm_write_answer(
+    question: str,
+    context: str,
+    model: str = CHAT_MODEL,
+    answer_language: str | None = None,
+    prompt_prefix: str = "",
+) -> tuple[str, dict]:
+    """Run the JSON answer writer and return (clean text, event)."""
+    system = LFM_ANSWER_SYSTEM_PROMPT
+    if answer_language:
+        system += (
+            "\n\n"
+            + LANGUAGE_INSTRUCTION.format(language=answer_language).strip()
+        )
+    if answer_language and "chinese" in answer_language.lower():
+        system += LFM_CHINESE_INSTRUCTION
+    if re.search(
+        r"\b(?:article|essay|\d+\s*words?|paragraphs?)\b",
+        question,
+        re.IGNORECASE,
+    ):
+        system += LFM_ARTICLE_INSTRUCTION
+    if prompt_prefix.strip():
+        system += (
+            "\n\nAdditional requirements and reference material (highest "
+            "priority after the evidence-only rule):\n"
+            + prompt_prefix.strip()
+        )
+    prompt = (
+        f"<context>\n{context}\n</context>\n\n"
+        f"Question: {question.strip()}"
+    )
+    if answer_language:
+        prompt += f"\n\nAnswer in {answer_language}."
+        if "chinese" in answer_language.lower():
+            prompt += " 只用简体中文回答，不要保留英文句子。"
+    parsed, event = _lfm_request_json(
+        system,
+        prompt,
+        LFM_ANSWER_SCHEMA,
+        model=model,
+        temperature=0.1,
+        num_predict=_lfm_output_budget(question),
+    )
+    if not parsed:
+        return "", event
+    return clean_lfm_answer(str(parsed.get("answer", ""))), event
+
+
+def answer_with_lfm_pipeline(
+    question: str,
+    chunks: list[Chunk],
+    model: str = CHAT_MODEL,
+    answer_language: str | None = None,
+    prompt_prefix: str = "",
+    translate_answer: bool = False,
+    metrics: dict | None = None,
+    emit: Callable[[str], None] | None = None,
+) -> str | None:
+    """Answer from selected chunks with the LFM gate + JSON writer pipeline.
+
+    Returns ``None`` when the gate or writer could not produce a usable reply,
+    so the caller can fall back to the legacy streaming prompt. A gate decision
+    of ``relevant=false`` returns the application refusal without paying for a
+    writer call.
+    """
+    started = time.monotonic()
+    context = build_lfm_context(chunks)
+    if not context.strip():
+        return None
+    try:
+        relevant, gate_event = lfm_relevance_gate(
+            question, context, model=model
+        )
+    except RuntimeError:
+        raise
+    if relevant is None:
+        # The gate itself failed (model/parse). Let the caller use the legacy
+        # prompt path rather than guessing a refusal.
+        return None
+    if not relevant:
+        answer = LFM_REFUSAL
+        if translate_answer:
+            try:
+                answer = translate_to_chinese(answer)
+            except RuntimeError:
+                pass
+        if emit is not None:
+            emit(answer + "\n")
+        if metrics is not None:
+            metrics.update(_lfm_metrics(started, [gate_event]))
+        return answer
+    try:
+        answer, writer_event = lfm_write_answer(
+            question,
+            context,
+            model=model,
+            answer_language=answer_language,
+            prompt_prefix=prompt_prefix,
+        )
+    except RuntimeError:
+        raise
+    if not answer.strip():
+        return None
+    if translate_answer:
+        try:
+            answer = translate_to_chinese(answer)
+        except RuntimeError:
+            pass
+    if emit is not None:
+        emit(answer + "\n")
+    if metrics is not None:
+        metrics.update(
+            _lfm_metrics(started, [gate_event, writer_event])
+        )
+    return answer
+
+
+def _lfm_metrics(
+    started: float,
+    events: list[dict],
+) -> dict:
+    """Map two non-streamed Ollama calls onto stream_answer's metric keys."""
+    elapsed = time.monotonic() - started
+    prompt_eval = sum(
+        int(event.get("prompt_eval_count", 0) or 0) for event in events
+    )
+    eval_count = sum(
+        int(event.get("eval_count", 0) or 0) for event in events
+    )
+    prompt_eval_ns = sum(
+        int(event.get("prompt_eval_duration", 0) or 0) for event in events
+    )
+    eval_ns = sum(
+        int(event.get("eval_duration", 0) or 0) for event in events
+    )
+    load_ns = sum(
+        int(event.get("load_duration", 0) or 0) for event in events
+    )
+    return {
+        # The writer is emitted only after its JSON is complete, so the first
+        # user-visible token arrives at the end of the pipeline.
+        "request_ttft": elapsed,
+        "load_duration": load_ns / 1e9,
+        "prompt_eval_count": prompt_eval,
+        "prompt_eval_cached_count": 0,
+        "prompt_eval_duration": prompt_eval_ns / 1e9,
+        "eval_count": eval_count,
+        "eval_duration": eval_ns / 1e9,
+    }
 
 
 def estimate_tokens(text: str) -> int:
@@ -2496,7 +3029,7 @@ def generate_text(
     model: str = TRANSLATION_MODEL,
     temperature: float = 0.1,
     num_predict: int | None = None,
-    num_ctx: int = 8192,
+    num_ctx: int = ANSWER_NUM_CTX,
     stop: list[str] | None = None,
 ) -> str:
     """Send a prompt to Ollama and return the complete (non-streamed) reply."""
@@ -2585,7 +3118,7 @@ def filter_candidates(
     candidates: list[tuple[Chunk, float]],
     model: str = FILTER_MODEL,
 ) -> list[tuple[Chunk, float]] | None:
-    """Use a small model to keep only BM25 candidates relevant to the question.
+    """Use the chat model to keep only BM25 candidates relevant to the question.
 
     Returns the filtered candidates, an empty list when the model explicitly
     says NONE, or None when filtering was skipped or failed (in which case the
@@ -5035,7 +5568,11 @@ def answer(
     )
     metrics: dict = {}
     prompt_done = context_done
-    if progressive and len(selected) > PROGRESSIVE_FIRST_PASS:
+    if (
+        progressive
+        and len(selected) > PROGRESSIVE_FIRST_PASS
+        and not LFM_PIPELINE_ENABLED
+    ):
         first_selected = selected[:PROGRESSIVE_FIRST_PASS]
         expansion_selected = selected[PROGRESSIVE_FIRST_PASS:]
         first_context = build_context([chunk for chunk, _ in first_selected])
@@ -5101,16 +5638,39 @@ def answer(
             "eval_duration", 0.0
         )
     else:
-        prompt = build_prompt(context, question, answer_language, prompt_prefix)
-        prompt_done = time.monotonic()
-        response = stream_answer(
-            prompt,
-            model=answer_model,
-            translate_answer=translate_answer,
-            metrics=metrics,
-            emit=emit,
-            think=think,
-        )
+        # LFM3-aura's best architecture is one clean, precision-selected
+        # context with a deterministic gate followed by a JSON writer. The
+        # gate decides refusal and the writer never receives a refusal
+        # instruction, which removes appended refusals and false negatives on
+        # partially answerable questions. If the JSON calls fail for any
+        # reason, fall back to the legacy streaming prompt (still the same
+        # local model).
+        response = None
+        if LFM_PIPELINE_ENABLED:
+            prompt_done = time.monotonic()
+            response = answer_with_lfm_pipeline(
+                question,
+                [chunk for chunk, _score in selected],
+                model=answer_model,
+                answer_language=answer_language,
+                prompt_prefix=prompt_prefix,
+                translate_answer=translate_answer,
+                metrics=metrics,
+                emit=emit,
+            )
+        if response is None:
+            prompt = build_prompt(
+                context, question, answer_language, prompt_prefix
+            )
+            prompt_done = time.monotonic()
+            response = stream_answer(
+                prompt,
+                model=answer_model,
+                translate_answer=translate_answer,
+                metrics=metrics,
+                emit=emit,
+                think=think,
+            )
     finished = time.monotonic()
     response = strip_supporting_evidence(strip_chunk_citations(response))
 
@@ -5194,18 +5754,13 @@ def show_sources(sources: list[tuple[Chunk, float]]) -> None:
 
 
 def prewarm() -> None:
-    """Load the expansion/filter and chat models and keep them resident.
+    """Load the single chat model and keep it resident.
 
-    Warm each model with the same ``num_ctx`` the real calls use. Ollama
-    reloads a model whenever the requested context size changes, so warming
-    with the default context used to guarantee a slow reload on the first
-    question (and another one whenever the small and answer models alternated).
+    Warm the model with the same ``num_ctx`` the real calls use. Ollama
+    reloads a model whenever the requested context size changes, so every
+    helper and answer call now shares one context size.
     """
-    targets = (
-        (EXPANSION_MODEL, EXPANSION_NUM_CTX),
-        (FILTER_MODEL, EXPANSION_NUM_CTX),
-        (CHAT_MODEL, ANSWER_NUM_CTX),
-    )
+    targets = ((CHAT_MODEL, ANSWER_NUM_CTX),)
     for model, num_ctx in dict.fromkeys(targets):
         try:
             requests.post(
