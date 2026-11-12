@@ -5673,6 +5673,7 @@ function addNewsEvent(entry, data) {
       learnable: data.learnable !== undefined
         ? Boolean(data.learnable)
         : !(data.docs || data.mdn || entry.newsDocs),
+      learnNoun: String(data.learn_noun || ""),
       entry,
       podcast: null,
       title: data.title || "(untitled)",
@@ -9929,7 +9930,14 @@ function renderNewsAction(item) {
   newsActionBtnEl.disabled = false;
   newsActionBtnEl.className = "video-action-btn";
   newsActionBtnEl.onclick = null;
-  const noun = item.docs ? "article" : "story";
+  const noun = item.learnNoun || (item.docs ? "article" : "story");
+  // Documentation items (Reddit posts and Wikivoyage articles) replace their
+  // search extract with the full body when the modal opens. Do not offer
+  // Learn until that on-demand fetch has succeeded, so the short preview or a
+  // failed extraction is never stored as the learned article.
+  const needsArticleBody = Boolean(item.docs && item.articleApi);
+  const bodyReady = (Array.isArray(item.blocks) && item.blocks.length > 0)
+    || (Array.isArray(item.paragraphs) && item.paragraphs.length > 0);
 
   if (item.learning) {
     newsActionNoteEl.textContent = `Learning this ${noun}…`;
@@ -9950,12 +9958,7 @@ function renderNewsAction(item) {
     newsActionNoteEl.textContent = `Learn failed: ${item.learnError}`;
     newsActionBtnEl.textContent = "Retry";
     newsActionBtnEl.title = `Retry learning this ${noun}`;
-  } else if (
-    item.docs
-    && item.articleApi
-    && item.articleError
-    && !(Array.isArray(item.blocks) && item.blocks.length)
-  ) {
+  } else if (needsArticleBody && item.articleError && !item.articleFetched) {
     // Do not silently learn the short search extract when the complete
     // destination article could not be loaded.
     newsActionNoteEl.textContent =
@@ -9969,10 +9972,20 @@ function renderNewsAction(item) {
       ensureNewsArticle(item);
     };
     return;
-  } else if (!item.complete || item.articleLoading) {
+  } else if (
+    !item.complete
+    || item.articleLoading
+    || (needsArticleBody && !item.articleFetched)
+  ) {
     newsActionNoteEl.textContent = item.articleLoading
       ? `Loading the full ${noun} text…`
       : `Waiting for the full ${noun} text…`;
+    newsActionBtnEl.textContent = "Learn";
+    newsActionBtnEl.disabled = true;
+    return;
+  } else if (needsArticleBody && !bodyReady) {
+    newsActionNoteEl.textContent =
+      `The full ${noun} has no readable text to learn.`;
     newsActionBtnEl.textContent = "Learn";
     newsActionBtnEl.disabled = true;
     return;

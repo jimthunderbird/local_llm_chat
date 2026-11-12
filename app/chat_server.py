@@ -60,8 +60,9 @@ Endpoints:
                                   Go, Rust, or PHP
     POST /api/snippet_question   SSE: answer a free-form question about a whole
                                   code snippet
-    POST /api/news_learn         store one /news story and build its learned
-                                  trunks in .chat/articles_cache
+    POST /api/news_learn         store one /news story or loaded Reddit post
+                                  and build its learned trunks in
+                                  .chat/articles_cache
     GET  /api/news_status        ?id=<news_id> whether one story is learned
     GET  /api/news_item          ?id=<news_id> full learned story for the modal
     GET  /api/news_article       ?url=<article_url> fetch a story body for the
@@ -6301,7 +6302,17 @@ def learn_news_article(payload: dict) -> dict:
         else:
             raise ValueError("The news story has no readable paragraphs")
 
-    news_id = news_id_for_item(payload)
+    # The result list already assigned a stable id from the feed entry. Reuse
+    # it so a learned story keeps the same id when its modal fetches and
+    # rewrites the link (for example a Google News wrapper resolving to the
+    # publisher's canonical URL). Otherwise the next list request would offer
+    # Learn again for an already learned story.
+    requested_id = str(payload.get("news_id") or "").strip()
+    news_id = (
+        requested_id
+        if NEWS_ID_PATTERN.fullmatch(requested_id)
+        else news_id_for_item(payload)
+    )
     link = str(payload.get("link") or "").strip()
     source = str(payload.get("source") or "").strip()
     section = str(payload.get("section") or "").strip()
@@ -14154,7 +14165,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         Usage: /reddit <keywords>
         The result list reuses the /news cards and detail modal. Opening a post
         fetches its body and comments through /api/reddit_article, which uses
-        Reddit's public .json endpoint with an Atom RSS fallback.
+        Reddit's public .json endpoint with an Atom RSS fallback. Once the full
+        thread has loaded, the modal offers Learn and then an isolated Chat,
+        exactly like a learned /news story.
         """
         keyword = " ".join(argument.split())
         if keyword.lower().startswith("search "):
@@ -14188,7 +14201,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             payload["article_api"] = "/api/reddit_article"
             payload["docs"] = True
             payload["docs_label"] = "Reddit"
-            payload["learnable"] = False
+            # A Reddit thread is article-like: once the server has extracted
+            # the post body and comments, it can be learned into trunks and
+            # chatted about in the modal just like a /news story.
+            payload["learnable"] = True
+            payload["learn_noun"] = "post"
             payload["images"] = []
             return payload
 

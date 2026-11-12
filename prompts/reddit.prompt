@@ -33,6 +33,13 @@ knowledge {
   }
 }
 
+task (completed) {
+  learn from /news command and news loading feature:
+  - add similar "learn" feature for reddit post
+  - only show the "learn" after the reddit post is successfully loaded
+  - after a post is learned, we can then chat about it, similar to the news
+}
+
 task.article_loading_improvement (completed) {
   when opening a reddit post, can we do this?
   use iframe to actually load the reddit's post
