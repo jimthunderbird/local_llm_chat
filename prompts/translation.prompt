@@ -1,0 +1,5 @@
+CHINESE_TRANSLATION_MODEL: ollama local model qwen3:8b 
+
+task.chinese_translation (completed) {
+  for translation to chinese, please use {CHINESE_TRANSLATION_MODEL}  
+}

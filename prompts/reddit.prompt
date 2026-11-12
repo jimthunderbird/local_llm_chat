@@ -1,0 +1,49 @@
+knowledge {
+  extract_reddit_post_content {
+    The Public .json Endpoint (Fastest / No API Key)
+    Reddit exposes a JSON representation for public threads by appending .json to the end of the URL (before any query parameters). You must pass a custom, descriptive User-Agent header, or Reddit will block the request with a 429 Too Many Requests error.
+
+    ```
+    import requests
+
+    url = "https://www.reddit.com/r/OpenAI/comments/1xufjfc/jensen_huang_just_resigned/.json"
+    headers = {
+      "User-Agent": "python:reddit-post-fetcher:v1.0 (by /u/your_reddit_username)"
+    }
+
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    data = response.json()
+
+    # data[0] contains the post metadata and body
+    post = data[0]["data"]["children"][0]["data"]
+    print("Title:", post["title"])
+    print("Author:", post["author"])
+    print("Score:", post["score"])
+    print("Body:", post["selftext"])
+    print("-" * 40)
+
+    # data[1] contains the top-level comments
+    comments = data[1]["data"]["children"]
+    for comment in comments:
+    if comment["kind"] == "t1":  # t1 = comment (skips 'more' pagination objects)
+    c_data = comment["data"]
+    print(f"{c_data['author']}: {c_data['body']}\n")
+    ```
+  }
+}
+
+task.article_loading_improvement (completed) {
+  when opening a reddit post, can we do this?
+  use iframe to actually load the reddit's post
+  then extract the main content, article content and comments?
+}
+
+task (completed) {
+  create command: /reddit <keyword> {
+    - use google rss field endpoint, similar to /news search <keywords> to extract search result
+    - for each result entry's link {
+      - learn from {knowledge.extract_reddit_post_content} and get the post content in the article popup
+    }
+  }
+}

@@ -10,6 +10,17 @@ restrictions:
 - if a task is persistent, DO NOT mark it as completed
 
 group app/chat.html and app/chat_server.py {
+  task (persistent) {
+    complete tasks in ./prompts/reddit.prompt
+  }
+
+  task (persistent) {
+    complete tasks in ./prompts/stackoverflow.prompt
+  }
+
+  task (persistent) {
+    complete tasks in ./prompts/translation.prompt
+  }
 
   task (persistent) {
     complete tasks in ./prompts/article_loading.prompt
@@ -98,6 +109,10 @@ group app/chat.html and app/chat_server.py {
   }
 
   document_backed_tags:rust, golang, php
+
+  task (completed) {
+    create a makefile, so that i can start app/chat_server.py with: make start
+  }
 
   task (completed) {
     DO NOT display "ornith:35b" in the chat window UI

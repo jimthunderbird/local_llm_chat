@@ -154,6 +154,12 @@ CODING_MODEL = ANSWER_MODEL
 SIMPLE_ANSWER_MODEL = LFM_MODEL
 # Local model used to translate Simplified Chinese questions for retrieval.
 TRANSLATION_MODEL = LFM_MODEL
+# Local model used for translation into Simplified Chinese, as required by
+# ./prompts/translation.prompt. Kept separate from the helper model because
+# qwen3:8b produces noticeably better Chinese than the 1.7B helper.
+CHINESE_TRANSLATION_MODEL = os.environ.get(
+    "OLLAMA_CHINESE_TRANSLATION_MODEL", "qwen3:8b"
+)
 # Local model used by /dict to generate definitions.
 DICT_MODEL = LFM_MODEL
 FALLBACK_TOP_N = 8
@@ -1213,7 +1219,9 @@ TEMPORAL_QUESTION_PATTERN = re.compile(
     r"\b(?:latest|newest|most\s+recent|recent|recently|current(?:ly)?|"
     r"right\s+now|nowadays|today|tonight|this\s+(?:week|month|year)|"
     r"as\s+of|so\s+far|up[- ]to[- ]date|breaking|status|update|updates|"
-    r"news|happening|happened|still|yet)\b"
+    r"news|happening|happened|still|yet|timeline|chronolog(?:y|ical)|"
+    r"sequence\s+of\s+events)\b"
+    r"|\bwhat\s+(?:are\s+)?(?:the\s+)?(?:latest\s+)?developments?\b"
     r"|\bhow\s+(?:is|are|'s)\b.{0,80}\bdoing\b"
     r"|\bwhat(?:'s|\s+is)\s+(?:going\s+on|happening|the\s+status|new)\b",
     re.IGNORECASE | re.DOTALL,
@@ -1283,6 +1291,27 @@ def chunk_published_at(chunk: Chunk) -> float:
 def format_published_date(timestamp: float) -> str:
     """Format a publication timestamp for the answer context."""
     return time.strftime("%Y-%m-%d", time.gmtime(timestamp))
+
+
+def order_evidence_by_recency(
+    evidence: list[tuple[Chunk, float]],
+) -> list[tuple[Chunk, float]]:
+    """Put the newest dated evidence first, keeping undated sources last.
+
+    Retrieval for a time-sensitive question can gather evidence over several
+    rounds. Each round is date-ordered, but a later round can still append an
+    older article after a newer one. Ordering the final selection by
+    publication date keeps the latest status at the top of the context, where
+    the answer model treats it as authoritative.
+    """
+    if len(evidence) < 2:
+        return evidence
+    dated = [item for item in evidence if chunk_published_at(item[0]) > 0.0]
+    if not dated:
+        return evidence
+    undated = [item for item in evidence if chunk_published_at(item[0]) <= 0.0]
+    dated.sort(key=lambda item: chunk_published_at(item[0]), reverse=True)
+    return dated + undated
 
 
 def _temporal_rerank(
@@ -2110,7 +2139,9 @@ def chat_status_report(
         f"  models:      {ANSWER_MODEL} "
         "(chat, math tutor, code generation)",
         f"               {CHAT_MODEL} "
-        "(query expansion, filter, translation, dictionary)",
+        "(query expansion, filter, translation to English, dictionary)",
+        f"               {CHINESE_TRANSLATION_MODEL} "
+        "(translation to Simplified Chinese)",
         f"  Ollama host: {OLLAMA_HOST}",
         f"  scope:       {scope}",
         f"  loaded:      {len(chunks):,} trunks from {loaded_label}",
@@ -3829,7 +3860,9 @@ def translate_to_english(text: str, model: str = TRANSLATION_MODEL) -> str:
     return translation
 
 
-def translate_to_chinese(text: str, model: str = TRANSLATION_MODEL) -> str:
+def translate_to_chinese(
+    text: str, model: str = CHINESE_TRANSLATION_MODEL
+) -> str:
     """Translate English text into Simplified Chinese."""
     translation = clean_translation(
         generate_text(ANSWER_TRANSLATION_PROMPT.format(text=text), model=model)
@@ -4123,7 +4156,8 @@ def stream_answer(
     """Send the prompt to Ollama and stream the generated answer to stdout.
 
     When ``translate_answer`` is true the English text is not printed.
-    Instead, completed sentence groups are translated with TRANSLATION_MODEL
+    Instead, completed sentence groups are translated with
+    CHINESE_TRANSLATION_MODEL
     and printed as Simplified Chinese while the answer is still streaming.
     The full English answer is always returned.
 
@@ -6303,6 +6337,13 @@ def answer(
     if not selected:
         _log("No trunks available to use as context.")
         return None, []
+
+    # Temporal answers are synthesized from dated news. Make the final
+    # selection newest-first even when the evidence arrived over several
+    # retrieval rounds, so the latest report is not buried under an older
+    # article that still describes a superseded status.
+    if question_is_time_sensitive(question):
+        selected = order_evidence_by_recency(selected)
 
     context = build_context([chunk for chunk, _ in selected])
     context_done = time.monotonic()

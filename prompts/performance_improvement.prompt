@@ -1,4 +1,15 @@
 task (completed) {
+  when running app/chat_server.py, if there is one process already running, kill that process first before starting the server
+}
+
+task (completed) {
+  question: give me a timeline of development on jensen huang's scandal
+  expect: the answer should not have contradicting information
+  actual: the answer mentioned "Reports surfaced regarding Jensen Huang's resignation from Nvidia", that is correct, but later on, it mentioned: "Despite the scandal, the board has expressed confidence in Huang's leadership, and he remains Nvidia's CEO as of the latest reports"
+  please find a systematic way
+}
+
+task (completed) {
   question: how is jensen huang doing
   expect: the answer should mention that he has resigned
   actual: Despite these allegations, Huang is reportedly keeping his position, salary, and benefits at Nvidia.

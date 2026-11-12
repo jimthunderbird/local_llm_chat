@@ -518,7 +518,7 @@ const ARTICLE_CACHE_FAILURE_TTL = 3600; // one hour for articles we could not lo
 // failed mirror lookup on the next news request instead of hiding the story
 // for a full hour.
 const ARTICLE_READER_FAILURE_TTL = 120;
-const ARTICLE_EXTRACTOR_VERSION = 10;  // bump when article extraction logic changes
+const ARTICLE_EXTRACTOR_VERSION = 11;  // bump when article extraction logic changes
 const ARTICLE_MIN_BODY_CHARS = 1200;   // a container this large is a real body, not metadata
 const ARTICLE_PARTIAL_BODY_CHARS = 1200; // shorter fallback bodies may be previews
 // A preview body is better than an empty modal, but it should not be treated
@@ -549,6 +549,24 @@ const ARTICLE_READER_FALLBACKS = [
         'https://freedium-mirror.cfd/{url}',
     ],
 ];
+// Some sites expose stories through an app-only URL that is protected by a
+// bot challenge while the same story has a public canonical page. Dealroom's
+// app note URLs (/news/note/<slug>) are Cloudflare-challenged, but its public
+// news sitemaps list the canonical /news/<id>-<slug>/ pages. Keyed by host
+// suffix; the lookup uses the story title (or the note slug) to find the
+// matching canonical URL before the normal article recovery chain runs.
+const ARTICLE_CANONICAL_LOOKUPS = [
+    'app.dealroom.co' => [
+        'sitemap' => 'https://dealroom.co/news/news-sitemap.xml',
+        'index' => 'https://dealroom.co/news/sitemap.xml',
+        'host' => 'dealroom.co',
+        'path_prefix' => '/news/',
+    ],
+];
+// Search at most about a year of weekly sitemaps after the recent-news
+// sitemap misses, so an old note still resolves without fetching every week
+// in the archive.
+const ARTICLE_CANONICAL_MAX_WEEKLY_SITEMAPS = 60;
 
 /**
  * Print a diagnostic line to stderr without disturbing the event stream.
@@ -2027,6 +2045,183 @@ function articleReaderFallbackUrls(string $url): array
 }
 
 /**
+ * Return the canonical-URL lookup config for an app-only article URL.
+ *
+ * @return array{sitemap:string,index:string,host:string,path_prefix:string}|null
+ */
+function articleCanonicalLookup(string $url): ?array
+{
+    $host = strtolower((string)parse_url($url, PHP_URL_HOST));
+    if ($host === '') {
+        return null;
+    }
+    foreach (ARTICLE_CANONICAL_LOOKUPS as $domain => $config) {
+        if ($host === $domain || str_ends_with($host, '.' . $domain)) {
+            return $config;
+        }
+    }
+    return null;
+}
+
+/**
+ * Extract every <loc> URL from a sitemap or sitemap index document.
+ *
+ * @return list<string>
+ */
+function articleSitemapLocations(string $xml): array
+{
+    if (trim($xml) === '') {
+        return [];
+    }
+    $previous = libxml_use_internal_errors(true);
+    $document = new DOMDocument();
+    $loaded = $document->loadXML(
+        $xml,
+        LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING
+    );
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+    if (!$loaded) {
+        return [];
+    }
+
+    $locations = [];
+    foreach ($document->getElementsByTagName('loc') as $node) {
+        $location = trim((string)$node->textContent);
+        if ($location !== '' && preg_match('#^https?://#i', $location)) {
+            $locations[] = $location;
+        }
+    }
+    return $locations;
+}
+
+/**
+ * Turn a URL slug into a headline-like string so a note slug can be matched
+ * against canonical story slugs from a sitemap.
+ */
+function articleSlugTitle(string $url): string
+{
+    $path = (string)parse_url(trim($url), PHP_URL_PATH);
+    $slug = basename(rtrim($path, '/'));
+    // Canonical Dealroom slugs start with the story id, e.g. 172164-title.
+    $slug = preg_replace('/^\d+-/', '', $slug) ?? $slug;
+    return normalizeText(str_replace(['-', '_'], ' ', $slug));
+}
+
+/**
+ * Find the public canonical page for an app-only article URL using the
+ * publisher's sitemap. Returns an empty string when no confident match exists.
+ */
+function articleCanonicalUrlFromSitemaps(
+    string $url,
+    string $title,
+    string $sourceKey
+): string {
+    $config = articleCanonicalLookup($url);
+    if ($config === null) {
+        return '';
+    }
+
+    $wanted = articleCoreTitle($title !== '' ? $title : articleSlugTitle($url));
+    if (count(articleTitleWords($wanted)) < 2) {
+        return '';
+    }
+
+    $canonicalHost = strtolower($config['host']);
+    $pathPrefix = $config['path_prefix'];
+    $bestUrl = '';
+    $bestScore = 0.0;
+    $consider = static function (string $candidate) use (
+        $wanted,
+        $canonicalHost,
+        $pathPrefix,
+        &$bestUrl,
+        &$bestScore
+    ): void {
+        if (!preg_match('#^https?://#i', $candidate)) {
+            return;
+        }
+        $parts = parse_url($candidate);
+        if (!is_array($parts)) {
+            return;
+        }
+        $host = strtolower((string)($parts['host'] ?? ''));
+        if ($host !== $canonicalHost) {
+            return;
+        }
+        $path = (string)($parts['path'] ?? '/');
+        if (!str_starts_with($path, $pathPrefix)) {
+            return;
+        }
+        $score = articleTitleSimilarity($wanted, articleSlugTitle($candidate));
+        if ($score > $bestScore) {
+            $bestScore = $score;
+            $bestUrl = $candidate;
+        }
+    };
+
+    $recent = fetchUrl(
+        $config['sitemap'],
+        'application/xml, text/xml;q=0.9, */*;q=0.8',
+        $sourceKey,
+        0,
+        true,
+        15
+    );
+    if (is_string($recent)) {
+        foreach (articleSitemapLocations($recent) as $candidate) {
+            $consider($candidate);
+        }
+    }
+    if ($bestScore >= 0.60) {
+        return $bestUrl;
+    }
+
+    // The recent-news sitemap only covers the last day or two. For an older
+    // note, scan the weekly sitemaps newest-first and stop as soon as a
+    // confident match is found.
+    $index = fetchUrl(
+        $config['index'],
+        'application/xml, text/xml;q=0.9, */*;q=0.8',
+        $sourceKey,
+        0,
+        true,
+        15
+    );
+    if (!is_string($index)) {
+        return '';
+    }
+    $weekly = articleSitemapLocations($index);
+    foreach (array_chunk($weekly, 8) as $batchIndex => $batch) {
+        if ($batchIndex * 8 >= ARTICLE_CANONICAL_MAX_WEEKLY_SITEMAPS) {
+            break;
+        }
+        $requests = [];
+        foreach ($batch as $position => $sitemapUrl) {
+            $requests[$position] = [
+                'url' => $sitemapUrl,
+                'accept' => 'application/xml, text/xml;q=0.9, */*;q=0.8',
+            ];
+        }
+        $pages = fetchUrlsConcurrently($requests, $sourceKey);
+        foreach ($pages as $page) {
+            $body = (string)($page['body'] ?? '');
+            if ($body === '') {
+                continue;
+            }
+            foreach (articleSitemapLocations($body) as $candidate) {
+                $consider($candidate);
+            }
+        }
+        if ($bestScore >= 0.60) {
+            return $bestUrl;
+        }
+    }
+
+    return '';
+}
+
+/**
  * Recover a blocked article through a public reader mirror.
  *
  * @return array{paragraphs:list<string>, image:string}|null
@@ -3500,6 +3695,18 @@ function enrichStoryContent(
         if (isNonArticleUrl($fetchLink)) {
             unset($stories[$index], $originals[$index]);
             continue;
+        }
+        // App-only story URLs can be bot-challenged even though the same
+        // story has a public canonical page. Resolve it before fetching so the
+        // normal article extractor and fallbacks see readable markup.
+        $canonical = articleCanonicalUrlFromSitemaps(
+            $fetchLink,
+            $titles[$index] ?? '',
+            $sourceKey
+        );
+        if ($canonical !== '') {
+            $resolved[$index] = $canonical;
+            $fetchLink = $canonical;
         }
         $pageRequests[$index] = ['url' => $fetchLink];
     }

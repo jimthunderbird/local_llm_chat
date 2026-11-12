@@ -1,0 +1,39 @@
+knowledge {
+  tag_search {
+    curl --compressed -G "https://stackexchange.com" \
+    --data-urlencode "order=desc" \
+    --data-urlencode "sort=creation" \
+    --data-urlencode "tagged=python" \
+    --data-urlencode "site=stackoverflow" \
+    --data-urlencode "pagesize=5"
+  }
+
+  keyword_search {
+    curl --compressed -G "https://stackexchange.com" \
+    --data-urlencode "order=desc" \
+    --data-urlencode "sort=creation" \
+    --data-urlencode "q=python programming" \
+    --data-urlencode "site=stackoverflow" \
+    --data-urlencode "pagesize=5"
+  }
+
+  load_answer_to_a_question {
+    https://api.stackexchange.com/2.3/questions/{question_id}/answers?site=stackoverflow&filter=withbody
+    example: https://api.stackexchange.com/2.3/questions/79093645/answers?site=stackoverflow&filter=withbody
+  }
+}
+
+task (completed) {
+  in the ui, in the search result of /stackoverflow command, when click on each entry's url, learn from {knowlege.load_answer_to_a_question}, in the question popup modal, render the code block nicely
+}
+
+task (completed) {
+  change default behavior for /stackoverflow search <keyword>, learn from {knowlege.keyword_search}, sort by creation in descending order
+}
+
+task (completed) {
+  create new command /stackoverflow tag <tag>: learn from {knowledge.tag_search}
+  create new command /stackoverflow search <keyword>: learn from {knowledge.keyword_search}
+
+  the ui/ux should be very similar to the /news search <keyword>
+}

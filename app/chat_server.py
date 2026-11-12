@@ -3,7 +3,8 @@
 
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, transcript/article scoping, history, /memory,
-/status, /sources, /benchmark, /youtube, /news, /mdn, /googlenews, /medium,
+/status, /sources, /benchmark, /youtube, /news, /mdn, /stackoverflow,
+/reddit, /googlenews, /medium,
 /gutenberg, /openlibrary, /changelog, /wikivoyage, /wiki, /wiki_article,
 /article, /dict, and /ask. The browser is a
 pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
@@ -18,7 +19,8 @@ Usage:
 Endpoints:
     GET  /                       app/chat.html
     GET  /api/state              current chat state + command list + history
-    GET  /api/autocomplete       ?kind=commands|transcripts|paths&q=...
+    GET  /api/autocomplete       ?kind=commands|transcripts|paths|
+                                  stackoverflow_subcommands&q=...
     GET  /api/wiki?word=...      JSON Wikipedia summary
     GET  /api/transcripts?q=...  ag title search results
     GET  /api/changelog_file     ?name=<summary.html> one completed-task page
@@ -42,7 +44,9 @@ Endpoints:
                                   official docs. /news streams "news" events
                                   from CNN, Yahoo Finance,
                                   KQED, SFGATE, SF Bay View, Mission Local,
-                                  Richmond Review, and TechCrunch).
+                                  Richmond Review, and TechCrunch.
+                                  /stackoverflow tag|search also streams a
+                                  /news-style result list.)
     POST /api/dict               SSE: dictionary + latest-answer usage stream
     POST /api/translate          SSE: paragraph-by-paragraph Simplified Chinese
                                   translation of an answer
@@ -62,6 +66,11 @@ Endpoints:
     GET  /api/news_item          ?id=<news_id> full learned story for the modal
     GET  /api/news_article       ?url=<article_url> fetch a story body for the
                                   detail modal when the list feed had no body
+    GET  /api/reddit_article     ?url=<post_url> fetch a Reddit post body and
+                                  comments for the /reddit detail modal
+    GET  /api/stackoverflow_answers
+                                  ?id=<question_id> fetch a question's answers
+                                  for the /stackoverflow detail modal
     GET  /api/wikivoyage_article ?url=<article_url> fetch a complete Wikivoyage
                                   article (headings, text, lists, and figures)
                                   for the /wikivoyage detail modal
@@ -100,6 +109,7 @@ import os
 import re
 import selectors
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -109,6 +119,7 @@ import zipfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import redirect_stderr, redirect_stdout
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, NamedTuple
@@ -171,6 +182,8 @@ WEB_COMMANDS = {
     "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
     "/mathtutor": "upload Microsoft Word test papers and practice similar math problems with detailed answers",
     "/changelog": "list completed-task summaries from .logs (newest first); click one to read it",
+    "/stackoverflow": "search Stack Overflow: /stackoverflow tag <tag> or /stackoverflow search <keywords>",
+    "/reddit": "search Reddit posts by keywords: /reddit <keywords>; click a post to read it",
 }
 
 # News sources accepted by /news and completed by news_fetch.php.
@@ -645,6 +658,538 @@ def search_mdn_docs(keyword: str, limit: int = MDN_RESULT_LIMIT) -> list[dict]:
             }
         )
     return results
+
+
+# /stackoverflow tag <tag> and /stackoverflow search <keywords> query the
+# public Stack Exchange API and render the questions as a /news-style result
+# list. Each card carries the question body, score, answer count, tags, and a
+# link to the question on stackoverflow.com.
+STACKOVERFLOW_API_URL = "https://api.stackexchange.com/2.3"
+STACKOVERFLOW_SITE = "stackoverflow"
+STACKOVERFLOW_BASE_URL = "https://stackoverflow.com"
+STACKOVERFLOW_RESULT_LIMIT = 10
+STACKOVERFLOW_BODY_PARAGRAPH_LIMIT = 24
+STACKOVERFLOW_TAG_LIMIT = 5
+STACKOVERFLOW_ANSWER_LIMIT = 8
+
+
+class _StackOverflowBodyParser(HTMLParser):
+    """Turn one Stack Overflow HTML body into ordered reader blocks.
+
+    Unlike a plain-text conversion, this keeps ``<pre><code>`` snippets as
+    separate blocks with their language hint. The browser renders those blocks
+    as fenced code, so answers keep their indentation and can be copied.
+    """
+
+    _HEADINGS = {f"h{level}": level for level in range(1, 7)}
+    _BLOCK_TAGS = {
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "div",
+        "dl",
+        "dt",
+        "dd",
+        "figcaption",
+        "figure",
+        "hr",
+        "p",
+        "section",
+        "table",
+        "tr",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.blocks: list[dict] = []
+        self._text: list[str] = []
+        self._heading_level = 0
+        self._heading_text: list[str] = []
+        self._in_pre = False
+        self._pre_text: list[str] = []
+        self._pre_language = ""
+        self._list_stack: list[dict] = []
+        self._li_text: list[str] | None = None
+
+    @staticmethod
+    def _normalize(value: str) -> str:
+        text = (
+            str(value or "")
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .replace("\xa0", " ")
+        )
+        text = re.sub(r"[ \t\f\v]+", " ", text)
+        text = re.sub(r" *\n *", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    @staticmethod
+    def _code_language(attrs: list[tuple[str, str | None]]) -> str:
+        merged = " ".join(
+            str(value or "")
+            for name, value in attrs
+            if name in {"class", "data-lang", "lang"}
+        )
+        match = re.search(
+            r"(?:^|\s)(?:lang(?:uage)?-)([A-Za-z0-9_+#.-]+)", merged
+        )
+        return match.group(1).lower() if match else ""
+
+    def _target(self) -> list[str]:
+        if self._heading_level:
+            return self._heading_text
+        if self._li_text is not None:
+            return self._li_text
+        return self._text
+
+    def _append(self, text: str) -> None:
+        if text:
+            self._target().append(text)
+
+    def _flush_text(self) -> None:
+        text = self._normalize("".join(self._text))
+        self._text.clear()
+        if text:
+            self.blocks.append({"type": "paragraph", "text": text})
+
+    def _flush_heading(self) -> None:
+        text = self._normalize("".join(self._heading_text))
+        level = self._heading_level
+        self._heading_text.clear()
+        self._heading_level = 0
+        if text and level:
+            self.blocks.append(
+                {"type": "heading", "level": level, "text": text}
+            )
+
+    def _flush_li(self) -> None:
+        if self._li_text is None:
+            return
+        text = self._normalize("".join(self._li_text))
+        self._li_text = None
+        if text and self._list_stack:
+            self._list_stack[-1]["items"].append(text)
+
+    def _flush_pre(self) -> None:
+        text = (
+            "".join(self._pre_text)
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
+            .strip("\n")
+        )
+        language = self._pre_language
+        self._pre_text.clear()
+        self._pre_language = ""
+        self._in_pre = False
+        if text:
+            self.blocks.append(
+                {"type": "code", "text": text, "language": language}
+            )
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        tag = tag.lower()
+        if tag == "pre":
+            self._flush_text()
+            self._in_pre = True
+            self._pre_text.clear()
+            self._pre_language = self._code_language(attrs)
+            return
+        if self._in_pre:
+            if tag == "code":
+                language = self._code_language(attrs)
+                if language:
+                    self._pre_language = language
+            return
+        if tag == "br":
+            self._append("\n")
+            return
+        if tag in self._HEADINGS:
+            self._flush_text()
+            self._heading_level = self._HEADINGS[tag]
+            self._heading_text.clear()
+            return
+        if tag in {"ul", "ol"}:
+            self._flush_li()
+            self._flush_text()
+            self._list_stack.append(
+                {"ordered": tag == "ol", "items": []}
+            )
+            return
+        if tag == "li":
+            self._flush_li()
+            self._flush_text()
+            self._li_text = []
+            return
+        if tag in self._BLOCK_TAGS:
+            self._flush_text()
+            return
+        if tag in {"td", "th"}:
+            self._append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "pre":
+            if self._in_pre:
+                self._flush_pre()
+            return
+        if self._in_pre:
+            return
+        if tag in self._HEADINGS:
+            self._flush_heading()
+            return
+        if tag == "li":
+            self._flush_li()
+            return
+        if tag in {"ul", "ol"}:
+            self._flush_li()
+            if not self._list_stack:
+                return
+            context = self._list_stack.pop()
+            items = [item for item in context["items"] if item]
+            if not items:
+                return
+            if self._list_stack:
+                # Keep nested lists inside the parent item so the reader
+                # still sees them in source order without a broken list.
+                marker = "1. " if context["ordered"] else "- "
+                parent_items = self._list_stack[-1]["items"]
+                nested = "\n".join(marker + item for item in items)
+                if parent_items:
+                    parent_items[-1] += "\n" + nested
+                else:
+                    parent_items.append(nested)
+            else:
+                self.blocks.append(
+                    {
+                        "type": "list",
+                        "ordered": bool(context["ordered"]),
+                        "items": items,
+                    }
+                )
+            return
+        if tag in self._BLOCK_TAGS:
+            self._flush_text()
+
+    def handle_data(self, data: str) -> None:
+        if not data:
+            return
+        if self._in_pre:
+            self._pre_text.append(data)
+        else:
+            self._append(data)
+
+    def close(self) -> None:
+        super().close()
+        if self._in_pre:
+            self._flush_pre()
+        self._flush_li()
+        while self._list_stack:
+            context = self._list_stack.pop()
+            items = [item for item in context["items"] if item]
+            if items:
+                self.blocks.append(
+                    {
+                        "type": "list",
+                        "ordered": bool(context["ordered"]),
+                        "items": items,
+                    }
+                )
+        self._flush_heading()
+        self._flush_text()
+
+
+def _stackoverflow_body_blocks(value: object) -> list[dict]:
+    """Parse one Stack Overflow HTML body into headings, text, lists, code."""
+    parser = _StackOverflowBodyParser()
+    try:
+        parser.feed(str(value or ""))
+        parser.close()
+    except Exception:  # pragma: no cover - defensive HTML fallback
+        fallback = _stackoverflow_plain_text(value)
+        return [{"type": "paragraph", "text": fallback}] if fallback else []
+    return parser.blocks
+
+
+def _stackoverflow_plain_text(value: object) -> str:
+    """Turn one Stack Overflow HTML title or question body into plain text."""
+    text = str(value or "")
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)<li[^>]*>", "• ", text)
+    text = re.sub(
+        r"(?i)</(?:p|div|li|tr|h[1-6]|blockquote|pre|table)\s*>",
+        "\n\n",
+        text,
+    )
+    text = re.sub(r"(?i)<[^>]+>", "", text)
+    text = html.unescape(text).replace("\xa0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _stackoverflow_stats(item: dict) -> str:
+    """Summarize one question's score, answers, and tags for the modal."""
+    parts: list[str] = []
+    if item.get("score") is not None:
+        parts.append(f"Score {int(item.get('score') or 0)}")
+    answers = int(item.get("answer_count") or 0)
+    if answers:
+        accepted = " (accepted)" if item.get("accepted_answer_id") else ""
+        parts.append(f"{answers} answer{'' if answers == 1 else 's'}{accepted}")
+    else:
+        parts.append("No answers yet")
+    owner = item.get("owner")
+    if isinstance(owner, dict) and owner.get("display_name"):
+        parts.append(f"asked by {owner['display_name']}")
+    tags = [str(tag) for tag in item.get("tags") or [] if str(tag).strip()]
+    if tags:
+        parts.append("Tags: " + ", ".join(tags[:STACKOVERFLOW_TAG_LIMIT * 2]))
+    return " · ".join(parts)
+
+
+def _stackoverflow_iso_time(timestamp: object) -> str:
+    """Convert a Stack Exchange epoch-seconds value to an ISO UTC string."""
+    try:
+        seconds = int(timestamp)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if seconds <= 0:
+        return ""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+
+
+def search_stackoverflow_questions(
+    query: str = "",
+    tagged: str = "",
+    limit: int = STACKOVERFLOW_RESULT_LIMIT,
+) -> list[dict]:
+    """Search Stack Overflow by tag or keywords and return result cards.
+
+    ``tagged`` selects the API's /questions endpoint sorted by creation time,
+    matching the prompt's tag_search example. ``query`` selects the advanced
+    search endpoint, also sorted by newest first, matching the prompt's
+    keyword_search example.
+    """
+    query = " ".join(str(query or "").split())
+    tag_value = ";".join(
+        tag for tag in re.split(r"[\s,;]+", str(tagged or "").strip()) if tag
+    )
+    if not query and not tag_value:
+        return []
+    try:
+        pagesize = max(1, min(int(limit), 100))
+    except (TypeError, ValueError):
+        pagesize = STACKOVERFLOW_RESULT_LIMIT
+
+    if tag_value:
+        endpoint = "questions"
+        params = {
+            "tagged": tag_value,
+            "order": "desc",
+            "sort": "creation",
+        }
+        feed = f"{STACKOVERFLOW_BASE_URL}/questions/tagged/{quote(tag_value, safe=';')}"
+    else:
+        endpoint = "search/advanced"
+        params = {
+            "q": query,
+            "order": "desc",
+            "sort": "creation",
+        }
+        feed = (
+            f"{STACKOVERFLOW_BASE_URL}/search?q={quote_plus(query)}&tab=Newest"
+        )
+    params.update(
+        {
+            "site": STACKOVERFLOW_SITE,
+            "pagesize": str(pagesize),
+            "filter": "withbody",
+        }
+    )
+
+    try:
+        response = requests.get(
+            f"{STACKOVERFLOW_API_URL}/{endpoint}",
+            params=params,
+            headers={
+                **chat.HTTP_HEADERS,
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip, deflate",
+            },
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"Stack Overflow search failed: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise RuntimeError("Stack Overflow returned an unexpected response.")
+    if data.get("error_message"):
+        raise RuntimeError(
+            f"Stack Overflow API error: {data['error_message']}"
+        )
+    items = data.get("items")
+    if not isinstance(items, list):
+        raise RuntimeError("Stack Overflow returned an unexpected response.")
+
+    results: list[dict] = []
+    for item in items[:pagesize]:
+        if not isinstance(item, dict):
+            continue
+        link = str(item.get("link") or "").strip()
+        title = _stackoverflow_plain_text(item.get("title")) or "(untitled)"
+        if not link:
+            question_id = item.get("question_id")
+            if question_id is None:
+                continue
+            link = f"{STACKOVERFLOW_BASE_URL}/questions/{question_id}"
+
+        body = _stackoverflow_plain_text(item.get("body"))
+        body_paragraphs = [
+            paragraph.strip()
+            for paragraph in re.split(r"\n{2,}", body)
+            if paragraph.strip()
+        ]
+        paragraphs = [
+            text
+            for text in [_stackoverflow_stats(item), *body_paragraphs]
+            if text
+        ][:STACKOVERFLOW_BODY_PARAGRAPH_LIMIT]
+        if len(paragraphs) < 2:
+            paragraphs.append(
+                "Open this question on Stack Overflow to read it in full."
+            )
+
+        question_blocks = _stackoverflow_body_blocks(item.get("body"))
+        if question_blocks:
+            question_blocks.insert(
+                0,
+                {"type": "paragraph", "text": _stackoverflow_stats(item)},
+            )
+
+        tags = [str(tag) for tag in item.get("tags") or [] if str(tag).strip()]
+        question_id = item.get("question_id")
+        results.append(
+            {
+                "title": title,
+                "link": link,
+                "question_id": question_id,
+                "score": int(item.get("score") or 0),
+                "answer_count": int(item.get("answer_count") or 0),
+                "accepted_answer_id": item.get("accepted_answer_id"),
+                "section": ", ".join(tags[:3]),
+                "published": _stackoverflow_iso_time(
+                    item.get("creation_date")
+                ),
+                "summary": paragraphs[0],
+                "paragraphs": paragraphs,
+                "blocks": question_blocks,
+                "feed": feed,
+            }
+        )
+    return results
+
+
+def fetch_stackoverflow_answers(
+    question_id: object, limit: int = STACKOVERFLOW_ANSWER_LIMIT
+) -> dict:
+    """Fetch one question's answers and parse their bodies into blocks.
+
+    This follows the prompt's load_answer_to_a_question endpoint. Accepted
+    answers are listed first so the modal shows the likely solution before
+    lower-voted alternatives.
+    """
+    try:
+        numeric_id = int(str(question_id).strip())
+    except (TypeError, ValueError):
+        raise ValueError("Missing or invalid Stack Overflow question id") from None
+    if numeric_id <= 0:
+        raise ValueError("Missing or invalid Stack Overflow question id")
+    try:
+        pagesize = max(1, min(int(limit), 30))
+    except (TypeError, ValueError):
+        pagesize = STACKOVERFLOW_ANSWER_LIMIT
+
+    try:
+        response = requests.get(
+            f"{STACKOVERFLOW_API_URL}/questions/{numeric_id}/answers",
+            params={
+                "site": STACKOVERFLOW_SITE,
+                "filter": "withbody",
+                "order": "desc",
+                "sort": "votes",
+                "pagesize": str(pagesize),
+            },
+            headers={
+                **chat.HTTP_HEADERS,
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip, deflate",
+            },
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"Stack Overflow answers failed: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise RuntimeError("Stack Overflow returned an unexpected response.")
+    if data.get("error_message"):
+        raise RuntimeError(
+            f"Stack Overflow API error: {data['error_message']}"
+        )
+    items = data.get("items")
+    if not isinstance(items, list):
+        raise RuntimeError("Stack Overflow returned an unexpected response.")
+
+    answers: list[dict] = []
+    for item in items[:pagesize]:
+        if not isinstance(item, dict):
+            continue
+        body_blocks = _stackoverflow_body_blocks(item.get("body"))
+        body_text = _stackoverflow_plain_text(item.get("body"))
+        if not body_blocks and not body_text:
+            continue
+        answer_id = item.get("answer_id")
+        owner = item.get("owner")
+        owner_name = ""
+        if isinstance(owner, dict):
+            owner_name = str(owner.get("display_name") or "").strip()
+        answers.append(
+            {
+                "answer_id": answer_id,
+                "score": int(item.get("score") or 0),
+                "accepted": bool(item.get("is_accepted")),
+                "owner": owner_name,
+                "created": _stackoverflow_iso_time(
+                    item.get("creation_date")
+                ),
+                "link": (
+                    f"{STACKOVERFLOW_BASE_URL}/a/{answer_id}"
+                    if answer_id is not None
+                    else f"{STACKOVERFLOW_BASE_URL}/questions/{numeric_id}"
+                ),
+                "blocks": body_blocks,
+                "paragraphs": [
+                    block.get("text", "")
+                    for block in body_blocks
+                    if block.get("type") in {"paragraph", "heading", "code"}
+                    and block.get("text")
+                ] or [body_text],
+            }
+        )
+    answers.sort(key=lambda answer: (not answer["accepted"], -answer["score"]))
+    return {
+        "question_id": numeric_id,
+        "link": f"{STACKOVERFLOW_BASE_URL}/questions/{numeric_id}",
+        "answers": answers,
+    }
 
 
 # /wikivoyage searches the Wikivoyage REST API and renders the destinations as
@@ -1937,6 +2482,7 @@ COMMAND_ARGUMENTS = {
     "/medium",
     "/gutenberg",
     "/openlibrary",
+    "/stackoverflow",
 }
 
 # Subcommands grouped under /gutenberg and /openlibrary.
@@ -1946,6 +2492,11 @@ GUTENBERG_SUBCOMMANDS = {
 
 OPENLIBRARY_SUBCOMMANDS = {
     "search": "search inside Open Library books by keyword",
+}
+
+STACKOVERFLOW_SUBCOMMANDS = {
+    "tag": "list the newest questions for one Stack Overflow tag",
+    "search": "search Stack Overflow questions by keyword, newest first",
 }
 
 # Project Gutenberg search and per-book chat. /gutenberg search mirrors the
@@ -2060,8 +2611,9 @@ YOUTUBE_SEARCH_PREFETCH_RESULTS = YOUTUBE_SEARCH_PAGE_RESULTS
 YOUTUBE_PREFETCH_WAIT_SECONDS = 8.0
 
 # The browser's "中文" button translates a finished answer paragraph by
-# paragraph. The single chat model preserves technical terminology and names.
-ANSWER_TRANSLATION_MODEL = chat.CHAT_MODEL
+# paragraph. ./prompts/translation.prompt requires qwen3:8b for translation to
+# Simplified Chinese, so it is kept separate from the small helper model.
+ANSWER_TRANSLATION_MODEL = chat.CHINESE_TRANSLATION_MODEL
 ANSWER_TRANSLATION_NUM_CTX = chat.ANSWER_NUM_CTX
 MAX_TRANSLATION_CHARS = 200_000
 TRANSLATION_PARAGRAPH_PATTERN = re.compile(r"\n[ \t]*\n+")
@@ -4895,6 +5447,781 @@ def fetch_news_article(url: str, title: str = "") -> dict:
     }
 
 
+# /reddit <keywords> searches Google News RSS restricted to reddit.com. The
+# result cards reuse the /news list, and each post body is fetched on demand
+# from Reddit's public JSON (or Atom RSS) endpoint.
+REDDIT_USER_AGENT = (
+    "python:personal-chatbot:v1.0 (by /u/personal_chatbot)"
+)
+REDDIT_REQUEST_TIMEOUT = 30
+REDDIT_MAX_COMMENTS = 40
+REDDIT_MAX_BLOCKS = 500
+# Reddit's legacy `.embed` endpoint is the iframe friendly rendering of a
+# thread. It is intentionally used as the last server-side fallback: the
+# browser cannot read a cross-origin iframe's DOM, so the server fetches the
+# same embed document, extracts the comments, and the UI also offers the live
+# embed in an iframe when the JSON/Atom endpoints are unavailable.
+REDDIT_EMBED_QUERY = "?limit=100&depth=2&sort=top"
+GOOGLE_NEWS_ARTICLE_RE = re.compile(
+    r"^https?://news\.google\.com/(?:rss/)?articles/", re.IGNORECASE
+)
+
+
+def _is_reddit_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host == "redd.it" or host == "reddit.com" or host.endswith(
+        ".reddit.com"
+    )
+
+
+def _reddit_canonical_url(url: str) -> str:
+    """Return the public www.reddit.com thread URL without JSON/RSS suffix."""
+    parts = urlparse(url)
+    host = (parts.hostname or "").lower()
+    path = re.sub(r"\.(?:json|rss)$", "", parts.path or "/", flags=re.I)
+    if host == "redd.it":
+        post_id = (parts.path or "").strip("/").split("/")[0]
+        if post_id:
+            return f"https://www.reddit.com/comments/{post_id}/"
+    path = re.sub(r"/+", "/", path)
+    if not path.startswith("/"):
+        path = "/" + path
+    if not path.endswith("/"):
+        path += "/"
+    return "https://www.reddit.com" + path
+
+
+def _reddit_section(url: str) -> str:
+    match = re.search(
+        r"/r/([^/]+)/comments/", urlparse(url).path, re.IGNORECASE
+    )
+    return f"r/{match.group(1)}" if match else ""
+
+
+def resolve_google_news_url(url: str) -> str:
+    """Resolve a news.google.com/rss/articles/... wrapper to its publisher.
+
+    Google exposes a timestamp and signature in the wrapper page that must be
+    exchanged through its batchexecute endpoint. This mirrors the resolution
+    news_fetch.php uses for Google News feeds, so a Reddit result can be
+    opened even when the feed itself did not resolve the wrapper.
+    """
+    url = str(url or "").strip()
+    match = re.match(
+        r"^https?://news\.google\.com/(?:rss/)?articles/([^/?#]+)",
+        url,
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    article_id = match.group(1)
+    headers = {
+        "User-Agent": REDDIT_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        page = requests.get(
+            url, headers=headers, timeout=REDDIT_REQUEST_TIMEOUT
+        )
+        page.raise_for_status()
+    except requests.RequestException:
+        return ""
+    timestamp = re.search(r'data-n-a-ts="(\d+)"', page.text)
+    signature = re.search(r'data-n-a-sg="([^"]+)"', page.text)
+    if not timestamp or not signature:
+        return ""
+
+    garturlreq = [
+        "garturlreq",
+        [
+            ["X", "X", ["X", "X"], None, None, 1, 1, "US:en", None, 1,
+             None, None, None, None, None, 0, 1],
+            "X",
+            "X",
+            1,
+            [1, 1, 1],
+            1,
+            1,
+            None,
+            0,
+            0,
+            None,
+            0,
+        ],
+        article_id,
+        int(timestamp.group(1)),
+        signature.group(1),
+    ]
+    inner = json.dumps(garturlreq, separators=(",", ":"))
+    outer = json.dumps([[['Fbv4je', inner]]], separators=(",", ":"))
+    try:
+        response = requests.post(
+            "https://news.google.com/_/DotsSplashUi/data/batchexecute",
+            data={"f.req": outer},
+            headers={
+                "User-Agent": REDDIT_USER_AGENT,
+                "Content-Type": (
+                    "application/x-www-form-urlencoded;charset=UTF-8"
+                ),
+                "Accept": "*/*",
+            },
+            timeout=REDDIT_REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+    except requests.RequestException:
+        return ""
+    body = response.text
+    if body.startswith(")]}'"):
+        body = body[4:].lstrip()
+    try:
+        decoded = json.loads(body)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(decoded, list):
+        return ""
+    for entry in decoded:
+        if not isinstance(entry, list) or len(entry) < 3:
+            continue
+        if entry[0] != "wrb.fr" or entry[1] != "Fbv4je":
+            continue
+        try:
+            inner_data = json.loads(str(entry[2]))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(inner_data, list)
+            and inner_data
+            and inner_data[0] == "garturlres"
+            and isinstance(inner_data[1], str)
+            and re.match(r"^https?://", inner_data[1], re.IGNORECASE)
+        ):
+            return inner_data[1]
+    return ""
+
+
+def _reddit_plain_blocks(text: str) -> list[dict]:
+    """Turn Reddit self-text markdown outside code fences into reader blocks."""
+    blocks: list[dict] = []
+    for raw in re.split(r"\n\s*\n+", str(text or "").strip()):
+        chunk = raw.strip()
+        if not chunk:
+            continue
+        lines = [line.rstrip() for line in chunk.splitlines() if line.strip()]
+        if not lines:
+            continue
+        heading = re.match(r"^(#{1,6})\s+(.*)$", lines[0])
+        if heading:
+            blocks.append(
+                {
+                    "type": "heading",
+                    "level": len(heading.group(1)),
+                    "text": heading.group(2).strip(),
+                }
+            )
+            lines = lines[1:]
+            if not lines:
+                continue
+        matches = [
+            re.match(r"^\s*(?:([-*+])|(\d+)[.)])\s+(.*)$", line)
+            for line in lines
+        ]
+        if matches and all(matches):
+            items = [
+                match.group(3).strip()
+                for match in matches
+                if match and match.group(3).strip()
+            ]
+            if items:
+                blocks.append(
+                    {
+                        "type": "list",
+                        "ordered": bool(matches[0].group(2)),
+                        "items": items,
+                    }
+                )
+            continue
+        blocks.append(
+            {"type": "paragraph", "text": " ".join(line.strip() for line in lines)}
+        )
+    return blocks
+
+
+def _reddit_markdown_blocks(text: str) -> list[dict]:
+    """Split Reddit self-text markdown into paragraphs, lists, and code blocks."""
+    text = html.unescape(
+        str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    )
+    blocks: list[dict] = []
+    position = 0
+    fence = re.compile(r"(?ms)^```([^\n`]*)\n(.*?)^```\s*$")
+    for match in fence.finditer(text):
+        blocks.extend(_reddit_plain_blocks(text[position : match.start()]))
+        code = match.group(2).rstrip("\n")
+        if code.strip():
+            blocks.append(
+                {
+                    "type": "code",
+                    "text": code,
+                    "language": match.group(1).strip(),
+                }
+            )
+        position = match.end()
+    blocks.extend(_reddit_plain_blocks(text[position:]))
+    return blocks
+
+
+def _reddit_blocks_from_html(document: str) -> list[dict]:
+    parser = _StackOverflowBodyParser()
+    parser.feed(str(document or ""))
+    parser.close()
+    return parser.blocks
+
+
+def _reddit_clean_blocks(blocks: list[dict]) -> list[dict]:
+    cleaned: list[dict] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind in {"paragraph", "heading"}:
+            text = str(block.get("text") or "").strip()
+            if not text:
+                continue
+            lowered = text.lower()
+            if lowered in {"[link]", "[comments]", "[removed]", "[deleted]"}:
+                continue
+            if "submitted by" in lowered and (
+                "[link]" in lowered or "[comments]" in lowered
+            ):
+                continue
+            block = {**block, "text": text}
+        elif kind == "list":
+            items = [
+                str(item).strip()
+                for item in (block.get("items") or [])
+                if str(item).strip()
+            ]
+            if not items:
+                continue
+            block = {**block, "items": items}
+        elif kind == "code":
+            if not str(block.get("text") or "").strip():
+                continue
+        else:
+            continue
+        cleaned.append(block)
+        if len(cleaned) >= REDDIT_MAX_BLOCKS:
+            break
+    return cleaned
+
+
+def _reddit_paragraphs_from_blocks(blocks: list[dict]) -> list[str]:
+    paragraphs: list[str] = []
+    for block in blocks:
+        kind = block.get("type")
+        if kind in {"paragraph", "heading", "code"}:
+            text = str(block.get("text") or "").strip()
+        elif kind == "list":
+            text = "\n".join(
+                str(item).strip() for item in block.get("items") or []
+            ).strip()
+        else:
+            text = ""
+        if text:
+            paragraphs.append(text)
+    return paragraphs
+
+
+def _reddit_embed_url(canonical: str) -> str:
+    """Return the iframe-friendly URL for a canonical Reddit thread."""
+    return canonical.rstrip("/") + "/.embed" + REDDIT_EMBED_QUERY
+
+
+def _reddit_iframe_url(url: str) -> str:
+    """Resolve a feed link to a Reddit embed URL suitable for an iframe."""
+    value = str(url or "").strip()
+    if GOOGLE_NEWS_ARTICLE_RE.match(value):
+        value = resolve_google_news_url(value)
+    if not value or not _is_reddit_url(value):
+        return ""
+    return _reddit_embed_url(_reddit_canonical_url(value))
+
+
+def _reddit_embed_document(document: str) -> str:
+    """Unwrap Reddit's ``document.write("...")`` embed response into HTML."""
+    text = str(document or "").strip()
+    if not text:
+        return ""
+    literal = re.search(
+        r'document\.write\(\s*("(?:[^"\\]|\\.)*")\s*\)', text, re.S
+    )
+    if literal:
+        raw = literal.group(1)
+        try:
+            text = json.loads(raw)
+        except json.JSONDecodeError:
+            try:
+                text = bytes(raw[1:-1], "utf-8").decode("unicode_escape")
+            except UnicodeDecodeError:
+                return ""
+    return text if "<" in text else ""
+
+
+class _RedditEmbedParser(HTMLParser):
+    """Extract author, score, and body blocks from Reddit's iframe embed.
+
+    The legacy embed is an HTML fragment wrapped in ``document.write``. It is
+    the only Reddit endpoint that is consistently embeddable and not blocked
+    on this network. Its comments are nested ``div.reddit-link`` elements with
+    a ``div.md`` body; capturing the inner HTML of each body and reusing the
+    Stack Overflow block parser keeps code and lists instead of flattening
+    everything to one paragraph.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.records: list[dict] = []
+        self._link_stack: list[dict] = []
+        self._div_stack: list[bool] = []
+        self._capture: dict | None = None
+        self._author_parts: list[str] | None = None
+        self._score_parts: list[str] | None = None
+        self._small_depth = 0
+
+    def _finish_capture(self) -> None:
+        capture = self._capture
+        if not capture:
+            return
+        self._capture = None
+        fragment = "".join(capture["parts"])
+        owner = capture["owner"]
+        if not isinstance(owner, dict):
+            return
+        blocks = _reddit_clean_blocks(_reddit_blocks_from_html(fragment))
+        if blocks:
+            owner["blocks"].extend(blocks)
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        tag = tag.lower()
+        attributes = {name: value for name, value in attrs}
+        classes = str(attributes.get("class") or "").split()
+        if self._capture is not None:
+            self._capture["parts"].append(self.get_starttag_text() or "")
+            if tag == "div":
+                self._capture["div_depth"] += 1
+            return
+        if tag == "div" and "md" in classes:
+            owner = self._link_stack[-1] if self._link_stack else None
+            if owner is None:
+                owner = {
+                    "author": "",
+                    "score": "",
+                    "blocks": [],
+                    "depth": 0,
+                }
+                self.records.append(owner)
+            self._capture = {
+                "parts": [],
+                "div_depth": 1,
+                "owner": owner,
+            }
+            return
+        if tag == "div":
+            is_link = "reddit-link" in classes
+            self._div_stack.append(is_link)
+            if is_link:
+                record = {
+                    "author": "",
+                    "score": "",
+                    "blocks": [],
+                    "depth": len(self._link_stack),
+                }
+                self.records.append(record)
+                self._link_stack.append(record)
+            return
+        if tag == "small" and self._link_stack:
+            self._small_depth += 1
+            return
+        if self._small_depth and self._link_stack:
+            if tag == "a":
+                href = str(attributes.get("href") or "")
+                if "/user/" in href:
+                    self._author_parts = []
+            elif tag == "span":
+                span_id = str(attributes.get("id") or "")
+                if span_id.startswith("score_"):
+                    self._score_parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if self._capture is not None:
+            self._capture["parts"].append(f"</{tag}>")
+            if tag == "div":
+                self._capture["div_depth"] -= 1
+                if self._capture["div_depth"] <= 0:
+                    self._finish_capture()
+            return
+        if tag == "a" and self._author_parts is not None:
+            author = " ".join("".join(self._author_parts).split())
+            if author and self._link_stack:
+                self._link_stack[-1]["author"] = author
+            self._author_parts = None
+            return
+        if tag == "span" and self._score_parts is not None:
+            score = " ".join("".join(self._score_parts).split())
+            if score and self._link_stack:
+                self._link_stack[-1]["score"] = score
+            self._score_parts = None
+            return
+        if tag == "small" and self._small_depth:
+            self._small_depth -= 1
+            return
+        if tag == "div" and self._div_stack:
+            if self._div_stack.pop() and self._link_stack:
+                self._link_stack.pop()
+
+    def handle_data(self, data: str) -> None:
+        if self._capture is not None:
+            self._capture["parts"].append(html.escape(data))
+            return
+        if self._author_parts is not None:
+            self._author_parts.append(data)
+        elif self._score_parts is not None:
+            self._score_parts.append(data)
+
+
+def _reddit_post_from_embed(
+    document: str, canonical: str, fallback_title: str
+) -> dict:
+    """Extract the post and comments from Reddit's iframe embed endpoint."""
+    embed_html = _reddit_embed_document(document)
+    if not embed_html:
+        raise RuntimeError("Reddit returned an empty embed document")
+    parser = _RedditEmbedParser()
+    parser.feed(embed_html)
+    parser.close()
+
+    post_blocks: list[dict] = []
+    comment_blocks: list[dict] = []
+    comments = 0
+    for record in parser.records:
+        record_blocks = _reddit_clean_blocks(record.get("blocks") or [])
+        if not record_blocks:
+            continue
+        author = str(record.get("author") or "").strip()
+        score = str(record.get("score") or "").strip()
+        if not author:
+            # The embed can include a body outside a comment link. Use the
+            # first such body as the post instead of mislabelling it as a
+            # comment.
+            if not post_blocks:
+                post_blocks.extend(record_blocks)
+                continue
+            label = "Comment"
+        else:
+            label = _reddit_author_label(author, "Comment")
+        if score:
+            label += f" · {score}"
+        if comments >= REDDIT_MAX_COMMENTS:
+            break
+        comments += 1
+        comment_blocks.append({"type": "heading", "level": 3, "text": label})
+        comment_blocks.extend(record_blocks)
+
+    if not post_blocks and not comment_blocks:
+        raise RuntimeError("Reddit returned no readable content in the embed")
+    blocks = list(post_blocks)
+    if comments:
+        blocks.append(
+            {"type": "heading", "level": 2, "text": f"Comments ({comments})"}
+        )
+        blocks.extend(comment_blocks)
+    blocks = _reddit_clean_blocks(blocks)
+    return {
+        "link": canonical,
+        "title": str(fallback_title or "").strip(),
+        "blocks": blocks,
+        "paragraphs": _reddit_paragraphs_from_blocks(blocks),
+        "images": [],
+        "partial": True,
+    }
+
+
+def _reddit_response(
+    result: dict, canonical: str, source: str, partial: bool = False
+) -> dict:
+    """Attach the live iframe URL and the source used to extract a thread."""
+    response = dict(result)
+    response["iframe_url"] = _reddit_embed_url(canonical)
+    response["source"] = source
+    response["partial"] = bool(partial or result.get("partial"))
+    return response
+
+
+def _reddit_images(post: dict) -> list[str]:
+    images: list[str] = []
+
+    def add(value: object) -> None:
+        if not isinstance(value, str):
+            return
+        value = html.unescape(value).strip()
+        if re.search(r"\.(?:jpe?g|png|gif|webp)(?:\?|$)", value, re.I):
+            images.append(value)
+
+    add(post.get("url_overridden_by_dest"))
+    add(post.get("url"))
+    preview = post.get("preview")
+    if isinstance(preview, dict):
+        for image in preview.get("images") or []:
+            if isinstance(image, dict) and isinstance(image.get("source"), dict):
+                add(image["source"].get("url"))
+    return list(dict.fromkeys(images))[:6]
+
+
+def _reddit_author_label(author: object, fallback: str) -> str:
+    value = str(author or "").strip().lstrip("/")
+    if not value:
+        return fallback
+    if not value.startswith("u/"):
+        value = "u/" + value
+    return value
+
+
+def _reddit_comment_blocks(
+    children: object, depth: int, state: dict
+) -> list[dict]:
+    blocks: list[dict] = []
+    if not isinstance(children, list):
+        return blocks
+    for child in children:
+        if state["count"] >= REDDIT_MAX_COMMENTS:
+            break
+        if not isinstance(child, dict):
+            continue
+        if child.get("kind") != "t1":
+            continue
+        data = child.get("data") or {}
+        body = str(data.get("body") or "").strip()
+        if body and body not in {"[removed]", "[deleted]"}:
+            state["count"] += 1
+            author = str(data.get("author") or "").strip()
+            label = _reddit_author_label(author, "Comment")
+            score = data.get("score")
+            if isinstance(score, int):
+                label += f" · {score} points"
+            blocks.append({"type": "heading", "level": 3, "text": label})
+            blocks.extend(_reddit_clean_blocks(_reddit_markdown_blocks(body)))
+        replies = data.get("replies")
+        if depth < 2 and isinstance(replies, dict):
+            reply_children = ((replies.get("data") or {}).get("children"))
+            blocks.extend(
+                _reddit_comment_blocks(reply_children, depth + 1, state)
+            )
+    return blocks
+
+
+def _reddit_post_from_json(
+    data: object, canonical: str, fallback_title: str
+) -> dict:
+    try:
+        post = data[0]["data"]["children"][0]["data"]
+    except (IndexError, KeyError, TypeError) as exc:
+        raise RuntimeError("Reddit did not return a post") from exc
+    if not isinstance(post, dict):
+        raise RuntimeError("Reddit did not return a post")
+
+    title = str(post.get("title") or fallback_title or "").strip()
+    author = str(post.get("author") or "").strip()
+    blocks: list[dict] = [
+        {
+            "type": "heading",
+            "level": 3,
+            "text": _reddit_author_label(author, "Post"),
+        }
+    ]
+    selftext = str(post.get("selftext") or "").strip()
+    if selftext and selftext not in {"[removed]", "[deleted]"}:
+        blocks.extend(_reddit_markdown_blocks(selftext))
+    elif post.get("url") and not post.get("is_self"):
+        blocks.append(
+            {"type": "paragraph", "text": f"Link: {post.get('url')}"}
+        )
+
+    state = {"count": 0}
+    comments: list[dict] = []
+    try:
+        children = data[1]["data"]["children"]
+    except (IndexError, KeyError, TypeError):
+        children = []
+    comments.extend(_reddit_comment_blocks(children, 0, state))
+    if state["count"]:
+        blocks.append(
+            {
+                "type": "heading",
+                "level": 2,
+                "text": f"Comments ({state['count']})",
+            }
+        )
+        blocks.extend(comments)
+
+    blocks = _reddit_clean_blocks(blocks)
+    return {
+        "link": canonical,
+        "title": title,
+        "blocks": blocks,
+        "paragraphs": _reddit_paragraphs_from_blocks(blocks),
+        "images": _reddit_images(post),
+    }
+
+
+def _reddit_post_from_rss(
+    document: str, canonical: str, fallback_title: str
+) -> dict:
+    """Parse Reddit's Atom thread feed when the .json endpoint is blocked."""
+    try:
+        root = ElementTree.fromstring(document)
+    except ElementTree.ParseError as exc:
+        raise RuntimeError("Reddit returned invalid RSS") from exc
+    namespace = {"a": "http://www.w3.org/2005/Atom"}
+    entries = root.findall("a:entry", namespace)
+    if not entries:
+        raise RuntimeError("Reddit returned no post content")
+
+    title = fallback_title
+    post_blocks: list[dict] = []
+    comment_blocks: list[dict] = []
+    comments = 0
+    for index, entry in enumerate(entries):
+        entry_id = entry.findtext("a:id", default="", namespaces=namespace)
+        entry_title = entry.findtext("a:title", default="", namespaces=namespace)
+        author = entry.findtext(
+            "a:author/a:name", default="", namespaces=namespace
+        ).strip()
+        content_element = entry.find("a:content", namespace)
+        content = content_element.text if content_element is not None else ""
+        is_post = entry_id.startswith("t3_") or (
+            index == 0 and not entry_id.startswith("t1_")
+        )
+        parsed = _reddit_clean_blocks(_reddit_blocks_from_html(content or ""))
+        label = _reddit_author_label(author, "Post" if is_post else "Comment")
+        if is_post:
+            if entry_title.strip():
+                title = entry_title.strip()
+            post_blocks.append({"type": "heading", "level": 3, "text": label})
+            post_blocks.extend(parsed)
+            continue
+        if not parsed or comments >= REDDIT_MAX_COMMENTS:
+            continue
+        comments += 1
+        comment_blocks.append({"type": "heading", "level": 3, "text": label})
+        comment_blocks.extend(parsed)
+
+    blocks = list(post_blocks)
+    if comments:
+        blocks.append(
+            {"type": "heading", "level": 2, "text": f"Comments ({comments})"}
+        )
+        blocks.extend(comment_blocks)
+    blocks = _reddit_clean_blocks(blocks)
+    return {
+        "link": canonical,
+        "title": str(title or "").strip(),
+        "blocks": blocks,
+        "paragraphs": _reddit_paragraphs_from_blocks(blocks),
+        "images": [],
+    }
+
+
+def fetch_reddit_post(url: str, title: str = "") -> dict:
+    """Fetch one public Reddit thread for the /reddit detail modal.
+
+    Reddit's public .json endpoint is tried first, with a descriptive
+    User-Agent as required by Reddit. Some networks are challenged with HTTP
+    403/429 on .json, so the thread's Atom feed is used as a fallback; it
+    carries the post and its comments in the same order. When both are
+    blocked, Reddit's legacy ``/.embed`` document (the same document an iframe
+    would load) is parsed for comments. Every successful response also carries
+    an ``iframe_url`` so the browser can show the live thread if extraction is
+    incomplete.
+    """
+    url = str(url or "").strip()
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        raise ValueError("Missing or invalid Reddit post URL")
+    if GOOGLE_NEWS_ARTICLE_RE.match(url):
+        resolved = resolve_google_news_url(url)
+        if not resolved:
+            raise RuntimeError(
+                "Could not resolve the Google News link to a Reddit post"
+            )
+        url = resolved
+    if not _is_reddit_url(url):
+        raise ValueError("The URL is not a Reddit post")
+
+    canonical = _reddit_canonical_url(url)
+    base = canonical.rstrip("/")
+    headers = {
+        "User-Agent": REDDIT_USER_AGENT,
+        "Accept": "application/json, text/plain;q=0.9, */*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    errors: list[str] = []
+    try:
+        response = requests.get(
+            base + "/.json",
+            headers=headers,
+            timeout=REDDIT_REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        result = _reddit_post_from_json(response.json(), canonical, title)
+        return _reddit_response(result, canonical, "json")
+    except (requests.RequestException, ValueError, RuntimeError) as exc:
+        errors.append(f"JSON: {exc}")
+
+    rss_headers = {
+        **headers,
+        "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.8",
+    }
+    try:
+        for attempt in range(2):
+            response = requests.get(
+                base + "/.rss",
+                headers=rss_headers,
+                timeout=REDDIT_REQUEST_TIMEOUT,
+            )
+            if response.status_code == 429 and attempt == 0:
+                # Reddit rate-limits the Atom endpoint aggressively after a
+                # challenged .json request. One short pause usually clears it.
+                time.sleep(2.0)
+                continue
+            response.raise_for_status()
+            result = _reddit_post_from_rss(response.text, canonical, title)
+            return _reddit_response(result, canonical, "rss")
+    except (requests.RequestException, RuntimeError) as exc:
+        errors.append(f"RSS: {exc}")
+
+    embed_headers = {
+        **headers,
+        "Accept": "text/javascript, text/html;q=0.9, */*;q=0.8",
+    }
+    try:
+        response = requests.get(
+            _reddit_embed_url(canonical),
+            headers=embed_headers,
+            timeout=REDDIT_REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        result = _reddit_post_from_embed(response.text, canonical, title)
+        return _reddit_response(result, canonical, "embed", partial=True)
+    except (requests.RequestException, RuntimeError) as exc:
+        errors.append(f"EMBED: {exc}")
+
+    raise RuntimeError(
+        "Could not load the Reddit post (" + "; ".join(errors) + ")"
+    )
+
+
 def chunk_title(chunk: chat.Chunk) -> str:
     """Return the title for a transcript or news chunk."""
     if chunk_is_news(chunk):
@@ -5424,12 +6751,23 @@ answer the supported parts and omit the unsupported detail.
 # ("Huang is expected to keep his job") can sit beside the newest report
 # ("Huang has resigned"). The publication dates are included with learned
 # article context, and this instruction makes the newer report authoritative.
+# A "timeline" question needs the older events too, but they must be dated
+# history, not competing descriptions of the present. Both cases need the same
+# rule: never present a superseded status as current.
 TEMPORAL_QUESTION_PROMPT_PREFIX = """### CURRENT INFORMATION
-Today is {today}. This question asks about the current state or latest
-development. The context contains dated articles; when sources disagree, the
-most recently published evidence supersedes older statements, predictions, and
-analysis. Report the latest known status rather than an outdated prediction,
-and make clear when the latest information is newer than the rest.
+Today is {today}. This question asks about the current state, the latest
+development, or a timeline of events. The context contains dated articles;
+when sources disagree, the most recently published evidence supersedes older
+statements, predictions, and analysis.
+- Report the latest known status. Never repeat a superseded claim as the
+  current situation, and never list one under "ongoing" or "current status".
+- If the question asks for a timeline or chronology, present the events in
+  chronological order with their dates, then state the latest known status
+  clearly and separately.
+- An older statement may appear only as a historical event, explicitly dated;
+  it must not be used to contradict the newest report.
+- These rules override the general conflict-resolution instruction: do not
+  present two contradictory current statuses as equally valid.
 
 """
 # A learned news story, a single transcript, or a book modal is a small,
@@ -8334,6 +9672,7 @@ class ChatState:
                 "expansion": chat.EXPANSION_MODEL,
                 "filter": chat.FILTER_MODEL,
                 "translation": chat.TRANSLATION_MODEL,
+                "translation_to_chinese": ANSWER_TRANSLATION_MODEL,
                 "conversation": CONVERSATION_MODEL,
                 "dict": chat.DICT_MODEL,
             },
@@ -9076,6 +10415,40 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(article)
             return
+        if path == "/api/reddit_article":
+            params = parse_qs(parsed.query)
+            url = (params.get("url") or [""])[0].strip()
+            title = (params.get("title") or [""])[0].strip()
+            try:
+                article = fetch_reddit_post(url, title)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except RuntimeError as exc:
+                # Even when every server-side extraction endpoint is blocked,
+                # Reddit's embed page may still render in the browser. Return
+                # its URL so the modal can fall back to an iframe.
+                payload: dict = {"error": str(exc)}
+                iframe_url = _reddit_iframe_url(url)
+                if iframe_url:
+                    payload["iframe_url"] = iframe_url
+                self._send_json(payload, 502)
+                return
+            self._send_json(article)
+            return
+        if path == "/api/stackoverflow_answers":
+            params = parse_qs(parsed.query)
+            question_id = (params.get("id") or [""])[0].strip()
+            try:
+                answers = fetch_stackoverflow_answers(question_id)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except RuntimeError as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json(answers)
+            return
         if path == "/api/wikivoyage_article":
             params = parse_qs(parsed.query)
             url = (params.get("url") or [""])[0].strip()
@@ -9187,6 +10560,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return [
                 {"value": name, "description": description}
                 for name, description in OPENLIBRARY_SUBCOMMANDS.items()
+                if name.startswith(lowered)
+            ]
+
+        if kind == "stackoverflow_subcommands":
+            lowered = query.lower()
+            return [
+                {"value": name, "description": description}
+                for name, description in STACKOVERFLOW_SUBCOMMANDS.items()
                 if name.startswith(lowered)
             ]
 
@@ -11167,8 +12548,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_ask(argument)
         elif name == "/news":
             self._command_news(argument)
+        elif name == "/reddit":
+            self._command_reddit(argument)
         elif name == "/mdn":
             self._command_mdn(argument)
+        elif name == "/stackoverflow":
+            self._command_stackoverflow(argument)
         elif name == "/googlenews":
             self._command_googlenews(argument)
         elif name == "/howstuffworks":
@@ -12567,6 +13952,96 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "output", f"\n/mdn: no documentation matched {keyword!r}.\n"
             )
 
+    def _command_stackoverflow(self, argument: str) -> None:
+        """Search Stack Overflow and stream the questions like /news search.
+
+        Usage: /stackoverflow tag <tag>
+               /stackoverflow search <keywords>
+        The public Stack Exchange API supplies the newest questions for a tag
+        or the newest keyword matches. The browser reuses the /news
+        result list and detail modal, so each question opens with its body,
+        tags, score, and answer count and links to stackoverflow.com.
+        """
+        stripped = argument.strip()
+        match = re.match(r"(?i)^(tag|search)(?:\s+(.*))?$", stripped)
+        mode = match.group(1).lower() if match else ""
+        value = (match.group(2) or "").strip() if match else ""
+        if not mode or not value:
+            self._sse_text(
+                "output",
+                "\nUsage: /stackoverflow tag <tag>\n"
+                "       /stackoverflow search <keywords>\n"
+                "Example: /stackoverflow tag python\n"
+                "Example: /stackoverflow search rust borrow checker\n",
+            )
+            return
+
+        self._sse_text(
+            "log",
+            f"[stackoverflow: searching Stack Overflow for {mode} {value!r}]",
+        )
+        try:
+            if mode == "tag":
+                results = search_stackoverflow_questions(tagged=value)
+            else:
+                results = search_stackoverflow_questions(query=value)
+        except RuntimeError as exc:
+            self._sse_text("error", f"\n/stackoverflow: {exc}\n")
+            return
+
+        feed = (
+            results[0]["feed"]
+            if results
+            else f"{STACKOVERFLOW_BASE_URL}/questions"
+        )
+        self._sse(
+            "news",
+            {
+                "type": "start",
+                "source": "Stack Overflow",
+                "feed": feed,
+                "sources": ["Stack Overflow"],
+                "docs": True,
+                "docs_label": "Stack Overflow",
+            },
+        )
+        for index, result in enumerate(results, 1):
+            self._sse(
+                "news",
+                {
+                    "type": "item",
+                    "index": index,
+                    "title": result["title"],
+                    "link": result["link"],
+                    "source": "Stack Overflow",
+                    "section": result["section"],
+                    "published": result["published"],
+                    "summary": result["summary"],
+                    "question_id": result.get("question_id"),
+                    "score": result.get("score", 0),
+                    "answer_count": result.get("answer_count", 0),
+                    "accepted_answer_id": result.get("accepted_answer_id"),
+                    "blocks": result.get("blocks") or [],
+                    "docs": True,
+                    "docs_label": "Stack Overflow",
+                },
+            )
+            seen: set[str] = set()
+            for text in result["paragraphs"]:
+                if text in seen:
+                    continue
+                seen.add(text)
+                self._sse(
+                    "news", {"type": "paragraph", "index": index, "text": text}
+                )
+            self._sse("news", {"type": "item_end", "index": index})
+        self._sse("news", {"type": "done"})
+        if not results:
+            self._sse_text(
+                "output",
+                f"\n/stackoverflow: no questions matched {value!r}.\n",
+            )
+
     def _command_wikivoyage(self, argument: str) -> None:
         """Search Wikivoyage destinations and stream a /news-style list.
 
@@ -12672,6 +14147,64 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "output",
                 "\nNo completed-task summaries were found in .logs.\n",
             )
+
+    def _command_reddit(self, argument: str) -> None:
+        """Search Reddit posts through Google News RSS and stream them as cards.
+
+        Usage: /reddit <keywords>
+        The result list reuses the /news cards and detail modal. Opening a post
+        fetches its body and comments through /api/reddit_article, which uses
+        Reddit's public .json endpoint with an Atom RSS fallback.
+        """
+        keyword = " ".join(argument.split())
+        if keyword.lower().startswith("search "):
+            keyword = keyword[7:].strip()
+        if not keyword:
+            self._sse_text(
+                "output",
+                "\nUsage: /reddit <keywords>\n"
+                "Example: /reddit jensen huang\n"
+                "Example: /reddit best ramen in tokyo\n",
+            )
+            return
+
+        self._sse_text(
+            "log", f"[reddit: searching Google News for site:reddit.com {keyword!r}]"
+        )
+
+        def transform(payload: dict) -> dict:
+            kind = payload.get("type")
+            if kind == "start":
+                payload["source"] = "Reddit"
+                payload["sources"] = ["Reddit"]
+                payload["docs"] = True
+                payload["docs_label"] = "Reddit"
+                return payload
+            if kind != "item":
+                return payload
+            link = str(payload.get("link") or "").strip()
+            payload["source"] = "Reddit"
+            payload["section"] = _reddit_section(link)
+            payload["article_api"] = "/api/reddit_article"
+            payload["docs"] = True
+            payload["docs_label"] = "Reddit"
+            payload["learnable"] = False
+            payload["images"] = []
+            return payload
+
+        self._stream_news_events(
+            "news_fetch.php",
+            "/reddit",
+            [
+                "--source",
+                "googlenews",
+                "--search",
+                f"site:reddit.com {keyword}",
+                "--limit",
+                "20",
+            ],
+            event_transform=transform,
+        )
 
     def _command_googlenews(self, argument: str) -> None:
         """Search Google News RSS for the latest stories matching keywords.
@@ -12901,6 +14434,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         command: str,
         extra_argv: list[str],
         podcast: bool = False,
+        event_transform: Callable[[dict], dict] | None = None,
     ) -> int:
         """Stream a news fetcher's NDJSON events as `news` SSE events.
 
@@ -12943,6 +14477,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         continue
                     if not isinstance(payload, dict):
                         continue
+                    if event_transform is not None:
+                        payload = event_transform(payload)
                     if payload.get("type") == "item":
                         item_count += 1
                         # Attach the stable learned-story id and status so the
@@ -13954,10 +15490,139 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _chat_server_pids(
+    ps_output: str, *, current_pid: int, parent_pid: int
+) -> list[int]:
+    """Return PIDs of other running chat_server.py processes.
+
+    ``ps_output`` is the output of ``ps -axo pid=,ppid=,command=``.  The
+    current process and its parent are protected so a wrapper shell or a test
+    harness whose command line happens to mention the script is never killed.
+    """
+    pids: list[int] = []
+    protected = {current_pid, parent_pid}
+    for line in ps_output.splitlines():
+        fields = line.strip().split(None, 2)
+        if len(fields) != 3:
+            continue
+        pid_text, ppid_text, command = fields
+        try:
+            pid = int(pid_text)
+            ppid = int(ppid_text)
+        except ValueError:
+            continue
+        if pid in protected:
+            continue
+        lowered = command.lower()
+        if "chat_server.py" not in lowered and "app.chat_server" not in lowered:
+            continue
+        # Only stop actual Python interpreters running the server, not an
+        # editor, pager, grep, or other tool whose arguments mention it.
+        tokens = lowered.split()
+        executable = os.path.basename(tokens[0])
+        is_python = executable.startswith(("python", "pypy"))
+        if not is_python and executable in {"env", "uv", "poetry", "pipenv"}:
+            is_python = any(
+                os.path.basename(token).startswith(("python", "pypy"))
+                for token in tokens[1:]
+            )
+        if not is_python:
+            continue
+        pids.append(pid)
+    return sorted(set(pids))
+
+
+def _pid_is_running(pid: int) -> bool:
+    """Whether ``pid`` is still running (a zombie no longer counts)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    state = result.stdout.strip()
+    if not state:
+        return False
+    return not state.startswith("Z")
+
+
+def _stop_existing_chat_server() -> None:
+    """Stop a previously started chat_server.py before binding the port."""
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"Could not inspect running chat servers: {exc}", flush=True)
+        return
+    pids = _chat_server_pids(
+        result.stdout,
+        current_pid=os.getpid(),
+        parent_pid=os.getppid(),
+    )
+    if not pids:
+        return
+
+    print(
+        "Stopping existing chat server process(es): "
+        + ", ".join(str(pid) for pid in pids),
+        flush=True,
+    )
+    for sig, timeout in ((signal.SIGTERM, 8.0), (signal.SIGKILL, 2.0)):
+        signaled: list[int] = []
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                continue
+            except OSError as exc:
+                print(f"Could not stop chat server PID {pid}: {exc}", flush=True)
+                continue
+            signaled.append(pid)
+        pids = signaled
+        deadline = time.monotonic() + timeout
+        while pids and time.monotonic() < deadline:
+            pids = [pid for pid in pids if _pid_is_running(pid)]
+            if pids:
+                time.sleep(0.1)
+        if not pids:
+            break
+
+    if pids:
+        print(
+            "Warning: existing chat server process(es) still running: "
+            + ", ".join(str(pid) for pid in pids),
+            flush=True,
+        )
+    else:
+        print("Existing chat server stopped.", flush=True)
+
+
 def main() -> None:
     args = parse_args()
     if not CHAT_HTML.is_file():
         sys.exit(f"Missing front end: {CHAT_HTML}")
+
+    # A second instance would compete for the port and, worse, load the same
+    # large Ollama models twice. Stop a prior instance before doing any warmup
+    # or corpus loading so a restart always replaces the old server.
+    _stop_existing_chat_server()
 
     # Warm the models while the corpus is being loaded, then wait for the
     # warmup to finish before accepting requests. Serving during prewarm made

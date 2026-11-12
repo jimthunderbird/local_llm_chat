@@ -1,5 +1,10 @@
 dictionary_llm: ollama local model ornith:35b with no thinking
 
+task (completed) {
+  in the dictionary popup, next to the word, please add a voice button so that we can hear the prounciation of the word
+  please leverage existing local voice functionalities
+}
+
 task.bug.dictionary_output_mismatching (completed) {
   in the diciontary lookup result of the word "rollout":
   - expect: it only show The meaning of the word, the word's IPA and the contextural meaning of the word

@@ -1028,6 +1028,23 @@
   #popup-prev, #popup-next, #popup-minimize, #popup-close { flex: 0 0 auto; }
   #popup-prev, #popup-next { font-size: 17px; padding: 0 4px; }
   #popup-prev:disabled, #popup-next:disabled { opacity: .3; cursor: default; }
+  #popup-speak {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    cursor: pointer;
+    padding: 0 4px;
+  }
+  #popup-speak svg { display: block; width: 16px; height: 16px; }
+  #popup-speak:hover:not(:disabled) { color: var(--text); }
+  #popup-speak:disabled { opacity: .35; cursor: default; }
+  #popup-speak.is-playing { color: var(--accent-2); }
+  #popup-speak.is-loading .tts-wave { opacity: .3; }
+  #popup-speak.is-playing .tts-wave { animation: tts-wave 1s ease-in-out infinite; }
+  #popup-speak.is-playing .tts-wave:nth-of-type(2) { animation-delay: .15s; }
   #popup-body {
     padding: 11px 13px 14px;
     overflow-y: auto;
@@ -1341,6 +1358,85 @@
   }
   .news-body .news-loading { color: var(--warn); font-size: 12px; }
   .news-body .news-summary { color: #dfeaf4; font-style: italic; }
+  .news-reddit-embed {
+    margin: 16px 0 0;
+    overflow: hidden;
+    border: 1px solid #223344;
+    border-radius: 6px;
+    background: #060a0e;
+  }
+  .news-reddit-embed summary {
+    padding: 8px 10px;
+    color: var(--accent-2);
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .news-reddit-embed summary:hover { color: #9fd0f5; }
+  .news-reddit-embed iframe {
+    display: block;
+    width: 100%;
+    min-height: 480px;
+    border: 0;
+    background: #fff;
+  }
+  /* /stackoverflow: question and answer bodies keep code as real code blocks. */
+  .news-answers {
+    margin-top: 18px;
+    padding-top: 4px;
+    border-top: 1px solid #223344;
+  }
+  .news-answers-heading {
+    font-size: 14px !important;
+    border-bottom: 0 !important;
+    margin-top: 0 !important;
+  }
+  .news-answer {
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    background: #0f1821;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+  }
+  .news-answer-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    color: var(--dim);
+    font-size: 11px;
+    user-select: none;
+  }
+  .news-answer-accepted {
+    color: #6ee7a0;
+    background: #0d2117;
+    border: 1px solid #1f5135;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-weight: 700;
+  }
+  .news-answer-score {
+    color: #ffd28a;
+    border: 1px solid #3a3320;
+    background: #1a1710;
+    border-radius: 4px;
+    padding: 1px 6px;
+  }
+  .news-answer-body p { margin: 0 0 .8em; }
+  .news-answer-body p:last-child { margin-bottom: 0; }
+  .news-answer-link {
+    display: inline-block;
+    margin-top: 7px;
+    color: var(--accent-2);
+    font-size: 11.5px;
+    text-decoration: none;
+    border-bottom: 1px dotted #3d6b8f;
+  }
+  .news-answer-link:hover { border-bottom-style: solid; }
+  .news-code-block { margin: .65em 0; }
+  .news-code-block .code-block { margin: 0; }
+  .news-code-block pre { margin: 0; }
   /* The story controls and chat reuse the video modal's action styles. */
   #news-action { flex: 0 0 auto; margin: 0; }
   #news-chat { flex: 0 0 auto; margin: 0; }
@@ -2748,6 +2844,15 @@
 <div id="popup" hidden>
   <div id="popup-head">
     <span id="popup-word"></span>
+    <button id="popup-speak" type="button" title="Hear pronunciation" aria-label="Hear pronunciation">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/>
+        <path class="tts-wave" d="M16 8.6a4.8 4.8 0 0 1 0 6.8" fill="none"
+              stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        <path class="tts-wave" d="M18.6 6a8.4 8.4 0 0 1 0 12" fill="none"
+              stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+      </svg>
+    </button>
     <span class="popup-note">/dict</span>
     <span class="spacer"></span>
     <button id="popup-prev" type="button" title="Previous looked-up word" aria-label="Previous word" disabled>‹</button>
@@ -3044,6 +3149,7 @@ const newsSourceLoadBtn = $("#news-source-load");
 const newsSourceCancelBtn = $("#news-source-cancel");
 const popupEl = $("#popup");
 const popupWordEl = $("#popup-word");
+const popupSpeakEl = $("#popup-speak");
 const popupBodyEl = $("#popup-body");
 const popupContentEl = $("#popup-content");
 const popupLoadingEl = $("#popup-loading");
@@ -5577,10 +5683,21 @@ function addNewsEvent(entry, data) {
       summary: data.summary || "",
       paragraphs: [],
       blocks: [],
+      questionBlocks: Array.isArray(data.blocks) ? data.blocks : [],
+      questionId: String(data.question_id || ""),
+      answerCount: Number(data.answer_count) || 0,
+      questionScore: Number(data.score) || 0,
+      acceptedAnswerId: data.accepted_answer_id ?? null,
+      answers: [],
+      answersFetched: false,
+      answersLoading: false,
+      answersError: "",
       fullArticleLoaded: false,
       articleFetched: false,
       articleApi: String(data.article_api || ""),
       articleRetryCount: 0,
+      iframeUrl: String(data.iframe_url || data.iframeUrl || ""),
+      articlePartial: Boolean(data.partial),
       images: Array.isArray(data.images)
         ? data.images.map((url) => String(url || "").trim()).filter(Boolean)
         : [],
@@ -5622,6 +5739,7 @@ function addNewsEvent(entry, data) {
         renderNewsModal(item);
         renderNewsAction(item);
         ensureNewsArticle(item);
+        ensureStackoverflowAnswers(item);
       }
       scheduleRender(entry);
     }
@@ -5997,6 +6115,9 @@ function renderNewsList(entry) {
       if (item.published) metaParts.push(formatNewsDate(item.published));
       if (!item.complete) {
         metaParts.push("fetching paragraphs…");
+      } else if (item.questionId) {
+        const count = Number(item.answerCount) || 0;
+        metaParts.push(`${count} answer${count === 1 ? "" : "s"}`);
       } else {
         const count = item.paragraphs.length;
         metaParts.push(`${count} paragraph${count === 1 ? "" : "s"}`);
@@ -8293,26 +8414,53 @@ document.addEventListener("keydown", (event) => {
   closeGutenbergModal();
 }, true);
 
+function newsBlocksText(blocks) {
+  const parts = [];
+  for (const block of Array.isArray(blocks) ? blocks : []) {
+    if (!block || typeof block !== "object") continue;
+    if (block.type === "list") {
+      for (const item of Array.isArray(block.items) ? block.items : []) {
+        const clean = String(item || "").trim();
+        if (clean) parts.push(clean);
+      }
+      continue;
+    }
+    const clean = String(block.text || "").trim();
+    if (clean) parts.push(clean);
+  }
+  return parts;
+}
+
 function newsArticleText(item) {
   if (!item) return "";
   const paragraphs = Array.isArray(item.paragraphs) ? item.paragraphs : [];
   const summary = String(item.summary || "");
+  const questionBlocks = Array.isArray(item.questionBlocks)
+    ? item.questionBlocks
+    : [];
   const parts = [];
-  if (summary && summary !== paragraphs[0]) parts.push(summary);
-  for (const text of paragraphs) {
-    const clean = String(text || "").trim();
-    if (clean) parts.push(clean);
+  if (questionBlocks.length) {
+    parts.push(...newsBlocksText(questionBlocks));
+  } else {
+    if (summary && summary !== paragraphs[0]) parts.push(summary);
+    for (const text of paragraphs) {
+      const clean = String(text || "").trim();
+      if (clean) parts.push(clean);
+    }
+  }
+  for (const answer of Array.isArray(item.answers) ? item.answers : []) {
+    parts.push(...newsBlocksText(answer.blocks));
   }
   return parts.join("\n\n");
 }
 
-function appendNewsParagraph(text, className) {
+function appendNewsParagraph(text, className, target) {
   const p = document.createElement("p");
   if (className) p.className = className;
   // Word spans keep every news word clickable for the /dict popup, exactly
   // like the words in a chat answer.
   p.appendChild(wordNodes(String(text || ""), true));
-  newsBodyEl.appendChild(p);
+  (target || newsBodyEl).appendChild(p);
 }
 
 /* ------------------------------------------------------------------ *
@@ -9174,17 +9322,17 @@ function toggleNewsTranslation() {
   newsTranslationEl.scrollIntoView({ block: "nearest" });
 }
 
-function appendNewsHeading(text, level) {
+function appendNewsHeading(text, level, target) {
   const value = String(text || "").trim();
   if (!value) return;
   const depth = Math.min(6, Math.max(2, Number(level) || 2));
   const heading = document.createElement(`h${depth}`);
   heading.className = "news-heading";
   heading.appendChild(wordNodes(value, true));
-  newsBodyEl.appendChild(heading);
+  (target || newsBodyEl).appendChild(heading);
 }
 
-function appendNewsList(items, ordered) {
+function appendNewsList(items, ordered, target) {
   if (!Array.isArray(items) || !items.length) return;
   const list = document.createElement(ordered ? "ol" : "ul");
   list.className = "news-list";
@@ -9197,10 +9345,30 @@ function appendNewsList(items, ordered) {
     list.appendChild(item);
     added += 1;
   }
-  if (added) newsBodyEl.appendChild(list);
+  if (added) (target || newsBodyEl).appendChild(list);
 }
 
-function appendNewsFigure(block) {
+function appendNewsCodeBlock(block, target) {
+  const text = String(block?.text || "");
+  if (!text.trim()) return;
+  const language = String(block?.language || "")
+    .trim()
+    .replace(/[^A-Za-z0-9_+#.-]/g, "");
+  const longestBackticks = (text.match(/`+/g) || []).reduce(
+    (longest, run) => Math.max(longest, run.length),
+    0
+  );
+  const fence = "`".repeat(Math.max(3, longestBackticks + 1));
+  const markdown = `${fence}${language}\n${text}\n${fence}`;
+  // Reuse the chat answer's code block: fenced code keeps indentation and
+  // gains the same copy/search controls as generated code snippets.
+  const holder = document.createElement("div");
+  holder.className = "markdown news-code-block";
+  holder.appendChild(renderMarkdown(markdown, true));
+  (target || newsBodyEl).appendChild(holder);
+}
+
+function appendNewsFigure(block, target) {
   const url = String(block?.url || "").trim();
   if (!url) return;
   const figure = document.createElement("figure");
@@ -9224,30 +9392,57 @@ function appendNewsFigure(block) {
     figcaption.appendChild(wordNodes(caption, true));
     figure.appendChild(figcaption);
   }
-  newsBodyEl.appendChild(figure);
+  (target || newsBodyEl).appendChild(figure);
 }
 
-function appendNewsBlocks(blocks) {
+function appendNewsBlocks(blocks, target) {
   if (!Array.isArray(blocks) || !blocks.length) return;
   for (const block of blocks) {
     if (!block || typeof block !== "object") continue;
     switch (block.type) {
       case "heading":
-        appendNewsHeading(block.text, block.level);
+        appendNewsHeading(block.text, block.level, target);
         break;
       case "paragraph":
-        appendNewsParagraph(block.text, "");
+        appendNewsParagraph(block.text, "", target);
         break;
       case "list":
-        appendNewsList(block.items, Boolean(block.ordered));
+        appendNewsList(block.items, Boolean(block.ordered), target);
+        break;
+      case "code":
+        appendNewsCodeBlock(block, target);
         break;
       case "image":
-        appendNewsFigure(block);
+        appendNewsFigure(block, target);
         break;
       default:
         break;
     }
   }
+}
+
+function appendRedditEmbed(item, target, open = false) {
+  const url = String(item?.iframeUrl || "").trim();
+  if (!url) return;
+  const details = document.createElement("details");
+  details.className = "news-reddit-embed";
+  details.open = Boolean(open);
+  const summary = document.createElement("summary");
+  summary.textContent = open
+    ? "Live Reddit thread (iframe)"
+    : "Open the live Reddit thread (iframe)";
+  details.appendChild(summary);
+  const frame = document.createElement("iframe");
+  frame.src = url;
+  frame.title = item.title
+    ? `Live Reddit thread: ${item.title}`
+    : "Live Reddit thread";
+  frame.loading = "lazy";
+  frame.referrerPolicy = "no-referrer";
+  frame.setAttribute("allowtransparency", "true");
+  frame.setAttribute("scrolling", "yes");
+  details.appendChild(frame);
+  (target || newsBodyEl).appendChild(details);
 }
 
 function renderNewsModal(item) {
@@ -9285,11 +9480,18 @@ function renderNewsModal(item) {
     ? item.images.map((url) => String(url || "").trim()).filter(Boolean)
     : [];
   const paragraphs = Array.isArray(item.paragraphs) ? item.paragraphs : [];
+  const questionBlocks = Array.isArray(item.questionBlocks)
+    ? item.questionBlocks
+    : [];
   const summary = String(item.summary || "");
   if (blocks.length) {
     // Full article view: headings, text, lists, and figures stay in the
     // order they appear in the source article.
     appendNewsBlocks(blocks);
+  } else if (questionBlocks.length) {
+    // Stack Overflow question bodies keep their own code blocks instead of
+    // being flattened into plain text.
+    appendNewsBlocks(questionBlocks);
   } else {
     if (images.length) {
       const gallery = document.createElement("div");
@@ -9330,17 +9532,38 @@ function renderNewsModal(item) {
       : "loading paragraphs…";
     newsBodyEl.appendChild(loading);
   } else if (!paragraphs.length && !blocks.length && item.articleError) {
-    const empty = document.createElement("div");
-    empty.className = "news-loading";
-    empty.textContent = "The full article could not be loaded. Use the article link above to open it directly.";
-    empty.title = item.articleError;
-    newsBodyEl.appendChild(empty);
+    if (item.iframeUrl) {
+      appendRedditEmbed(item, newsBodyEl, true);
+    } else {
+      const empty = document.createElement("div");
+      empty.className = "news-loading";
+      empty.textContent = "The full article could not be loaded. Use the article link above to open it directly.";
+      empty.title = item.articleError;
+      newsBodyEl.appendChild(empty);
+    }
   } else if (!paragraphs.length && !blocks.length && !summary) {
     const empty = document.createElement("div");
     empty.className = "news-loading";
     empty.textContent = "This story has no readable paragraphs in the feed.";
     newsBodyEl.appendChild(empty);
   }
+  // Reddit's own page is cross-origin, so its DOM cannot be read from an
+  // iframe. The server extracts the thread from JSON/Atom/embed first, and
+  // this iframe is the faithful fallback that loads the real rendered post
+  // and comments directly from Reddit.
+  if (item.articlePartial) {
+    const note = document.createElement("div");
+    note.className = "news-loading";
+    note.textContent = "Reddit blocked the full post body; comments were extracted from Reddit's embed. The live thread is available below.";
+    newsBodyEl.appendChild(note);
+  }
+  if (
+    item.iframeUrl
+    && (paragraphs.length || blocks.length || summary)
+  ) {
+    appendRedditEmbed(item, newsBodyEl, false);
+  }
+  renderStackoverflowAnswers(item);
   // Keep the (possibly streaming) translation after the article body.
   renderNewsTranslation();
   renderNewsPodcast(item);
@@ -9377,6 +9600,7 @@ function openNewsModal(item) {
   // its top.
   resetNewsBodyScroll(item);
   ensureNewsArticle(item);
+  ensureStackoverflowAnswers(item);
 }
 
 let newsBodyScrollFrame = 0;
@@ -9428,12 +9652,17 @@ function ensureNewsArticle(item) {
     ? `${articleApi}?url=${encodeURIComponent(link)}&title=${encodeURIComponent(item.title || "")}`
     : `/api/news_article?url=${encodeURIComponent(link)}&title=${encodeURIComponent(item.title || "")}`;
   fetch(requestUrl)
-    .then((response) => {
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.json();
-    })
+    .then((response) => response.json().then((data) => {
+      if (!response.ok) {
+        if (data?.iframe_url) item.iframeUrl = String(data.iframe_url);
+        throw new Error(data?.error || `HTTP ${response.status}`);
+      }
+      return data;
+    }))
     .then((data) => {
       item.articleFetched = true;
+      if (data.iframe_url) item.iframeUrl = String(data.iframe_url);
+      item.articlePartial = Boolean(data.partial);
       const blocks = Array.isArray(data.blocks)
         ? data.blocks.filter((block) => block && typeof block === "object")
         : [];
@@ -9489,6 +9718,114 @@ function ensureNewsArticle(item) {
         }, 1200);
       }
     });
+}
+
+/*
+ * A /stackoverflow result opens with the question body. Its answers arrive
+ * lazily through the Stack Exchange answers endpoint so the search stays
+ * fast and the modal can show each answer's code blocks with formatting.
+ */
+function ensureStackoverflowAnswers(item) {
+  if (!item || !item.questionId || item.answersFetched || item.answersLoading) {
+    return;
+  }
+  item.answersLoading = true;
+  item.answersError = "";
+  if (newsItem === item) renderNewsModal(item);
+  fetch(
+    `/api/stackoverflow_answers?id=${encodeURIComponent(item.questionId)}`
+  )
+    .then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    })
+    .then((data) => {
+      item.answersFetched = true;
+      item.answers = Array.isArray(data.answers) ? data.answers : [];
+      if (data.link) item.answersLink = String(data.link);
+    })
+    .catch((error) => {
+      item.answersError = error?.message || String(error);
+    })
+    .finally(() => {
+      item.answersLoading = false;
+      if (newsItem === item) renderNewsModal(item);
+    });
+}
+
+function renderStackoverflowAnswers(item) {
+  if (!item || !item.questionId) return;
+  const answers = Array.isArray(item.answers) ? item.answers : [];
+  if (!answers.length && !item.answersLoading && !item.answersError) return;
+
+  const section = document.createElement("section");
+  section.className = "news-answers";
+  const heading = document.createElement("h3");
+  heading.className = "news-heading news-answers-heading";
+  heading.textContent = item.answersLoading
+    ? "Answers · loading…"
+    : `Answers (${answers.length})`;
+  section.appendChild(heading);
+
+  if (item.answersError) {
+    const error = document.createElement("div");
+    error.className = "news-loading";
+    error.textContent = "The answers could not be loaded. Open this question on Stack Overflow to read them directly.";
+    error.title = item.answersError;
+    section.appendChild(error);
+  }
+
+  answers.forEach((answer, index) => {
+    const article = document.createElement("article");
+    article.className = "news-answer";
+
+    const head = document.createElement("div");
+    head.className = "news-answer-head";
+    if (answer.accepted) {
+      const accepted = document.createElement("span");
+      accepted.className = "news-answer-accepted";
+      accepted.textContent = "✓ Accepted answer";
+      head.appendChild(accepted);
+    }
+    const score = document.createElement("span");
+    score.className = "news-answer-score";
+    const scoreValue = Number(answer.score) || 0;
+    score.textContent = `${scoreValue} vote${scoreValue === 1 ? "" : "s"}`;
+    head.appendChild(score);
+    const metaParts = [`Answer ${index + 1}`];
+    if (answer.owner) metaParts.push(`by ${answer.owner}`);
+    if (answer.created) metaParts.push(formatNewsDate(answer.created));
+    const meta = document.createElement("span");
+    meta.className = "news-answer-meta";
+    meta.textContent = metaParts.join(" · ");
+    head.appendChild(meta);
+    article.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "news-answer-body";
+    const blocks = Array.isArray(answer.blocks) ? answer.blocks : [];
+    if (blocks.length) {
+      appendNewsBlocks(blocks, body);
+    } else {
+      for (const text of Array.isArray(answer.paragraphs) ? answer.paragraphs : []) {
+        appendNewsParagraph(text, "", body);
+      }
+    }
+    article.appendChild(body);
+
+    if (answer.link) {
+      const link = document.createElement("a");
+      link.className = "news-answer-link";
+      link.href = answer.link;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = "Open this answer on Stack Overflow ↗";
+      article.appendChild(link);
+    }
+    section.appendChild(article);
+  });
+
+  newsBodyEl.appendChild(section);
 }
 
 /*
@@ -10685,12 +11022,13 @@ function submitText(text, fromChoice = false) {
   const commandArgs = question.startsWith("/")
     ? question.slice(1).split(/\s+/).slice(1)
     : [];
-  // /news search, /mdn, and /wikivoyage stream their result lists; anchor
-  // each list at the top so new results do not drag the viewport down.
+  // /news search, /mdn, /wikivoyage, and /reddit stream their result lists;
+  // anchor each list at the top so new results do not drag the viewport down.
   const pinsNewsSearch = (
     commandName === "news"
       && String(commandArgs[0] || "").toLowerCase() === "search"
-  ) || commandName === "mdn" || commandName === "wikivoyage";
+  ) || commandName === "mdn" || commandName === "wikivoyage"
+    || commandName === "reddit";
 
   addUserEcho(question, image);
   const isCommand = question.startsWith("/");
@@ -10706,7 +11044,9 @@ function submitText(text, fromChoice = false) {
           ? "MDN Web Docs"
           : commandName === "wikivoyage"
             ? "Wikivoyage"
-            : commandName === "howstuffworks"
+            : commandName === "reddit"
+              ? "Reddit"
+              : commandName === "howstuffworks"
               ? "HowStuffWorks"
               : commandName === "medium"
                 ? "Medium"
@@ -11050,6 +11390,16 @@ function completionContext() {
       kind = name === "/gutenberg"
         ? "gutenberg_subcommands"
         : "openlibrary_subcommands";
+      start = firstSpace + 1;
+    } else {
+      return null;
+    }
+  }
+  else if (name === "/stackoverflow") {
+    // First argument is "tag" or "search"; the rest is free-form.
+    const args = value.slice(firstSpace + 1, caret);
+    if (args.search(/\s/) < 0) {
+      kind = "stackoverflow_subcommands";
       start = firstSpace + 1;
     } else {
       return null;
@@ -12173,6 +12523,125 @@ const dictionaryHistory = [];
 let dictionaryHistoryIndex = -1;
 let dictionaryRootAnswer = "";
 let dictionaryRenderTimer = null;
+let dictionarySpeakGeneration = 0;
+let dictionarySpeakState = null;
+
+function syncDictionarySpeakButton() {
+  const entry = activeDictionaryEntry();
+  const word = String(entry?.word || "").trim();
+  const state = dictionarySpeakState;
+  const playing = Boolean(state && !state.loading);
+  popupSpeakEl.disabled = !word;
+  popupSpeakEl.classList.toggle("is-playing", playing);
+  popupSpeakEl.classList.toggle("is-loading", Boolean(state?.loading));
+  const label = state
+    ? `Stop pronouncing “${word}”`
+    : `Hear pronunciation of “${word}”`;
+  popupSpeakEl.title = word ? label : "Hear pronunciation";
+  popupSpeakEl.setAttribute("aria-label", popupSpeakEl.title);
+}
+
+function stopDictionaryPronunciation() {
+  dictionarySpeakGeneration += 1;
+  const state = dictionarySpeakState;
+  dictionarySpeakState = null;
+  if (!state) {
+    syncDictionarySpeakButton();
+    return;
+  }
+  if (state.controller) state.controller.abort();
+  if (state.audio) {
+    state.audio.onended = null;
+    state.audio.onerror = null;
+    state.audio.pause();
+    state.audio.removeAttribute("src");
+    state.audio.load();
+  }
+  if (state.url) URL.revokeObjectURL(state.url);
+  syncDictionarySpeakButton();
+}
+
+async function speakDictionaryWord() {
+  if (dictionarySpeakState) {
+    stopDictionaryPronunciation();
+    return;
+  }
+  const entry = activeDictionaryEntry();
+  const word = String(entry?.word || "").trim();
+  if (!word) return;
+
+  const generation = ++dictionarySpeakGeneration;
+  const controller = new AbortController();
+  const state = {
+    word,
+    loading: true,
+    controller,
+    audio: null,
+    url: "",
+  };
+  dictionarySpeakState = state;
+  syncDictionarySpeakButton();
+
+  try {
+    const response = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: word }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try {
+        const text = await response.text();
+        if (text) {
+          try {
+            detail = JSON.parse(text).error || detail;
+          } catch {
+            detail = text.slice(0, 200);
+          }
+        }
+      } catch { /* ignore */ }
+      throw new Error(detail);
+    }
+    const blob = await response.blob();
+    if (generation !== dictionarySpeakGeneration) return;
+
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio();
+    state.loading = false;
+    state.controller = null;
+    state.audio = audio;
+    state.url = url;
+    audio.onended = () => {
+      if (generation === dictionarySpeakGeneration) {
+        stopDictionaryPronunciation();
+      }
+    };
+    audio.onerror = () => {
+      if (generation !== dictionarySpeakGeneration) return;
+      stopDictionaryPronunciation();
+      toast("Could not play the pronunciation.");
+    };
+    audio.src = url;
+    syncDictionarySpeakButton();
+    const playback = audio.play();
+    if (playback?.catch) {
+      playback.catch((error) => {
+        if (generation !== dictionarySpeakGeneration) return;
+        stopDictionaryPronunciation();
+        if (error?.name !== "AbortError") {
+          toast(`Pronunciation failed: ${error?.message || String(error)}`);
+        }
+      });
+    }
+  } catch (error) {
+    if (generation !== dictionarySpeakGeneration) return;
+    stopDictionaryPronunciation();
+    if (error?.name !== "AbortError") {
+      toast(`Pronunciation failed: ${error?.message || String(error)}`);
+    }
+  }
+}
 
 function activeDictionaryEntry() {
   if (dictionaryHistoryIndex < 0) return null;
@@ -12230,6 +12699,7 @@ function highlightDictionaryWord(word) {
 function renderDictionaryEntry(entry) {
   if (activeDictionaryEntry() !== entry) return;
   popupWordEl.textContent = entry.word;
+  syncDictionarySpeakButton();
   popupContentEl.dataset.buffer = entry.buffer;
   popupContentEl.textContent = "";
   // Every displayed word can itself be looked up, including words in the
@@ -12326,6 +12796,7 @@ function ensureDictionaryEntryStream(entry) {
 function showDictionaryEntry(entry) {
   const index = dictionaryHistory.indexOf(entry);
   if (index < 0) return;
+  stopDictionaryPronunciation();
   dictionaryHistoryIndex = index;
   popupWordEl.textContent = entry.word;
   popupContentEl.textContent = "";
@@ -12390,6 +12861,7 @@ function syncPopupRestore() {
 
 function minimizePopup() {
   if (popupEl.hidden) return;
+  stopDictionaryPronunciation();
   // Keep the SSE stream (and any partial definition) alive while hidden.
   popupMinimized = true;
   popupEl.hidden = true;
@@ -12407,6 +12879,7 @@ function restorePopup() {
 }
 
 function closePopup() {
+  stopDictionaryPronunciation();
   for (const entry of dictionaryHistory) abortDictionaryEntry(entry);
   if (dictionaryRenderTimer) {
     window.clearTimeout(dictionaryRenderTimer);
@@ -12423,6 +12896,7 @@ function closePopup() {
 }
 $("#popup-close").addEventListener("click", closePopup);
 $("#popup-minimize").addEventListener("click", minimizePopup);
+popupSpeakEl.addEventListener("click", speakDictionaryWord);
 popupPrevEl.addEventListener("click", () => navigateDictionary(-1));
 popupNextEl.addEventListener("click", () => navigateDictionary(1));
 popupRestoreEl.addEventListener("click", restorePopup);
