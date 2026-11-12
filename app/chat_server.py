@@ -5471,6 +5471,25 @@ VERDICT: YES or NO
 EVIDENCE: [excerpt number] (required when the verdict is YES)
 MISSING: what is still missing (short; write NONE when nothing is missing)
 """
+# List/comparison questions need every requested item, but the generic prompt
+# is satisfied as soon as one example is present. Ask specifically whether the
+# set is complete so an enumeration is retrieved across more rounds instead of
+# stopping on the first matching item.
+ARTICLE_ENUMERATIVE_SUFFICIENCY_PROMPT = """You are checking whether retrieved excerpts can answer an enumeration question.
+
+Question: {question}
+
+Excerpts:
+{excerpts}
+
+The question asks for a list, comparison, or other enumeration. A single
+example, a partial list, or a mention of the topic is not enough. Answer
+VERDICT: YES only when the excerpts enumerate the requested items (or cover
+every compared aspect). Reply in exactly this format:
+VERDICT: YES or NO
+EVIDENCE: [excerpt number] (required when the verdict is YES)
+MISSING: which requested item(s) or category(ies) are still absent (short; write NONE when nothing is missing)
+"""
 
 
 class ArticleRoute(NamedTuple):
@@ -6218,15 +6237,21 @@ def _missing_search_terms(missing: str) -> str:
 
 
 def _article_sufficiency_check(
-    question: str, evidence: list[tuple[chat.Chunk, float]]
+    question: str,
+    evidence: list[tuple[chat.Chunk, float]],
+    *,
+    enumerative: bool = False,
 ) -> dict:
     """Ask the small model whether the gathered evidence answers the question."""
     excerpts = _article_excerpts_for_check(evidence)
     if not excerpts:
         return {"sufficient": False, "missing": ""}
-    prompt = ARTICLE_SUFFICIENCY_PROMPT.format(
-        question=question, excerpts=excerpts
+    template = (
+        ARTICLE_ENUMERATIVE_SUFFICIENCY_PROMPT
+        if enumerative
+        else ARTICLE_SUFFICIENCY_PROMPT
     )
+    prompt = template.format(question=question, excerpts=excerpts)
     try:
         response = chat.generate_text(
             prompt,
@@ -6364,6 +6389,7 @@ def _iterative_evidence(
     accept_insufficient: bool = False,
     apply_filter: bool = True,
     check_every: int = 1,
+    enumerative: bool = False,
 ) -> list[tuple[chat.Chunk, float]]:
     """Gather evidence in small rounds, stopping when it is sufficient.
 
@@ -6384,40 +6410,86 @@ def _iterative_evidence(
     long_form = chat.is_article_format_request(question)
     if long_form:
         max_rounds = 1
+    enumerative = enumerative or bool(
+        chat.LIST_QUERY_PATTERN.search(question)
+    )
     paragraph_chunks = _iterative_paragraph_chunks(chunks)
-    # The original question does not change between rounds, so expand it once.
-    # Later rounds append the sufficiency checker's ``missing`` terms to the
-    # BM25 query, which already gives those terms full weight; expanding the
-    # whole question again only repeated a small-model call. ``expand_query``
-    # is also cached, so /article and normal retrieval reuse this result.
-    try:
-        expansion = chat.expand_query(question)
-    except RuntimeError:
-        expansion = ""
+    # Query expansion is a small-model call. Defer it until the first raw BM25
+    # pass fails to cover the question: a direct fact question is usually
+    # answered by the original terms alone, and the expanded terms only help
+    # the follow-up round when retrieval came up short.
+    expansion = ""
+    expansion_done = False
+
+    def ensure_expansion() -> str:
+        nonlocal expansion, expansion_done
+        if not expansion_done:
+            expansion_done = True
+            try:
+                expansion = chat.expand_query(question)
+            except RuntimeError:
+                expansion = ""
+        return expansion
+
+    def rank_candidates(
+        query: str, use_expansion: bool
+    ) -> list[tuple[chat.Chunk, float]]:
+        ranked = chat.top_chunks(
+            query,
+            paragraph_chunks,
+            limit=candidate_limit,
+            expansion=ensure_expansion() if use_expansion else "",
+        )
+        return [
+            item
+            for item in ranked
+            if (item[0].video_id, item[0].index) not in seen
+        ]
+
     filter_done = False
     previous_missing = ""
 
     for round_number in range(1, max_rounds + 1):
         if used >= budget:
             break
-        ranked = chat.top_chunks(
-            search_question,
-            paragraph_chunks,
-            limit=candidate_limit,
-            expansion=expansion,
-        )
-        candidates = [
-            item
-            for item in ranked
-            if (item[0].video_id, item[0].index) not in seen
-        ]
+        candidates = rank_candidates(search_question, round_number > 1)
+        if not candidates and round_number == 1 and not expansion_done:
+            # The raw first pass found nothing at all. Retry it once with
+            # expansion before concluding the corpus has no match.
+            candidates = rank_candidates(search_question, True)
         if not candidates:
             break
 
+        added = 0
+        # Gather a wider first batch. A sufficiency check is the most
+        # expensive step in the loop, so front-loading a few extra paragraphs
+        # often answers the question after one check instead of two or three.
+        round_batch = batch * 2 if round_number == 1 else batch
+        if long_form:
+            round_batch = max(round_batch, LONGFORM_ITERATIVE_FIRST_BATCH)
+
+        # Cheap coverage check before the small-model relevance filter. When
+        # the top ``batch`` candidates already contain every question term,
+        # the evidence is self-evidently on-topic: skip the filter call and
+        # keep the smaller batch, which cuts the answer model's prefill.
+        covered_by_top_batch = (
+            not long_form
+            and not enumerative
+            and _evidence_covers_question(
+                question, evidence + candidates[:batch]
+            )
+        )
+        if covered_by_top_batch:
+            round_batch = min(round_batch, batch)
+
         # Run the small relevance filter once, when the candidate pool is in
-        # its effective range, instead of on every round.
+        # its effective range, instead of on every round. Long-form requests
+        # skip it entirely: their context is intentionally broad and the
+        # filter would only delay the writer.
         if (
             apply_filter
+            and not long_form
+            and not covered_by_top_batch
             and not filter_done
             and chat.FILTER_MIN_CANDIDATES
             <= len(candidates)
@@ -6433,14 +6505,6 @@ def _iterative_evidence(
                     item for item in candidates
                     if id(item[0]) not in filtered_ids
                 ]
-
-        added = 0
-        # Gather a wider first batch. A sufficiency check is the most
-        # expensive step in the loop, so front-loading a few extra paragraphs
-        # often answers the question after one check instead of two or three.
-        round_batch = batch * 2 if round_number == 1 else batch
-        if long_form:
-            round_batch = max(round_batch, LONGFORM_ITERATIVE_FIRST_BATCH)
         for chunk, score in candidates:
             key = (chunk.video_id, chunk.index)
             if key in seen:
@@ -6472,26 +6536,27 @@ def _iterative_evidence(
         # Fast path: for a simple question, evidence that already contains all
         # of the question's content words is sufficient by inspection. This
         # skips a small-model call on most direct fact questions.
-        if not chat.LIST_QUERY_PATTERN.search(question) and (
-            _evidence_covers_question(question, evidence)
-        ):
+        if not enumerative and _evidence_covers_question(question, evidence):
             sufficient = True
             log(
                 f"[{label} iterative: evidence covers the question terms; "
                 "stopping]"
             )
             break
-        # Checking sufficiency is the expensive step. Enumerative questions
-        # need several rounds of coverage, so checking every other round
-        # avoids repeating the small-model call while still stopping as soon
-        # as the growing evidence is judged sufficient (or at the last round).
+        # Checking sufficiency is the expensive step. For enumerative
+        # questions the wide first batch is checked immediately, then every
+        # other round (1, 3, 5), so a complete list stops early while a
+        # partial list still receives the full round budget. The enumerative
+        # prompt also rejects a verdict based on one example.
         if (
             check_every > 1
-            and round_number % check_every != 0
+            and round_number % check_every != 1
             and round_number != max_rounds
         ):
             continue
-        verdict = _article_sufficiency_check(question, evidence)
+        verdict = _article_sufficiency_check(
+            question, evidence, enumerative=enumerative
+        )
         if verdict["sufficient"]:
             sufficient = True
             log(f"[{label} iterative: evidence is sufficient; stopping]")
@@ -6684,6 +6749,7 @@ def _youtube_iterative_evidence(
             accept_insufficient=True,
             apply_filter=base_apply_filter,
             check_every=2 if enumerative else 1,
+            enumerative=enumerative,
         )
         if cache is not None:
             cache[cache_key] = base

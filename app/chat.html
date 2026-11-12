@@ -5578,6 +5578,7 @@ function addNewsEvent(entry, data) {
       paragraphs: [],
       blocks: [],
       fullArticleLoaded: false,
+      articleFetched: false,
       articleApi: String(data.article_api || ""),
       articleRetryCount: 0,
       images: Array.isArray(data.images)
@@ -9405,11 +9406,13 @@ function ensureNewsArticle(item) {
   // is opened; item_end must not prefetch ten full destination articles.
   if (articleApi && newsItem !== item) return;
   const needsFullArticle = Boolean(articleApi) && !item.fullArticleLoaded;
-  if (
-    !needsFullArticle
-    && Array.isArray(item.paragraphs)
-    && item.paragraphs.length
-  ) {
+  // A feed story can arrive with a single preview/standfirst paragraph. That
+  // is not the full article, so the modal must still request the article body
+  // once. A successful detail fetch sets articleFetched to avoid re-fetching
+  // on every reopen, even when the story really is one paragraph long.
+  const hasBody = (Array.isArray(item.blocks) && item.blocks.length > 0)
+    || (Array.isArray(item.paragraphs) && item.paragraphs.length > 1);
+  if (item.articleFetched || (!needsFullArticle && hasBody)) {
     return;
   }
   const link = String(item.link || "").trim();
@@ -9430,6 +9433,7 @@ function ensureNewsArticle(item) {
       return response.json();
     })
     .then((data) => {
+      item.articleFetched = true;
       const blocks = Array.isArray(data.blocks)
         ? data.blocks.filter((block) => block && typeof block === "object")
         : [];

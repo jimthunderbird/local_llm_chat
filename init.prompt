@@ -12,6 +12,10 @@ restrictions:
 group app/chat.html and app/chat_server.py {
 
   task (persistent) {
+    complete tasks in ./prompts/article_loading.prompt
+  }
+
+  task (persistent) {
     complete tasks in ./prompts/benchmark.prompt
   }
   

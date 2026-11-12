@@ -518,9 +518,13 @@ const ARTICLE_CACHE_FAILURE_TTL = 3600; // one hour for articles we could not lo
 // failed mirror lookup on the next news request instead of hiding the story
 // for a full hour.
 const ARTICLE_READER_FAILURE_TTL = 120;
-const ARTICLE_EXTRACTOR_VERSION = 9;   // bump when article extraction logic changes
+const ARTICLE_EXTRACTOR_VERSION = 10;  // bump when article extraction logic changes
 const ARTICLE_MIN_BODY_CHARS = 1200;   // a container this large is a real body, not metadata
 const ARTICLE_PARTIAL_BODY_CHARS = 1200; // shorter fallback bodies may be previews
+// A preview body is better than an empty modal, but it should not be treated
+// as the complete article forever. Retry it on a detail request after a short
+// interval (a publisher paywall can disappear or a syndicated copy can appear).
+const ARTICLE_PARTIAL_TTL = 900;
 const ARTICLE_FETCH_CONCURRENCY = 6;
 const MAX_ARTICLE_CACHE_ENTRIES = 500;
 // Some publishers put the complete story in a public RSS feed while the
@@ -2224,6 +2228,44 @@ function articleTitleWords(string $title): array
 }
 
 /**
+ * Remove a feed-appended publisher suffix from a headline.
+ *
+ * Google News titles look like "Who could run Nvidia after Jensen Huang? -
+ * Financial Times". The publisher name lowers headline similarity enough to
+ * miss the syndicated copy, leaving a paywall standfirst as the whole story.
+ * Only strip a short trailing separator segment so a real dash inside the
+ * headline is preserved when it carries more than a publisher name.
+ */
+function articleCoreTitle(string $title): string
+{
+    $title = normalizeText($title);
+    $best = $title;
+    foreach ([' - ', ' | ', " \u{2014} ", " \u{2013} "] as $separator) {
+        $position = mb_strrpos($title, $separator);
+        if ($position === false) {
+            continue;
+        }
+        $headline = trim(mb_substr($title, 0, $position));
+        $suffix = trim(mb_substr($title, $position + mb_strlen($separator)));
+        if ($headline === '' || $suffix === '') {
+            continue;
+        }
+        $headlineWords = articleTitleWords($headline);
+        $suffixWords = preg_split('/\s+/u', $suffix) ?: [];
+        if (count($headlineWords) < 3
+            || count($suffixWords) > 5
+            || mb_strlen($suffix) > 50
+        ) {
+            continue;
+        }
+        if (mb_strlen($headline) < mb_strlen($best)) {
+            $best = $headline;
+        }
+    }
+    return $best;
+}
+
+/**
  * Similarity between an original headline and a possible syndicated copy.
  */
 function articleTitleSimilarity(string $original, string $candidate): float
@@ -2376,6 +2418,71 @@ function trimArticleChrome(array $paragraphs): array
         return $paragraphs;
     }
     return $trimmed;
+}
+
+/**
+ * Extract a story headline from a publisher page. Paywalled pages still
+ * normally expose their headline in an og:title/twitter:title meta tag or the
+ * document title, which lets syndication matching run even when the caller
+ * (for example `--article <url>`) did not supply a title.
+ */
+function extractArticleTitleFromHtml(string $html): string
+{
+    if (trim($html) === '') {
+        return '';
+    }
+
+    $previous = libxml_use_internal_errors(true);
+    $document = new DOMDocument();
+    $loaded = $document->loadHTML(
+        '<?xml encoding="utf-8"?>' . $html,
+        LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING
+    );
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+    if (!$loaded) {
+        return '';
+    }
+
+    $title = '';
+    foreach ($document->getElementsByTagName('meta') as $meta) {
+        $key = strtolower(trim(
+            $meta->getAttribute('property') !== ''
+                ? $meta->getAttribute('property')
+                : $meta->getAttribute('name')
+        ));
+        if ($key !== 'og:title' && $key !== 'twitter:title') {
+            continue;
+        }
+        $title = normalizeText($meta->getAttribute('content'));
+        if ($title !== '') {
+            break;
+        }
+    }
+
+    if ($title === '') {
+        $node = $document->getElementsByTagName('title')->item(0);
+        $title = $node !== null ? normalizeText($node->textContent) : '';
+    }
+    if ($title === '') {
+        return '';
+    }
+    // A WAF/challenge page also has a title; it is not the story headline.
+    $lower = strtolower($title);
+    foreach ([
+        'security verification',
+        'just a moment',
+        'access denied',
+        'attention required',
+        'are you a robot',
+        'verify you are human',
+        'page not found',
+    ] as $needle) {
+        if (str_contains($lower, $needle)) {
+            return '';
+        }
+    }
+    return $title;
 }
 
 /**
@@ -2627,6 +2734,7 @@ function fetchArticleSyndicationFallback(
     string $sourceKey
 ): ?array {
     $title = normalizeText(strip_tags($title));
+    $title = articleCoreTitle($title);
     if (mb_strlen($title) < 15) {
         $parts = parse_url(trim($url));
         $slug = is_array($parts)
@@ -3071,9 +3179,15 @@ function fetchArticleFeedFallback(string $url, string $sourceKey): ?array
             if ($image === '') {
                 $image = extractArticleImageFromHtml($bodyHtml, $url);
             }
+            $itemTitle = '';
+            $titleNode = $item->getElementsByTagName('title')->item(0);
+            if ($titleNode !== null) {
+                $itemTitle = normalizeText($titleNode->textContent);
+            }
             return [
                 'paragraphs' => $paragraphs,
                 'image' => $image,
+                'title' => $itemTitle,
             ];
         }
     }
@@ -3288,6 +3402,11 @@ function enrichStoryContent(
                 $entry['paragraphs'] = [];
             }
             $ttl = $paragraphs ? ARTICLE_CACHE_TTL : ARTICLE_CACHE_FAILURE_TTL;
+            // An entry explicitly marked partial is a preview kept because no
+            // complete body was available. Use it briefly, then retry.
+            if ($paragraphs && !empty($entry['partial'])) {
+                $ttl = min($ttl, ARTICLE_PARTIAL_TTL);
+            }
             if (!$paragraphs) {
                 $entryLink = trim((string)($entry['link'] ?? ''));
                 if (articleReaderFallbackUrls($link)
@@ -3303,10 +3422,29 @@ function enrichStoryContent(
             $cacheIsUsable = $cacheIsUsable
                 && !$placeholderCache
                 && (int)($entry['extractor'] ?? 0) === ARTICLE_EXTRACTOR_VERSION;
+            // A lazy list must never hand a paywall standfirst to the modal as
+            // the complete article. Drop a cached partial body and let the
+            // detail request fetch the full story on demand.
+            if ($cacheOnly && !empty($entry['partial'])) {
+                $cacheIsUsable = false;
+            }
             // A Wayback story that previously failed before the archive-aware
             // fallback existed must be retried instead of serving an empty
             // failure entry for the rest of the hour.
             if (!$paragraphs && parseWaybackUrl($link) !== null) {
+                $cacheIsUsable = false;
+            }
+            // Older cache entries did not record whether a short body was a
+            // publisher preview. A detail request must retry one of those once
+            // instead of presenting the standfirst as the whole article.
+            // A body already marked partial is also retried on every detail
+            // request: the recovery mirrors are intermittently available, so
+            // a preview cached a moment ago must not hide the complete story
+            // for the whole partial TTL.
+            if ($retryFailedCache && $paragraphs
+                && (!empty($entry['partial'])
+                    || articleFallbackIsPreview($paragraphs))
+            ) {
                 $cacheIsUsable = false;
             }
             // A detail request explicitly asks for the article body, so an
@@ -3326,6 +3464,9 @@ function enrichStoryContent(
             // The feed body was only a headline/preview and the full article
             // is not cached yet. Drop the preview so the detail modal does not
             // treat the snippet as the complete story and fetches it on demand.
+            // A cached partial body (a paywall standfirst or feed preview) is
+            // also not the complete article. Reusing it here would leave the
+            // modal without any hint that it must fetch the full story.
             $story['paragraphs'] = [];
             continue;
         }
@@ -3376,10 +3517,28 @@ function enrichStoryContent(
             'paragraphs' => [],
             'image' => '',
             'full_article' => $forceFullArticle,
+            'partial' => false,
             'extractor' => ARTICLE_EXTRACTOR_VERSION,
             'ts' => $now,
         ];
         $partial = null;
+
+        // The caller may not know the headline (the CLI --article form does
+        // not). A paywalled page still carries it in its metadata, and the
+        // syndication fallback needs it to find an accessible copy. Prefer the
+        // page's own headline even when a title was supplied: feed titles such
+        // as Google News append " - Publisher", which makes headline matching
+        // miss the syndicated copy and leaves only the paywall standfirst.
+        if (is_array($page)
+            && (int)($page['status'] ?? 0) >= 200
+            && (int)($page['status'] ?? 0) < 400
+            && ($page['body'] ?? '') !== ''
+        ) {
+            $pageTitle = extractArticleTitleFromHtml($page['body']);
+            if ($pageTitle !== '') {
+                $storyTitle = $pageTitle;
+            }
+        }
 
         $pageFailed = false;
         $pageStatus = 0;
@@ -3392,8 +3551,19 @@ function enrichStoryContent(
             } else {
                 $direct = articleResultFromBody($page['body'], $finalLink);
                 if ($direct !== null) {
-                    $entry['paragraphs'] = $direct['paragraphs'];
-                    $entry['image'] = $direct['image'];
+                    if (articleFallbackIsPreview($direct['paragraphs'])) {
+                        // A paywalled publisher can serve the standfirst as
+                        // the page body (FT does this). Keep it as a partial
+                        // result and keep looking for the full story in the
+                        // feed, reader proxies, syndicated copies, or archive.
+                        $partial = $direct;
+                        if ($entry['image'] === '') {
+                            $entry['image'] = trim((string)$direct['image']);
+                        }
+                    } else {
+                        $entry['paragraphs'] = $direct['paragraphs'];
+                        $entry['image'] = $direct['image'];
+                    }
                 } else {
                     // Some WAFs answer HTTP 200 with a challenge page.
                     $pageFailed = true;
@@ -3407,9 +3577,19 @@ function enrichStoryContent(
         if (!$entry['paragraphs'] && $pageFailed) {
             $retry = fetchArticleWithAlternateBrowsers($finalLink, $sourceKey);
             if ($retry !== null) {
-                $entry['paragraphs'] = $retry['paragraphs'];
-                $entry['image'] = $retry['image'];
-                $pageFailed = false;
+                if (articleFallbackIsPreview($retry['paragraphs'])) {
+                    // Another browser identity may get only the paywall
+                    // standfirst. Keep it as a partial result while the
+                    // feed/mirror/syndication fallbacks look for the story.
+                    $partial = $retry;
+                    if ($entry['image'] === '' && !empty($retry['image'])) {
+                        $entry['image'] = $retry['image'];
+                    }
+                } else {
+                    $entry['paragraphs'] = $retry['paragraphs'];
+                    $entry['image'] = $retry['image'];
+                    $pageFailed = false;
+                }
             }
         }
 
@@ -3417,9 +3597,21 @@ function enrichStoryContent(
         // publisher's public feed still carries the full story (Axios) or at
         // least its lead image and summary (NYT, FT, NewsNation).
         if (!$entry['paragraphs']) {
+            $feedFallback = fetchArticleFeedFallback($finalLink, $sourceKey);
+            // A paywalled page (HTTP 403) yields no usable title, but the
+            // publisher feed names the same story. Keep it for syndication
+            // matching when the caller did not supply a headline.
+            if ($storyTitle === '' && is_array($feedFallback)) {
+                $feedTitle = normalizeText(
+                    (string)($feedFallback['title'] ?? '')
+                );
+                if ($feedTitle !== '') {
+                    $storyTitle = $feedTitle;
+                }
+            }
             considerArticleFallback(
                 $entry,
-                fetchArticleFeedFallback($finalLink, $sourceKey),
+                $feedFallback,
                 $partial
             );
         }
@@ -3483,6 +3675,7 @@ function enrichStoryContent(
         // modal. Use it only after every full-body recovery path failed.
         if (!$entry['paragraphs'] && $partial !== null) {
             $entry['paragraphs'] = $partial['paragraphs'];
+            $entry['partial'] = true;
             if ($entry['image'] === '' && !empty($partial['image'])) {
                 $entry['image'] = $partial['image'];
             }

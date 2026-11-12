@@ -1,0 +1,13 @@
+task (completed) {
+  bug: 
+  this is strange: 
+  - php news_fetch.php --article https://www.ft.com/content/e47f7d4a-88d7-41e4-8c77-8ea8e0769353?syn-25a6b1a6=1
+    this is working
+  - but in the article modal, it only loads part of the article, not the full article
+  please fix it!
+}
+
+task (completed) {
+  bug:
+  in the article modal, it fails to load article: https://www.ft.com/content/e47f7d4a-88d7-41e4-8c77-8ea8e0769353?syn-25a6b1a6=1
+}
