@@ -100,6 +100,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable
@@ -1202,6 +1203,139 @@ class Chunk:
 
 
 ARTICLE_CHUNK_PREFIXES = ("news_", "article_")
+NEWS_CHUNK_PREFIX = "news_"
+
+# Questions about the current state of the world ("how is X doing?", "what is
+# the latest on Y?") must prefer the newest dated evidence. Older articles in
+# the corpus often describe the same event at an earlier stage (a prediction, a
+# denial, or an investigation) and would otherwise win on BM25 score alone.
+TEMPORAL_QUESTION_PATTERN = re.compile(
+    r"\b(?:latest|newest|most\s+recent|recent|recently|current(?:ly)?|"
+    r"right\s+now|nowadays|today|tonight|this\s+(?:week|month|year)|"
+    r"as\s+of|so\s+far|up[- ]to[- ]date|breaking|status|update|updates|"
+    r"news|happening|happened|still|yet)\b"
+    r"|\bhow\s+(?:is|are|'s)\b.{0,80}\bdoing\b"
+    r"|\bwhat(?:'s|\s+is)\s+(?:going\s+on|happening|the\s+status|new)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+# Words that only frame a question as time-sensitive. Removing them from the
+# BM25 query keeps the entity ("jensen huang") from being diluted by generic
+# status words ("how", "doing"), which can push every news article below the
+# positive-score cutoff.
+TEMPORAL_QUERY_FILLER_PATTERN = re.compile(
+    r"\b(?:latest|newest|most|recent|recently|current|currently|"
+    r"right|now|nowadays|today|tonight|this|week|month|year|as|of|so|far|"
+    r"up|to|date|breaking|status|update|updates|news|happening|happened|"
+    r"still|yet|how|is|are|was|were|doing|going|what|whats|about|on|"
+    r"the|any)\b",
+    re.IGNORECASE,
+)
+# Within the relevant BM25 pool, dated evidence is ordered newest first. The
+# ratio prevents a barely-related fresh article from displacing the actual
+# subject of the question.
+TEMPORAL_RELEVANCE_RATIO = 0.6
+
+
+def question_is_time_sensitive(question: str) -> bool:
+    """Return True for questions about the current or latest state of affairs."""
+    return bool(question and TEMPORAL_QUESTION_PATTERN.search(question))
+
+
+def strip_temporal_filler(question: str) -> str:
+    """Remove time/status framing words so BM25 focuses on the entity."""
+    cleaned = " ".join(TEMPORAL_QUERY_FILLER_PATTERN.sub(" ", question).split())
+    return cleaned or question.strip()
+
+
+@lru_cache(maxsize=4096)
+def _news_published_cached(video_id: str) -> float:
+    """Return a learned article's publication time as a Unix timestamp."""
+    if not video_id.startswith(NEWS_CHUNK_PREFIX):
+        return 0.0
+    try:
+        meta = json.loads(
+            (ARTICLES_DIR / f"{video_id}.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return 0.0
+    if not isinstance(meta, dict):
+        return 0.0
+    published = str(meta.get("published") or "").strip()
+    if published:
+        try:
+            parsed = datetime.fromisoformat(published.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except ValueError:
+            pass
+    try:
+        return float(meta.get("learned_at") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def chunk_published_at(chunk: Chunk) -> float:
+    """Return when a source was published, or 0.0 when it has no date."""
+    return _news_published_cached(chunk.video_id)
+
+
+def format_published_date(timestamp: float) -> str:
+    """Format a publication timestamp for the answer context."""
+    return time.strftime("%Y-%m-%d", time.gmtime(timestamp))
+
+
+def _temporal_rerank(
+    ranked: list[tuple[Chunk, float]],
+) -> list[tuple[Chunk, float]]:
+    """Order relevant evidence newest-first for a time-sensitive question.
+
+    BM25 scores are kept unchanged; only the order inside the relevant score
+    band changes. Sources without a date (mostly YouTube transcripts) stay
+    after the dated news evidence, preserving their original score order.
+    """
+    if len(ranked) < 2:
+        return ranked
+    best_score = max(score for _chunk, score in ranked)
+    threshold = best_score * TEMPORAL_RELEVANCE_RATIO
+    relevant = [(chunk, score) for chunk, score in ranked if score >= threshold]
+    dated = [
+        (chunk, score)
+        for chunk, score in relevant
+        if chunk_published_at(chunk) > 0.0
+    ]
+    if not dated:
+        return ranked
+    # Keep several recent reports visible instead of filling the whole context
+    # with every paragraph of the single newest article. Articles are ordered
+    # by publication time, and their best-ranked paragraphs are interleaved.
+    by_article: dict[str, list[tuple[Chunk, float]]] = {}
+    for item in dated:
+        by_article.setdefault(item[0].video_id, []).append(item)
+    for items in by_article.values():
+        items.sort(key=lambda item: item[1], reverse=True)
+    articles = sorted(
+        by_article.values(),
+        key=lambda items: (
+            chunk_published_at(items[0][0]),
+            max(score for _chunk, score in items),
+        ),
+        reverse=True,
+    )
+    ordered_dated: list[tuple[Chunk, float]] = []
+    position = 0
+    while len(ordered_dated) < len(dated):
+        for items in articles:
+            if position < len(items):
+                ordered_dated.append(items[position])
+        position += 1
+    dated_ids = {id(chunk) for chunk, _score in dated}
+    relevant_ids = {id(chunk) for chunk, _score in relevant}
+    return (
+        ordered_dated
+        + [item for item in relevant if id(item[0]) not in dated_ids]
+        + [item for item in ranked if id(item[0]) not in relevant_ids]
+    )
 
 
 def _article_heading_like(text: str) -> bool:
@@ -2768,7 +2902,11 @@ def top_chunks(
         return []
 
     index = get_bm25_index(chunks)
-    question_tokens = tokenize(question)
+    temporal_question = question_is_time_sensitive(question)
+    search_question = (
+        strip_temporal_filler(question) if temporal_question else question
+    )
+    question_tokens = tokenize(search_question) or tokenize(question)
     corrections = fuzzy_query_terms(question_tokens, index)
     acronym_terms = tokenize(
         " ".join(question_acronym_expansions(question, chunks, index))
@@ -2898,6 +3036,9 @@ def top_chunks(
             )
             ranked = focused
 
+    if temporal_question:
+        ranked = _temporal_rerank(ranked)
+
     ranked = _lfm_clean_ranked(ranked)
     if limit is not None:
         return ranked[: max(1, limit)]
@@ -2923,7 +3064,16 @@ def build_context(chunks: list[Chunk], start_index: int = 1) -> str:
         if chunk.video_id not in titled_videos:
             title = video_title(chunk.video_id)
             if title:
-                title_line = f"[Video: {title}]\n"
+                if chunk.video_id.startswith(NEWS_CHUNK_PREFIX):
+                    published = chunk_published_at(chunk)
+                    date_line = (
+                        f" | Published: {format_published_date(published)}"
+                        if published
+                        else ""
+                    )
+                    title_line = f"[Article: {title}{date_line}]\n"
+                else:
+                    title_line = f"[Video: {title}]\n"
             titled_videos.add(chunk.video_id)
         parts.append(
             f'<chunk id="{chunk_id}">\n{title_line}{text}\n</chunk>'

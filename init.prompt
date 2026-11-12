@@ -20,7 +20,7 @@ group app/chat.html and app/chat_server.py {
   }
   
   task (persistent) {
-    complete tasks in ./performance_improvement.prompt
+    complete tasks in ./prompts/performance_improvement.prompt
   }
 
   task (persistent) {

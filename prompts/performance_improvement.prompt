@@ -1,3 +1,12 @@
+task (completed) {
+  question: how is jensen huang doing
+  expect: the answer should mention that he has resigned
+  actual: Despite these allegations, Huang is reportedly keeping his position, salary, and benefits at Nvidia.
+  please find a systematic way
+  - consider latest knowledge might override the previous facts
+  - this is a time based question
+}
+
 task.performance_improvement.rag (completed) {
   1. Move the coverage check before the LLM filter.                                                                      
   2. Skip the filter entirely for long-form requests. 

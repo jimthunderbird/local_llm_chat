@@ -5419,6 +5419,19 @@ Do not say that the context is insufficient; if a detail is genuinely absent,
 answer the supported parts and omit the unsupported detail.
 
 """
+# Current-status questions are resolved with a recency rule. The knowledge
+# base intentionally keeps old news for history, so an outdated prediction
+# ("Huang is expected to keep his job") can sit beside the newest report
+# ("Huang has resigned"). The publication dates are included with learned
+# article context, and this instruction makes the newer report authoritative.
+TEMPORAL_QUESTION_PROMPT_PREFIX = """### CURRENT INFORMATION
+Today is {today}. This question asks about the current state or latest
+development. The context contains dated articles; when sources disagree, the
+most recently published evidence supersedes older statements, predictions, and
+analysis. Report the latest known status rather than an outdated prediction,
+and make clear when the latest information is newer than the rest.
+
+"""
 # A learned news story, a single transcript, or a book modal is a small,
 # explicitly-scoped corpus. If the question has no lexical match in that scope,
 # BM25 can return nothing and the answer stream ends silently (the article
@@ -10550,6 +10563,22 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 # priority), then add the documentation reference next to the
                 # retrieved transcript context.
                 prompt_prefix = prompt_prefix + programming_docs_prefix
+            if (
+                chat.question_is_time_sensitive(retrieval_question)
+                and not article_mode
+                and not coding_mode
+            ):
+                prompt_prefix = (
+                    TEMPORAL_QUESTION_PROMPT_PREFIX.format(
+                        today=time.strftime("%Y-%m-%d")
+                    )
+                    + prompt_prefix
+                )
+                self._sse_text(
+                    "log",
+                    "[time-sensitive question: dated evidence is ordered "
+                    "newest first, and newer reports override older ones]",
+                )
             # /article gathers evidence in small rounds and stops as soon as
             # the small model says the gathered paragraphs are sufficient.
             # Apply the same loop to normal transcript questions. Article mode
