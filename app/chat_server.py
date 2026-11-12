@@ -118,8 +118,11 @@ import threading
 import wave
 import zipfile
 import time
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import redirect_stderr, redirect_stdout
+from functools import lru_cache
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -184,7 +187,7 @@ WEB_COMMANDS = {
     "/mathtutor": "upload Microsoft Word test papers and practice similar math problems with detailed answers",
     "/changelog": "list completed-task summaries from .logs (newest first); click one to read it",
     "/stackoverflow": "search Stack Overflow: /stackoverflow tag <tag> or /stackoverflow search <keywords>",
-    "/reddit": "search Reddit posts by keywords: /reddit <keywords>; click a post to read it",
+    "/reddit": "search Reddit posts by keywords: /reddit <keywords>; also searches related subreddits; click a post to read it",
 }
 
 # News sources accepted by /news and completed by news_fetch.php.
@@ -5463,6 +5466,31 @@ REDDIT_MAX_BLOCKS = 500
 # same embed document, extracts the comments, and the UI also offers the live
 # embed in an iframe when the JSON/Atom endpoints are unavailable.
 REDDIT_EMBED_QUERY = "?limit=100&depth=2&sort=top"
+# /reddit searches site:reddit.com first, then repeats the search inside each
+# Reddit community suggested for the query's main entities. Results from all
+# searches are merged, de-duplicated, and renumbered into one list.
+REDDIT_MAIN_LIMIT = 20
+REDDIT_ENTITY_LIMIT = 10
+REDDIT_MAX_RESULTS = 60
+REDDIT_MAX_ENTITY_QUERIES = 3
+REDDIT_ENTITY_MODEL = chat.ANSWER_MODEL
+REDDIT_ENTITY_PROMPT = """Extract the main named entities and topics from this Reddit search query.
+Return a JSON array of up to 3 short strings. Each string must be a plausible
+subreddit name: one word, letters/digits/underscores only, no r/ prefix.
+Return only the JSON array.
+Query: {query}"""
+REDDIT_ENTITY_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+REDDIT_ENTITY_STOPWORDS = frozenset(
+    "a an the and or but if then than that this these those there here "
+    "what which who whom whose when where why how is are was were be been "
+    "being do does did done have has had can could should would will may "
+    "might must shall to of in on at for from with about into over after "
+    "before under between during any some all more most other another "
+    "such only just also very much many few own same so not no nor too "
+    "best top good great new latest current review reviews guide help "
+    "please tell show give me my i you your we our us them they he she it "
+    "reddit subreddit post posts thread threads comment comments".split()
+)
 GOOGLE_NEWS_ARTICLE_RE = re.compile(
     r"^https?://news\.google\.com/(?:rss/)?articles/", re.IGNORECASE
 )
@@ -5497,6 +5525,137 @@ def _reddit_section(url: str) -> str:
         r"/r/([^/]+)/comments/", urlparse(url).path, re.IGNORECASE
     )
     return f"r/{match.group(1)}" if match else ""
+
+
+def _reddit_published_timestamp(value: object) -> float | None:
+    """Parse a feed publish date into an epoch timestamp for sorting."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        pass
+    try:
+        return parsedate_to_datetime(text).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _reddit_result_sort_key(entry: dict) -> tuple[bool, float]:
+    """Sort newest published posts first, with undated posts last."""
+    timestamp = _reddit_published_timestamp(
+        entry.get("payload", {}).get("published")
+    )
+    return (timestamp is not None, timestamp or 0.0)
+
+
+def _reddit_clean_entity(value: object) -> str:
+    """Normalize one model/heuristic suggestion into a subreddit name."""
+    text = str(value or "").strip().strip("'\"`[](),.")
+    text = re.sub(r"^/?r/", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"[^A-Za-z0-9_]", "", text)
+    if not (2 <= len(text) <= 30):
+        return ""
+    if text.lower() in REDDIT_ENTITY_STOPWORDS:
+        return ""
+    return text
+
+
+def _reddit_fallback_entities(keyword: str) -> list[str]:
+    """Derive plausible subreddit names without calling the model."""
+    words = [
+        word.lower()
+        for word in REDDIT_ENTITY_TOKEN_RE.findall(keyword.lower())
+        if len(word) > 1 and word.lower() not in REDDIT_ENTITY_STOPWORDS
+    ]
+    candidates: list[str] = []
+    # Two-word names such as "python asyncio" or "jensen huang" are common
+    # subreddit spellings, so try the joined form before the single words.
+    candidates.extend(first + second for first, second in zip(words, words[1:]))
+    candidates.extend(words)
+    result: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        cleaned = _reddit_clean_entity(candidate)
+        if not cleaned or cleaned.lower() in seen:
+            continue
+        seen.add(cleaned.lower())
+        result.append(cleaned)
+        if len(result) >= REDDIT_MAX_ENTITY_QUERIES:
+            break
+    return result
+
+
+@lru_cache(maxsize=256)
+def _reddit_entities(keyword: str) -> tuple[str, ...]:
+    """Return up to three subreddit names related to a /reddit query.
+
+    The 35B answer model is good at turning "best ramen in tokyo" into
+    ``tokyo, ramen, JapanFood`` and "jensen huang" into ``nvidia, ...``. A
+    deterministic keyword fallback keeps the command useful when Ollama is
+    unavailable or returns prose instead of the requested JSON array.
+    """
+    keyword = " ".join(keyword.split())
+    if not keyword:
+        return ()
+    candidates: list[object] = []
+    try:
+        response = chat.generate_text(
+            REDDIT_ENTITY_PROMPT.format(query=keyword),
+            model=REDDIT_ENTITY_MODEL,
+            temperature=0.0,
+            num_predict=80,
+        )
+        match = re.search(r"\[.*?\]", response, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                candidates.extend(parsed)
+        if not candidates:
+            candidates.extend(re.split(r"[,\n]", response))
+    except (RuntimeError, ValueError):
+        pass
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        cleaned = _reddit_clean_entity(candidate)
+        if not cleaned or cleaned.lower() in seen:
+            continue
+        seen.add(cleaned.lower())
+        result.append(cleaned)
+        if len(result) >= REDDIT_MAX_ENTITY_QUERIES:
+            break
+    if not result:
+        result = _reddit_fallback_entities(keyword)
+    return tuple(result)
+
+
+def _reddit_result_keys(payload: dict) -> tuple[str, ...]:
+    """Return stable keys for de-duplicating results across searches.
+
+    Google News wrapper links do not expose the final Reddit URL, so a
+    normalized title is used as a second identity. Tracking both keys also
+    catches the same thread when one search returns a direct reddit.com link
+    and another returns a news.google.com wrapper.
+    """
+    keys: list[str] = []
+    link = str(payload.get("link") or "").strip()
+    if link:
+        if _is_reddit_url(link):
+            keys.append(_reddit_canonical_url(link).lower())
+        else:
+            keys.append("link:" + link.lower())
+    title = " ".join(
+        REDDIT_ENTITY_TOKEN_RE.findall(str(payload.get("title") or "").lower())
+    )
+    if title:
+        keys.append("title:" + title)
+    return tuple(keys)
 
 
 def resolve_google_news_url(url: str) -> str:
@@ -14159,19 +14318,286 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "\nNo completed-task summaries were found in .logs.\n",
             )
 
+    def _stream_reddit_queries(
+        self, queries: list[tuple[str, str]]
+    ) -> int:
+        """Run several Reddit searches and stream one merged, unique list.
+
+        ``queries`` holds ``(label, google_news_query)`` pairs. Each search is
+        an independent ``news_fetch.php`` process, but the browser receives a
+        single ``start`` event, sequentially renumbered items, and a single
+        ``done`` event. Duplicate threads are dropped by canonical Reddit URL
+        (or by normalized title for Google News wrapper links), then the
+        merged list is sorted newest-first by publish date. Every post is
+        labelled with the subreddit it belongs to; Google News wrapper links
+        are resolved in parallel so the label is the real community rather
+        than the search query.
+        """
+        script = SCRIPT_DIR / "news_fetch.php"
+        if not script.exists():
+            self._sse_text("output", "\n/reddit: missing news_fetch.php.\n")
+            return 0
+
+        labels = ["Reddit"] + [label for label, _query in queries[1:]]
+        self._sse(
+            "news",
+            {
+                "type": "start",
+                "source": "Reddit",
+                "sources": labels,
+                "docs": True,
+                "docs_label": "Reddit",
+                "limit": REDDIT_MAX_RESULTS,
+            },
+        )
+
+        # Collect first so the merged output can be sorted by publish date,
+        # while retaining paragraph/item_end events for the final emission.
+        collected: list[dict] = []
+        key_to_entry: dict[str, dict] = {}
+        for position, (label, query) in enumerate(queries):
+            if position:
+                self._sse_text(
+                    "log", f"[reddit: searching {query!r}]"
+                )
+            limit = (
+                REDDIT_MAIN_LIMIT
+                if position == 0
+                else REDDIT_ENTITY_LIMIT
+            )
+            argv = [
+                "php",
+                str(script),
+                "--json",
+                "--lazy",
+                "--source",
+                "googlenews",
+                "--search",
+                query,
+                "--limit",
+                str(limit),
+            ]
+            process = None
+            returncode = 0
+            active: dict[int, dict] = {}
+            try:
+                process = subprocess.Popen(
+                    argv,
+                    cwd=SCRIPT_DIR,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                assert process.stdout is not None
+                for raw_line in process.stdout:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        self._sse_text("log", f"[reddit: {line}]")
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    kind = payload.get("type")
+                    if kind in {"start", "done"}:
+                        # One start/done pair is emitted for the whole merge.
+                        continue
+                    if kind == "warning":
+                        message = str(payload.get("message") or "").strip()
+                        if message:
+                            self._sse_text("log", f"[reddit: {message}]")
+                        continue
+                    if kind == "error":
+                        message = str(payload.get("message") or "").strip()
+                        if message:
+                            self._sse_text(
+                                "output", f"\n/reddit: {message}\n"
+                            )
+                        continue
+
+                    try:
+                        source_index = int(payload.get("index"))
+                    except (TypeError, ValueError):
+                        continue
+
+                    if kind == "item":
+                        keys = _reddit_result_keys(payload)
+                        if not keys:
+                            continue
+                        existing = next(
+                            (
+                                key_to_entry[key]
+                                for key in keys
+                                if key in key_to_entry
+                            ),
+                            None,
+                        )
+                        if existing is not None:
+                            if label not in existing["labels"]:
+                                existing["labels"].append(label)
+                            active[source_index] = existing
+                            continue
+                        entry = {
+                            "payload": payload,
+                            "labels": [label],
+                            "paragraphs": [],
+                            "ended": False,
+                        }
+                        collected.append(entry)
+                        for key in keys:
+                            key_to_entry[key] = entry
+                        active[source_index] = entry
+                        continue
+
+                    if kind in {"paragraph", "item_end"}:
+                        entry = active.get(source_index)
+                        if entry is None:
+                            continue
+                        if kind == "paragraph":
+                            text = str(payload.get("text") or "").strip()
+                            if text and text not in entry["paragraphs"]:
+                                entry["paragraphs"].append(text)
+                        else:
+                            entry["ended"] = True
+                        continue
+
+                returncode = process.wait()
+            except ClientDisconnected:
+                if process is not None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                raise
+            except OSError as exc:
+                self._sse_text(
+                    "output",
+                    f"\n/reddit: could not run {script.name}: {exc}\n",
+                )
+                continue
+            if returncode != 0:
+                self._sse_text(
+                    "output",
+                    f"\n/reddit: {script.name} exited with code "
+                    f"{returncode} while searching {query!r}.\n",
+                )
+
+        # Newest first; undated results (if any) stay at the end.
+        collected.sort(key=_reddit_result_sort_key, reverse=True)
+        selected = collected[:REDDIT_MAX_RESULTS]
+
+        # Google News hides the Reddit thread behind a wrapper URL, so fetch
+        # those wrappers concurrently to label each post with its real
+        # subreddit. Direct reddit.com links need no network call.
+        unresolved = [
+            entry
+            for entry in selected
+            if not _reddit_section(str(entry["payload"].get("link") or ""))
+            and GOOGLE_NEWS_ARTICLE_RE.match(
+                str(entry["payload"].get("link") or "")
+            )
+        ]
+        if unresolved:
+            with ThreadPoolExecutor(
+                max_workers=min(8, len(unresolved))
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        resolve_google_news_url,
+                        str(entry["payload"].get("link") or ""),
+                    ): entry
+                    for entry in unresolved
+                }
+                for future in as_completed(futures):
+                    entry = futures[future]
+                    try:
+                        resolved = future.result()
+                    except Exception:
+                        resolved = ""
+                    section = _reddit_section(resolved) if resolved else ""
+                    if section:
+                        entry["resolved_section"] = section
+
+        item_count = 0
+        for emitted_index, entry in enumerate(selected, 1):
+            payload = entry["payload"]
+            link = str(payload.get("link") or "").strip()
+            section = _reddit_section(link)
+            if not section:
+                section = str(entry.get("resolved_section") or "")
+            if not section:
+                # Fall back to the subreddit-specific query that found it.
+                for label in entry["labels"]:
+                    if label.startswith("r/"):
+                        section = label
+                        break
+            payload["index"] = emitted_index
+            payload["source"] = "Reddit"
+            payload["section"] = section
+            payload["article_api"] = "/api/reddit_article"
+            payload["docs"] = True
+            payload["docs_label"] = "Reddit"
+            payload["learnable"] = True
+            payload["learn_noun"] = "post"
+            payload["images"] = []
+            try:
+                news_id = news_id_for_item(payload)
+            except ValueError:
+                news_id = ""
+            payload["news_id"] = news_id
+            payload["learned"] = bool(news_id and news_is_learned(news_id))
+            self._sse("news", payload)
+            for text in entry["paragraphs"]:
+                self._sse(
+                    "news",
+                    {
+                        "type": "paragraph",
+                        "index": emitted_index,
+                        "text": text,
+                    },
+                )
+            if entry["ended"]:
+                self._sse(
+                    "news", {"type": "item_end", "index": emitted_index}
+                )
+            item_count += 1
+
+        self._sse("news", {"type": "done", "count": item_count})
+        if item_count == 0:
+            self._sse_text(
+                "output", "\n/reddit: no posts were found in the feed.\n"
+            )
+        return item_count
+
     def _command_reddit(self, argument: str) -> None:
         """Search Reddit posts through Google News RSS and stream them as cards.
 
         Usage: /reddit <keywords>
-        The result list reuses the /news cards and detail modal. Opening a post
-        fetches its body and comments through /api/reddit_article, which uses
-        Reddit's public .json endpoint with an Atom RSS fallback. Once the full
-        thread has loaded, the modal offers Learn and then an isolated Chat,
-        exactly like a learned /news story.
+        The search first targets site:reddit.com, then repeats the same
+        keywords inside the subreddits the answer model associates with the
+        query's main entities (for example /reddit jensen huang also searches
+        r/nvidia). All result lists are merged, de-duplicated, and streamed as
+        one set of /news cards. Opening a post fetches its body and comments
+        through /api/reddit_article, which uses Reddit's public .json endpoint
+        with an Atom RSS fallback. Once the full thread has loaded, the modal
+        offers Learn and then an isolated Chat, exactly like a learned /news
+        story.
         """
         keyword = " ".join(argument.split())
         if keyword.lower().startswith("search "):
             keyword = keyword[7:].strip()
+        # Accept a manually typed site restriction without doubling it.
+        keyword = re.sub(
+            r"^\s*site:reddit\.com(?:/r/[A-Za-z0-9_]+)?\s+",
+            "",
+            keyword,
+            flags=re.IGNORECASE,
+        )
         if not keyword:
             self._sse_text(
                 "output",
@@ -14181,47 +14607,26 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
+        entities = _reddit_entities(keyword)
+        if entities:
+            self._sse_text(
+                "log",
+                "[reddit: related subreddits: "
+                + ", ".join(f"r/{entity}" for entity in entities)
+                + "]",
+            )
+        queries: list[tuple[str, str]] = [
+            ("Reddit", f"site:reddit.com {keyword}")
+        ]
+        for entity in entities:
+            queries.append(
+                (f"r/{entity}", f"site:reddit.com/r/{entity} {keyword}")
+            )
         self._sse_text(
-            "log", f"[reddit: searching Google News for site:reddit.com {keyword!r}]"
+            "log",
+            f"[reddit: searching site:reddit.com {keyword!r}]",
         )
-
-        def transform(payload: dict) -> dict:
-            kind = payload.get("type")
-            if kind == "start":
-                payload["source"] = "Reddit"
-                payload["sources"] = ["Reddit"]
-                payload["docs"] = True
-                payload["docs_label"] = "Reddit"
-                return payload
-            if kind != "item":
-                return payload
-            link = str(payload.get("link") or "").strip()
-            payload["source"] = "Reddit"
-            payload["section"] = _reddit_section(link)
-            payload["article_api"] = "/api/reddit_article"
-            payload["docs"] = True
-            payload["docs_label"] = "Reddit"
-            # A Reddit thread is article-like: once the server has extracted
-            # the post body and comments, it can be learned into trunks and
-            # chatted about in the modal just like a /news story.
-            payload["learnable"] = True
-            payload["learn_noun"] = "post"
-            payload["images"] = []
-            return payload
-
-        self._stream_news_events(
-            "news_fetch.php",
-            "/reddit",
-            [
-                "--source",
-                "googlenews",
-                "--search",
-                f"site:reddit.com {keyword}",
-                "--limit",
-                "20",
-            ],
-            event_transform=transform,
-        )
+        self._stream_reddit_queries(queries)
 
     def _command_googlenews(self, argument: str) -> None:
         """Search Google News RSS for the latest stories matching keywords.

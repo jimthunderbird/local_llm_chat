@@ -33,6 +33,25 @@ knowledge {
   }
 }
 
+task.enhance_search_for_subreddit.sorting (completed) {
+  reference task.enhance_search_for_subreddit:
+  - sort the result by publish date in descending order
+  - for each post, put the label next to each entry showing what subredit this entry to related to 
+}
+
+task.enhance_search_for_subreddit (completed) {
+  for the /reddit command {
+    result = []
+    result[] = search keywords against site:reddit.com first
+    entities: analyze the keywords, extract the main entities
+    for each {entity} as {entities} {
+      result[] = search the keywords against site:reddit.com/r/{entity}
+    }
+    final_result: get all unique entries in result
+    return final_result
+  }
+}
+
 task (completed) {
   learn from /news command and news loading feature:
   - add similar "learn" feature for reddit post
