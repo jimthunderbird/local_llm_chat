@@ -16,6 +16,10 @@ group app/chat.html and app/chat_server.py {
   }
 
   task (persistent) {
+    complete tasks in ./prompts/sqlite_bm25.prompt 
+  }
+
+  task (persistent) {
     complete tasks in ./prompts/changelog.prompt
   }
 

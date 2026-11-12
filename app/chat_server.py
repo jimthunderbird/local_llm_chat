@@ -127,6 +127,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import chat
+import sqlite_bm25
 from paragraph_utils import split_paragraphs
 from doc_answer_cleanup import (
     CodeFenceRepairFilter,
@@ -4985,10 +4986,31 @@ def learn_news_article(payload: dict) -> dict:
         (NEWS_CACHE_DIR / f"{news_id}.0.trunk").write_text(
             _news_trunk(title, overview), encoding="utf-8"
         )
+        learned_chunks = [
+            chat.Chunk(
+                video_id=news_id,
+                index=0,
+                trunk_path=NEWS_CACHE_DIR / f"{news_id}.0.trunk",
+            )
+        ]
         for index, paragraph in enumerate(paragraphs, start=1):
-            (NEWS_CACHE_DIR / f"{news_id}.{index}.trunk").write_text(
+            trunk_path = NEWS_CACHE_DIR / f"{news_id}.{index}.trunk"
+            trunk_path.write_text(
                 _news_trunk(title, paragraph), encoding="utf-8"
             )
+            learned_chunks.append(
+                chat.Chunk(video_id=news_id, index=index, trunk_path=trunk_path)
+            )
+
+    # Store the article's trunks and search entries together in the SQLite
+    # FTS5 index at .chat/articles_cache/bm25_index_fts.db. The next server
+    # start therefore has no re-tokenization work for this article.
+    try:
+        chat.index_chunks_in_sqlite(learned_chunks, corpus_key="global")
+    except Exception:
+        # Learning the article on disk succeeded; the index is rebuilt lazily
+        # on the next question if SQLite is temporarily unavailable.
+        pass
 
     return {
         "id": news_id,
@@ -6701,6 +6723,12 @@ def _load_article_chunks(
         chunks.append(
             chat.Chunk(video_id=video_id, index=index, trunk_path=trunk_path)
         )
+    # Persist the article's trunks and inverted index together, matching the
+    # news learning path. Unchanged chunks are skipped by the file signature.
+    try:
+        chat.index_chunks_in_sqlite(chunks)
+    except Exception:
+        pass
     return chunks, title, structure
 
 
@@ -13673,8 +13701,17 @@ def main() -> None:
             print("Ollama models are ready.", flush=True)
 
     # Build the BM25 index before accepting requests. Otherwise the first
-    # question pays the index-construction cost for the whole corpus.
-    chat.get_bm25_index(state.chunks)
+    # question pays the index-construction cost for the whole corpus. The
+    # startup corpus is the full global one, so this is also the safe place to
+    # prune DB rows whose trunk files were deleted.
+    chat.get_bm25_index(state.chunks, prune=True)
+    # Transcript/article/book FTS tables describe sources that are no longer
+    # open after a restart. They are cheap to rebuild, so drop them instead of
+    # letting the database grow forever.
+    try:
+        sqlite_bm25.drop_transient_corpora(chat.BM25_DB_PATH)
+    except Exception:
+        pass
 
     ChatRequestHandler.state = state
     server = ThreadingHTTPServer((args.host, args.port), ChatRequestHandler)

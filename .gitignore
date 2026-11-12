@@ -1,4 +1,5 @@
 .chat/
+chat
 __pycache__/
 .article_cache/
 .logs/

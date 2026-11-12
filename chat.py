@@ -5,15 +5,16 @@ Usage:
     python3 chat.py
 
 At startup every ./.chat/youtube_transcripts/<youtube_video_hash>.<index>.trunk
-file is loaded into one global in-memory corpus. Every question searches the
-whole corpus; there is no tag scope or per-topic partition. No embedding files
-and no cosine similarity are used.
+file is loaded into one global corpus. Every question searches the whole
+corpus; there is no tag scope or per-topic partition. No embedding files and
+no cosine similarity are used. The BM25 postings live in an on-disk SQLite
+FTS5 database at ./.chat/articles_cache/bm25_index_fts.db.
 
 For each question:
     1. Expand the question with Ollama model qwen3:1.7b into a short list of
        synonyms and related terms (32 output tokens, single line).
-    2. Score every loaded trunk with an in-memory BM25 index, using the original
-       question tokens (weighted twice) plus the expanded tokens.
+    2. Score every loaded trunk through the SQLite FTS5 BM25 index, using the
+       original question tokens (weighted twice) plus the expanded tokens.
     3. Keep the top 20 BM25 candidates by default. `/depth <n>` changes that
        count; `/depth auto` enables adaptive selection (BM25 score elbow,
        per-video cap, near-duplicate removal, and a token budget).
@@ -82,6 +83,7 @@ import argparse
 import contextlib
 import difflib
 import gc
+import hashlib
 import io
 import json
 import math
@@ -103,13 +105,7 @@ try:
 except ImportError as exc:  # pragma: no cover - dependency guard
     sys.exit(f"Missing dependency: {exc.name}. Install with: pip install requests")
 
-try:
-    from rank_bm25 import BM25Okapi
-except ImportError as exc:  # pragma: no cover - dependency guard
-    sys.exit(
-        f"Missing dependency: {exc.name}. Install with: "
-        "python3 -m pip install rank-bm25"
-    )
+import sqlite_bm25
 
 try:
     from prompt_toolkit import PromptSession
@@ -258,6 +254,9 @@ CHAT_DIR = Path.cwd() / ".chat"
 # per knowledge paragraph, so the same BM25 retrieval code can search articles
 # and transcripts together.
 ARTICLES_DIR = CHAT_DIR / "articles_cache"
+# The on-disk FTS5 BM25 index. Learned articles write their trunks and their
+# search entries here together, and every question scores against it.
+BM25_DB_PATH = ARTICLES_DIR / "bm25_index_fts.db"
 HISTORY_FILE = CHAT_DIR / "question_history.txt"
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
@@ -1054,17 +1053,32 @@ def tokenize(text: str) -> list[str]:
 
 @dataclass
 class BM25Index:
-    """In-memory lexical index for one list of chunks."""
+    """Lexical index for one list of chunks, backed by SQLite FTS5.
+
+    The postings and document text live on disk in
+    ``.chat/articles_cache/bm25_index_fts.db``.  Only the vocabulary and the
+    document frequency of each term are kept in Python, which is what the
+    query-expansion and entity-focus checks need.
+    """
 
     chunks: list[Chunk]
-    tokenized_documents: list[list[str]]
-    bm25: BM25Okapi
+    chunk_keys: list[str]
+    chunk_key_by_id: dict[int, str]
+    bm25: sqlite_bm25.SQLiteBM25
     vocabulary: frozenset[str]
     # Number of documents containing each token. Used to separate a question's
     # distinctive anchors from generic words when validating query expansion.
     document_frequency: dict[str, int]
     # (first letter, length) -> vocabulary words, used for cheap fuzzy lookup.
     fuzzy_buckets: dict[tuple[str, int], list[str]]
+    document_count: int
+    token_count: int
+
+    def key_for(self, chunk: Chunk) -> str:
+        return self.chunk_key_by_id.get(id(chunk), "")
+
+    def matching_keys(self, tokens, mode: str = "AND") -> set[str]:
+        return self.bm25.matching_keys(tokens, mode)
 
 
 # Keep a couple of indexes alive (global corpus + explicit transcript) so
@@ -1079,29 +1093,99 @@ _ACRONYM_CACHE: "OrderedDict[int, tuple[list[Chunk], dict[str, str | None]]]" = 
 ACRONYM_CACHE_ENTRIES = 2
 
 
-def build_bm25_index(chunks: list[Chunk]) -> BM25Index:
-    """Read the trunk texts and build an in-memory BM25 index."""
-    tokenized_documents: list[list[str]] = []
-    for chunk in chunks:
-        text = paragraph_text(chunk)
-        title = video_title(chunk.video_id)
-        # Learned article paragraphs inherit their section heading, so the
-        # body of the "Eat" section matches a question that uses the word
-        # "eat" even though the heading itself is not a standalone answer.
-        heading = getattr(chunk, "section_heading", "")
-        parts = [part for part in (title, heading, text) if part]
-        document = "\n".join(parts)
-        tokenized_documents.append(tokenize(document))
+def chunk_key(chunk: Chunk) -> str:
+    """Return a stable key for a trunk file's row in the SQLite index."""
+    path = chunk.trunk_path.resolve()
+    try:
+        return str(path.relative_to(CHAT_DIR.resolve()))
+    except ValueError:
+        # The /article cache lives under app/.article_cache rather than .chat.
+        return str(path)
 
-    vocabulary = {
-        token
-        for document in tokenized_documents
-        for token in document
-    }
-    document_frequency: dict[str, int] = {}
-    for document in tokenized_documents:
-        for token in set(document):
-            document_frequency[token] = document_frequency.get(token, 0) + 1
+
+def _bm25_document_tokens(chunk: Chunk) -> list[str]:
+    """Tokenize exactly the text the old in-memory index used for BM25."""
+    text = paragraph_text(chunk)
+    title = video_title(chunk.video_id)
+    # Learned article paragraphs inherit their section heading, so the body of
+    # the "Eat" section matches a question that uses the word "eat" even
+    # though the heading itself is not a standalone answer.
+    heading = getattr(chunk, "section_heading", "")
+    parts = [part for part in (title, heading, text) if part]
+    return tokenize("\n".join(parts))
+
+
+def _bm25_corpus_key(chunks: list[Chunk], keys: list[str]) -> str:
+    """Return the FTS5 corpus name for a chunk list.
+
+    The global knowledge base gets one stable table.  A filtered global list
+    (for example the paragraph-only list used by iterative retrieval) still
+    covers every known video/article id, so it shares that table instead of
+    duplicating 26k documents into a scope table.  A transcript, single
+    article, or book gets its own table so its BM25 document count and
+    average length stay correct.
+    """
+    chunk_ids = {chunk.video_id for chunk in chunks}
+    try:
+        known_ids = set(available_video_ids())
+        for path in ARTICLES_DIR.glob("*.trunk"):
+            match = TRUNK_FILE.fullmatch(path.name)
+            if match:
+                known_ids.add(match.group("video"))
+    except OSError:
+        known_ids = set()
+    if chunk_ids and chunk_ids == known_ids:
+        return "global"
+    digest = hashlib.sha1(
+        "\n".join(sorted(keys)).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"scope_{digest}"
+
+
+def _bm25_sync_entries(
+    chunks: list[Chunk], corpus_key: str
+) -> list[tuple[str, list[str], int, int]]:
+    """Describe the chunks for the SQLite index, skipping unchanged files.
+
+    Tokenizing every trunk on every cache miss is the expensive part of an
+    index build.  The FTS5 database already knows each trunk's mtime and size,
+    so only new or rewritten trunks are read and tokenized here.
+    """
+    backend = sqlite_bm25.get_index(BM25_DB_PATH, corpus_key)
+    signatures = backend.file_signatures()
+    entries: list[tuple[str, list[str], int, int]] = []
+    for chunk in chunks:
+        key = chunk_key(chunk)
+        try:
+            stat = chunk.trunk_path.stat()
+            mtime_ns = int(stat.st_mtime_ns)
+            size = int(stat.st_size)
+        except OSError:
+            mtime_ns = 0
+            size = 0
+        if signatures.get(key) == (mtime_ns, size):
+            entries.append((key, [], mtime_ns, size))
+        else:
+            entries.append((key, _bm25_document_tokens(chunk), mtime_ns, size))
+    return entries
+
+
+def build_bm25_index(chunks: list[Chunk], prune: bool = False) -> BM25Index:
+    """Index ``chunks`` in the on-disk FTS5 database and load its metadata."""
+    keys = [chunk_key(chunk) for chunk in chunks]
+    corpus_key = _bm25_corpus_key(chunks, keys)
+    backend = sqlite_bm25.get_index(BM25_DB_PATH, corpus_key)
+    backend.sync(_bm25_sync_entries(chunks, corpus_key))
+
+    if prune and corpus_key == "global":
+        # Never prune a transcript/article/book scope: it holds only that
+        # explicit source, and stale rows are limited to the same source.
+        backend.prune(keys)
+
+    # Load vocabulary metadata only after any stale rows were removed, so the
+    # in-memory document frequencies match the rows that remain on disk.
+    document_frequency = backend.vocabulary()
+    vocabulary = frozenset(document_frequency)
     fuzzy_buckets: dict[tuple[str, int], list[str]] = {}
     for token in vocabulary:
         if len(token) < FUZZY_MIN_TOKEN_LENGTH or not token.isalpha():
@@ -1110,15 +1194,37 @@ def build_bm25_index(chunks: list[Chunk]) -> BM25Index:
 
     return BM25Index(
         chunks=chunks,
-        tokenized_documents=tokenized_documents,
-        bm25=BM25Okapi(tokenized_documents),
-        vocabulary=frozenset(vocabulary),
+        chunk_keys=keys,
+        chunk_key_by_id={id(chunk): key for chunk, key in zip(chunks, keys)},
+        bm25=backend,
+        vocabulary=vocabulary,
         document_frequency=document_frequency,
         fuzzy_buckets=fuzzy_buckets,
+        document_count=backend.document_count(),
+        token_count=backend.token_count(),
     )
 
 
-def get_bm25_index(chunks: list[Chunk]) -> BM25Index:
+def index_chunks_in_sqlite(
+    chunks: list[Chunk], corpus_key: str | None = None
+) -> dict[str, object]:
+    """Persist newly learned chunks in the SQLite BM25 index immediately.
+
+    Used by the article learning paths so a learned article has both its trunk
+    files and its search index on disk even before the next question.  News
+    articles always join the global corpus; an explicit article file gets its
+    own scoped table.
+    """
+    if not chunks:
+        return {"added": 0, "updated": 0, "unchanged": 0}
+    keys = [chunk_key(chunk) for chunk in chunks]
+    if corpus_key is None:
+        corpus_key = _bm25_corpus_key(chunks, keys)
+    backend = sqlite_bm25.get_index(BM25_DB_PATH, corpus_key)
+    return backend.sync(_bm25_sync_entries(chunks, corpus_key))
+
+
+def get_bm25_index(chunks: list[Chunk], prune: bool = False) -> BM25Index:
     """Return a cached BM25 index for ``chunks``, building it on first use."""
     key = id(chunks)
     entry = _BM25_CACHE.get(key)
@@ -1126,7 +1232,7 @@ def get_bm25_index(chunks: list[Chunk]) -> BM25Index:
         _BM25_CACHE.move_to_end(key)
         return entry[1]
 
-    index = build_bm25_index(chunks)
+    index = build_bm25_index(chunks, prune=prune)
     _BM25_CACHE[key] = (chunks, index)
     _BM25_CACHE.move_to_end(key)
     while len(_BM25_CACHE) > BM25_CACHE_ENTRIES:
@@ -1188,10 +1294,13 @@ def acronym_expansion(
         r"\(\s*" + re.escape(key) + r"s?\s*\)"
     )
     expansion: str | None = None
-    for document_index, document in enumerate(index.tokenized_documents):
-        if token not in document:
+    # FTS5 finds the documents containing the acronym; the chunk order is
+    # preserved so the first definition in corpus order is still chosen.
+    matching = index.matching_keys([token])
+    for chunk, document_key in zip(chunks, index.chunk_keys):
+        if document_key not in matching:
             continue
-        text = paragraph_text(chunks[document_index])
+        text = paragraph_text(chunk)
         for match in pattern.finditer(text):
             phrase = _acronym_phrase(match.group("phrase"), key)
             if phrase:
@@ -1364,7 +1473,7 @@ def index_memory_report(
     build_index: bool = True,
     article: str | None = None,
 ) -> str:
-    """Describe the loaded trunks and the in-memory BM25 index.
+    """Describe the loaded trunks and the on-disk BM25 index.
 
     When ``article`` is set the active scope is a single article file rather
     than a set of YouTube transcripts, so the source count is labelled
@@ -1381,12 +1490,10 @@ def index_memory_report(
     ]
     if build_index:
         index = get_bm25_index(chunks)
-        token_count = sum(
-            len(document) for document in index.tokenized_documents
-        )
+        token_count = index.token_count
         lines.append(
-            f"  {token_count:,} tokenized terms (in-memory BM25Okapi, "
-            "no embedding vectors)"
+            f"  {token_count:,} tokenized terms (SQLite FTS5 on disk at "
+            f"{BM25_DB_PATH}, no embedding vectors)"
         )
     else:
         lines.append("  index: built lazily on the first question")
@@ -1854,22 +1961,11 @@ def fuzzy_query_terms(query_tokens: list[str], index: BM25Index) -> list[str]:
         and token in index.vocabulary
         and token not in FUZZY_ANCHOR_STOPWORDS
     }
-    document_token_sets: list[set[str]] | None = None
-
     def cooccurrence_support(candidate: str) -> int:
         """Count documents containing the candidate and another query term."""
-        nonlocal document_token_sets
         if not anchors:
             return 0
-        if document_token_sets is None:
-            document_token_sets = [
-                set(document) for document in index.tokenized_documents
-            ]
-        return sum(
-            1
-            for tokens in document_token_sets
-            if candidate in tokens and tokens & anchors
-        )
+        return index.bm25.count_cooccurrence(candidate, sorted(anchors))
 
     for token in query_tokens:
         if token in processed:
@@ -1932,7 +2028,7 @@ def fuzzy_entity_terms(
     entity; the caller uses :func:`entity_focus_terms` to decide which of
     those words are distinctive enough to identify it.
     """
-    if not query_tokens or not index.tokenized_documents:
+    if not query_tokens or not index.document_count:
         return []
 
     known = set(index.vocabulary)
@@ -1947,26 +2043,22 @@ def fuzzy_entity_terms(
         else:
             effective.append([token])
 
-    document_token_sets = [
-        set(document) for document in index.tokenized_documents
-    ]
+    # Document frequencies and pairwise co-occurrence come from the FTS5
+    # vocabulary/index instead of a materialized set of every document's
+    # tokens.
     document_frequency: dict[str, int] = {}
     pair_frequency: dict[tuple[str, str], int] = {}
 
     def df(token: str) -> int:
         if token not in document_frequency:
-            document_frequency[token] = sum(
-                1 for tokens in document_token_sets if token in tokens
-            )
+            document_frequency[token] = index.document_frequency.get(token, 0)
         return document_frequency[token]
 
     def cooccurrence(left: str, right: str) -> int:
         key = (left, right) if left <= right else (right, left)
         if key not in pair_frequency:
             a, b = key
-            pair_frequency[key] = sum(
-                1 for tokens in document_token_sets if a in tokens and b in tokens
-            )
+            pair_frequency[key] = index.bm25.count_matching([a, b], "AND")
         return pair_frequency[key]
 
     entity_phrases: list[frozenset[str]] = []
@@ -2018,19 +2110,14 @@ def entity_focus_terms(
     Returns ``(strict_phrases, loose_tokens)`` where each strict phrase must
     occur in full and a loose token may match on its own.
     """
-    if not entity_phrases or not index.tokenized_documents:
+    if not entity_phrases or not index.document_count:
         return [], set()
 
-    document_token_sets = [
-        set(document) for document in index.tokenized_documents
-    ]
     frequencies: dict[str, int] = {}
 
     def df(token: str) -> int:
         if token not in frequencies:
-            frequencies[token] = sum(
-                1 for tokens in document_token_sets if token in tokens
-            )
+            frequencies[token] = index.document_frequency.get(token, 0)
         return frequencies[token]
 
     strict_phrases: list[frozenset[str]] = []
@@ -2090,7 +2177,7 @@ def _question_anchor_terms(
     ranked = sorted(
         candidates, key=lambda token: index.document_frequency.get(token, 0)
     )
-    document_count = max(1, len(index.tokenized_documents))
+    document_count = max(1, index.document_count)
     cutoff = max(2, int(document_count * 0.10))
     anchors = [
         token
@@ -2129,19 +2216,11 @@ def _filtered_expansion_terms(
         return tokenize(cached[1])
 
     anchor_set = set(anchors)
-    anchor_cooccurrence: dict[str, int] = {}
-    for document in index.tokenized_documents:
-        document_tokens = set(document)
-        if not anchor_set.intersection(document_tokens):
-            continue
-        for token in document_tokens:
-            anchor_cooccurrence[token] = (
-                anchor_cooccurrence.get(token, 0) + 1
-            )
-
     kept: list[str] = []
     for token in expansion_tokens:
-        cooccurrence = anchor_cooccurrence.get(token, 0)
+        # The FTS5 index counts, for each expansion term, how many of its
+        # documents also contain one of the question's anchors.
+        cooccurrence = index.bm25.count_cooccurrence(token, sorted(anchor_set))
         if not cooccurrence:
             continue
         frequency = index.document_frequency.get(token, 0)
@@ -2191,7 +2270,7 @@ def top_chunks(
     if not query_tokens:
         return []
 
-    scores = index.bm25.get_scores(query_tokens)
+    scores = index.bm25.get_scores(query_tokens, index.chunk_keys)
     ranked = [
         (chunk, float(score))
         for chunk, score in zip(chunks, scores)
@@ -2237,21 +2316,21 @@ def top_chunks(
         # constraint: if nothing matches (for example the name is not in the
         # corpus), leave the BM25 ranking untouched so retrieval can
         # still reconsider the question.
-        document_tokens = {
-            id(chunk): tokens
-            for chunk, tokens in zip(chunks, index.tokenized_documents)
-        }
         strict_phrases, loose_tokens = entity_focus_terms(
             entity_phrases, index
         )
+        allowed_keys: set[str] = set()
+        for phrase in strict_phrases:
+            # Each strict phrase must occur in full; the FTS5 MATCH query does
+            # the intersection on disk instead of materializing every
+            # document's token set in Python.
+            allowed_keys |= index.matching_keys(sorted(phrase), "AND")
+        if loose_tokens:
+            allowed_keys |= index.matching_keys(sorted(loose_tokens), "OR")
         focused = [
             (chunk, score)
             for chunk, score in ranked
-            if any(
-                phrase.issubset(document_tokens[id(chunk)])
-                for phrase in strict_phrases
-            )
-            or loose_tokens.intersection(document_tokens[id(chunk)])
+            if index.key_for(chunk) in allowed_keys
         ]
         if focused:
             # Within the entity's chunks, prefer those that also mention the
@@ -2270,10 +2349,13 @@ def top_chunks(
                 and token not in entity_tokens
             }
             if topic_terms:
+                topic_keys = index.matching_keys(
+                    sorted(topic_terms), "OR"
+                )
                 topical = [
                     (chunk, score)
                     for chunk, score in focused
-                    if topic_terms.intersection(document_tokens[id(chunk)])
+                    if index.key_for(chunk) in topic_keys
                 ]
                 # A single generic or incidental word must not collapse a
                 # large entity set into a couple of chunks. Keep the topical

@@ -289,6 +289,17 @@ const SOURCES = [
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
     . 'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+// Some publisher WAFs reject a specific browser identity (PBS answers the
+// Chrome 131 UA with an HTTP 202 JavaScript challenge) while serving the same
+// article to another mainstream browser. Retry a blocked article page with
+// these identities before giving up on the direct publisher page.
+const ARTICLE_FALLBACK_USER_AGENTS = [
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+        . 'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0',
+    'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+];
+
 /**
  * Read the Medium author handle from ~/.medium/username.
  *
@@ -568,13 +579,14 @@ function fetchUrl(
     string $sourceKey,
     int $attempt = 0,
     bool $quiet = false,
-    int $timeout = 30
+    int $timeout = 30,
+    string $userAgent = USER_AGENT
 ): ?string
 {
     $context = stream_context_create([
         'http' => [
             'method' => 'GET',
-            'header' => 'User-Agent: ' . USER_AGENT . "\r\n"
+            'header' => 'User-Agent: ' . $userAgent . "\r\n"
                 . 'Accept: ' . $accept . "\r\n"
                 . "Accept-Language: en-US,en;q=0.9\r\n",
             'ignore_errors' => true,
@@ -605,7 +617,8 @@ function fetchUrl(
             $sourceKey,
             $attempt + 1,
             $quiet,
-            $timeout
+            $timeout,
+            $userAgent
         );
     }
 
@@ -2386,6 +2399,41 @@ function articleResultFromBody(string $body, string $baseUrl): ?array
 }
 
 /**
+ * Retry a blocked article page with alternate mainstream browser identities.
+ *
+ * WAFs sometimes fingerprint a single user agent and answer it with a bot
+ * challenge while returning the unchanged article to another browser. Only
+ * the direct publisher page is retried; the normal feed/reader/archive
+ * fallbacks still run if every identity is blocked.
+ *
+ * @return array{paragraphs:list<string>, image:string}|null
+ */
+function fetchArticleWithAlternateBrowsers(
+    string $url,
+    string $sourceKey
+): ?array {
+    foreach (ARTICLE_FALLBACK_USER_AGENTS as $userAgent) {
+        $body = fetchUrl(
+            $url,
+            'text/html, application/xhtml+xml;q=0.9, */*;q=0.8',
+            $sourceKey,
+            MAX_ATTEMPTS - 1,
+            true,
+            20,
+            $userAgent
+        );
+        if (!is_string($body) || trim($body) === '') {
+            continue;
+        }
+        $result = articleResultFromBody($body, $url);
+        if ($result !== null) {
+            return $result;
+        }
+    }
+    return null;
+}
+
+/**
  * Generic public readers that render a blocked publisher page from a
  * different network. Google Translate's proxy is especially useful for AP
  * and other sites that block plain bot requests but allow the translate
@@ -3350,6 +3398,18 @@ function enrichStoryContent(
                     // Some WAFs answer HTTP 200 with a challenge page.
                     $pageFailed = true;
                 }
+            }
+        }
+
+        // A WAF can reject one browser identity with a challenge while the
+        // same article is served normally to another. Retry the publisher
+        // page with alternate browser identities before using mirrors/feeds.
+        if (!$entry['paragraphs'] && $pageFailed) {
+            $retry = fetchArticleWithAlternateBrowsers($finalLink, $sourceKey);
+            if ($retry !== null) {
+                $entry['paragraphs'] = $retry['paragraphs'];
+                $entry['image'] = $retry['image'];
+                $pageFailed = false;
             }
         }
 

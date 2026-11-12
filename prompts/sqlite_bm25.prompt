@@ -1,0 +1,44 @@
+research_findings {
+  SQLite FTS5 (Zero External Services, Embedded C)
+  SQLite’s built-in full-text search engine (FTS5) uses BM25 scoring by default under the hood. It compiles directly into the process, builds a persistent on-disk inverted index, and easily handles 100k+ chunks in 2–5ms.
+
+  Python
+  import sqlite3
+
+  conn = sqlite3.connect("chunks_fts.db")
+  cursor = conn.cursor()
+
+  # 1. Create FTS5 virtual table
+  cursor.execute("""
+  CREATE VIRTUAL TABLE IF NOT EXISTS chunk_index USING fts5(
+  chunk_id UNINDEXED,
+  content,
+  tokenize = 'porter unicode61'
+  );
+  """)
+
+  # 2. Batch insert chunks (do this once during indexing)
+  # chunks = [(chunk_id, text), ...]
+  cursor.executemany("INSERT INTO chunk_index(chunk_id, content) VALUES (?, ?);", chunks)
+  conn.commit()
+
+  # 3. Query with native BM25 ranking
+  def query_bm25(query_str: str, limit: int = 10):
+  # fts5 bm25() returns lower scores for better matches (negative-like sorting)
+  res = cursor.execute("""
+  SELECT chunk_id, content, bm25(chunk_index) as rank
+  FROM chunk_index
+  WHERE chunk_index MATCH ?
+  ORDER BY rank
+  LIMIT ?;
+  """, (query_str, limit)).fetchall()
+  return res
+}
+
+task {
+  sqlite_db: {diretory_of_this_prompt}/../.chat/articles_cache/bm25_index_fts.db
+  based on {research_findings}:
+  - create a sqlite db at {sqlite_db}
+  - instead of loading the inverted index in memory, use the sqlite database to get all the inverted index chunk
+  - when we learn an article, store the trunks and indexes in {sqlite_db}
+}
