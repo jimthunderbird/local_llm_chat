@@ -89,6 +89,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -179,6 +180,16 @@ FUZZY_ANCHOR_STOPWORDS = frozenset(
     "before under between during any some all more most other another "
     "such only just also very much many few own same so not no nor too "
     "tell show give me please new latest current".split()
+)
+# Function words add almost no BM25 ranking signal but make MATCH select most
+# of the corpus.  Keep the original token list for fuzzy correction, entity
+# detection, acronym expansion, and expansion validation; only the list sent
+# to FTS5 is pruned.  Time words ("new", "latest", "current") stay in the
+# query because in news questions they can be topical.
+BM25_QUERY_STOPWORDS = (
+    FUZZY_ANCHOR_STOPWORDS - frozenset("new latest current".split())
+) | frozenset(
+    "it its he him his she her they them we us our you your i my mine".split()
 )
 FILTER_SNIPPET_CHARS = 700
 FILTER_NUM_PREDICT = 96
@@ -1214,7 +1225,9 @@ def build_bm25_index(chunks: list[Chunk], prune: bool = False) -> BM25Index:
 
 
 def index_chunks_in_sqlite(
-    chunks: list[Chunk], corpus_key: str | None = None
+    chunks: list[Chunk],
+    corpus_key: str | None = None,
+    optimize: bool = True,
 ) -> dict[str, object]:
     """Persist newly learned chunks in the SQLite BM25 index immediately.
 
@@ -1229,7 +1242,16 @@ def index_chunks_in_sqlite(
     if corpus_key is None:
         corpus_key = _bm25_corpus_key(chunks, keys)
     backend = sqlite_bm25.get_index(BM25_DB_PATH, corpus_key)
-    return backend.sync(_bm25_sync_entries(chunks, corpus_key))
+    result = backend.sync(_bm25_sync_entries(chunks, corpus_key))
+    # A bulk learn appends a few FTS5 segments at a time.  Merge them now,
+    # while we are already off the question path, so later MATCH scans do not
+    # pay for a fragmented b-tree.
+    if optimize and (result.get("added") or result.get("updated")):
+        try:
+            backend.optimize()
+        except sqlite3.Error:
+            pass
+    return result
 
 
 def get_bm25_index(chunks: list[Chunk], prune: bool = False) -> BM25Index:
@@ -2282,7 +2304,22 @@ def top_chunks(
     if not query_tokens:
         return []
 
-    scores = index.bm25.get_scores(query_tokens, index.chunk_keys)
+    # Prune function words only for the FTS5 MATCH expression.  The original
+    # weighted list above is still used by the negative-score fallback and by
+    # all entity/acronym logic.
+    bm25_tokens = [
+        token for token in query_tokens if token not in BM25_QUERY_STOPWORDS
+    ]
+    if not bm25_tokens:
+        bm25_tokens = query_tokens
+    # Return only candidates that can actually be selected.  An explicit
+    # /depth larger than the default still gets its full candidate pool.
+    score_limit = sqlite_bm25.DEFAULT_SCORE_LIMIT
+    if limit is not None:
+        score_limit = max(score_limit, int(limit))
+    scores = index.bm25.get_scores(
+        bm25_tokens, index.chunk_keys, limit=score_limit
+    )
     ranked = [
         (chunk, float(score))
         for chunk, score in zip(chunks, scores)
@@ -5216,6 +5253,20 @@ def main() -> None:
 
     chunks = load_all_chunks()
     print(index_memory_report(chunks, build_index=False))
+    # Startup is the safe place for BM25 maintenance: drop scope tables that
+    # belong to a previous session, return their pages to the filesystem, and
+    # merge FTS5 segments before the first question.  None of this runs on the
+    # question path.
+    try:
+        sqlite_bm25.drop_transient_corpora(BM25_DB_PATH, vacuum=True)
+    except Exception:
+        pass
+    try:
+        startup_index = get_bm25_index(chunks, prune=True)
+        startup_index.bm25.optimize()
+        startup_index.bm25.vacuum()
+    except Exception:
+        pass
     transcript: str | None = None
     latest_answer: str | None = None
     latest_sources: list[tuple[Chunk, float]] = []
@@ -5368,6 +5419,14 @@ def main() -> None:
                         chunks = new_chunks
                         clear_bm25_cache()
                         gc.collect()
+                        # Index the new trunks and merge FTS5 segments now,
+                        # during the learn command, not on the next question.
+                        try:
+                            index_chunks_in_sqlite(
+                                chunks, corpus_key="global"
+                            )
+                        except Exception:
+                            pass
                         print(
                             index_memory_report(chunks, build_index=False)
                         )

@@ -8632,6 +8632,12 @@ def _refresh_knowledge_after_learn(state: ChatState, video_id: str) -> None:
             if error or chunks is None:
                 return
             state.global_chunks = chunks
+            # Persist the new trunks and merge the FTS5 segments now, while
+            # this background learn job is already off the question path.
+            try:
+                chat.index_chunks_in_sqlite(chunks, corpus_key="global")
+            except Exception:
+                pass
             if state.article_path is not None or state.transcript is not None:
                 return
             # A new video is immediately part of the global corpus; no
@@ -12110,6 +12116,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         global_chunks, _global_printed, global_error = load_all_chunks_captured()
         if not global_error and global_chunks is not None:
             state.global_chunks = global_chunks
+            # Index the newly learned trunks and compact the FTS5 segments
+            # here, during the learn command rather than on the next question.
+            try:
+                chat.index_chunks_in_sqlite(
+                    global_chunks, corpus_key="global"
+                )
+            except Exception:
+                pass
 
         if state.article_path is not None:
             self._sse_text(
@@ -13706,17 +13720,29 @@ def main() -> None:
         else:
             print("Ollama models are ready.", flush=True)
 
+    # Transcript/article/book FTS tables describe sources that are no longer
+    # open after a restart. They are cheap to rebuild, so drop them and return
+    # their pages to the filesystem instead of letting the database grow
+    # forever. This runs before the global index is opened so VACUUM can take
+    # the exclusive lock it needs.
+    try:
+        sqlite_bm25.drop_transient_corpora(
+            chat.BM25_DB_PATH, vacuum=True
+        )
+    except Exception:
+        pass
+
     # Build the BM25 index before accepting requests. Otherwise the first
     # question pays the index-construction cost for the whole corpus. The
     # startup corpus is the full global one, so this is also the safe place to
-    # prune DB rows whose trunk files were deleted.
-    chat.get_bm25_index(state.chunks, prune=True)
-    # Transcript/article/book FTS tables describe sources that are no longer
-    # open after a restart. They are cheap to rebuild, so drop them instead of
-    # letting the database grow forever.
+    # prune DB rows whose trunk files were deleted. Merge FTS5 segments after
+    # the sync so the first MATCH scans an optimized b-tree.
     try:
-        sqlite_bm25.drop_transient_corpora(chat.BM25_DB_PATH)
+        startup_index = chat.get_bm25_index(state.chunks, prune=True)
+        startup_index.bm25.optimize()
+        startup_index.bm25.vacuum()
     except Exception:
+        # Index maintenance is best-effort; a later question rebuilds lazily.
         pass
 
     ChatRequestHandler.state = state

@@ -65,6 +65,12 @@ BASE_SCHEMA = (
 # transaction (and its memory) open while the server is starting.
 INSERT_BATCH_SIZE = 400
 
+# Only candidates near the top can ever be selected by the chat retrieval
+# code (the adaptive cap is 50 and the default depth is 20).  A single SQL
+# LIMIT keeps FTS5 from scoring, sorting, and materializing tens of thousands
+# of rows for every function word in a question.
+DEFAULT_SCORE_LIMIT = 500
+
 
 def _quote(token: str) -> str:
     """Quote one token so FTS5 treats it as a literal phrase, not syntax."""
@@ -105,6 +111,10 @@ class SQLiteBM25:
         self.fts_table, self.vocab_table = _table_names(corpus_key)
         self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
+        # rowid -> chunk_key, loaded lazily once per corpus.  The hot BM25
+        # query can then select rowid only and skip the join against
+        # chunk_documents (which measured about 33% overhead).
+        self._doc_keys: dict[int, str] | None = None
 
     # ------------------------------------------------------------------ setup
     def _connect(self) -> sqlite3.Connection:
@@ -260,6 +270,8 @@ class SQLiteBM25:
                         ),
                     )
                 connection.commit()
+            # A sync can change the rowid -> chunk_key mapping.
+            self._doc_keys = None
         return {"added": added, "updated": updated, "unchanged": unchanged}
 
     def prune(self, valid_keys: Iterable[str]) -> int:
@@ -292,13 +304,67 @@ class SQLiteBM25:
                 )
                 connection.commit()
                 removed += len(batch)
+            self._doc_keys = None
         return removed
 
+    # -------------------------------------------------------------- optimize
+    def optimize(self) -> None:
+        """Merge FTS5 b-tree segments so MATCH/BM25 work stays minimal.
+
+        FTS5 keeps several segments after incremental inserts.  ``optimize``
+        merges them into one segment.  It is a write operation, so callers
+        run it at startup or after a bulk learn, never inside a question.
+        """
+        with self._lock:
+            connection = self._connect()
+            connection.execute(
+                f'INSERT INTO "{self.fts_table}"("{self.fts_table}") '
+                "VALUES('optimize')"
+            )
+            connection.commit()
+
+    def vacuum(self) -> None:
+        """Return free pages to the filesystem after drops/optimize.
+
+        ``optimize`` can leave a few thousand free pages behind, and dropping
+        stale scopes does too.  A compact file stays in the OS page cache and
+        needs less WAL work.  Like ``optimize`` this is maintenance-only.
+        """
+        with self._lock:
+            connection = self._connect()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            connection.execute("VACUUM")
+            # VACUUM writes the rebuilt pages through the WAL; checkpoint
+            # again so an idle server does not leave a database-sized -wal.
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
     # ----------------------------------------------------------------- lookup
+    def _document_keys(self) -> dict[int, str]:
+        """Return the cached ``rowid -> chunk_key`` map for this corpus."""
+        if self._doc_keys is None:
+            connection = self._connect()
+            rows = connection.execute(
+                "SELECT doc_id, chunk_key FROM chunk_documents "
+                "WHERE corpus_key = ?",
+                (self.corpus_key,),
+            ).fetchall()
+            self._doc_keys = {
+                int(doc_id): str(chunk_key) for doc_id, chunk_key in rows
+            }
+        return self._doc_keys
+
     def get_scores(
-        self, query_tokens: Sequence[str], chunk_keys: Sequence[str]
+        self,
+        query_tokens: Sequence[str],
+        chunk_keys: Sequence[str],
+        limit: int | None = DEFAULT_SCORE_LIMIT,
     ) -> list[float]:
-        """Return BM25 scores aligned with ``chunk_keys`` (higher is better)."""
+        """Return BM25 scores aligned with ``chunk_keys`` (higher is better).
+
+        When ``limit`` is set only the best-scoring rows are read from
+        SQLite.  The returned list is still aligned with ``chunk_keys``;
+        keys outside the top-k simply keep a zero score.
+        """
         if not query_tokens or not chunk_keys:
             return [0.0] * len(chunk_keys)
         expression = _weighted_expression(query_tokens)
@@ -306,24 +372,26 @@ class SQLiteBM25:
             return [0.0] * len(chunk_keys)
         with self._lock:
             connection = self._connect()
+            doc_keys = self._document_keys()
+            sql = (
+                f'SELECT rowid, bm25("{self.fts_table}") '
+                f'FROM "{self.fts_table}" '
+                f'WHERE "{self.fts_table}" MATCH ? '
+                f'ORDER BY bm25("{self.fts_table}")'
+            )
+            params: list[object] = [expression]
+            if limit is not None and limit > 0:
+                sql += " LIMIT ?"
+                params.append(int(limit))
             try:
-                rows = connection.execute(
-                    f"""
-                    SELECT d.chunk_key, bm25("{self.fts_table}")
-                    FROM "{self.fts_table}"
-                    JOIN chunk_documents AS d
-                      ON d.corpus_key = ? AND d.doc_id = "{self.fts_table}".rowid
-                    WHERE "{self.fts_table}" MATCH ?
-                    """,
-                    (self.corpus_key, expression),
-                ).fetchall()
+                rows = connection.execute(sql, params).fetchall()
             except sqlite3.OperationalError:
                 return [0.0] * len(chunk_keys)
         # FTS5 returns a negative value for a better match (it sorts
         # ascending), so negate it to match the rest of the retrieval code.
         by_key = {
-            str(key): -float(score)
-            for key, score in rows
+            doc_keys.get(int(rowid), ""): -float(score)
+            for rowid, score in rows
             if score is not None
         }
         return [by_key.get(key, 0.0) for key in chunk_keys]
@@ -462,18 +530,23 @@ def get_index(db_path: Path | str, corpus_key: str = "global") -> SQLiteBM25:
 
 
 def drop_transient_corpora(
-    db_path: Path | str, keep: Iterable[str] = ("global",)
+    db_path: Path | str,
+    keep: Iterable[str] = ("global",),
+    vacuum: bool = False,
 ) -> int:
     """Drop per-scope FTS tables, keeping the persistent global corpus.
 
     Explicit transcript/article/book corpora are cheap to rebuild and describe
     files that may no longer be open.  Running this once at server start keeps
-    the database from growing without bound.
+    the database from growing without bound.  With ``vacuum=True`` the freed
+    pages are also returned to the filesystem, which keeps the index small
+    enough to stay in the OS page cache.
     """
     path = Path(db_path)
     if not path.is_file():
         return 0
     keep_keys = set(keep)
+    resolved = str(path.resolve())
     connection = sqlite3.connect(str(path), timeout=30.0)
     try:
         exists = connection.execute(
@@ -502,6 +575,24 @@ def drop_transient_corpora(
             )
             dropped += 1
         connection.commit()
+        # Close handles for corpora that no longer exist so a later get_index
+        # starts from a clean connection instead of a dropped table, and so
+        # they cannot hold a read lock while VACUUM asks for an exclusive one.
+        with _INDEXES_LOCK:
+            for key, index in list(_INDEXES.items()):
+                if key[0] == resolved and key[1] not in keep_keys:
+                    index.close()
+                    del _INDEXES[key]
+        free_pages = int(
+            connection.execute("PRAGMA freelist_count").fetchone()[0]
+        )
+        if vacuum and (dropped or free_pages):
+            # Release the dropped scope tables' pages.  VACUUM needs free
+            # temporary space roughly equal to the database size, so it runs
+            # only during startup/maintenance, never on a question.
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            connection.execute("VACUUM")
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return dropped
     finally:
         connection.close()

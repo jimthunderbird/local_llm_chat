@@ -35,6 +35,17 @@ research_findings {
   return res
 }
 
+task.action.speedup_sqlite_bm25 (completed) {
+  - perform all related optimizations based on section "Can SQLite FTS5 BM25 retrieval be made 50% faster?" in {diretory_of_this_prompt}/../research/sqlite_bm25.html
+}
+
+task.research.speedup_sqlite_bm25 (completed) {
+  research the following the append the result to {diretory_of_this_prompt}/../research/sqlite_bm25.html {
+    - currently it seems like it takes longer time to get the answer, can we think of ways to improve it?
+    - the goal is to keep using the sqlite fts and bm25, but has a speed up of 50%
+  }
+}
+
 task.reserch (completed) {
   research the following the save the result to {diretory_of_this_prompt}/../research/sqlite_bm25.html {
     - currently, in {diretory_of_this_prompt}/../.chat/articles_cache, we have a lot of *.trunk, *.json, *.md files, are they still needed? can we just delete them all?

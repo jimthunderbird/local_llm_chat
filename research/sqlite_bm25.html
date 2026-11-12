@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Can the .chat/articles_cache files be deleted now that SQLite FTS5 holds the BM25 index?</title>
+<title>SQLite FTS5 BM25 research: cache files and retrieval speedup</title>
 <style>
   :root { color-scheme: light dark; }
   body {
@@ -283,6 +283,384 @@ rm .chat/articles_cache/bm25_index_fts.db .chat/articles_cache/bm25_index_fts.db
   the <code>.trunk</code> or <code>.json</code> files without destroying the
   learned-article corpus.</strong>
 </p>
+
+<hr>
+
+<h1 id="speedup">Can SQLite FTS5 BM25 retrieval be made 50% faster?</h1>
+
+<p class="muted">
+  Follow-up research for <code>prompts/sqlite_bm25.prompt</code>.
+  Measured 2026-11-11 on the production corpus: 26,202 global trunks
+  (591 videos + 120 learned articles), FTS5 database
+  <code>.chat/articles_cache/bm25_index_fts.db</code> (138&nbsp;MB,
+  125,511 rows across one global and four stale scoped tables).
+  Timings are the best of five warm runs in the same process; the goal was
+  to <strong>keep SQLite FTS5 + BM25</strong> and cut retrieval time by at
+  least 50%.
+</p>
+
+<div class="verdict">
+  <strong>Answer: yes, comfortably.</strong>
+  Pruning stopwords from the FTS5 <code>MATCH</code> expression and returning
+  only the top candidates reduced the complete <code>top_chunks()</code>
+  retrieval stage from <strong>418&nbsp;ms to 77.5&nbsp;ms</strong> over eight
+  representative questions (<strong>5.4&times; faster, 81.5% less time</strong>).
+  The raw <code>get_scores()</code> call alone dropped from
+  <strong>264.8&nbsp;ms to 40.2&nbsp;ms</strong> (6.6&times;). FTS5
+  <code>optimize</code> contributes another ~29% on top of that, and
+  dropping the stale scoped tables shrinks the database from 138&nbsp;MB to
+  34&nbsp;MB. The speedup target is met by stopword pruning alone; the other
+  changes make it larger and reduce disk/cache pressure.
+</div>
+
+<h2>Benchmark setup</h2>
+
+<p>
+  The benchmark used the real <code>chat.load_all_chunks()</code>,
+  <code>chat.get_bm25_index()</code>, <code>chat.top_chunks()</code>, and
+  <code>sqlite_bm25.SQLiteBM25</code> code paths (Ollama was not called).
+  Queries:
+</p>
+
+<pre><code>what can i eat in Izumo
+where is nijo market
+what are all levels of wagyu
+can i do left turn on red light
+tell me about the history of kyoto
+did terrence tao write a new book
+how does the nvidia ai chip work
+what is the best time to visit japan</code></pre>
+
+<p>
+  <code>top_chunks(..., limit=100)</code> was chosen because it includes the
+  normal 20-result default, the <code>/depth</code> path, and the iterative
+  <code>/article</code> path. Scores were compared against the unmodified
+  implementation, and the selected top-10 paragraphs were inspected for
+  relevance as well as counted for overlap.
+</p>
+
+<h2>Where the time goes</h2>
+
+<p>
+  The current query is an <code>OR</code> of <em>every</em> question token,
+  repeated to weight question words twice, plus fuzzy corrections, acronym
+  expansions, and model expansion terms. Function words such as
+  <code>what</code>, <code>is</code>, <code>the</code>, <code>in</code>, and
+  <code>me</code> therefore appear as full BM25 terms. On this corpus that
+  makes almost the entire 26,202-document global table match:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Question</th><th>Documents matched by current MATCH</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>what can i eat in Izumo</td><td>23,422 / 26,202</td></tr>
+    <tr><td>where is nijo market</td><td>18,770 / 26,202</td></tr>
+    <tr><td>what are all levels of wagyu</td><td>22,411 / 26,202</td></tr>
+    <tr><td>can i do left turn on red light</td><td>21,531 / 26,202</td></tr>
+    <tr><td>tell me about the history of kyoto</td><td>24,881 / 26,202</td></tr>
+    <tr><td>did terrence tao write a new book</td><td>21,547 / 26,202</td></tr>
+    <tr><td>how does the nvidia ai chip work</td><td>24,886 / 26,202</td></tr>
+    <tr><td>what is the best time to visit japan</td><td>25,857 / 26,202</td></tr>
+  </tbody>
+</table>
+
+<p>
+  FTS5 must score, sort, and return every one of those rows. Python then
+  builds a 26,202-entry score map and an almost-as-large ranked list, only
+  for <code>_select_auto_chunks()</code> to look at the first 50 candidates.
+  The query plan shows the expected shape:
+</p>
+
+<pre><code>SCAN chunk_index_&lt;hash&gt; VIRTUAL TABLE INDEX 0:M1
+SEARCH d USING INDEX sqlite_autoindex_chunk_documents_1
+       (corpus_key=? AND doc_id=?)</code></pre>
+
+<p>
+  In other words, the join is cheap; the cost is that the <code>MATCH</code>
+  selects 70-99% of the corpus and every selected row is materialized in
+  Python. Function words add almost no ranking signal because their IDF is
+  tiny, but they do add a large candidate set.
+</p>
+
+<h2>1. Prune stopwords from the MATCH expression (largest win)</h2>
+
+<p>
+  Keep the original token list for fuzzy correction, entity detection,
+  acronym expansion, and expansion validation. Only the list handed to
+  <code>get_scores()</code> is filtered. If filtering leaves at least one
+  content word, use the filtered list; otherwise fall back to the original
+  list so a question made only of function words still searches.
+</p>
+
+<pre><code>search_tokens = query_tokens
+content_tokens = [
+    token for token in search_tokens
+    if token not in FUZZY_ANCHOR_STOPWORDS
+]
+if content_tokens:
+    search_tokens = content_tokens
+
+scores = index.bm25.get_scores(
+    search_tokens, index.chunk_keys, limit=500
+)</code></pre>
+
+<p>
+  Repeated content tokens are preserved, so the existing question-word
+  weighting and FTS5 phrase-weight behavior are unchanged. Measured over the
+  eight questions:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Implementation</th><th>get_scores total</th><th>Time reduction</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Current (all question tokens, all rows)</td><td>264.8&nbsp;ms</td><td>-</td></tr>
+    <tr><td>Stopwords pruned, top 500 rows</td><td>40.2&nbsp;ms</td><td><strong>84.8%</strong> (6.6&times;)</td></tr>
+    <tr><td>Same, on an optimized/compacted database</td><td>27.5&nbsp;ms</td><td><strong>89.6%</strong> (9.6&times;)</td></tr>
+  </tbody>
+</table>
+
+<p>
+  A smaller, classic stopword list (keeping <code>new</code>,
+  <code>latest</code>, and <code>current</code>) still gives
+  <strong>443.5&nbsp;ms &rarr; 91.1&nbsp;ms</strong> end-to-end on
+  <code>top_chunks()</code>, a 79.5% reduction. This is the safer list for
+  news-like questions where those time words can be topical.
+</p>
+
+<h2>2. Return only the top candidates</h2>
+
+<p>
+  <code>get_scores()</code> currently returns a list aligned with all
+  <code>chunk_keys</code>. Only candidates near the top can ever be selected:
+  <code>AUTO_CANDIDATE_LIMIT = 50</code>, the default depth is 20, and the
+  iterative article path requests a small candidate pool. Add a
+  <code>limit</code> to the SQL query:
+</p>
+
+<pre><code>SELECT d.chunk_key, bm25("chunk_index_&lt;hash&gt;")
+FROM "chunk_index_&lt;hash&gt;"
+JOIN chunk_documents AS d
+  ON d.corpus_key = ?
+ AND d.doc_id = "chunk_index_&lt;hash&gt;".rowid
+WHERE "chunk_index_&lt;hash&gt;" MATCH ?
+ORDER BY bm25("chunk_index_&lt;hash&gt;")
+LIMIT ?;</code></pre>
+
+<p>
+  A limit of 500 is ample (10&times; the adaptive candidate cap, 25&times; the
+  default depth) and bounds the Python-side map and ranked list. Do not use
+  <code>ORDER BY rank</code>: on this SQLite build it measured slower than
+  <code>ORDER BY bm25(...)</code>. For a further small gain, select
+  <code>rowid</code> only and translate <code>doc_id -&gt; chunk_key</code>
+  from a cached dictionary loaded at index build time; the join added about
+  33% in isolation (27.7&nbsp;ms vs 41.5&nbsp;ms over the eight queries).
+</p>
+
+<h2>3. Run FTS5 <code>optimize</code></h2>
+
+<p>
+  FTS5 keeps several b-tree segments after incremental inserts. Running the
+  special <code>optimize</code> command merges them into one segment, which
+  reduces MATCH and <code>bm25()</code> work:
+</p>
+
+<pre><code>INSERT INTO "chunk_index_&lt;hash&gt;"("chunk_index_&lt;hash&gt;")
+VALUES('optimize');</code></pre>
+
+<p>
+  On a global-only copy this took about <strong>0.2&nbsp;s</strong> and cut
+  the eight-query baseline from <strong>275.0&nbsp;ms to 194.9&nbsp;ms</strong>
+  (<strong>29%</strong>). Run it at server startup after syncing, and after a
+  bulk learn operation (video or article); do not run it inside a question
+  request. It is a write operation, so it should happen on the learning or
+  startup thread.
+</p>
+
+<h2>4. Drop stale scopes and VACUUM</h2>
+
+<p>
+  The database held five corpora: <code>global</code> with 26,202 documents
+  plus four stale <code>scope_*</code> tables with about 24,800 documents
+  each. Those scopes are rebuildable and already dropped by
+  <code>drop_transient_corpora()</code> at startup, but the freed pages are
+  not returned to the filesystem. Dropping the stale tables and running
+  <code>VACUUM</code> took the copy from <strong>138&nbsp;MB to 34&nbsp;MB</strong>
+  without changing the global rows. A smaller file means more of the index
+  stays resident in the OS page cache and less WAL/checkpoint work.
+</p>
+
+<pre><code># with the server stopped, or on a maintenance thread
+DROP TABLE IF EXISTS "chunk_index_&lt;stale hash&gt;";
+DROP TABLE IF EXISTS "chunk_vocab_&lt;stale hash&gt;";
+DELETE FROM chunk_documents WHERE corpus_key LIKE 'scope_%';
+DELETE FROM corpora WHERE corpus_key LIKE 'scope_%';
+VACUUM;  -- rewrites the file; needs temporary free space</code></pre>
+
+<p>
+  <code>VACUUM</code> alone did <em>not</em> speed up the global query in the
+  warm-cache benchmark; it is a storage/cache-residency improvement, not a
+  query-plan improvement. Pair it with <code>optimize</code> for the query
+  win.
+</p>
+
+<h2>Combined end-to-end retrieval result</h2>
+
+<p>
+  Full <code>chat.top_chunks(question, chunks, limit=100)</code>, including
+  fuzzy correction, entity filtering, acronym expansion, and adaptive
+  selection, best of five runs:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Question</th><th>Current</th><th>Stopwords + top 500</th><th>Speedup</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>what can i eat in Izumo</td><td>49.8&nbsp;ms</td><td>15.9&nbsp;ms</td><td>3.1&times;</td></tr>
+    <tr><td>where is nijo market</td><td>40.4&nbsp;ms</td><td>3.5&nbsp;ms</td><td>11.5&times;</td></tr>
+    <tr><td>what are all levels of wagyu</td><td>45.6&nbsp;ms</td><td>3.6&nbsp;ms</td><td>12.7&times;</td></tr>
+    <tr><td>can i do left turn on red light</td><td>51.7&nbsp;ms</td><td>17.8&nbsp;ms</td><td>2.9&times;</td></tr>
+    <tr><td>tell me about the history of kyoto</td><td>53.5&nbsp;ms</td><td>3.0&nbsp;ms</td><td>17.8&times;</td></tr>
+    <tr><td>did terrence tao write a new book</td><td>49.5&nbsp;ms</td><td>5.8&nbsp;ms</td><td>8.5&times;</td></tr>
+    <tr><td>how does the nvidia ai chip work</td><td>55.1&nbsp;ms</td><td>15.9&nbsp;ms</td><td>3.5&times;</td></tr>
+    <tr><td>what is the best time to visit japan</td><td>72.5&nbsp;ms</td><td>12.0&nbsp;ms</td><td>6.0&times;</td></tr>
+    <tr><th>Total</th><th>418.0&nbsp;ms</th><th>77.5&nbsp;ms</th><th>5.4&times; (81.5% less)</th></tr>
+  </tbody>
+</table>
+
+<p>
+  Even the worst-case questions (<code>eat</code>, <code>left turn red
+  light</code>, <code>nvidia ai chip</code>) improve by nearly 3&times;. The
+  remaining time is mostly the fuzzy/entity <code>MATCH</code> helper queries
+  rather than BM25 scoring, so this is close to the practical floor without
+  changing retrieval semantics.
+</p>
+
+<h2>Quality check</h2>
+
+<p>
+  Dropping stopwords changes the candidate set, so this is not a byte-identical
+  drop-in. Spot checks show the change is usually an improvement because
+  function-word-only documents disappear:
+</p>
+
+<ul>
+  <li><strong>Wagyu:</strong> the top 10 results are effectively identical;
+      the same ten-level Wagyu video dominates both rankings.</li>
+  <li><strong>Kyoto history:</strong> the current top 10 is mostly generic
+      AI-history paragraphs that happen to contain <code>history</code>
+      and <code>the</code>. The filtered ranking replaces them with Kyoto
+      travel paragraphs, including the Wikivoyage Japan article and the
+      &ldquo;Little Kyoto of Iyo&rdquo; segment.</li>
+  <li><strong>Nijo Market:</strong> all 50 current top results are preserved;
+      97 of the top 100 remain.</li>
+</ul>
+
+<p>
+  For queries whose relevant set is large, the top-50 overlap with the current
+  implementation was 40-50/50. The exceptions are cases where the current
+  top-50 is filled with function-word-only matches; there the new ranking is
+  the more relevant one. Run the existing evaluation questions before
+  rollout and keep the classic-stopword fallback if any regression appears.
+</p>
+
+<h2>What did not help</h2>
+
+<ul>
+  <li><code>PRAGMA mmap_size=268435456</code>: no measurable change on warm
+      queries (27.7&nbsp;ms either way).</li>
+  <li><code>PRAGMA cache_size=-65536</code>: no improvement; slightly slower
+      in this benchmark.</li>
+  <li><code>ORDER BY rank</code> instead of <code>ORDER BY bm25(...)</code>:
+      about 40% slower for the limited query (39.0&nbsp;ms vs 27.7&nbsp;ms over
+      the eight queries).</li>
+  <li>A subquery that applies <code>LIMIT</code> before joining
+      <code>chunk_documents</code>: slower (52.2&nbsp;ms) because SQLite
+      materialized the subquery. A plain top-K join or a cached
+      <code>doc_id -&gt; chunk_key</code> map is better.</li>
+  <li><code>VACUUM</code> alone: storage win only, no warm-query win.</li>
+</ul>
+
+<h2>Recommended implementation order</h2>
+
+<ol>
+  <li><strong>Stopword-prune the BM25 query.</strong> In
+      <code>top_chunks()</code> (or inside <code>get_scores()</code> with a
+      stopword argument), filter the weighted token list, fall back to the
+      unfiltered list when nothing remains, and keep the original tokens for
+      fuzzy/entity/acronym logic. This alone exceeds the 50% target.</li>
+  <li><strong>Add a top-K limit to <code>get_scores()</code>.</strong> Return
+      only rows that can be selected (500 is plenty; make it a constant, not
+      a per-call allocation). Optionally return a
+      <code>{chunk_key: score}</code> dict so callers do not build a
+      26,202-element aligned list.</li>
+  <li><strong>Replace the join with a cached id map</strong> if more speed is
+      needed: load <code>doc_id -&gt; chunk_key</code> once with the index
+      metadata and select <code>rowid, bm25(...)</code> in the hot query.</li>
+  <li><strong>Run FTS5 <code>optimize</code></strong> at startup after
+      <code>sync()</code>/<code>prune()</code>, and after bulk learning.
+      Guard it with a flag so concurrent readers use WAL and do not block.</li>
+  <li><strong>VACUUM after dropping transient scopes</strong> when the server
+      is idle (or on a maintenance command), so the file shrinks from the
+      stale 100k+ scope rows. Do not run it per request.</li>
+  <li><strong>Keep the database path and schema unchanged.</strong> All of the
+      above are query-construction and maintenance changes; SQLite FTS5 and
+      its native BM25 remain the only ranking engine.</li>
+</ol>
+
+<h2>Expected impact and caveats</h2>
+
+<ul>
+  <li><strong>Retrieval stage:</strong> 5.4&times; faster end-to-end in the
+      benchmark (81.5% less time), versus the 50% target.</li>
+  <li><strong>Full answer latency:</strong> the retrieval stage is tens of
+      milliseconds while Ollama prefill/generation is seconds. These changes
+      cannot by themselves halve the wall-clock time to a streamed answer;
+      they remove 30-70&nbsp;ms of avoidable work and make the BM25 stage
+      negligible. If the perceived slowdown is in answer generation, measure
+      TTFT before and after and tune the model/context path separately.</li>
+  <li><strong>Quality:</strong> stopword removal is a standard BM25
+      optimization, but it changes the candidate set. Keep the fallback and
+      run the evaluation questions; do not combine it with a lower
+      <code>AUTO_CANDIDATE_LIMIT</code> without re-checking recall.</li>
+  <li><strong>Maintenance:</strong> <code>optimize</code> and
+      <code>VACUUM</code> are writes. Schedule them at startup or during
+      learning, never on the question path. Back up the DB before the first
+      <code>VACUUM</code>; it needs temporary free space roughly equal to the
+      database size.</li>
+</ul>
+
+<h2>Validation checklist</h2>
+
+<ol>
+  <li>Run the eight benchmark questions plus the existing Nijo Market, Izumo
+      food, wagyu, IDP, Terence Tao, and Kyoto questions through
+      <code>top_chunks()</code>; assert the expected source paragraph is still
+      in the top 20.</li>
+  <li>Compare top-10 source paragraphs before and after for each evaluation
+      question; flag any answer-source regression.</li>
+  <li>Measure <code>top_chunks()</code> p50/p95 after a warm index rebuild;
+      expect the 5&times; reduction shown here.</li>
+  <li>Confirm the FTS5 DB is one global table plus temporary scopes, and that
+      <code>drop_transient_corpora()</code> plus <code>VACUUM</code> leave the
+      file near 34&nbsp;MB for the current corpus.</li>
+  <li>Run <code>py_compile</code> on <code>chat.py</code>,
+      <code>sqlite_bm25.py</code>, and <code>app/chat_server.py</code>, then
+      start the server and ask one live question to verify the streaming
+      path.</li>
+</ol>
+
+<div class="warn">
+  <p><strong>Bottom line:</strong> the BM25 stage is not slow because SQLite
+  FTS5 is slow; it is slow because the query asks FTS5 to score almost every
+  document for a handful of function words and then materializes all of those
+  rows in Python. Stopword pruning plus a top-K SQL limit is the 50%+ fix;
+  <code>optimize</code> and scope compaction are the maintenance follow-ups.</p>
+</div>
 
 </body>
 </html>
