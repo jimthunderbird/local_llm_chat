@@ -12985,7 +12985,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 self._sse_text(
                     "output",
                     "\nNo benchmark data yet. Ask a question first, or use "
-                    "/benchmark on to show metrics after each answer.\n",
+                    "/benchmark on to show metrics after each answer.\n"
+                    + chat.memory_usage_line()
+                    + "\n",
                 )
             else:
                 self._sse_text(
@@ -13000,6 +13002,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             if state.latest_benchmark is not None:
                 message += chat.format_benchmark_line(state.latest_benchmark) + "\n"
+            else:
+                message += chat.memory_usage_line() + "\n"
             self._sse_text("output", message)
             self._sse("meta", state.snapshot())
             return

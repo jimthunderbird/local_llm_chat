@@ -681,11 +681,207 @@ proper nouns in their original Latin spelling. Write complete sentences and do
 not leave an English fragment or an unclosed parenthesis.
 Useful noun translations: crab=螃蟹, salmon=鲑鱼, scallops=扇贝, sea urchin=海胆,
 market=市场, seafood=海鲜, opening hours=营业时间."""
-LFM_ARTICLE_INSTRUCTION = """
-The user requested an article or a specific word count. Write flowing prose in
-the requested number of paragraphs (or roughly the requested word count), using
-only the evidence. Expand on the supported details; do not pad with outside
-facts or repeat the same sentence."""
+# Long-form requests are common in the chat ("write me a 400 word article
+# about..."). The small local writer tends to return one long block even when
+# asked for paragraphs, so the request is detected here, the prompt gets an
+# explicit paragraph contract, and a streaming formatter inserts blank-line
+# paragraph breaks at sentence boundaries as a deterministic safety net.
+ARTICLE_GENERATION_RE = re.compile(
+    r"\b(?:write|draft|compose|create|produce|prepare|generate|give\s+me)\b"
+    r"[^.!?\n]{0,100}\b(?:article|essay|blog\s+post|write[- ]?up|report|guide)\b"
+    r"|\b(?:article|essay|blog\s+post|write[- ]?up)\b"
+    r"[^.!?\n]{0,60}\b(?:about|on|covering|explaining)\b",
+    re.IGNORECASE,
+)
+ARTICLE_WORD_COUNT_RE = re.compile(
+    r"\b(\d[\d,]*)\s*[- ]?(?:words?|word\s+(?:article|essay|report|piece))\b",
+    re.IGNORECASE,
+)
+ARTICLE_PARAGRAPH_COUNT_RE = re.compile(
+    r"\b(\d+)\s*(?:paragraphs?|paras?)\b",
+    re.IGNORECASE,
+)
+ARTICLE_MIN_WORDS_WITHOUT_NOUN = 120
+ARTICLE_DEFAULT_PARAGRAPH_WORDS = 110
+ARTICLE_MAX_PARAGRAPH_WORDS = 150
+# A sentence boundary needs whitespace and a likely sentence start. Requiring
+# an uppercase/digit/quote/CJK start avoids treating "e.g." or "i.e." as the
+# end of a sentence. CJK punctuation does not use whitespace.
+ARTICLE_SENTENCE_BOUNDARY_RE = re.compile(
+    r"[.!?](?:[\"'”’\)\]]*)\s+(?=[A-Z0-9\"'“”‘’(]|[\u4e00-\u9fff])"
+    r"|[。！？](?:[\"'”’\)\]]*)\s*"
+)
+ARTICLE_STRUCTURED_LINE_RE = re.compile(
+    r"(?m)^\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|\|)"
+)
+
+
+def requested_article_word_count(question: str) -> int | None:
+    """Return an explicit "in 400 words" length, when present."""
+    match = ARTICLE_WORD_COUNT_RE.search(question or "")
+    if not match:
+        return None
+    try:
+        words = int(match.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    return words if 30 <= words <= 4000 else None
+
+
+def requested_article_paragraph_count(question: str) -> int | None:
+    """Return an explicit paragraph count, when present."""
+    match = ARTICLE_PARAGRAPH_COUNT_RE.search(question or "")
+    if not match:
+        return None
+    try:
+        count = int(match.group(1))
+    except ValueError:
+        return None
+    return count if 1 <= count <= 20 else None
+
+
+def is_article_format_request(question: str) -> bool:
+    """Return True when the answer should be a multi-paragraph article."""
+    question = question or ""
+    if ARTICLE_GENERATION_RE.search(question):
+        return True
+    words = requested_article_word_count(question)
+    return words is not None and words >= ARTICLE_MIN_WORDS_WITHOUT_NOUN
+
+
+def _article_paragraph_target_words(question: str) -> int:
+    """Return the paragraph length the streaming formatter should aim for."""
+    words = requested_article_word_count(question)
+    count = requested_article_paragraph_count(question)
+    if words and count:
+        target = round(words / count)
+    elif words:
+        paragraphs = max(2, min(8, round(words / ARTICLE_DEFAULT_PARAGRAPH_WORDS)))
+        target = round(words / paragraphs)
+    else:
+        target = ARTICLE_DEFAULT_PARAGRAPH_WORDS
+    return max(45, min(ARTICLE_MAX_PARAGRAPH_WORDS, target))
+
+
+def article_format_instruction(question: str) -> str:
+    """Return the multi-paragraph writing contract for long-form answers."""
+    if not is_article_format_request(question):
+        return ""
+    words = requested_article_word_count(question)
+    count = requested_article_paragraph_count(question)
+    if count:
+        paragraph_line = f"Write exactly {count} paragraph(s)."
+    elif words:
+        paragraphs = max(
+            2, min(8, round(words / ARTICLE_DEFAULT_PARAGRAPH_WORDS))
+        )
+        paragraph_line = (
+            f"Write approximately {paragraphs} paragraphs "
+            "(about 90-130 words each)."
+        )
+    else:
+        paragraph_line = "Write at least 3 paragraphs (about 90-130 words each)."
+    length_line = (
+        f"Target length: approximately {words:,} words. " if words else ""
+    )
+    return (
+        "### ARTICLE FORMAT\n"
+        "The user requested an article or a long-form answer. Write flowing "
+        "prose, not a single long block.\n"
+        f"- {paragraph_line}\n"
+        f"- {length_line}Meet the requested length as closely as the evidence "
+        "allows; do not stop well short of it.\n"
+        "- Separate every paragraph with one blank line.\n"
+        "- Each paragraph must focus on one distinct aspect of the topic; "
+        "start a new paragraph when the aspect changes.\n"
+        "- Never return the whole answer as one long paragraph.\n"
+    )
+
+
+class ArticleParagraphStream:
+    """Insert blank-line paragraph breaks into streamed article prose.
+
+    The local writer can ignore the prompt contract and emit one long block.
+    This filter keeps streaming, holds text only until the next sentence
+    boundary, and inserts a paragraph break after roughly the requested
+    paragraph length. It is deterministic and chunk-boundary independent, so
+    applying it to the complete answer yields the same paragraphs the user saw.
+    """
+
+    def __init__(self, question: str) -> None:
+        self.enabled = is_article_format_request(question)
+        self.target_words = _article_paragraph_target_words(question)
+        self.buffer = ""
+        self.paragraph_words = 0
+        self.sentence_count = 0
+
+    def _consume(self, segment: str) -> str:
+        stripped = segment.rstrip()
+        if not stripped:
+            return segment
+        trailing = segment[len(stripped):]
+        self.paragraph_words += len(stripped.split())
+        self.sentence_count += 1
+        if "\n" in trailing:
+            # The writer already started a new paragraph; normalize it to one
+            # blank line and reset the counter for the next paragraph.
+            self.paragraph_words = 0
+            self.sentence_count = 0
+            return stripped + "\n\n"
+        if (
+            self.paragraph_words >= self.target_words
+            and self.sentence_count >= 2
+        ):
+            self.paragraph_words = 0
+            self.sentence_count = 0
+            return stripped + "\n\n"
+        return segment
+
+    def feed(self, chunk: str) -> str:
+        if not chunk:
+            return ""
+        if not self.enabled:
+            return chunk
+        self.buffer += chunk
+        if "```" in self.buffer or "~~~" in self.buffer:
+            # Code must never be reflowed. Emit everything as-is from here on.
+            self.enabled = False
+            output, self.buffer = self.buffer, ""
+            return output
+        if ARTICLE_STRUCTURED_LINE_RE.search(self.buffer):
+            # Headings, lists, quotes, and tables are already structured.
+            self.enabled = False
+            output, self.buffer = self.buffer, ""
+            return output
+        output: list[str] = []
+        while True:
+            match = ARTICLE_SENTENCE_BOUNDARY_RE.search(self.buffer)
+            if not match:
+                break
+            segment = self.buffer[: match.end()]
+            self.buffer = self.buffer[match.end():]
+            output.append(self._consume(segment))
+        # A very long run without sentence punctuation must not grow the
+        # buffer without bound; split at the last word boundary instead.
+        if len(self.buffer) > 800:
+            cut = self.buffer.rfind(" ", 0, 600)
+            if cut > 0:
+                segment = self.buffer[: cut + 1]
+                self.buffer = self.buffer[cut + 1:]
+                output.append(self._consume(segment))
+        return "".join(output)
+
+    def flush(self) -> str:
+        output, self.buffer = self.buffer, ""
+        return output
+
+
+def format_article_answer(text: str, question: str) -> str:
+    """Return an article answer with deterministic blank-line paragraphs."""
+    if not text or not is_article_format_request(question):
+        return text
+    formatter = ArticleParagraphStream(question)
+    return (formatter.feed(text) + formatter.flush()).strip()
 # When true (default), chat.answer uses the gate + JSON writer pipeline. Set
 # LFM_PIPELINE=0 only for debugging or to compare against the legacy prompt.
 LFM_PIPELINE_ENABLED = os.environ.get("LFM_PIPELINE", "1").strip().lower() not in {
@@ -1595,6 +1791,48 @@ def format_bytes(num: float) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024.0
     return f"{value:.1f} TiB"
+
+
+def process_memory_mb() -> float | None:
+    """Return the current resident memory of this process in MiB.
+
+    macOS has no /proc, so ``ps`` is used there for the live resident set.
+    Linux reads VmRSS directly. If neither is available, peak RSS from
+    ``getrusage`` is the best remaining approximation.
+    """
+    try:
+        if sys.platform == "darwin":
+            output = subprocess.check_output(
+                ["ps", "-o", "rss=", "-p", str(os.getpid())],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            if output:
+                return int(output) / 1024.0
+        else:
+            with open("/proc/self/status", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("VmRSS:"):
+                        return int(line.split()[1]) / 1024.0
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        import resource
+
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if sys.platform != "darwin":  # Linux reports KiB, macOS reports bytes
+            rss *= 1024
+        return rss / (1024.0 * 1024.0)
+    except (ImportError, OSError):  # pragma: no cover - non-Unix platforms
+        return None
+
+
+def memory_usage_line() -> str:
+    """Format the current process memory for the /benchmark command."""
+    memory_mb = process_memory_mb()
+    if memory_mb is None:
+        return "memory usage: unavailable"
+    return f"memory usage: {memory_mb:,.1f} MB"
 
 
 def index_memory_report(
@@ -3068,12 +3306,9 @@ def lfm_write_answer(
         )
     if answer_language and "chinese" in answer_language.lower():
         system += LFM_CHINESE_INSTRUCTION
-    if re.search(
-        r"\b(?:article|essay|\d+\s*words?|paragraphs?)\b",
-        question,
-        re.IGNORECASE,
-    ):
-        system += LFM_ARTICLE_INSTRUCTION
+    article_instruction = article_format_instruction(question)
+    if article_instruction:
+        system += "\n\n" + article_instruction
     if prompt_prefix.strip():
         system += (
             "\n\nAdditional requirements and reference material (highest "
@@ -5591,10 +5826,16 @@ def answer(
     summaries or neighboring paragraphs before the context is built; this is
     used by /article's section-level expansion.
     """
+    article_formatter = ArticleParagraphStream(question)
+    article_instruction = article_format_instruction(question)
+
     def _emit(text: str) -> None:
+        if text and article_formatter.enabled:
+            text = article_formatter.feed(text)
+        if not text:
+            return
         if emit is not None:
-            if text:
-                emit(text)
+            emit(text)
         else:
             print(text, end="", flush=True)
 
@@ -5824,7 +6065,10 @@ def answer(
         expansion_selected = selected[PROGRESSIVE_FIRST_PASS:]
         first_context = build_context([chunk for chunk, _ in first_selected])
         first_prompt = build_prompt(
-            first_context, question, answer_language, prompt_prefix
+            first_context,
+            question,
+            answer_language,
+            article_instruction + prompt_prefix,
         )
         prompt_done = time.monotonic()
         first_metrics: dict = {}
@@ -5833,7 +6077,7 @@ def answer(
             model=answer_model,
             translate_answer=translate_answer,
             metrics=first_metrics,
-            emit=emit,
+            emit=_emit,
             think=think,
         )
         expansion_metrics: dict = {}
@@ -5857,12 +6101,14 @@ def answer(
                 language_instruction=language_instruction,
                 answer_so_far=first_response,
             )
+            if article_instruction:
+                expansion_prompt = article_instruction + expansion_prompt
             expansion_response = stream_answer(
                 expansion_prompt,
                 model=answer_model,
                 translate_answer=translate_answer,
                 metrics=expansion_metrics,
-                emit=emit,
+                emit=_emit,
                 think=think,
             )
         response = first_response
@@ -5903,11 +6149,14 @@ def answer(
                 prompt_prefix=prompt_prefix,
                 translate_answer=translate_answer,
                 metrics=metrics,
-                emit=emit,
+                emit=_emit,
             )
         if response is None:
             prompt = build_prompt(
-                context, question, answer_language, prompt_prefix
+                context,
+                question,
+                answer_language,
+                article_instruction + prompt_prefix,
             )
             prompt_done = time.monotonic()
             response = stream_answer(
@@ -5915,11 +6164,12 @@ def answer(
                 model=answer_model,
                 translate_answer=translate_answer,
                 metrics=metrics,
-                emit=emit,
+                emit=_emit,
                 think=think,
             )
     finished = time.monotonic()
     response = strip_supporting_evidence(strip_chunk_citations(response))
+    response = format_article_answer(response, question)
 
     retrieval_seconds = retrieval_done - started
     prefill_seconds = metrics.get("prompt_eval_duration", 0.0)
@@ -5966,10 +6216,12 @@ def answer(
 
 def format_benchmark_line(stats: dict) -> str:
     """Format the retrieval/prefill/TTFT metrics for /benchmark."""
+    memory = memory_usage_line().removeprefix("memory usage: ")
     if stats.get("cached"):
         return (
             f"[cache hit | context ~{stats.get('context_tokens', 0):,} "
-            "token(s) estimated | no retrieval or prefill]"
+            f"token(s) estimated | no retrieval or prefill | "
+            f"memory {memory}]"
         )
     return (
         f"[retrieval {stats.get('retrieval', 0.0):.2f} s "
@@ -5986,7 +6238,8 @@ def format_benchmark_line(stats: dict) -> str:
         f"(cached {stats.get('prompt_tokens_cached', 0):,}) | "
         f"answer_tokens {stats.get('response_tokens', 0):,} | "
         f"context {stats.get('context_tokens', 0):,} estimated | "
-        f"total {stats.get('total', 0.0):.2f} s]"
+        f"total {stats.get('total', 0.0):.2f} s | "
+        f"memory {memory}]"
     )
 
 
@@ -6284,6 +6537,7 @@ def main() -> None:
                             "or use /benchmark on to show metrics after "
                             "each answer."
                         )
+                        print(memory_usage_line())
                     else:
                         print(format_benchmark_line(latest_benchmark))
                 elif value in {"on", "enable", "enabled"}:
@@ -6294,6 +6548,8 @@ def main() -> None:
                     )
                     if latest_benchmark is not None:
                         print(format_benchmark_line(latest_benchmark))
+                    else:
+                        print(memory_usage_line())
                 elif value in {"off", "disable", "disabled"}:
                     benchmark_mode = False
                     print("Benchmark display: off.")

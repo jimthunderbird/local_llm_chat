@@ -1,0 +1,4 @@
+task (completed) {
+  in /benchmark command:
+  - please also show the current memory consumption of the application, in MB
+}

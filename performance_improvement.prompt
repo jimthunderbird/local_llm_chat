@@ -1,3 +1,11 @@
+task.answer_quality_1 (completed) {
+  bug:
+  question: write me a 400 word article about what should i need to know when driving in japan
+  expect: multi paragraphs articles, each paragraph focus on one aspect
+  actual: a single and long paragraph
+  please fix in a systematic way
+}
+
 task.stream_answer (completed) {
   do we use streaming when answer is being generated? please make sure we do so
 }
