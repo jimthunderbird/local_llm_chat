@@ -4,7 +4,7 @@
 Usage:
     python3 chat.py
 
-At startup every ./.chat/youtube_transcripts/<youtube_video_hash>.<index>.trunk
+At startup every ./.chat/articles_cache/youtube_<youtube_video_hash>.<index>.trunk
 file is loaded into one global corpus. Every question searches the whole
 corpus; there is no tag scope or per-topic partition. No embedding files and
 no cosine similarity are used. The BM25 postings live in an on-disk SQLite
@@ -247,13 +247,14 @@ PROGRESSIVE_FIRST_PASS = 10
 # character (for example CJK) per token.
 CHARS_PER_TOKEN = 4
 SCRIPT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
 CHAT_DIR = Path.cwd() / ".chat"
-# Learned articles (news stories and learned web articles) live beside the
-# YouTube corpus. Each learned article has a .title file and one .trunk file
-# per knowledge paragraph, so the same BM25 retrieval code can search articles
-# and transcripts together.
+# Learned articles (news stories, learned web articles, and YouTube videos)
+# share one cache directory. YouTube transcripts, titles, and trunks carry a
+# ``youtube_`` prefix so they can live beside article files while still being
+# identified as videos by the retrieval code.
 ARTICLES_DIR = CHAT_DIR / "articles_cache"
+OUTPUT_DIR = ARTICLES_DIR
+YOUTUBE_PREFIX = "youtube_"
 # The on-disk FTS5 BM25 index. Learned articles write their trunks and their
 # search entries here together, and every question scores against it.
 BM25_DB_PATH = ARTICLES_DIR / "bm25_index_fts.db"
@@ -265,6 +266,11 @@ if not OLLAMA_HOST.startswith(("http://", "https://")):
 
 TRUNK_FILE = re.compile(
     r"^(?P<video>[A-Za-z0-9_-]+)\.(?P<index>\d+)\.trunk$"
+)
+# YouTube files are stored as youtube_<video_id>.<index>.trunk inside the
+# unified articles cache. The prefix keeps them distinct from learned articles.
+YOUTUBE_TRUNK_FILE = re.compile(
+    r"^youtube_(?P<video>[A-Za-z0-9_-]+)\.(?P<index>\d+)\.trunk$"
 )
 PARAGRAPH_PATTERN = re.compile(
     r"<paragraph>(.*?)</paragraph>", re.DOTALL | re.IGNORECASE
@@ -1129,6 +1135,8 @@ def _bm25_corpus_key(chunks: list[Chunk], keys: list[str]) -> str:
     try:
         known_ids = set(available_video_ids())
         for path in ARTICLES_DIR.glob("*.trunk"):
+            if path.name.startswith(YOUTUBE_PREFIX):
+                continue
             match = TRUNK_FILE.fullmatch(path.name)
             if match:
                 known_ids.add(match.group("video"))
@@ -1335,11 +1343,11 @@ def _collect_chunks(selected_video_ids: set[str]) -> tuple[list[Chunk], int]:
     chunks: list[Chunk] = []
     filtered = 0
     paths = sorted(
-        OUTPUT_DIR.glob("*.trunk"),
+        OUTPUT_DIR.glob(f"{YOUTUBE_PREFIX}*.trunk"),
         key=lambda p: (p.name.split(".", 1)[0], p.name),
     )
     for path in paths:
-        match = TRUNK_FILE.fullmatch(path.name)
+        match = YOUTUBE_TRUNK_FILE.fullmatch(path.name)
         if not match:
             continue
         if match.group("video") not in selected_video_ids:
@@ -1368,7 +1376,7 @@ def load_chunks(
     caller wants to print one combined transcript + news summary.
     """
     if not OUTPUT_DIR.is_dir():
-        sys.exit(f"Transcript directory not found: {OUTPUT_DIR}")
+        sys.exit(f"Articles cache directory not found: {OUTPUT_DIR}")
 
     if video_ids is not None:
         selected_video_ids = set(video_ids)
@@ -1410,6 +1418,8 @@ def load_news_chunks(news_ids: set[str] | None = None) -> list[Chunk]:
     except OSError:
         return []
     for path in paths:
+        if path.name.startswith(YOUTUBE_PREFIX):
+            continue
         match = TRUNK_FILE.fullmatch(path.name)
         if not match:
             continue
@@ -1616,14 +1626,14 @@ class CommandCompleter(Completer):
 
 
 def available_video_ids() -> list[str]:
-    """Return video ids that have trunk files in ./.chat/youtube_transcripts."""
+    """Return video ids that have youtube_ trunk files in the articles cache."""
     try:
-        entries = list(OUTPUT_DIR.glob("*.trunk"))
+        entries = list(OUTPUT_DIR.glob(f"{YOUTUBE_PREFIX}*.trunk"))
     except OSError:
         return []
     video_ids = set()
     for entry in entries:
-        match = TRUNK_FILE.fullmatch(entry.name)
+        match = YOUTUBE_TRUNK_FILE.fullmatch(entry.name)
         if match:
             video_ids.add(match.group("video"))
     return sorted(video_ids)
@@ -1842,7 +1852,9 @@ def _read_title_cached(path: str) -> str:
 
 def video_title(video_id: str) -> str:
     """Return the saved title for a video or learned article, if one exists."""
-    title = _read_title_cached(str(OUTPUT_DIR / f"{video_id}.title"))
+    title = _read_title_cached(
+        str(ARTICLES_DIR / f"{YOUTUBE_PREFIX}{video_id}.title")
+    )
     if title:
         return title
     return _read_title_cached(str(ARTICLES_DIR / f"{video_id}.title"))
@@ -4468,8 +4480,9 @@ def switch_transcript(
     """Handle /youtube transcript: pick one video's trunks and release the rest.
 
     The argument may be a video id, a YouTube URL, or a keyword. Keywords
-    are searched against ./.chat/youtube_transcripts/*.title with ag, and the
-    matches are offered as a <hash> <title> hinting list to select from.
+    are searched against youtube_*.title in ./.chat/articles_cache with ag,
+    and the matches are offered as a <hash> <title> hinting list to select
+    from.
 
     Returns the new video id and chunks, or None when the switch was cancelled
     or failed (in which case the current trunks stay loaded).
@@ -4504,7 +4517,7 @@ def switch_transcript(
 
 
 def search_transcript_titles(keyword: str) -> list[TranscriptMatch]:
-    """Search ./.chat/youtube_transcripts/*.title files with ag."""
+    """Search youtube_*.title files in ./.chat/articles_cache with ag."""
     keyword = keyword.strip()
     if not keyword:
         return []
@@ -4545,9 +4558,9 @@ def search_transcript_titles(keyword: str) -> list[TranscriptMatch]:
         if not parsed:
             continue
         name = Path(parsed.group("path")).name
-        if not name.endswith(".title"):
+        if not name.startswith(YOUTUBE_PREFIX) or not name.endswith(".title"):
             continue
-        video_id = name[: -len(".title")]
+        video_id = name[len(YOUTUBE_PREFIX) : -len(".title")]
         title = parsed.group("title").strip()
         if video_id and video_id not in matches:
             matches[video_id] = TranscriptMatch(video_id, title)

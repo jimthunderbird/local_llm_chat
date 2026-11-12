@@ -5,12 +5,12 @@ Usage:
     python3 create_trunks.py <youtube_video_hash>
 
 Reads:
-    ./.chat/youtube_transcripts/<youtube_video_hash>.transcript
-    ./.chat/youtube_transcripts/<youtube_video_hash>.title
+    ./.chat/articles_cache/youtube_<youtube_video_hash>.transcript
+    ./.chat/articles_cache/youtube_<youtube_video_hash>.title
 
 Writes:
-    ./.chat/youtube_transcripts/<youtube_video_hash>.0.trunk
-    ./.chat/youtube_transcripts/<youtube_video_hash>.<paragraph_index>.trunk
+    ./.chat/articles_cache/youtube_<youtube_video_hash>.0.trunk
+    ./.chat/articles_cache/youtube_<youtube_video_hash>.<paragraph_index>.trunk
 
 This mirrors news learning: one compact overview trunk (index 0) plus one
 trunk per transcript paragraph. No rewrite file and no embeddings are needed.
@@ -32,7 +32,8 @@ def normalize_argv(argv):
     return argv
 
 
-OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
+OUTPUT_DIR = Path.cwd() / ".chat" / "articles_cache"
+YOUTUBE_PREFIX = "youtube_"
 
 TRUNK_TEMPLATE = "<article><title>{title}</title><paragraph>{paragraph}</paragraph></article>"
 SPEAKER_MARKER_RE = re.compile(r">>\s*")
@@ -65,8 +66,9 @@ def build_video_trunks(
     additional). Raises ``FileNotFoundError``/``ValueError`` with a readable
     message when the transcript or title is unusable.
     """
-    transcript_path = output_dir / f"{video_id}.transcript"
-    title_path = output_dir / f"{video_id}.title"
+    storage_id = f"{YOUTUBE_PREFIX}{video_id}"
+    transcript_path = output_dir / f"{storage_id}.transcript"
+    title_path = output_dir / f"{storage_id}.title"
 
     if not transcript_path.is_file():
         raise FileNotFoundError(
@@ -88,7 +90,7 @@ def build_video_trunks(
         title = video_id
 
     # Remove previously generated trunks for this video before rebuilding.
-    for old_trunk in output_dir.glob(f"{video_id}.*.trunk"):
+    for old_trunk in output_dir.glob(f"{storage_id}.*.trunk"):
         old_trunk.unlink()
 
     # Index 0 mirrors news learning: a compact overview trunk for broad
@@ -97,18 +99,41 @@ def build_video_trunks(
         title=escape(title),
         paragraph=escape(paragraphs[0]),
     )
-    (output_dir / f"{video_id}.0.trunk").write_text(
-        overview_trunk + "\n", encoding="utf-8"
-    )
+    overview_path = output_dir / f"{storage_id}.0.trunk"
+    overview_path.write_text(overview_trunk + "\n", encoding="utf-8")
+    trunks = [
+        (0, overview_path),
+    ]
 
     for index, paragraph in enumerate(paragraphs, start=1):
         trunk = TRUNK_TEMPLATE.format(
             title=escape(title),
             paragraph=escape(paragraph),
         )
-        (output_dir / f"{video_id}.{index}.trunk").write_text(
-            trunk + "\n", encoding="utf-8"
-        )
+        trunk_path = output_dir / f"{storage_id}.{index}.trunk"
+        trunk_path.write_text(trunk + "\n", encoding="utf-8")
+        trunks.append((index, trunk_path))
+
+    # Mirror the news learning path: persist the trunks and their search
+    # entries together so the unified SQLite BM25 corpus can find a new video
+    # immediately, even before the server rebuilds its in-memory chunk list.
+    try:
+        if output_dir.resolve() == OUTPUT_DIR.resolve():
+            import chat
+
+            chat.index_chunks_in_sqlite(
+                [
+                    chat.Chunk(
+                        video_id=video_id, index=index, trunk_path=trunk_path
+                    )
+                    for index, trunk_path in trunks
+                ],
+                corpus_key="global",
+            )
+    except Exception:
+        # The trunks on disk are authoritative; a missing/unavailable index
+        # is rebuilt lazily on the next question or server start.
+        pass
 
     return len(paragraphs)
 

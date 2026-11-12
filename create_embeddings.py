@@ -5,11 +5,11 @@ Usage:
     python3 create_embeddings.py <youtube_video_hash>
 
 Reads:
-    ./.chat/youtube_transcripts/<youtube_video_hash>.<index>.trunk
+    ./.chat/articles_cache/youtube_<youtube_video_hash>.<index>.trunk
 
 Writes:
-    ./.chat/youtube_transcripts/<youtube_video_hash>.<index>.embedding
-    ./.chat/youtube_transcripts/<youtube_video_hash>.<index>.paragraph.embedding
+    ./.chat/articles_cache/youtube_<youtube_video_hash>.<index>.embedding
+    ./.chat/articles_cache/youtube_<youtube_video_hash>.<index>.paragraph.embedding
     (JSON arrays of floats; the paragraph file is used for retrieval so the
     shared video title does not bias the ranking)
 """
@@ -35,7 +35,8 @@ def normalize_argv(argv):
 
 MODEL = "embeddinggemma-2:570m"
 KEEP_ALIVE = "30m"
-OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
+OUTPUT_DIR = Path.cwd() / ".chat" / "articles_cache"
+YOUTUBE_PREFIX = "youtube_"
 PARAGRAPH_PATTERN = re.compile(
     r"<paragraph>(.*?)</paragraph>", re.DOTALL | re.IGNORECASE
 )
@@ -90,9 +91,10 @@ def extract_paragraph(content: str) -> str:
 
 
 def remove_existing_embeddings(video_id: str) -> int:
-    """Delete every ./.chat/youtube_transcripts/<video_id>.*.embedding file."""
+    """Delete every youtube_<video_id>.*.embedding file."""
+    storage_id = f"{YOUTUBE_PREFIX}{video_id}"
     removed = 0
-    for path in OUTPUT_DIR.glob(f"{video_id}.*.embedding"):
+    for path in OUTPUT_DIR.glob(f"{storage_id}.*.embedding"):
         try:
             path.unlink()
             removed += 1
@@ -103,9 +105,10 @@ def remove_existing_embeddings(video_id: str) -> int:
 
 def find_trunks(video_id: str) -> list[tuple[int, Path]]:
     """Return (index, path) pairs sorted numerically by trunk index."""
-    pattern = re.compile(rf"^{re.escape(video_id)}\.(\d+)\.trunk$")
+    storage_id = f"{YOUTUBE_PREFIX}{video_id}"
+    pattern = re.compile(rf"^{re.escape(storage_id)}\.(\d+)\.trunk$")
     trunks = []
-    for path in OUTPUT_DIR.glob(f"{video_id}.*.trunk"):
+    for path in OUTPUT_DIR.glob(f"{storage_id}.*.trunk"):
         match = pattern.fullmatch(path.name)
         if match:
             trunks.append((int(match.group(1)), path))
@@ -138,8 +141,9 @@ def main() -> None:
     failures = 0
     for index, trunk_path in trunks:
         content = trunk_path.read_text(encoding="utf-8")
-        embedding_path = OUTPUT_DIR / f"{video_id}.{index}.embedding"
-        paragraph_path = OUTPUT_DIR / f"{video_id}.{index}.paragraph.embedding"
+        storage_id = f"{YOUTUBE_PREFIX}{video_id}"
+        embedding_path = OUTPUT_DIR / f"{storage_id}.{index}.embedding"
+        paragraph_path = OUTPUT_DIR / f"{storage_id}.{index}.paragraph.embedding"
         paragraph = extract_paragraph(content)
         texts = [content]
         if paragraph and paragraph != content:

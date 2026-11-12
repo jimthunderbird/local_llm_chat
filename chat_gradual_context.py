@@ -4,9 +4,9 @@
 Usage:
     python3 chat_gradual_context.py
 
-At startup, every ./.chat/youtube_transcripts/<youtube_video_hash>.<index>.embedding
+At startup, every ./.chat/articles_cache/youtube_<youtube_video_hash>.<index>.embedding
 file is loaded into memory and paired with its
-./.chat/youtube_transcripts/<youtube_video_hash>.<index>.trunk file. Every
+./.chat/articles_cache/youtube_<youtube_video_hash>.<index>.trunk file. Every
 question searches the whole global corpus; there is no tag scope.
 
 For each question:
@@ -120,7 +120,8 @@ LIST_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
+OUTPUT_DIR = Path.cwd() / ".chat" / "articles_cache"
+YOUTUBE_PREFIX = "youtube_"
 CHAT_DIR = Path.cwd() / ".chat"
 HISTORY_FILE = CHAT_DIR / "question_history.txt"
 
@@ -129,7 +130,7 @@ if not OLLAMA_HOST.startswith(("http://", "https://")):
     OLLAMA_HOST = f"http://{OLLAMA_HOST}"
 
 EMBEDDING_FILE = re.compile(
-    r"^(?P<video>[A-Za-z0-9_-]+)\.(?P<index>\d+)\.embedding$"
+    r"^youtube_(?P<video>[A-Za-z0-9_-]+)\.(?P<index>\d+)\.embedding$"
 )
 PARAGRAPH_PATTERN = re.compile(
     r"<paragraph>(.*?)</paragraph>", re.DOTALL | re.IGNORECASE
@@ -317,7 +318,7 @@ def load_embeddings(video_ids: set[str] | None = None) -> list[Chunk]:
     filtered = 0
 
     paths = sorted(
-        OUTPUT_DIR.glob("*.embedding"),
+        OUTPUT_DIR.glob(f"{YOUTUBE_PREFIX}*.embedding"),
         key=lambda p: (p.name.split(".", 1)[0], p.name),
     )
     for path in paths:
@@ -501,9 +502,9 @@ class CommandCompleter(Completer):
 
 
 def available_video_ids() -> list[str]:
-    """Return video ids that have embeddings in ./.chat/youtube_transcripts."""
+    """Return video ids that have embeddings in the articles cache."""
     try:
-        entries = list(OUTPUT_DIR.glob("*.embedding"))
+        entries = list(OUTPUT_DIR.glob(f"{YOUTUBE_PREFIX}*.embedding"))
     except OSError:
         return []
     video_ids = set()
@@ -1369,7 +1370,8 @@ def switch_transcript(
     """Handle /transcript: pick one video's embeddings and release the rest.
 
     The argument may be a video id, a YouTube URL, or a keyword. Keywords
-    are searched against ./.chat/youtube_transcripts/*.title with ag, and the
+    are searched against youtube_*.title in ./.chat/articles_cache with ag,
+    and the
     matches are offered as a <hash> <title> hinting list to select from.
 
     Returns the new video id and chunks, or None when the switch was cancelled
@@ -1405,7 +1407,7 @@ def switch_transcript(
 
 
 def search_transcript_titles(keyword: str) -> list[TranscriptMatch]:
-    """Search ./.chat/youtube_transcripts/*.title files with ag."""
+    """Search youtube_*.title files in ./.chat/articles_cache with ag."""
     keyword = keyword.strip()
     if not keyword:
         return []
@@ -1446,9 +1448,9 @@ def search_transcript_titles(keyword: str) -> list[TranscriptMatch]:
         if not parsed:
             continue
         name = Path(parsed.group("path")).name
-        if not name.endswith(".title"):
+        if not name.startswith(YOUTUBE_PREFIX) or not name.endswith(".title"):
             continue
-        video_id = name[: -len(".title")]
+        video_id = name[len(YOUTUBE_PREFIX) : -len(".title")]
         title = parsed.group("title").strip()
         if video_id and video_id not in matches:
             matches[video_id] = TranscriptMatch(video_id, title)

@@ -5,10 +5,10 @@ Usage:
     python3 rewrite.py <youtube_video_hash>
 
 Reads:
-    ./.chat/youtube_transcripts/<youtube_video_hash>.transcript
+    ./.chat/articles_cache/youtube_<youtube_video_hash>.transcript
 
 Writes:
-    ./.chat/youtube_transcripts/<youtube_video_hash>.rewrite
+    ./.chat/articles_cache/youtube_<youtube_video_hash>.rewrite
 """
 
 import argparse
@@ -33,7 +33,8 @@ def normalize_argv(argv):
 
 
 MODEL = "ornith:35b"
-OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
+OUTPUT_DIR = Path.cwd() / ".chat" / "articles_cache"
+YOUTUBE_PREFIX = "youtube_"
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 if not OLLAMA_HOST.startswith(("http://", "https://")):
@@ -157,7 +158,8 @@ def main() -> None:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", video_id):
         sys.exit(f"Invalid YouTube video hash: {video_id!r}")
 
-    transcript_path = OUTPUT_DIR / f"{video_id}.transcript"
+    storage_id = f"{YOUTUBE_PREFIX}{video_id}"
+    transcript_path = OUTPUT_DIR / f"{storage_id}.transcript"
     if not transcript_path.is_file():
         sys.exit(
             f"Transcript not found: {transcript_path}\n"
@@ -173,7 +175,7 @@ def main() -> None:
     except Exception as exc:
         sys.exit(f"Error: {exc}")
 
-    rewrite_path = OUTPUT_DIR / f"{video_id}.rewrite"
+    rewrite_path = OUTPUT_DIR / f"{storage_id}.rewrite"
     rewrite_path.write_text(rewritten + "\n", encoding="utf-8")
 
     paragraphs = [p for p in rewritten.split("\n\n") if p.strip()]

@@ -1,3 +1,13 @@
+task.major_refactor.unified_articles_cache (completed) {
+  major refactor:
+  - please move all files under {directory_of_this_prompt}/../youtube_transcripts to {directory_of_this_prompt}/../.chat/articles_cache
+  - we will start using {directory_of_this_prompt}/../.chat/articles_cache to store all the youtube related files and trunks
+  - all the youtube related transcripts and trunks should be prefix with youtube_
+  - reference ./sqlite_bm25.prompt, apply the same sqlite db way to load the trunks
+  - make sure the existing trunks are indexed in the sqlite db like the news
+  - please change all related code
+}
+
 task (completed) {
   for /youtube command:
   - change the option advancesearch to search

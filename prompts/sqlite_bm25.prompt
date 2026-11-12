@@ -35,7 +35,13 @@ research_findings {
   return res
 }
 
-task {
+task.reserch (completed) {
+  research the following the save the result to {diretory_of_this_prompt}/../research/sqlite_bm25.html {
+    - currently, in {diretory_of_this_prompt}/../.chat/articles_cache, we have a lot of *.trunk, *.json, *.md files, are they still needed? can we just delete them all?
+  }
+}
+
+task (completed) {
   sqlite_db: {diretory_of_this_prompt}/../.chat/articles_cache/bm25_index_fts.db
   based on {research_findings}:
   - create a sqlite db at {sqlite_db}

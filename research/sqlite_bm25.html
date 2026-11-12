@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Can the .chat/articles_cache files be deleted now that SQLite FTS5 holds the BM25 index?</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 62rem;
+    margin: 2rem auto;
+    padding: 0 1.25rem;
+    line-height: 1.6;
+    color: #1f2328;
+    background: #fff;
+  }
+  h1 { font-size: 1.55rem; line-height: 1.25; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; border-bottom: 1px solid #d8dee4; padding-bottom: .3rem; }
+  h3 { font-size: 1rem; margin-top: 1.4rem; }
+  code { background: #f2f4f7; padding: .1rem .3rem; border-radius: .25rem; font-size: .9em; }
+  pre { background: #f6f8fa; padding: .8rem 1rem; border-radius: .4rem; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .93rem; }
+  th, td { border: 1px solid #d0d7de; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #f2f4f7; }
+  .verdict { border-left: 4px solid #1a7f37; background: #eef8f0; padding: .75rem 1rem; border-radius: .35rem; }
+  .warn { border-left: 4px solid #bf8700; background: #fff8e5; padding: .75rem 1rem; border-radius: .35rem; }
+  .danger { border-left: 4px solid #cf222e; background: #fff0f0; padding: .75rem 1rem; border-radius: .35rem; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: .3rem 0; }
+  .muted { color: #57606a; }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e6edf3; background: #0d1117; }
+    code, pre, th { background: #161b22; }
+    th, td { border-color: #30363d; }
+    h2 { border-color: #30363d; }
+    .verdict { background: #12261a; }
+    .warn { background: #2a2110; }
+    .danger { background: #2a1215; }
+    .muted { color: #8b949e; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Are <code>.chat/articles_cache</code> <code>*.trunk</code>, <code>*.json</code>, and <code>*.md</code> still needed?</h1>
+
+<p class="muted">
+  Research for <code>prompts/sqlite_bm25.prompt</code>.
+  Corpus inspected: 117 learned articles, 4,134 trunks, SQLite FTS5 BM25 index at
+  <code>.chat/articles_cache/bm25_index_fts.db</code>.
+</p>
+
+<div class="verdict">
+  <strong>Short answer:</strong> <strong>No, you cannot delete them all.</strong>
+  The SQLite database is a <em>rebuildable search index</em>, not a copy of the
+  learned articles. It stores only normalized tokens, not the original trunk
+  text, titles, URLs, or paragraphs. Deleting every <code>.trunk</code> and
+  <code>.json</code> file destroys the learned corpus and breaks server startup.
+  The <code>.md</code> files, however, are write-only human-readable exports:
+  no code reads them, so <strong>the <code>.md</code> files alone can be deleted safely</strong>.
+</div>
+
+<h2>What actually uses each file</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>File</th>
+      <th>Count / size</th>
+      <th>Role at runtime</th>
+      <th>Can it be deleted?</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>news_&lt;id&gt;.&lt;n&gt;.trunk</code></td>
+      <td>4,134 files, ≈16 MB</td>
+      <td>
+        The learned article's <em>original text</em>, one paragraph per trunk.
+        These are the documents that are ranked, passed to the answer model, and
+        re-indexed by SQLite when they change.
+      </td>
+      <td><strong>No.</strong> Required. Without them there is no readable corpus
+        left (the FTS table only holds lowercased/normalized tokens), and startup
+        has nothing to index.</td>
+    </tr>
+    <tr>
+      <td><code>news_&lt;id&gt;.json</code></td>
+      <td>117 files, ≈1.2 MB</td>
+      <td>
+        Article metadata: <code>title</code>, <code>link</code>,
+        <code>source</code>, <code>section</code>, <code>published</code>,
+        <code>summary</code>, <code>paragraphs</code>, and <code>images</code>.
+        Read by <code>/api/news_status</code>, <code>/api/news_item</code>, and
+        source labels/links; also used to decide whether an item is "learned".
+      </td>
+      <td><strong>No.</strong> Required by the news/wikivoyage UI and by the
+        learned-state checks. The DB has no copy of this metadata.</td>
+    </tr>
+    <tr>
+      <td><code>news_&lt;id&gt;.title</code></td>
+      <td>117 files, ≈468 KB</td>
+      <td>
+        Duplicate of the JSON title. The web server reads titles from
+        <code>.json</code>, but <code>chat.py</code>'s
+        <code>video_title()</code> falls back to
+        <code>.chat/articles_cache/&lt;id&gt;.title</code> for learned articles.
+      </td>
+      <td><strong>Technically yes, but not recommended.</strong> The web UI still
+        works, but CLI labels for learned news would degrade to raw ids. It is
+        only 468 KB; keep it.</td>
+    </tr>
+    <tr>
+      <td><code>news_&lt;id&gt;.md</code></td>
+      <td>117 files, ≈1.1 MB</td>
+      <td>
+        A human-readable Markdown copy written at learn time. It is
+        <strong>never read</strong> by Python, the server, the browser, or PHP.
+      </td>
+      <td><strong>Yes.</strong> Safe to delete. This is the only category that is
+        pure output.</td>
+    </tr>
+    <tr>
+      <td><code>bm25_index_fts.db</code> (+ <code>-wal</code>/<code>-shm</code>)</td>
+      <td>≈51 MB + ≈5 MB WAL</td>
+      <td>
+        The on-disk FTS5 BM25 index. Stores tokenized documents and per-document
+        signatures, and is rebuilt incrementally from the trunks.
+      </td>
+      <td><strong>Yes, it is a cache.</strong> Delete it only while the server is
+        stopped; it will be rebuilt from the trunks (the existing cold build took
+        about 5.8 s for 26k trunks). Deleting it does not delete knowledge, but
+        it is the opposite of what freeing space by deleting trunks would do.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Why the database cannot replace the trunks</h2>
+
+<p>
+  <code>sqlite_bm25.py</code> is explicit about what it stores. The FTS5
+  <code>content</code> column receives <code>" ".join(tokens)</code>, where the
+  tokens come from <code>chat._bm25_document_tokens()</code> →
+  <code>tokenize(...)</code>. That pipeline lowercases, normalizes plurals, and
+  canonicalizes times; punctuation and original casing are gone. The database is
+  a retrieval index, and it is described in its own module docstring as an index
+  that is "incremental" and rebuilt from trunk files.
+</p>
+
+<pre><code># sqlite_bm25.py (sync)
+pending.append((doc_id, key, " ".join(tokens), mtime_ns, size))
+
+# chat.py (what is tokenized)
+def _bm25_document_tokens(chunk: Chunk) -&gt; list[str]:
+    text = paragraph_text(chunk)
+    title = video_title(chunk.video_id)
+    heading = getattr(chunk, "section_heading", "")
+    parts = [part for part in (title, heading, text) if part]
+    return tokenize("\n".join(parts))</code></pre>
+
+<p>
+  The answer path calls <code>paragraph_text(chunk)</code>, which reads
+  <code>chunk.trunk_path</code>. Likewise, <code>chat.load_news_chunks()</code>
+  discovers the corpus by globbing <code>ARTICLES_DIR/*.trunk</code>. If the
+  trunks disappear, no chunks are loaded, <code>chat.load_all_chunks()</code>
+  exits with "No learned trunks found…", and the server cannot construct its
+  <code>ChatState</code>.
+</p>
+
+<h2>Code evidence (read paths)</h2>
+
+<ul>
+  <li><strong>Trunks are loaded as the corpus:</strong>
+    <code>chat.py</code> → <code>load_news_chunks()</code> sorts
+    <code>ARTICLES_DIR.glob("*.trunk")</code> and builds <code>Chunk</code>
+    objects from them.</li>
+  <li><strong>Trunks are the prompt text:</strong>
+    <code>chat.paragraph_text()</code> reads
+    <code>chunk.trunk_path.read_text()</code>; the answer model receives this,
+    not tokens from SQLite.</li>
+  <li><strong>Trunks drive incremental indexing:</strong>
+    <code>_bm25_sync_entries()</code> compares each trunk's
+    <code>mtime_ns</code>/<code>size</code> and only tokenizes new or changed
+    files.</li>
+  <li><strong>JSON is the metadata store:</strong>
+    <code>app/chat_server.py</code> → <code>_read_news_meta()</code>,
+    <code>news_is_learned()</code>, <code>news_title()</code>,
+    <code>news_link()</code>, <code>/api/news_status</code>, and
+    <code>/api/news_item</code>.</li>
+  <li><strong>Markdown is write-only:</strong>
+    <code>learn_news_article()</code> writes
+    <code>NEWS_CACHE_DIR / f"{news_id}.md"</code>; a repository-wide search
+    finds no read of that file. The only <code>.md</code> mention in the server
+    outside comments is the <code>write_text(...)</code> call itself.</li>
+  <li><strong>Titles are a fallback:</strong> <code>chat.video_title()</code>
+    reads <code>ARTICLES_DIR/&lt;id&gt;.title</code> after looking in the
+    YouTube transcript directory.</li>
+  <li><strong>SQLite is pruned when trunks vanish:</strong> server startup calls
+    <code>chat.get_bm25_index(state.chunks, prune=True)</code>. Once the trunk
+    files are gone, the corresponding DB rows are considered stale and pruned,
+    so an "index-only" cache shrinks to nothing on the next start.</li>
+</ul>
+
+<h2>Measured inventory</h2>
+
+<table>
+  <thead>
+    <tr><th>Item</th><th>Value</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Learned article ids</td><td>117</td></tr>
+    <tr><td>Trunk files</td><td>4,134 (average 35.3 paragraphs per article)</td></tr>
+    <tr><td>JSON files</td><td>117</td></tr>
+    <tr><td>Markdown files</td><td>117</td></tr>
+    <tr><td>Title files</td><td>117</td></tr>
+    <tr><td>Article ids missing any of trunk/json/md/title</td><td>0</td></tr>
+    <tr><td><code>.chat/articles_cache</code> total</td><td>≈73 MB</td></tr>
+    <tr><td>SQLite DB + WAL</td><td>≈51 MB + ≈5 MB</td></tr>
+  </tbody>
+</table>
+
+<h2>What you can safely clean up</h2>
+
+<div class="warn">
+  <p><strong>Safe:</strong> remove the human-readable Markdown exports (117 files, ≈1.1 MB):</p>
+  <pre><code>find .chat/articles_cache -maxdepth 1 -name 'news_*.md' -delete</code></pre>
+  <p class="muted">
+    Nothing in the application reads these files. They can be regenerated from
+    the corresponding <code>.json</code> if you ever want them back.
+  </p>
+</div>
+
+<div class="warn">
+  <p><strong>Safe with the server stopped:</strong> remove the search index to
+  force a clean rebuild (≈56 MB):</p>
+  <pre><code># stop app/chat_server.py first
+rm .chat/articles_cache/bm25_index_fts.db .chat/articles_cache/bm25_index_fts.db-wal .chat/articles_cache/bm25_index_fts.db-shm</code></pre>
+  <p class="muted">
+    It is a derived cache; the next startup rebuilds it from the trunks. Do not
+    do this expecting to save disk permanently, because it comes right back.
+  </p>
+</div>
+
+<div class="danger">
+  <p><strong>Do not delete:</strong> <code>news_*.trunk</code> or
+  <code>news_*.json</code>.</p>
+  <p>
+    Deleting the trunks removes the original learned text used for prompts and
+    forces the SQLite rows to be pruned; deleting the JSON removes titles, URLs,
+    summaries, paragraphs, images, and the learned-state marker. The database
+    contains neither. The result would be an empty/broken corpus, not a leaner
+    one.
+  </p>
+</div>
+
+<h2>Recommendation</h2>
+
+<ol>
+  <li><strong>Keep</strong> <code>*.trunk</code> and <code>*.json</code> — they are
+    the source of truth for learned articles.</li>
+  <li><strong>Keep</strong> <code>*.title</code> — small, and still used as the
+    CLI title fallback.</li>
+  <li><strong>Delete only</strong> <code>*.md</code> if you want a small, safe
+    cleanup; it is a write-only convenience copy.</li>
+  <li><strong>Treat</strong> <code>bm25_index_fts.db</code> as a rebuildable
+    cache, not as storage.</li>
+  <li><strong>Long term:</strong> if disk usage matters, the effective lever is
+    the number/size of learned articles and the SQLite DB, not the tiny Markdown
+    exports. Trunk files (≈16 MB) are the knowledge itself and should not be
+    treated as disposable.</li>
+</ol>
+
+<h2>Conclusion</h2>
+
+<p>
+  The FTS5 migration moved the <em>scoring structure</em> to disk; it did not
+  make the learned article files redundant. <code>.trunk</code> files are the
+  text the chatbot answers from, <code>.json</code> files are the article
+  metadata the UI needs, and <code>.md</code> is a write-only export. Therefore:
+  <strong>you can delete all the <code>.md</code> files, but you cannot delete
+  the <code>.trunk</code> or <code>.json</code> files without destroying the
+  learned-article corpus.</strong>
+</p>
+
+</body>
+</html>

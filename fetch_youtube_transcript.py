@@ -6,8 +6,8 @@ Usage:
     python3 fetch_youtube_transcript.py --force <youtube_video_hash>
 
 Outputs:
-    ./.chat/youtube_transcripts/<youtube_video_hash>.transcript
-    ./.chat/youtube_transcripts/<youtube_video_hash>.title
+    ./.chat/articles_cache/youtube_<youtube_video_hash>.transcript
+    ./.chat/articles_cache/youtube_<youtube_video_hash>.title
 
 Transcript providers, tried in order:
     1. youtube-transcript-api (fast when YouTube is not blocking this IP)
@@ -68,7 +68,8 @@ def normalize_argv(argv):
 
 
 MODEL = "ornith:35b"
-OUTPUT_DIR = Path.cwd() / ".chat" / "youtube_transcripts"
+OUTPUT_DIR = Path.cwd() / ".chat" / "articles_cache"
+YOUTUBE_PREFIX = "youtube_"
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 if not OLLAMA_HOST.startswith(("http://", "https://")):
@@ -120,8 +121,16 @@ def _classify_error(exc: BaseException) -> str:
     return "transient"
 
 
+def _storage_id(video_id: str) -> str:
+    return f"{YOUTUBE_PREFIX}{video_id}"
+
+
 def _transcript_path(video_id: str) -> Path:
-    return OUTPUT_DIR / f"{video_id}.transcript"
+    return OUTPUT_DIR / f"{_storage_id(video_id)}.transcript"
+
+
+def _title_path(video_id: str) -> Path:
+    return OUTPUT_DIR / f"{_storage_id(video_id)}.title"
 
 
 def _proxy_config():
@@ -470,7 +479,7 @@ def main() -> None:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     transcript_path = _transcript_path(video_id)
-    title_path = OUTPUT_DIR / f"{video_id}.title"
+    title_path = _title_path(video_id)
     transcript_path.write_text(transcript + "\n", encoding="utf-8")
     print(f"Saved transcript: {transcript_path}")
 

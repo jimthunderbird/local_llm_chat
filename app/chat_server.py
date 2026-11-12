@@ -2119,7 +2119,7 @@ VIDEO_SUMMARY_PROMPT = """You summarize YouTube videos for a viewer who is decid
 # youtube_video_learn.py pipeline in a background thread, so the browser can
 # keep chatting while the transcript is fetched and chunked into trunks.
 # Progress is reported as a percentage by the status endpoint.
-VIDEO_LEARN_TRANSCRIPT_DIR = SCRIPT_DIR / ".chat" / "youtube_transcripts"
+VIDEO_LEARN_TRANSCRIPT_DIR = SCRIPT_DIR / ".chat" / "articles_cache"
 # Weights match youtube_video_learn.STEPS: fetch and create_trunks.
 VIDEO_LEARN_STEP_WEIGHTS = (30.0, 70.0)
 VIDEO_LEARN_ACTIVE_STATES = {"queued", "running"}
@@ -5257,7 +5257,7 @@ def build_answer_annotations(
 
 # Articles loaded with /article are split into the same one-knowledge-piece
 # paragraphs that the transcript pipeline uses. The generated trunk files live
-# outside ./.chat/youtube_transcripts so they never become corpus videos or appear in
+# outside ./.chat/articles_cache so they never become corpus videos or appear in
 # transcript autocomplete.
 ARTICLE_CACHE_DIR = APP_DIR / ".article_cache"
 ARTICLE_HTML_BLOCK_RE = re.compile(
@@ -8211,9 +8211,15 @@ class ChatState:
 
 
 def _video_files(video_id: str) -> tuple[Path, list[Path]]:
-    """Return the transcript path and learned trunk paths for one video."""
-    transcript = VIDEO_LEARN_TRANSCRIPT_DIR / f"{video_id}.transcript"
-    trunks = list(VIDEO_LEARN_TRANSCRIPT_DIR.glob(f"{video_id}.*.trunk"))
+    """Return the transcript path and learned trunk paths for one video.
+
+    YouTube artifacts live in the unified articles cache and carry a
+    ``youtube_`` prefix, so they can share the directory with learned news
+    stories and web articles.
+    """
+    storage_id = f"{chat.YOUTUBE_PREFIX}{video_id}"
+    transcript = VIDEO_LEARN_TRANSCRIPT_DIR / f"{storage_id}.transcript"
+    trunks = list(VIDEO_LEARN_TRANSCRIPT_DIR.glob(f"{storage_id}.*.trunk"))
     return transcript, trunks
 
 
