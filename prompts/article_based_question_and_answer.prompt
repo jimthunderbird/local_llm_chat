@@ -23,7 +23,7 @@ task.research.super_long_article_q_and_a (completed) {
   research the following and save into {research_doc}:
   - if i have a very long article, for example:
     /article ~/projects/learning_and_development/home-cms/HOME-126045-product-tag-audit/research/item_tagging_overview.html
-    - can i fit the entire article in the context of ollama local model ornith:35b then perform the question and answer?
+    - can i fit the entire article in the context of ollama local model ornith-1.5:35b then perform the question and answer?
     - if not, can you come up with 3 ways to allow me to return high quality answer be there a broad question or narrow, specific question?
 }
 

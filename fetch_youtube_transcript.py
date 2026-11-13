@@ -20,7 +20,7 @@ Optional environment variables:
     WEBSHARE_PROXY_PASSWORD   youtube-transcript-api
     YT_COOKIES_FROM_BROWSER   e.g. "chrome" for the yt-dlp fallback
     YT_COOKIES_FILE           path to a Netscape cookies.txt for yt-dlp
-    OLLAMA_YOUTUBE_MODEL      title-summary model (default: ornith:35b)
+    OLLAMA_YOUTUBE_MODEL      title-summary model (default: ornith-1.5:35b)
 """
 
 import argparse
@@ -69,7 +69,7 @@ def normalize_argv(argv):
 
 
 # The YouTube-learning pipeline always uses the large answer model.
-MODEL = os.environ.get("OLLAMA_YOUTUBE_MODEL", "ornith:35b")
+MODEL = os.environ.get("OLLAMA_YOUTUBE_MODEL", "ornith-1.5:35b")
 OUTPUT_DIR = Path.cwd() / ".chat" / "articles_cache"
 YOUTUBE_PREFIX = "youtube_"
 

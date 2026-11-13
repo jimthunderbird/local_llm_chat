@@ -1,4 +1,4 @@
-code_generation_llm: ollama local model ornith:35b
+code_generation_llm: ollama local model ornith-1.5:35b
 
 task (persistent) {
   complete tasks in ./code_snippet_block.prompt  
@@ -96,7 +96,7 @@ task (completed) {
   task (completed) {
     if a tag is in one of the {document_backed_tags}:
     in the answer, we saw message like:
-    [answer source: local LLM ornith:35b][relevance filter returned no candidates; keeping the top 5 BM25 match(es)][using 5 of 10 BM25 trunk(s) (depth 20, default)][context size: ~352 token(s) estimated across 5 trunk(s); context window: 32,768 token(s)][tag 'php' could not answer; consulting www.php.net/manual/en with ornith:35b instead of switching tags][php: searching the official PHP documentation at https://www.php.net/manual/en/ instead of calling the GitHub API][php: Using cached index: /Users/jhuang/.cache/php_doc_search/index.json][php: Analyzing question...][php: Search keywords: Iterator, IteratorAggregate, Traversable, Iterator::current, Iterator::key, Iterator::next, Iterator::rewind, Iterator::valid][answer source: PHP documentation (www.php.net/manual/en)][php: PHP documentation answer received][php: merged the www.php.net/manual/en answer with the local knowledge answer]
+    [answer source: local LLM ornith-1.5:35b][relevance filter returned no candidates; keeping the top 5 BM25 match(es)][using 5 of 10 BM25 trunk(s) (depth 20, default)][context size: ~352 token(s) estimated across 5 trunk(s); context window: 32,768 token(s)][tag 'php' could not answer; consulting www.php.net/manual/en with ornith-1.5:35b instead of switching tags][php: searching the official PHP documentation at https://www.php.net/manual/en/ instead of calling the GitHub API][php: Using cached index: /Users/jhuang/.cache/php_doc_search/index.json][php: Analyzing question...][php: Search keywords: Iterator, IteratorAggregate, Traversable, Iterator::current, Iterator::key, Iterator::next, Iterator::rewind, Iterator::valid][answer source: PHP documentation (www.php.net/manual/en)][php: PHP documentation answer received][php: merged the www.php.net/manual/en answer with the local knowledge answer]
     please do not show those messages, instead, put output "thinking..." is ok
   }
 
@@ -112,7 +112,7 @@ task (completed) {
     if a tag is in one of the {document_backed_tags}:
     - in the code snippets in the answers:
     - next to each line of code (except comments), show a question mark icon, when click on this icon:
-    - open up a modal, use ollama local model ornith:35b to explain what does this line do in the context of the current code snippet
+    - open up a modal, use ollama local model ornith-1.5:35b to explain what does this line do in the context of the current code snippet
   }
 
   task (completed) {

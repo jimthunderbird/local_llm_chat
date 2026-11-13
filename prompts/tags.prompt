@@ -190,7 +190,7 @@ task (completed) {
 
   Time-to-first-token improved by roughly 50-95% and total time by roughly
   25-95%. The remaining floor for long list answers is answer generation by
-  ornith:35b (~44 tok/s); for "levels of wagyu" that is 6.5 s of the 8.0 s
+  ornith-1.5:35b (~44 tok/s); for "levels of wagyu" that is 6.5 s of the 8.0 s
   total, so halving total time for long answers would require a faster answer
   model or deliberately shorter output, both of which conflict with the
   existing model/answer requirements.

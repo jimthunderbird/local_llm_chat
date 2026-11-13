@@ -760,7 +760,7 @@ retries but many sequential attempts, a worst-case run can take roughly
 
 | File | Relationship |
 |---|---|
-| `fetch_youtube_transcript.php` | Shares the same caption-fetching function names and logic, but additionally summarizes with Ollama (`MODEL = 'ornith:35b'`) and writes `./.chat/youtube_transcripts/<id>.transcript` and `<id>.title`. |
+| `fetch_youtube_transcript.php` | Shares the same caption-fetching function names and logic, but additionally summarizes with Ollama (`MODEL = 'ornith-1.5:35b'`) and writes `./.chat/youtube_transcripts/<id>.transcript` and `<id>.title`. |
 | `fetch_youtube_transcript.py` | The original Python implementation this logic mirrors. |
 | `.chat/youtube_transcripts/` | Populated by `fetch_youtube_transcript.php`; **not** used or written by this script. |
 | `search_youtube.py`, `get_videos_in_playlist.py` | Can supply video IDs to feed into this script. |

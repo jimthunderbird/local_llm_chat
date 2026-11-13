@@ -43,7 +43,7 @@ task.bug.long_article_slow (completed) {
 }
 
 task.back_to_ornith_35b (completed) {
-  Keep ornith:35b as the answer model, math tutor model and code generation model
+  Keep ornith-1.5:35b as the answer model, math tutor model and code generation model
 }
 
 task.answer_quality_2 (completed) {
@@ -82,7 +82,7 @@ task.research.super_small_model.milodule3/LFM3-1.7B-aura-grounded:latest (comple
     please do a thorough research on local model milodule3/LFM3-1.7B-aura-grounded:latest:
     - would it be a good replacement for qwen3:1.7b?
     - how fast is this model?
-    - how is the quality of answer that is generated from milodule3/LFM3-1.7B-aura-grounded:latest compared to qwen3:1.7b and ornith:35b?
+    - how is the quality of answer that is generated from milodule3/LFM3-1.7B-aura-grounded:latest compared to qwen3:1.7b and ornith-1.5:35b?
     - what would be the best configuration for milodule3/LFM3-1.7B-aura-grounded:latest?
   }
 }
@@ -96,13 +96,13 @@ task.research.super_small_model.followup (completed) {
 
 task.research.super_small_model (completed) {
   research only and save the research result to {diretory_of_this_prompt}/../research/performance_improvement.html {
-    is it feasible to just use qwen3:1.7b and replace ornith:35b? what will be the impact and what kind of configuration should we use?
+    is it feasible to just use qwen3:1.7b and replace ornith-1.5:35b? what will be the impact and what kind of configuration should we use?
   }
 }
 
 task.unified_model (completed) {
   reference task.research.list_of_models:
-  - do not use qwen3:1.7b, ministral-3:3b and gemma3:latest, only use ornith:35b
+  - do not use qwen3:1.7b, ministral-3:3b and gemma3:latest, only use ornith-1.5:35b
   - refer to "7.1 Highest leverage: keep the models resident" in {diretory_of_this_prompt}/../research/performance_improvement.html, Add a lightweight keepalive watchdog to the server.
 }
 

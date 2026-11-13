@@ -138,7 +138,7 @@
   ├─ optional cross-tag fallback when the active scope has no match
   ├─ numbered &lt;chunk id="N"&gt; blocks
   ├─ prompt from research/100_trunks_prompt.txt
-  ├─ streaming answer from ornith:35b over Ollama
+  ├─ streaming answer from ornith-1.5:35b over Ollama
   ├─ streaming filters remove [Chunk N] and “Supporting Evidence”
   └─ answer stored in cache; sources + metrics kept for commands</code></pre>
 
@@ -154,7 +154,7 @@
     <table>
       <tr><th>Model</th><th>Role</th></tr>
       <tr><td><code>qwen3:1.7b</code></td><td>query expansion, relevance filter, Chinese→English question translation</td></tr>
-      <tr><td><code>ornith:35b</code></td><td>final answer synthesis (streaming)</td></tr>
+      <tr><td><code>ornith-1.5:35b</code></td><td>final answer synthesis (streaming)</td></tr>
       <tr><td><code>gemma3:1b</code></td><td><code>/dict</code> definitions</td></tr>
     </table>
     <p class="small">All model weights live in Ollama processes, outside the chatbot’s Python memory.</p>
@@ -172,7 +172,7 @@
       <li><code>--progressive</code> for optional two-pass streaming (off by default).</li>
     </ul>
   </li>
-  <li><strong><code>prewarm()</code></strong> <span class="pill">chat.py:2606</span> runs in a daemon thread and sends a one-token request to <code>qwen3:1.7b</code> and <code>ornith:35b</code> with <code>keep_alive="30m"</code>. This moves model loading off the input critical path. Failures are ignored.</li>
+  <li><strong><code>prewarm()</code></strong> <span class="pill">chat.py:2606</span> runs in a daemon thread and sends a one-token request to <code>qwen3:1.7b</code> and <code>ornith-1.5:35b</code> with <code>keep_alive="30m"</code>. This moves model loading off the input critical path. Failures are ignored.</li>
   <li><strong><code>load_all_chunks()</code></strong>:
     <ul>
       <li>validates the selected tag against <code>./tags.toml</code>;</li>
@@ -229,7 +229,7 @@
 <ul>
   <li>the question is translated to English with <code>qwen3:1.7b</code> <strong>for retrieval only</strong>; the prompt tells the model to use standard romanized Japanese place names (e.g. 二条市场 → Nijo Market);</li>
   <li><code>answer_language = "Simplified Chinese"</code>, which inserts <code>Answer in Simplified Chinese. Do not translate proper nouns.</code> into the final prompt;</li>
-  <li><code>ornith:35b</code> answers directly in Simplified Chinese. The default path does <strong>not</strong> translate the answer afterward (<code>translate_answer=False</code>). A streaming Chinese translation path still exists in <code>stream_answer()</code> for callers that request it.</li>
+  <li><code>ornith-1.5:35b</code> answers directly in Simplified Chinese. The default path does <strong>not</strong> translate the answer afterward (<code>translate_answer=False</code>). A streaming Chinese translation path still exists in <code>stream_answer()</code> for callers that request it.</li>
 </ul>
 
 <h3>3.3 Answer-cache lookup</h3>
@@ -293,7 +293,7 @@ tokenized_documents.append(tokenize(document))</code></pre>
 <p><code>stream_answer()</code> <span class="pill">chat.py:1609</span> POSTs to Ollama’s <code>/api/generate</code> with:</p>
 <table>
   <tr><th>Parameter</th><th>Value</th></tr>
-  <tr><td>model</td><td><code>ornith:35b</code></td></tr>
+  <tr><td>model</td><td><code>ornith-1.5:35b</code></td></tr>
   <tr><td>stream</td><td><code>true</code></td></tr>
   <tr><td>think</td><td><code>false</code></td></tr>
   <tr><td>keep_alive</td><td><code>30m</code></td></tr>
@@ -311,7 +311,7 @@ tokenized_documents.append(tokenize(document))</code></pre>
     <p>Suppresses a trailing “Supporting Evidence” section, including Markdown headings, bold markers, bullets, and blockquotes, even when the heading is split across tokens. The same section is stripped again from the final string.</p>
   </div>
 </div>
-<p>The full English answer is accumulated and returned. If translation is requested, sentence/line groups are translated on the fly by <code>qwen3:1.7b</code> and printed in Simplified Chinese; list markers are restored if the small model drops them. The default chatbot path does not enable this because it asks <code>ornith:35b</code> to answer in Chinese directly.</p>
+<p>The full English answer is accumulated and returned. If translation is requested, sentence/line groups are translated on the fly by <code>qwen3:1.7b</code> and printed in Simplified Chinese; list markers are restored if the small model drops them. The default chatbot path does not enable this because it asks <code>ornith-1.5:35b</code> to answer in Chinese directly.</p>
 <p>Ollama’s final event supplies <code>load_duration</code>, <code>prompt_eval_count</code>, <code>prompt_eval_cached_count</code>, <code>prompt_eval_duration</code>, <code>eval_count</code>, and <code>eval_duration</code>. The first displayed token time is recorded as request TTFT. End-to-end TTFT is retrieval time + request TTFT.</p>
 
 <h3>3.10 Optional progressive mode</h3>
@@ -550,7 +550,7 @@ tokenized_documents.append(tokenize(document))</code></pre>
     <table>
       <tr><td><code>EXPANSION_MODEL</code></td><td><code>qwen3:1.7b</code></td></tr>
       <tr><td><code>FILTER_MODEL</code></td><td><code>qwen3:1.7b</code></td></tr>
-      <tr><td><code>CHAT_MODEL</code></td><td><code>ornith:35b</code></td></tr>
+      <tr><td><code>CHAT_MODEL</code></td><td><code>ornith-1.5:35b</code></td></tr>
       <tr><td><code>DICT_MODEL</code></td><td><code>gemma3:1b</code></td></tr>
       <tr><td><code>ANSWER_NUM_CTX</code></td><td class="num">32,768</td></tr>
       <tr><td><code>OLLAMA_KEEP_ALIVE</code></td><td><code>30m</code></td></tr>

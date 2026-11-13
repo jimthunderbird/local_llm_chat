@@ -16,7 +16,7 @@ declare(strict_types=1);
  *     ./.chat/articles_cache/youtube_<youtube_video_hash>.title
  */
 
-const MODEL = 'ornith:35b';
+const MODEL = 'ornith-1.5:35b';
 
 // A regular browser User-Agent keeps YouTube from serving the bare consent
 // page, which is what the Python script implicitly relies on as well.

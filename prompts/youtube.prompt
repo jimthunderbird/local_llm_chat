@@ -4,7 +4,7 @@ task.relearn_youtube_videos (completed) {
 }
 
 task.back_to_ornith_35b (completed) {
-  The current YouTube-learning pipeline should always use ollama local ornith:35b as the model
+  The current YouTube-learning pipeline should always use ollama local ornith-1.5:35b as the model
 }
 
 task.major_refactor.unified_articles_cache (completed) {

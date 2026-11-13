@@ -7,8 +7,64 @@ knowledge {
   }
 }
 
-task {
-  in additionl to showing list of related wiki entries, 
+task.more_geolocation_details_on_restaurants (completed) {
+  - please also add the latitude and longtitude of the restaurant  
+}
+
+task.nearby_restaurant_list (completed) {
+  - resume the original restaurant street map with just the restaurant pin there
+  - below the map, show list of nearby restaurants
+}
+
+task.nearby_pins_on_map (completed) {
+  in task.ui.restaurant_modal:
+  - in the restarant's open street map:
+    - include pins to the nearest retaurants
+    - when clicking on each pin, the modal will jump to the pinned restarant's detail
+    - on top of the modal, add navigation user experience similar to the one that is in dictionary modal
+      the idea is to allow user to navigate back and forth of the restaurant exploration history
+}
+
+task (completed) {
+  in task.ui.restaurant_modal:
+  - do not collapse restaurant's open hour
+}
+
+task.ui.restaurant_modal (completed) {
+  in the restaurant detail modal:
+  - please put each piece of information line by line instead of putting all of them in one single line
+  - please create an external link when it has a website
+  - please include a openstreet map with the restaurant's location pin
+}
+
+task.implement.yelp_fusion_api_alternative (completed) {
+  refer to {diretory_of_this_prompt}/../research/yelp_fusion_api_alternative.html section "3.OpenStreetMap Overpass API (recommended)", use OpenStreetMap Overpass API to get the restaurant's detail information, the style of food, the address, the open hours
+}
+
+task.research.yelp_fusion_api_alternative (completed) {
+  research only and save the research result to {diretory_of_this_prompt}/../research/yelp_fusion_api_alternative.html {
+    I found that Yelp Fusion API (v3) requires an api key and potential charges
+    I am looking for a free, no api key solution that works similar to Yelp Fusion API (v3), my goal is just to get a restaurant's detail information given its latitude and longitude, ideally i would like to get the restaurant's detail information, the style of food, the address, the open hours 
+  }
+}
+
+task (completed) {
+  refer to task.tabgroup:
+  - in the tab "Nearby Restaurant", when click open the restaurant information modal:
+    - use Yelp Fusion API (v3) to look up a restaurant using its latitude and longitude and get more detail information
+}
+
+task.tabgroup (completed) {
+  create a tabgroup {
+    tab "Nearby Places" {
+      group the list of related wikipedia entries into a tab "Nearby Places"
+    }
+    tab "Nearby Restaurants" {
+      group a list of nearby restaurants {
+        use Overpass API to get nearby restaurants
+      }
+    }
+  }
 }
 
 task (completed) {

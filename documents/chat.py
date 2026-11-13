@@ -27,7 +27,7 @@ The pipeline is:
       -> optional tag routing if no candidate fits the active tag
       -> numbered <chunk> context blocks
       -> prompt from research/100_trunks_prompt.txt
-      -> streaming answer from ornith:35b over Ollama
+      -> streaming answer from ornith-1.5:35b over Ollama
       -> streaming filters remove chunk citations and "Supporting Evidence"
       -> answer cached; sources and benchmark metrics retained for commands
 
@@ -55,7 +55,7 @@ main() in ./chat.py:
      --progressive            optional two-pass streaming (default off)
 
 2. A daemon thread calls prewarm(), which sends a one-token request to
-   qwen3:1.7b and ornith:35b with keep_alive="30m". This moves model loading
+   qwen3:1.7b and ornith-1.5:35b with keep_alive="30m". This moves model loading
    off the critical path. Failure is ignored.
 
 3. load_all_chunks():
@@ -107,7 +107,7 @@ traditional-only character sets. If the question is Simplified Chinese:
     - answer_language is set to "Simplified Chinese", which adds an
       "Answer in Simplified Chinese" instruction to the final prompt.
 
-The answer is produced directly in Chinese by ornith:35b. There is no
+The answer is produced directly in Chinese by ornith-1.5:35b. There is no
 post-hoc answer translation in the default path (translate_answer=False).
 A streaming Chinese translation path still exists in stream_answer() for
 callers that request it.
@@ -270,7 +270,7 @@ section.
 
 stream_answer() POSTs to Ollama's /api/generate with:
 
-    model:       ornith:35b (CHAT_MODEL)
+    model:       ornith-1.5:35b (CHAT_MODEL)
     stream:      true
     think:       false
     keep_alive:  30m
@@ -295,7 +295,7 @@ The full English answer is accumulated and returned. If translation is
 requested, sentence/line groups are translated on the fly by qwen3:1.7b and
 printed in Simplified Chinese; list markers are restored if the small model
 drops them. The default chatbot path does not enable this because it asks
-ornith:35b to answer in Chinese directly.
+ornith-1.5:35b to answer in Chinese directly.
 
 Ollama's final event supplies load_duration, prompt_eval_count,
 prompt_eval_cached_count, prompt_eval_duration, eval_count, and eval_duration.
@@ -390,7 +390,7 @@ dictionary API; it uses gemma3:1b.
 These numbers are for the current repository on macOS (Python 3, CPython),
 measured with ps RSS, resource.getrusage, tracemalloc, and recursive
 sys.getsizeof() over the index structures. They exclude Ollama, which runs in
-separate processes and holds the model weights (qwen3:1.7b, ornith:35b,
+separate processes and holds the model weights (qwen3:1.7b, ornith-1.5:35b,
 gemma3:1b) outside the Python memory footprint.
 
 Corpus in this checkout

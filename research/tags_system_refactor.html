@@ -132,7 +132,7 @@ contains YouTube video ids; <code>chat.load_chunks(tag)</code> loads only those
 videos; <code>/tag</code> rebuilds the in-memory trunk list; the cross-tag
 fallback loads the union of every tag file and tries other tags one at a time.
 Learning a video ends with <code>youtube_video_tag_gen.py</code>, which asks
-<code>ornith:35b</code> one yes/no question for every tag. On this machine one
+<code>ornith-1.5:35b</code> one yes/no question for every tag. On this machine one
 such classification took <strong>11.8 s</strong> for a single video/tag pair.
 With the current 13 tags that is roughly <strong>2.5 minutes of tagging added to
 every new video</strong>, and a full reclassification would be thousands of
@@ -272,7 +272,7 @@ feature. The appendix proposes descriptions for all 13.
 <h3>3.1 Learning latency is dominated by classification</h3>
 <p>
 The tag classifier loads up to 2,500 characters of title/rewrite/transcript for
-each video and asks <code>ornith:35b</code> one yes/no question per tag. On this
+each video and asks <code>ornith-1.5:35b</code> one yes/no question per tag. On this
 machine a single call took <strong>11.8 s</strong> in a controlled experiment.
 The current pipeline therefore adds roughly:
 </p>

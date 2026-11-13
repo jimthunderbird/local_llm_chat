@@ -2,7 +2,7 @@
   all tasks related to the code snippet block in the frontend UI
  */
 
-snippet_question_llm: ollama local model ornith:35b
+snippet_question_llm: ollama local model ornith-1.5:35b
 
 task.codesnippet_ask_a_question (completed) {
   on top of each code snippet block {

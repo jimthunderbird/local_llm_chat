@@ -1,4 +1,4 @@
-simple_answer_model: ollama local model ornith:35b
+simple_answer_model: ollama local model ornith-1.5:35b
 
 task (completed) {
   - please remove the word "OUTPUT" before the actual answer

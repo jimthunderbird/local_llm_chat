@@ -85,7 +85,7 @@
 <h1>Can a Very Long Article Fit in a Local 35B Model's Context?</h1>
 <p class="muted">
   Research note for the <code>/article</code> command in <code>app/chat_server.py</code>.<br>
-  Date: 2026-11-02 · Model: <code>ornith:35b</code> · Sample article: <code>item_tagging_overview.html</code>
+  Date: 2026-11-02 · Model: <code>ornith-1.5:35b</code> · Sample article: <code>item_tagging_overview.html</code>
 </p>
 
 <div class="toc">
@@ -185,7 +185,7 @@
     <tr><th>Layer</th><th class="num">Tokens</th><th>Meaning</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>ornith:35b</code> native context length</td><td class="num">262,144</td><td>Advertised maximum from <code>ollama show ornith:35b</code></td></tr>
+    <tr><td><code>ornith-1.5:35b</code> native context length</td><td class="num">262,144</td><td>Advertised maximum from <code>ollama show ornith-1.5:35b</code></td></tr>
     <tr><td><code>chat.ANSWER_NUM_CTX</code></td><td class="num">32,768</td><td>Window actually requested for answer generation</td></tr>
     <tr><td><code>chat.MAX_CONTEXT_TOKENS</code></td><td class="num">4,096</td><td>Default adaptive retrieval budget (context, not total prompt)</td></tr>
     <tr><td>Default retrieval depth</td><td class="num">20</td><td>BM25 candidate count before filtering/selection</td></tr>
@@ -494,7 +494,7 @@ synthesize(question, evidence)               # with citations
       <li><code>answer()</code> retrieves paragraph trunks with BM25, applies
           the <code>qwen3:1.7b</code> relevance filter, enforces the
           <code>MAX_CONTEXT_TOKENS</code> budget, and streams the final answer
-          with <code>ornith:35b</code> at <code>ANSWER_NUM_CTX = 32,768</code>.</li>
+          with <code>ornith-1.5:35b</code> at <code>ANSWER_NUM_CTX = 32,768</code>.</li>
       <li><code>_select_auto_chunks()</code> already implements an elbow,
           diversity, per-video cap, and token-budget stopping rule. For
           article mode, “per-video” is effectively “per-document”, so the cap
@@ -614,7 +614,7 @@ synthesize(question, evidence)               # with citations
 <h2 id="appendix">10. Appendix: reproduction commands</h2>
 
 <p>Inspect the model's advertised window:</p>
-<pre><code>ollama show ornith:35b | grep -i "context length"</code></pre>
+<pre><code>ollama show ornith-1.5:35b | grep -i "context length"</code></pre>
 
 <p>Measure the sample article with the application's own helpers:</p>
 <pre><code>cd /Users/jhuang/airesearch/local_llm_chat
@@ -643,7 +643,7 @@ PY</code></pre>
   P. Sarthi et al., “RAPTOR: Recursive Abstractive Processing for
   Tree-Organized Retrieval” (2024); the map-reduce and refine patterns
   described in LangChain's long-document summarization documentation.
-  Local measurements were taken against <code>ornith:35b</code> on the
+  Local measurements were taken against <code>ornith-1.5:35b</code> on the
   sample article on 2026-11-02.
 </p>
 

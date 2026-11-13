@@ -1,0 +1,3 @@
+task (completed) {
+  - replace ollama local model ornith:35b with ornith-1.5:35b in all places
+}

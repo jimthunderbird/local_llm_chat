@@ -169,6 +169,15 @@
   }
   .answer-source[hidden] { display: none; }
 
+  .answer-word-count {
+    margin-top: 7px;
+    color: var(--dim);
+    font-size: 11.5px;
+    letter-spacing: .03em;
+    user-select: none;
+  }
+  .answer-word-count[hidden] { display: none; }
+
   .translation {
     margin-top: 10px;
     padding: 7px 0 0 11px;
@@ -1405,6 +1414,20 @@
   }
   .news-link:hover { border-bottom-style: solid; }
   .news-link[hidden] { display: none; }
+  .news-nav {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 19px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 2px 5px;
+    user-select: none;
+  }
+  .news-nav:hover:not(:disabled) { color: var(--text); }
+  .news-nav:disabled { opacity: .3; cursor: default; }
+  .news-nav[hidden] { display: none; }
   #news-close {
     flex: 0 0 auto;
     background: transparent;
@@ -1636,6 +1659,114 @@
   .map-videos .video-cards {
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   }
+  .map-yelp {
+    margin-top: 18px;
+    padding-top: 12px;
+    border-top: 1px solid #223344;
+  }
+  .map-yelp-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .map-yelp-note { color: var(--dim); font-size: 11px; font-weight: 400; }
+  .map-yelp-rating { color: #ffd166; font-size: 13px; margin-bottom: 5px; }
+  .map-yelp-fact { color: #cfdae5; font-size: 12.5px; line-height: 1.5; }
+  .map-yelp-fact a { color: var(--accent-2); text-decoration: none; }
+  .map-yelp-error, .map-yelp-note-body {
+    color: var(--warn);
+    font-size: 12px;
+    margin-bottom: 8px;
+  }
+  .map-yelp-note-body { color: var(--dim); }
+  .map-yelp-hours {
+    margin-top: 8px;
+    color: var(--dim);
+    font-size: 12px;
+  }
+  .map-yelp-hours summary {
+    color: var(--accent-2);
+    cursor: pointer;
+    user-select: none;
+  }
+  .map-yelp-hours div { margin-top: 4px; line-height: 1.5; }
+  .map-yelp-photos {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .map-yelp-photos a {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    border-radius: 6px;
+    border: 1px solid #223344;
+  }
+  .map-yelp-photos img {
+    display: block;
+    width: 100%;
+    height: 110px;
+    object-fit: cover;
+  }
+  .map-yelp-link { display: inline-block; margin-top: 10px; }
+  .map-osm-frame {
+    display: block;
+    width: 100%;
+    height: 240px;
+    margin-top: 12px;
+    border: 1px solid #223344;
+    border-radius: 6px;
+    background: #0b1620;
+  }
+  .map-osm-map-link { display: inline-block; margin-top: 6px; margin-right: 10px; }
+  .osm-nearby { margin-top: 12px; }
+  .osm-nearby-head {
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+  .osm-nearby-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .osm-nearby-item {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid #223344;
+    border-radius: 5px;
+    background: #101b26;
+    color: #cfdae5;
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .osm-nearby-item:hover, .osm-nearby-item:focus-visible {
+    border-color: #3d6b8f;
+    background: #13212e;
+    outline: none;
+  }
+  .osm-nearby-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--accent-2);
+    font-weight: 600;
+  }
+  .osm-nearby-meta { flex: 0 0 auto; color: var(--dim); font-size: 11px; }
+  .osm-nearby-empty { color: var(--dim); font-size: 11.5px; }
   .video-list-head {
     display: flex;
     align-items: baseline;
@@ -3062,6 +3193,10 @@
         <div id="news-title" class="news-modal-title">News</div>
         <div id="news-meta" class="news-modal-meta"></div>
       </div>
+      <button id="news-prev" class="news-nav" type="button"
+              title="Previous restaurant" aria-label="Previous restaurant" hidden>‹</button>
+      <button id="news-next" class="news-nav" type="button"
+              title="Next restaurant" aria-label="Next restaurant" hidden>›</button>
       <a id="news-link" class="news-link" href="#" target="_blank" rel="noopener noreferrer">Open article ↗</a>
       <button id="news-podcast" class="news-tts news-podcast" type="button" hidden
               title="Create and play an AI news podcast" aria-label="Create and play an AI news podcast">
@@ -3369,6 +3504,8 @@ const stockCompanyBodyEl = $("#stock-company-body");
 const stockCompanyCloseEl = $("#stock-company-close");
 const newsTitleEl = $("#news-title");
 const newsMetaEl = $("#news-meta");
+const newsPrevEl = $("#news-prev");
+const newsNextEl = $("#news-next");
 const newsLinkEl = $("#news-link");
 const newsBodyEl = $("#news-body");
 const newsTtsBtn = $("#news-tts");
@@ -3444,19 +3581,24 @@ const URL_TRAILING_PUNCT_RE = /[.,!?;:'"”’]+$/;
 const CLOSING_BRACKETS = { ")": "(", "]": "[", "}": "{" };
 
 /* Model names are implementation details: the chat window should not expose
- * the specific local model. The app now runs one LFM3 artifact; the legacy
- * ornith name stays in the list so older cached status payloads are hidden
- * too. Every model name and every message that may contain one goes through
- * these helpers before it reaches the DOM. */
+ * the specific local model. The app now runs one LFM3 artifact; the current
+ * and legacy ornith model names are both hidden so older cached status
+ * payloads never leak into the UI. Every model name and every message that
+ * may contain one goes through these helpers before it reaches the DOM. */
 const HIDDEN_MODEL_NAMES = [
   "milodule3/LFM3-1.7B-aura-grounded:latest",
   "LFM3-1.7B-aura-grounded",
-  "ornith:35b",
+  "ornith-1.5:35b",
 ];
+// Match both the current and legacy Ornith model tags without keeping a
+// second literal model name in the UI code.
+const HIDDEN_MODEL_NAME_RE = /\bornith(?:-1\.5)?:35b\b/i;
+const HIDDEN_MODEL_NAME_GLOBAL_RE = /\bornith(?:-1\.5)?:35b\b/gi;
 function displayModelName(value) {
   const name = String(value ?? "").trim();
   if (!name) return "—";
   return HIDDEN_MODEL_NAMES.some((hidden) => name.includes(hidden))
+    || HIDDEN_MODEL_NAME_RE.test(name)
     ? "local LLM"
     : name;
 }
@@ -3467,6 +3609,7 @@ function scrubModelNames(text) {
     cleaned = cleaned.split(`via ${hidden}`).join("");
     cleaned = cleaned.split(hidden).join("local LLM");
   }
+  cleaned = cleaned.replace(HIDDEN_MODEL_NAME_GLOBAL_RE, "local LLM");
   return cleaned.replace(/[ \t]{2,}/g, " ").trim();
 }
 
@@ -3500,6 +3643,10 @@ let popupMinimized = false;
 let popupAnchorEl = null;
 let popupAnchorRect = null;
 let newsItem = null;
+// Restaurants opened from the /map modal form a back/forward history, just
+// like the dictionary popup's looked-up-word history.
+const restaurantHistory = [];
+let restaurantHistoryIndex = -1;
 let newsTranslationGeneration = 0;
 let newsTranslationRenderPending = false;
 let newsTtsGeneration = 0;
@@ -5562,6 +5709,8 @@ function makeEntry(kind, options = {}) {
     newsSources: [],
     newsDocs: false,
     newsDone: false,
+    newsLocation: null,
+    mapRestaurants: null,
     aiNewsPodcast: false,
     changelogItems: [],
     changelogSource: "",
@@ -5652,6 +5801,13 @@ function makeEntry(kind, options = {}) {
   if (entry.clickable) markdownEl.dataset.clickable = "true";
   entry.markdownEl = markdownEl;
   entry.bodyEl.appendChild(markdownEl);
+
+  const wordCountEl = document.createElement("div");
+  wordCountEl.className = "answer-word-count";
+  wordCountEl.hidden = true;
+  wordCountEl.title = "Word count of this answer";
+  entry.wordCountEl = wordCountEl;
+  entry.bodyEl.appendChild(wordCountEl);
 
   const translationEl = document.createElement("div");
   translationEl.className = "translation";
@@ -5782,6 +5938,8 @@ function renderEntry(entry) {
     }
   }
 
+  renderAnswerWordCount(entry);
+
   entry.choicesEl.textContent = "";
   renderNewsList(entry);
   renderChangelogList(entry);
@@ -5874,6 +6032,30 @@ function makeNewsItem(entry, data) {
     docs: Boolean(data.docs || data.mdn || entry.newsDocs),
     docsLabel: String(data.docs_label || entry.newsDocsLabel || ""),
     map: Boolean(data.map),
+    osm: Boolean(data.osm),
+    osmType: String(data.osm_type || ""),
+    osmId: data.osm_id ?? null,
+    osmStatus: "idle",
+    osmDetails: null,
+    osmError: "",
+    cuisine: String(data.cuisine || ""),
+    address: String(data.address || ""),
+    hours: String(data.hours || ""),
+    phone: String(data.phone || ""),
+    website: String(data.website || ""),
+    distanceM: Number.isFinite(Number(data.distance_m))
+      ? Number(data.distance_m)
+      : null,
+    yelp: Boolean(data.yelp),
+    latitude: Number.isFinite(Number(data.latitude))
+      ? Number(data.latitude)
+      : null,
+    longitude: Number.isFinite(Number(data.longitude))
+      ? Number(data.longitude)
+      : null,
+    yelpStatus: "idle",
+    yelpDetails: null,
+    yelpError: "",
     mapVideos: [],
     mapVideosLoading: false,
     mapVideosFetched: false,
@@ -5939,18 +6121,26 @@ function addNewsEvent(entry, data) {
     entry.newsSources = Array.isArray(data.sources) ? data.sources : [];
     entry.newsDocs = Boolean(data.docs || data.mdn);
     entry.newsDocsLabel = String(data.docs_label || "");
-    entry.newsTabs = Array.isArray(data.tabs)
-      ? data.tabs.map((tab) => String(tab || "")).filter(Boolean)
-      : [];
+    entry.newsTabs = Array.isArray(data.tabs) ? data.tabs : [];
+    entry.newsLocation = data.location && typeof data.location === "object"
+      ? data.location
+      : null;
     entry.newsSymbol = String(data.symbol || "").trim();
     entry.newsCompanyName = String(data.company_name || "").trim();
     entry.stockHoldings = data.holdings && typeof data.holdings === "object"
       ? data.holdings
       : null;
     if (entry.newsTabs.length > 1) {
-      entry.newsTab = "news";
-      if (!entry.stockReddit) {
+      const definitions = newsTabDefinitions(entry);
+      entry.newsTab = definitions[0]?.id || "";
+      if (definitions.some((tab) => tab.id === "reddit") && !entry.stockReddit) {
         entry.stockReddit = { status: "idle", items: [], error: "" };
+      }
+      if (
+        definitions.some((tab) => tab.id === "restaurants")
+        && !entry.mapRestaurants
+      ) {
+        entry.mapRestaurants = { status: "idle", items: [], error: "" };
       }
     }
     scheduleRender(entry);
@@ -6300,12 +6490,97 @@ function ensureStockRedditLoaded(entry) {
     .finally(() => scheduleRender(entry));
 }
 
+function ensureMapRestaurantsLoaded(entry) {
+  const state = entry.mapRestaurants;
+  if (!state || state.status === "loading" || state.status === "ready") {
+    return;
+  }
+  const location = entry.newsLocation;
+  const latitude = Number(location?.latitude);
+  const longitude = Number(location?.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    state.status = "error";
+    state.error = "This map has no coordinates to search for restaurants.";
+    scheduleRender(entry);
+    return;
+  }
+  state.status = "loading";
+  state.error = "";
+  scheduleRender(entry);
+  const params = new URLSearchParams({
+    lat: String(latitude),
+    lon: String(longitude),
+  });
+  const radius = Number(location?.radius_meters);
+  if (Number.isFinite(radius)) params.set("radius", String(radius));
+  fetch(`/api/map_restaurants?${params.toString()}`, { cache: "no-store" })
+    .then((response) => response.json().then((data) => {
+      if (!response.ok) {
+        throw new Error(data?.error || `HTTP ${response.status}`);
+      }
+      return data;
+    }))
+    .then((data) => {
+      const items = Array.isArray(data.items) ? data.items : [];
+      state.items = items.map((payload, index) => makeNewsItem(entry, {
+        ...payload,
+        index: Number(payload.index) || index + 1,
+        source: payload.source || "OpenStreetMap",
+        docs: true,
+        docs_label: payload.docs_label || "OpenStreetMap",
+        learnable: false,
+        complete: true,
+      }));
+      state.status = "ready";
+    })
+    .catch((error) => {
+      state.status = "error";
+      state.error = error?.message || String(error);
+    })
+    .finally(() => scheduleRender(entry));
+}
+
+function appendMapRestaurantsStatus(container, entry) {
+  const state = entry.mapRestaurants;
+  if (!state) return;
+  const showEmpty = state.status === "ready"
+    && !(Array.isArray(state.items) && state.items.length);
+  if (state.status !== "loading" && state.status !== "error" && !showEmpty) {
+    return;
+  }
+  const status = document.createElement("div");
+  status.className = "news-tab-status";
+  if (state.status === "loading") {
+    status.textContent = "Loading nearby restaurants from OpenStreetMap…";
+  } else if (state.status === "error") {
+    status.classList.add("is-error");
+    status.textContent = `Could not load nearby restaurants: ${state.error}`;
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "news-tab-retry";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      state.status = "idle";
+      ensureMapRestaurantsLoaded(entry);
+    });
+    status.appendChild(retry);
+  } else {
+    status.textContent = "No restaurants were found near this location.";
+  }
+  container.appendChild(status);
+}
+
 function renderNewsTabs(container, entry, tabs, newsItems) {
   const bar = document.createElement("div");
   bar.className = "news-tabs";
   bar.setAttribute("role", "tablist");
   const redditItems = Array.isArray(entry.stockReddit?.items)
     ? entry.stockReddit.items
+    : [];
+  const restaurantItems = Array.isArray(entry.mapRestaurants?.items)
+    ? entry.mapRestaurants.items
     : [];
   for (const tab of tabs) {
     const button = document.createElement("button");
@@ -6318,12 +6593,21 @@ function renderNewsTabs(container, entry, tabs, newsItems) {
     const label = document.createElement("span");
     label.textContent = tab.label;
     button.appendChild(label);
-    const count = tab.id === "reddit" ? redditItems.length : newsItems.length;
+    const tabItems = tab.id === "reddit"
+      ? redditItems
+      : tab.id === "restaurants"
+        ? restaurantItems
+        : newsItems;
+    const tabState = tab.id === "reddit"
+      ? entry.stockReddit
+      : tab.id === "restaurants"
+        ? entry.mapRestaurants
+        : null;
     const countEl = document.createElement("span");
     countEl.className = "news-tab-count";
-    countEl.textContent = tab.id === "reddit" && entry.stockReddit?.status !== "ready"
+    countEl.textContent = tabState && tabState.status !== "ready"
       ? ""
-      : String(count);
+      : String(tabItems.length);
     button.appendChild(countEl);
     button.addEventListener("click", (event) => {
       event.preventDefault();
@@ -6332,6 +6616,12 @@ function renderNewsTabs(container, entry, tabs, newsItems) {
       entry.newsTab = tab.id;
       if (tab.id === "reddit" && entry.stockReddit?.status === "idle") {
         ensureStockRedditLoaded(entry);
+      }
+      if (
+        tab.id === "restaurants"
+        && entry.mapRestaurants?.status === "idle"
+      ) {
+        ensureMapRestaurantsLoaded(entry);
       }
       scheduleRender(entry);
     });
@@ -6382,14 +6672,23 @@ function renderNewsList(entry) {
   const items = Array.isArray(entry.newsItems) ? entry.newsItems : [];
   const tabs = newsTabDefinitions(entry);
   const hasTabs = tabs.length > 1;
+  const tabIds = new Set(tabs.map((tab) => tab.id));
   const activeTab = hasTabs
-    ? (entry.newsTab === "reddit" ? "reddit" : tabs[0].id)
+    ? (tabIds.has(entry.newsTab) ? entry.newsTab : tabs[0].id)
     : "";
   const redditState = entry.stockReddit || null;
   const redditItems = Array.isArray(redditState?.items)
     ? redditState.items
     : [];
-  const visibleItems = activeTab === "reddit" ? redditItems : items;
+  const restaurantState = entry.mapRestaurants || null;
+  const restaurantItems = Array.isArray(restaurantState?.items)
+    ? restaurantState.items
+    : [];
+  const visibleItems = activeTab === "reddit"
+    ? redditItems
+    : activeTab === "restaurants"
+      ? restaurantItems
+      : items;
   if (
     !visibleItems.length
     && !items.length
@@ -6421,7 +6720,9 @@ function renderNewsList(entry) {
   const source = document.createElement("span");
   source.textContent = activeTab === "reddit"
     ? "Reddit"
-    : (entry.newsSource || (groups.length === 1 ? groups[0].source : "News"));
+    : activeTab === "restaurants"
+      ? "Nearby Restaurants"
+      : (entry.newsSource || (groups.length === 1 ? groups[0].source : "News"));
   const note = document.createElement("span");
   note.className = "news-list-note";
   if (activeTab === "reddit") {
@@ -6432,6 +6733,15 @@ function renderNewsList(entry) {
     } else {
       const count = visibleItems.length;
       note.textContent = `${count} ${count === 1 ? "post" : "posts"}`;
+    }
+  } else if (activeTab === "restaurants") {
+    if (restaurantState?.status === "loading") {
+      note.textContent = "loading…";
+    } else if (restaurantState?.status === "error") {
+      note.textContent = "not loaded";
+    } else {
+      const count = visibleItems.length;
+      note.textContent = `${count} ${count === 1 ? "restaurant" : "restaurants"}`;
     }
   } else {
     const storyWord = entry.newsDocs
@@ -6459,6 +6769,11 @@ function renderNewsList(entry) {
     if (activeTab === "reddit") {
       if (redditState?.status === "idle") ensureStockRedditLoaded(entry);
       appendNewsTabStatus(container, entry);
+    } else if (activeTab === "restaurants") {
+      if (restaurantState?.status === "idle") {
+        ensureMapRestaurantsLoaded(entry);
+      }
+      appendMapRestaurantsStatus(container, entry);
     }
   }
 
@@ -6547,7 +6862,12 @@ function renderNewsList(entry) {
     container.appendChild(list);
   }
 
-  if (entry.aiNewsPodcast && visibleItems.length && activeTab !== "reddit") {
+  if (
+    entry.aiNewsPodcast
+    && visibleItems.length
+    && activeTab !== "reddit"
+    && activeTab !== "restaurants"
+  ) {
     container.appendChild(newsPodcastAction(entry, visibleItems));
   }
 }
@@ -10130,11 +10450,13 @@ function renderNewsModal(item) {
       }
       if (gallery.children.length) newsBodyEl.appendChild(gallery);
     }
-    if (summary && summary !== paragraphs[0]) {
+    if (!item.osm && summary && summary !== paragraphs[0]) {
       appendNewsParagraph(summary, "news-summary");
     }
-    for (const text of paragraphs) {
-      appendNewsParagraph(text, "");
+    if (!item.osm) {
+      for (const text of paragraphs) {
+        appendNewsParagraph(text, "");
+      }
     }
   }
   if (!item.complete || item.articleLoading) {
@@ -10179,6 +10501,8 @@ function renderNewsModal(item) {
   renderStackoverflowAnswers(item);
   // Keep the (possibly streaming) translation after the article body.
   renderNewsTranslation();
+  renderOsmDetails(item);
+  renderYelpDetails(item);
   renderMapVideos(item);
   renderNewsPodcast(item);
   syncNewsTtsButton();
@@ -10195,27 +10519,73 @@ function cancelNewsPodcastGeneration(item) {
   }
 }
 
-function openNewsModal(item) {
+function updateRestaurantNav() {
+  const isRestaurant = Boolean(newsItem?.osm);
+  newsPrevEl.hidden = !isRestaurant;
+  newsNextEl.hidden = !isRestaurant;
+  newsPrevEl.disabled = !isRestaurant || restaurantHistoryIndex <= 0;
+  newsNextEl.disabled = !isRestaurant
+    || restaurantHistoryIndex < 0
+    || restaurantHistoryIndex >= restaurantHistory.length - 1;
+}
+
+function trackRestaurantHistory(item, mode) {
+  if (!item?.osm) {
+    if (mode === "root") {
+      restaurantHistory.length = 0;
+      restaurantHistoryIndex = -1;
+    }
+    return;
+  }
+  if (mode === "none") return;
+  if (mode === "push") {
+    const existing = restaurantHistory.indexOf(item);
+    if (existing >= 0) {
+      restaurantHistoryIndex = existing;
+      return;
+    }
+    restaurantHistory.splice(restaurantHistoryIndex + 1);
+    restaurantHistory.push(item);
+    restaurantHistoryIndex = restaurantHistory.length - 1;
+    return;
+  }
+  restaurantHistory.length = 0;
+  restaurantHistory.push(item);
+  restaurantHistoryIndex = 0;
+}
+
+function navigateRestaurant(step) {
+  const next = restaurantHistoryIndex + step;
+  if (next < 0 || next >= restaurantHistory.length) return;
+  restaurantHistoryIndex = next;
+  openNewsModal(restaurantHistory[next], { restaurantHistory: "none" });
+}
+
+function openNewsModal(item, options = {}) {
+  const historyMode = options.restaurantHistory || "root";
+  trackRestaurantHistory(item, historyMode);
   if (newsItem && newsItem !== item) cancelNewsPodcastGeneration(newsItem);
   newsItem = item;
+  updateRestaurantNav();
   newsPanelEl.classList.toggle("is-map", Boolean(item.map));
   resetNewsTts();
   resetNewsTranslation();
   resetNewsChat();
   resetNewsPodcastPlayback();
+  // Show the panel before rendering so the OSM tile map can measure the body
+  // width accurately when it builds its tiles and pin positions.
+  newsPanelEl.hidden = false;
   renderNewsModal(item);
   renderNewsAction(item);
-  newsPanelEl.hidden = false;
-  // renderNewsModal() runs while the panel is still hidden, and a scrollTop
-  // assignment on a display:none subtree is ignored: the browser restores the
-  // body's previous offset when the panel is shown, so a new story could open
-  // at the end of the previous story. Re-apply the reset after the panel has
-  // a layout box (and once more after the first frame) so every story opens at
-  // its top.
+  // A newly rendered story should always start at the top. The panel may
+  // briefly retain the previous story's scroll offset, so reset it after the
+  // new content has a layout box (and once more after the first frame).
   resetNewsBodyScroll(item);
   ensureNewsArticle(item);
   ensureStackoverflowAnswers(item);
   if (item.map) ensureMapVideos(item);
+  if (item.osm) ensureOsmDetails(item);
+  if (item.yelp) ensureYelpDetails(item);
 }
 
 let newsBodyScrollFrame = 0;
@@ -10395,6 +10765,663 @@ function loadMoreMapVideos(item) {
       item.mapVideosLoading = false;
       if (newsItem === item) renderNewsModal(item);
     });
+}
+
+/* Restaurants come from OpenStreetMap's Overpass API, which needs no key.
+ * The list payload carries the exact OSM object identity, so opening a card
+ * fetches that object once and shows cuisine, address, and opening hours. */
+function ensureOsmDetails(item) {
+  if (!item?.osm) return;
+  if (
+    item.osmStatus === "loading"
+    || item.osmStatus === "ready"
+    || item.osmStatus === "missing"
+  ) {
+    return;
+  }
+  const osmType = String(item.osmType || "").trim();
+  const osmId = String(item.osmId ?? "").trim();
+  if (!osmType || !/^\d+$/.test(osmId)) {
+    item.osmStatus = "missing";
+    item.osmDetails = null;
+    item.osmError = "";
+    return;
+  }
+  item.osmStatus = "loading";
+  item.osmError = "";
+  if (newsItem === item) renderNewsModal(item);
+  const params = new URLSearchParams({ type: osmType, id: osmId });
+  fetch(`/api/osm_restaurant?${params.toString()}`, { cache: "no-store" })
+    .then((response) => response.json().then((data) => {
+      if (!response.ok) {
+        throw new Error(data?.error || `HTTP ${response.status}`);
+      }
+      return data;
+    }))
+    .then((data) => {
+      if (data?.found) {
+        item.osmStatus = "ready";
+        item.osmDetails = data;
+      } else {
+        item.osmStatus = "missing";
+        item.osmDetails = null;
+      }
+    })
+    .catch((error) => {
+      item.osmStatus = "error";
+      item.osmError = error?.message || String(error);
+    })
+    .finally(() => {
+      if (newsItem === item) renderNewsModal(item);
+    });
+}
+
+function osmDistanceMeters(lat1, lon1, lat2, lon2) {
+  const radius = 6371000;
+  const toRadians = (value) => (value * Math.PI) / 180;
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2))
+      * Math.sin(dLon / 2) ** 2;
+  return radius * 2 * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+function osmDistanceText(distance) {
+  return distance < 1000
+    ? `${Math.round(distance)} m`
+    : `${(distance / 1000).toFixed(1)} km`;
+}
+
+function osmRestaurantPins(item) {
+  const entries = Array.isArray(item?.entry?.mapRestaurants?.items)
+    ? item.entry.mapRestaurants.items
+    : [];
+  const pins = [];
+  const seen = new Set();
+  const add = (restaurant) => {
+    if (!restaurant?.osm) return;
+    const latitude = restaurant.latitude;
+    const longitude = restaurant.longitude;
+    if (
+      latitude === null || latitude === undefined
+      || longitude === null || longitude === undefined
+      || !Number.isFinite(Number(latitude))
+      || !Number.isFinite(Number(longitude))
+    ) {
+      return;
+    }
+    const key = `${Number(latitude).toFixed(6)},${Number(longitude).toFixed(6)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    pins.push(restaurant);
+  };
+  for (const restaurant of entries) add(restaurant);
+  add(item);
+  return pins;
+}
+
+function appendOsmRestaurantMap(section, item, latitude, longitude) {
+  // The original single-restaurant street map: one OSM embed with a marker
+  // pin on the selected restaurant.
+  const delta = 0.003;
+  const bbox = [
+    longitude - delta,
+    latitude - delta,
+    longitude + delta,
+    latitude + delta,
+  ].map((value) => value.toFixed(6)).join("%2C");
+  const marker = `${latitude.toFixed(6)}%2C${longitude.toFixed(6)}`;
+  const frame = document.createElement("iframe");
+  frame.className = "map-osm-frame";
+  frame.loading = "lazy";
+  frame.referrerPolicy = "no-referrer";
+  frame.title = `${item.title || "Restaurant"} location on OpenStreetMap`;
+  frame.src = `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${marker}`;
+  section.appendChild(frame);
+
+  const mapLink = document.createElement("a");
+  mapLink.className = "news-link map-osm-map-link";
+  mapLink.href = `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}#map=17/${latitude}/${longitude}`;
+  mapLink.target = "_blank";
+  mapLink.rel = "noopener noreferrer";
+  mapLink.textContent = "Open larger map ↗";
+  section.appendChild(mapLink);
+
+  // Below the map, list the nearby restaurants from the /map restaurant
+  // result set. Selecting one follows the same history as pin navigation.
+  const nearby = osmRestaurantPins(item)
+    .filter((restaurant) => restaurant !== item)
+    .map((restaurant) => ({
+      restaurant,
+      distance: osmDistanceMeters(
+        latitude,
+        longitude,
+        Number(restaurant.latitude),
+        Number(restaurant.longitude)
+      ),
+    }))
+    .sort((left, right) => left.distance - right.distance)
+    .slice(0, 12);
+
+  const block = document.createElement("div");
+  block.className = "osm-nearby";
+  const head = document.createElement("div");
+  head.className = "osm-nearby-head";
+  head.textContent = "Nearby restaurants";
+  block.appendChild(head);
+
+  if (nearby.length) {
+    const list = document.createElement("div");
+    list.className = "osm-nearby-list";
+    for (const { restaurant, distance } of nearby) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "osm-nearby-item";
+      button.title = `Open ${restaurant.title || "restaurant"} details`;
+      const name = document.createElement("span");
+      name.className = "osm-nearby-name";
+      name.textContent = restaurant.title || "(untitled restaurant)";
+      const meta = document.createElement("span");
+      meta.className = "osm-nearby-meta";
+      const cuisine = Array.isArray(restaurant.osmDetails?.cuisine)
+        ? restaurant.osmDetails.cuisine.join(", ")
+        : String(restaurant.cuisine || "");
+      meta.textContent = [osmDistanceText(distance), cuisine]
+        .filter(Boolean)
+        .join(" · ");
+      button.appendChild(name);
+      button.appendChild(meta);
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (restaurant === newsItem) return;
+        openNewsModal(restaurant, { restaurantHistory: "push" });
+      });
+      list.appendChild(button);
+    }
+    block.appendChild(list);
+  } else {
+    const empty = document.createElement("div");
+    empty.className = "osm-nearby-empty";
+    empty.textContent = "No other restaurants were found nearby.";
+    block.appendChild(empty);
+  }
+  section.appendChild(block);
+}
+
+function renderOsmDetails(item) {
+  if (!item?.osm) return;
+  const status = item.osmStatus || "idle";
+  if (status === "idle") return;
+
+  const section = document.createElement("section");
+  section.className = "map-yelp map-osm";
+  const head = document.createElement("div");
+  head.className = "map-yelp-head";
+  const label = document.createElement("span");
+  label.textContent = "OpenStreetMap";
+  const note = document.createElement("span");
+  note.className = "map-yelp-note";
+  if (status === "loading") note.textContent = "looking up…";
+  else if (status === "error") note.textContent = "not available";
+  else if (status === "missing") note.textContent = "no details";
+  else note.textContent = "restaurant details";
+  head.appendChild(label);
+  head.appendChild(note);
+  section.appendChild(head);
+
+  if (status === "loading") {
+    const loading = document.createElement("div");
+    loading.className = "news-loading";
+    loading.textContent = "Loading restaurant details from OpenStreetMap…";
+    section.appendChild(loading);
+  } else if (status === "error") {
+    const error = document.createElement("div");
+    error.className = "map-yelp-error";
+    error.textContent = item.osmError
+      || "OpenStreetMap details could not be loaded.";
+    section.appendChild(error);
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "news-tab-retry";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      item.osmStatus = "idle";
+      ensureOsmDetails(item);
+    });
+    section.appendChild(retry);
+  } else if (status === "missing") {
+    const missing = document.createElement("div");
+    missing.className = "map-yelp-note-body";
+    missing.textContent = "This restaurant has no detailed OpenStreetMap tags yet.";
+    section.appendChild(missing);
+  } else if (status === "ready" && item.osmDetails) {
+    const details = item.osmDetails;
+    const facts = document.createElement("div");
+    facts.className = "map-yelp-facts";
+    const addFact = (text) => {
+      if (!text) return null;
+      const line = document.createElement("div");
+      line.className = "map-yelp-fact";
+      line.textContent = text;
+      facts.appendChild(line);
+      return line;
+    };
+
+    const kind = String(details.type || "").trim();
+    const cuisine = Array.isArray(details.cuisine)
+      ? details.cuisine.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    if (kind) addFact(`Type: ${kind}`);
+    if (cuisine.length) addFact(`Cuisine: ${cuisine.join(", ")}`);
+    if (details.address) addFact(`Address: ${details.address}`);
+    const coordinates = String(details.coordinates || "").trim()
+      || (
+        Number.isFinite(Number(details.latitude))
+        && Number.isFinite(Number(details.longitude))
+          ? `${Number(details.latitude).toFixed(6)}, ${Number(details.longitude).toFixed(6)}`
+          : ""
+      );
+    if (coordinates) addFact(`Coordinates: ${coordinates}`);
+    if (Number.isFinite(Number(item.distanceM))) {
+      const meters = Number(item.distanceM);
+      addFact(`Distance: ${meters < 1000
+        ? `${Math.round(meters)} m`
+        : `${(meters / 1000).toFixed(1)} km`}`);
+    }
+
+    if (details.phone) {
+      const line = document.createElement("div");
+      line.className = "map-yelp-fact";
+      const link = document.createElement("a");
+      link.href = `tel:${String(details.phone).replace(/[^0-9+]/g, "")}`;
+      link.textContent = details.phone;
+      line.appendChild(link);
+      facts.appendChild(line);
+    }
+    if (details.website) {
+      const line = document.createElement("div");
+      line.className = "map-yelp-fact";
+      line.append("Website: ");
+      const link = document.createElement("a");
+      link.href = String(details.website);
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.title = "Open this restaurant's website in a new tab";
+      link.textContent = String(details.website);
+      line.appendChild(link);
+      facts.appendChild(line);
+    }
+
+    const serviceLabels = {
+      takeaway: "Takeaway",
+      delivery: "Delivery",
+      outdoor_seating: "Outdoor seating",
+      wheelchair: "Wheelchair access",
+      internet_access: "Internet access",
+    };
+    if (details.service && typeof details.service === "object") {
+      for (const [key, text] of Object.entries(serviceLabels)) {
+        if (details.service[key]) {
+          addFact(`${text}: ${details.service[key]}`);
+        }
+      }
+    }
+
+    const dietaryLabels = {
+      vegetarian: "Vegetarian",
+      vegan: "Vegan",
+      halal: "Halal",
+      kosher: "Kosher",
+      gluten_free: "Gluten-free",
+    };
+    if (details.dietary && typeof details.dietary === "object") {
+      for (const [key, text] of Object.entries(dietaryLabels)) {
+        if (details.dietary[key]) {
+          addFact(`${text}: ${details.dietary[key]}`);
+        }
+      }
+    }
+    if (details.stars) addFact(`Michelin stars: ${details.stars}`);
+    section.appendChild(facts);
+
+    const hours = details.opening_hours;
+    if (hours && typeof hours === "object" && hours.raw) {
+      // Opening hours are always visible: the modal must never collapse them
+      // behind a <details>/<summary> disclosure.
+      const block = document.createElement("div");
+      block.className = "map-yelp-hours";
+      const blockTitle = document.createElement("div");
+      blockTitle.textContent = "Opening hours";
+      block.appendChild(blockTitle);
+      if (hours.open_now === true) {
+        const statusLine = document.createElement("div");
+        statusLine.textContent = "Status: Open now";
+        block.appendChild(statusLine);
+      } else if (hours.open_now === false) {
+        const statusLine = document.createElement("div");
+        statusLine.textContent = "Status: Closed now";
+        block.appendChild(statusLine);
+      }
+      if (hours.next_change) {
+        const changeLine = document.createElement("div");
+        changeLine.textContent = `Next change: ${hours.next_change}`;
+        block.appendChild(changeLine);
+      }
+      const rawLine = document.createElement("div");
+      rawLine.textContent = `Hours: ${hours.raw}`;
+      block.appendChild(rawLine);
+      if (details.kitchen_hours) {
+        const kitchenLine = document.createElement("div");
+        kitchenLine.textContent = `Kitchen hours: ${details.kitchen_hours}`;
+        block.appendChild(kitchenLine);
+      }
+      section.appendChild(block);
+    } else if (details.kitchen_hours) {
+      addFact(`Kitchen hours: ${details.kitchen_hours}`);
+    }
+
+    if (details.url) {
+      const link = document.createElement("a");
+      link.className = "news-link map-yelp-link";
+      link.href = details.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = "Open on OpenStreetMap ↗";
+      section.appendChild(link);
+    }
+    const attribution = document.createElement("div");
+    attribution.className = "map-yelp-note";
+    attribution.textContent = details.attribution || "© OpenStreetMap contributors";
+    section.appendChild(attribution);
+  }
+
+  // While the detail request is in flight, or when it fails, keep the
+  // restaurant information from the list payload visible, one field per line.
+  if (status !== "ready") {
+    const facts = document.createElement("div");
+    facts.className = "map-yelp-facts";
+    const addFact = (text) => {
+      if (!text) return;
+      const line = document.createElement("div");
+      line.className = "map-yelp-fact";
+      line.textContent = text;
+      facts.appendChild(line);
+    };
+    if (item.cuisine) addFact(`Cuisine: ${item.cuisine}`);
+    if (item.address) addFact(`Address: ${item.address}`);
+    const fallbackLatitude = item.osmDetails?.latitude ?? item.latitude;
+    const fallbackLongitude = item.osmDetails?.longitude ?? item.longitude;
+    if (
+      fallbackLatitude !== null && fallbackLatitude !== undefined
+      && fallbackLongitude !== null && fallbackLongitude !== undefined
+      && Number.isFinite(Number(fallbackLatitude))
+      && Number.isFinite(Number(fallbackLongitude))
+    ) {
+      addFact(
+        `Coordinates: ${Number(fallbackLatitude).toFixed(6)}, `
+        + `${Number(fallbackLongitude).toFixed(6)}`
+      );
+    }
+    if (Number.isFinite(Number(item.distanceM))) {
+      const meters = Number(item.distanceM);
+      addFact(`Distance: ${meters < 1000
+        ? `${Math.round(meters)} m`
+        : `${(meters / 1000).toFixed(1)} km`}`);
+    }
+    if (item.phone) addFact(`Phone: ${item.phone}`);
+    if (item.website) {
+      const line = document.createElement("div");
+      line.className = "map-yelp-fact";
+      line.append("Website: ");
+      const link = document.createElement("a");
+      link.href = item.website;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.title = "Open this restaurant's website in a new tab";
+      link.textContent = item.website;
+      line.appendChild(link);
+      facts.appendChild(line);
+    }
+    if (item.hours) addFact(`Hours: ${item.hours}`);
+    if (facts.children.length) section.appendChild(facts);
+  }
+
+  // A tiled OpenStreetMap view with clickable pins for the nearby
+  // restaurants; selecting a pin opens that restaurant's modal.
+  const detailLatitude = item.osmDetails?.latitude;
+  const detailLongitude = item.osmDetails?.longitude;
+  const hasDetailCoordinates = detailLatitude !== null
+    && detailLatitude !== undefined
+    && detailLongitude !== null
+    && detailLongitude !== undefined
+    && Number.isFinite(Number(detailLatitude))
+    && Number.isFinite(Number(detailLongitude));
+  const hasItemCoordinates = item.latitude !== null
+    && item.latitude !== undefined
+    && item.longitude !== null
+    && item.longitude !== undefined
+    && Number.isFinite(Number(item.latitude))
+    && Number.isFinite(Number(item.longitude));
+  const mapLatitude = hasDetailCoordinates
+    ? Number(detailLatitude)
+    : Number(item.latitude);
+  const mapLongitude = hasDetailCoordinates
+    ? Number(detailLongitude)
+    : Number(item.longitude);
+  if (hasDetailCoordinates || hasItemCoordinates) {
+    appendOsmRestaurantMap(section, item, mapLatitude, mapLongitude);
+
+    if (status !== "ready") {
+      const attribution = document.createElement("div");
+      attribution.className = "map-yelp-note";
+      attribution.textContent = "© OpenStreetMap contributors";
+      section.appendChild(attribution);
+    }
+  }
+
+  newsBodyEl.appendChild(section);
+}
+
+function ensureYelpDetails(item) {
+  if (!item?.yelp) return;
+  if (
+    item.yelpStatus === "loading"
+    || item.yelpStatus === "ready"
+    || item.yelpStatus === "missing"
+  ) {
+    return;
+  }
+  const latitude = Number(item.latitude);
+  const longitude = Number(item.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    item.yelpStatus = "error";
+    item.yelpError = "This restaurant has no coordinates for Yelp.";
+    return;
+  }
+  item.yelpStatus = "loading";
+  item.yelpError = "";
+  if (newsItem === item) renderNewsModal(item);
+  const params = new URLSearchParams({
+    lat: String(latitude),
+    lon: String(longitude),
+    name: item.title || "",
+  });
+  fetch(`/api/yelp_restaurant?${params.toString()}`, { cache: "no-store" })
+    .then((response) => response.json().then((data) => {
+      if (!response.ok) {
+        throw new Error(data?.error || `HTTP ${response.status}`);
+      }
+      return data;
+    }))
+    .then((data) => {
+      if (data?.found) {
+        item.yelpStatus = "ready";
+        item.yelpDetails = data;
+      } else {
+        item.yelpStatus = "missing";
+        item.yelpDetails = null;
+      }
+    })
+    .catch((error) => {
+      item.yelpStatus = "error";
+      item.yelpError = error?.message || String(error);
+    })
+    .finally(() => {
+      if (newsItem === item) renderNewsModal(item);
+    });
+}
+
+function renderYelpDetails(item) {
+  if (!item?.yelp) return;
+  const status = item.yelpStatus || "idle";
+  if (status === "idle") return;
+
+  const section = document.createElement("section");
+  section.className = "map-yelp";
+  const head = document.createElement("div");
+  head.className = "map-yelp-head";
+  const label = document.createElement("span");
+  label.textContent = "Yelp";
+  const note = document.createElement("span");
+  note.className = "map-yelp-note";
+  if (status === "loading") note.textContent = "looking up…";
+  else if (status === "error") note.textContent = "not available";
+  else if (status === "missing") note.textContent = "no match";
+  else note.textContent = "restaurant details";
+  head.appendChild(label);
+  head.appendChild(note);
+  section.appendChild(head);
+
+  if (status === "loading") {
+    const loading = document.createElement("div");
+    loading.className = "news-loading";
+    loading.textContent = "Looking up this restaurant on Yelp…";
+    section.appendChild(loading);
+  } else if (status === "error") {
+    const error = document.createElement("div");
+    error.className = "map-yelp-error";
+    error.textContent = item.yelpError || "Yelp details could not be loaded.";
+    section.appendChild(error);
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "news-tab-retry";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      item.yelpStatus = "idle";
+      ensureYelpDetails(item);
+    });
+    section.appendChild(retry);
+  } else if (status === "missing") {
+    const missing = document.createElement("div");
+    missing.className = "map-yelp-note-body";
+    missing.textContent = "No matching Yelp business was found for this restaurant.";
+    section.appendChild(missing);
+  } else if (status === "ready" && item.yelpDetails) {
+    const details = item.yelpDetails;
+    const facts = document.createElement("div");
+    facts.className = "map-yelp-facts";
+
+    const rating = Number(details.rating);
+    const parts = [];
+    if (Number.isFinite(rating) && rating > 0) {
+      const filled = Math.max(0, Math.min(5, Math.round(rating)));
+      parts.push(`${"★".repeat(filled)}${"☆".repeat(5 - filled)} ${rating.toFixed(1)}`);
+    }
+    const reviews = Number(details.review_count) || 0;
+    if (reviews) parts.push(`${reviews} review${reviews === 1 ? "" : "s"}`);
+    if (details.price) parts.push(String(details.price));
+    if (Array.isArray(details.categories) && details.categories.length) {
+      parts.push(details.categories.join(", "));
+    }
+    if (parts.length) {
+      const line = document.createElement("div");
+      line.className = "map-yelp-rating";
+      line.textContent = parts.join(" · ");
+      facts.appendChild(line);
+    }
+
+    const statusParts = [];
+    if (details.is_closed) statusParts.push("Closed");
+    else if (details.is_open_now === true) statusParts.push("Open now");
+    else if (details.is_open_now === false) statusParts.push("Closed now");
+    if (Array.isArray(details.transactions) && details.transactions.length) {
+      statusParts.push(`Offers ${details.transactions.join(", ")}`);
+    }
+    if (statusParts.length) {
+      const line = document.createElement("div");
+      line.className = "map-yelp-fact";
+      line.textContent = statusParts.join(" · ");
+      facts.appendChild(line);
+    }
+
+    if (details.address) {
+      const line = document.createElement("div");
+      line.className = "map-yelp-fact";
+      line.textContent = details.address;
+      facts.appendChild(line);
+    }
+    if (details.phone) {
+      const line = document.createElement("div");
+      line.className = "map-yelp-fact";
+      const link = document.createElement("a");
+      link.href = `tel:${String(details.phone).replace(/[^0-9+]/g, "")}`;
+      link.textContent = details.phone;
+      line.appendChild(link);
+      facts.appendChild(line);
+    }
+    section.appendChild(facts);
+
+    if (Array.isArray(details.hours) && details.hours.length) {
+      const hours = document.createElement("details");
+      hours.className = "map-yelp-hours";
+      const summary = document.createElement("summary");
+      summary.textContent = "Opening hours";
+      hours.appendChild(summary);
+      const body = document.createElement("div");
+      body.textContent = details.hours.join(" · ");
+      hours.appendChild(body);
+      section.appendChild(hours);
+    }
+
+    if (Array.isArray(details.photos) && details.photos.length) {
+      const gallery = document.createElement("div");
+      gallery.className = "map-yelp-photos";
+      for (const url of details.photos.slice(0, 3)) {
+        const link = document.createElement("a");
+        link.href = url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.title = "Open this Yelp photo in a new tab";
+        const image = document.createElement("img");
+        image.src = url;
+        image.alt = `${details.name || item.title || "Restaurant"} photo`;
+        image.loading = "lazy";
+        image.referrerPolicy = "no-referrer";
+        image.addEventListener("error", () => link.remove(), { once: true });
+        link.appendChild(image);
+        gallery.appendChild(link);
+      }
+      if (gallery.children.length) section.appendChild(gallery);
+    }
+
+    if (details.url) {
+      const link = document.createElement("a");
+      link.className = "news-link map-yelp-link";
+      link.href = details.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = "Open on Yelp ↗";
+      section.appendChild(link);
+    }
+  }
+
+  newsBodyEl.appendChild(section);
 }
 
 function renderMapVideos(item) {
@@ -10626,6 +11653,7 @@ function openNewsStory(newsId, fallbackUrl = "", fallbackTitle = "") {
 function closeNewsModal() {
   cancelNewsPodcastGeneration(newsItem);
   newsItem = null;
+  updateRestaurantNav();
   resetNewsTts();
   resetNewsTranslation();
   resetNewsChat();
@@ -11060,6 +12088,8 @@ $("#news-chat-close").addEventListener("click", (event) => {
 });
 
 $("#news-close").addEventListener("click", closeNewsModal);
+newsPrevEl.addEventListener("click", () => navigateRestaurant(-1));
+newsNextEl.addEventListener("click", () => navigateRestaurant(1));
 newsTtsBtn.addEventListener("click", (event) => {
   event.preventDefault();
   event.stopPropagation();
@@ -11119,6 +12149,35 @@ newsTitleEl.addEventListener("click", handleNewsWordClick);
 /* ------------------------------------------------------------------ *
  *  Answer source badge (local Ollama vs. language documentation)
  * ------------------------------------------------------------------ */
+/* Count the words in an answer. Latin words are matched as runs of
+ * letters/digits (hyphens and apostrophes stay inside a word); CJK
+ * characters are counted individually so a Chinese answer is not one word. */
+function countAnswerWords(text) {
+  const raw = String(text || "");
+  const cjkPattern = /[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g;
+  const cjk = raw.match(cjkPattern);
+  const nonCjk = raw.replace(cjkPattern, " ");
+  const words = nonCjk.match(/[A-Za-z0-9]+(?:[’'\-][A-Za-z0-9]+)*/g);
+  return (cjk ? cjk.length : 0) + (words ? words.length : 0);
+}
+
+function renderAnswerWordCount(entry) {
+  const el = entry.wordCountEl;
+  if (!el) return;
+  const text = String(entry.text || "").trim();
+  if (!text) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  const count = countAnswerWords(text);
+  el.hidden = false;
+  el.textContent = `${count.toLocaleString()} ${count === 1 ? "word" : "words"}`;
+  el.title = entry.complete
+    ? "Words in this answer"
+    : "Words so far in this answer";
+}
+
 function renderAnswerSource(entry) {
   const el = entry.sourceEl;
   if (!el) return;

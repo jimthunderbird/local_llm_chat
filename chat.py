@@ -24,7 +24,7 @@ For each question:
        a deterministic JSON relevance gate followed by a JSON answer writer.
        The gate owns refusal decisions; the writer never sees a refusal
        instruction, so it cannot append a second refusal paragraph.
-    6. Stream the written answer from Ollama's ornith:35b model. Retrieval /
+    6. Stream the written answer from Ollama's ornith-1.5:35b model. Retrieval /
        filter / prefill / TTFT / prompt-token measurements are hidden by
        default and can be shown with `/benchmark` (or continuously with
        `/benchmark on`).
@@ -127,7 +127,7 @@ except ImportError as exc:  # pragma: no cover - dependency guard
         "python3 -m pip install --user prompt_toolkit"
     )
 
-# The server uses ornith:35b to write answers, tutor math, and generate code.
+# The server uses ornith-1.5:35b to write answers, tutor math, and generate code.
 # The small LFM3-aura-grounded artifact remains the helper model for query
 # expansion, candidate filtering, conversation rewriting, translation, and
 # dictionary lookups, so Ollama keeps a cheap model for those short calls.
@@ -136,10 +136,10 @@ LFM_MODEL = os.environ.get(
     "OLLAMA_LFM_MODEL", "milodule3/LFM3-1.7B-aura-grounded:latest"
 )
 # The answer writer, the math tutor, and code generation use the larger
-# ornith:35b model. The small LFM3 artifact stays the helper model (query
+# ornith-1.5:35b model. The small LFM3 artifact stays the helper model (query
 # expansion, candidate filtering, conversation, translation, dictionary) so
 # those frequent short calls remain cheap.
-ANSWER_MODEL = os.environ.get("OLLAMA_ANSWER_MODEL", "ornith:35b")
+ANSWER_MODEL = os.environ.get("OLLAMA_ANSWER_MODEL", "ornith-1.5:35b")
 EXPANSION_MODEL = LFM_MODEL
 # Model used to filter BM25 candidates before synthesis.
 FILTER_MODEL = LFM_MODEL
@@ -152,9 +152,9 @@ RESIDENT_MODELS = tuple(dict.fromkeys((CHAT_MODEL, ANSWER_MODEL)))
 CODING_MODEL = ANSWER_MODEL
 # Local model used by /ask for quick questions that do not use retrieval.
 # prompts/ask_command.prompt requires the declared simple_answer_model
-# (ornith:35b), so keep this separate from the smaller helper model.
+# (ornith-1.5:35b), so keep this separate from the smaller helper model.
 SIMPLE_ANSWER_MODEL = os.environ.get(
-    "OLLAMA_SIMPLE_ANSWER_MODEL", "ornith:35b"
+    "OLLAMA_SIMPLE_ANSWER_MODEL", "ornith-1.5:35b"
 )
 # Local model used to translate Simplified Chinese questions for retrieval.
 TRANSLATION_MODEL = LFM_MODEL
@@ -266,7 +266,14 @@ FUZZY_ENTITY_TOPIC_MIN_MATCHES = 3
 FUZZY_ENTITY_TOPIC_STOPWORDS = FUZZY_ANCHOR_STOPWORDS | frozenset(
     "it its he him his she her they them we us our you your i my mine "
     "word words essay paragraph paragraphs sentence sentences summary "
-    "summarize explanation describe description".split()
+    "summarize explanation explain describe description answer answers "
+    "response reply detail details detailed info information "
+    # Answer-format words describe the requested deliverable, not the
+    # entity. "Who is Mark Wiens, give me a research paper of 600 words"
+    # must not narrow the entity chunks to the ones that happen to mention
+    # "research" or "paper" (for example a Mark Twain quote about words).
+    "research paper papers report reports article articles write writing "
+    "draft compose create produce prepare generate".split()
 )
 # Acronyms in questions (for example "IDP") are often spelled out in the
 # corpus next to their definition ("International Driving Permit (IDP)").
@@ -6235,7 +6242,7 @@ def answer(
 
     answer_model = model or ANSWER_MODEL
     # The JSON gate/writer pipeline is specific to the LFM3-aura fine-tune.
-    # A different answer model (ornith:35b) uses the regular streaming RAG
+    # A different answer model (ornith-1.5:35b) uses the regular streaming RAG
     # prompt instead.
     lfm_pipeline = LFM_PIPELINE_ENABLED and answer_model == LFM_MODEL
 

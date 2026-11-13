@@ -1,4 +1,9 @@
-image_llm: ollama local model ornith:35b
+image_llm: ollama local model ornith-1.5:35b
+
+task (completed) {
+  after attaching an image and ask the question "show me all the words", we got:
+  No installed Ollama model can read images. Pull a vision model or set OLLAMA_IMAGE_MODEL to one that is installed.
+}
 
 task (completed) {
   in the chat message box, allow me to drag an image and then ask a question about this image using {image_llm}
@@ -18,9 +23,9 @@ task (completed) {
   - /api/ask accepts an optional `image` data URL, validates the MIME type and
     base64 payload, and caps images at 12 MB (request body cap raised to 20 MB).
   - A new image-question path sends the image through Ollama's `images` field
-    to the configured image model (ornith:35b) and streams the answer as the
+    to the configured image model (ornith-1.5:35b) and streams the answer as the
     usual SSE `delta` events. Follow-up pronouns use the recent conversation.
-  - The installed ornith:35b build exposes completion/tools/thinking but no
+  - The installed ornith-1.5:35b build exposes completion/tools/thinking but no
     vision capability, so if Ollama rejects the image as multimodal the server
     automatically retries with a local vision model (gemma3:latest by default,
     configurable with OLLAMA_IMAGE_MODEL / OLLAMA_IMAGE_FALLBACK_MODELS).

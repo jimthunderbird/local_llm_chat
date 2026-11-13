@@ -72,6 +72,15 @@ Endpoints:
                                   comments for the /reddit detail modal
     GET  /api/stock_reddit       ?symbol=<ticker> fetch unique Reddit posts from
                                   r/stock and r/<ticker> for the /stock modal
+    GET  /api/map_restaurants    ?lat=<latitude>&lon=<longitude> fetch nearby
+                                  restaurants from the Overpass API for /map
+    GET  /api/osm_restaurant     ?type=<node|way|relation>&id=<osm_id>
+                                  fetch one restaurant's cuisine, address, and
+                                  opening hours from the Overpass API for the
+                                  /map restaurant modal (no API key needed)
+    GET  /api/yelp_restaurant    ?lat=<latitude>&lon=<longitude>&name=<name>
+                                  optional Yelp Fusion v3 enrichment for a /map
+                                  restaurant modal (used only when configured)
     GET  /api/stock_summary      ?symbol=<ticker> fetch a company summary for a
                                   /stock holding, shown in its own modal
     GET  /api/stackoverflow_answers
@@ -2815,6 +2824,27 @@ WIKIPEDIA_BASE_URL = "https://en.wikipedia.org"
 MAP_SEARCH_RADIUS_METERS = 10_000
 MAP_RESULT_LIMIT = 15
 MAP_RETRY_MAX_SECONDS = 20.0
+# /map's second tab lists restaurants from the Overpass API. A 1.5 km radius
+# keeps the list walkable, and the fallback endpoint keeps the tab usable when
+# the main Overpass instance is rate-limited or down.
+OVERPASS_API_URLS = (
+    "https://overpass.openstreetmap.fr/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+)
+MAP_RESTAURANT_RADIUS_METERS = 1_500
+MAP_RESTAURANT_LIMIT = 30
+# Restaurant modals fetch their primary details from the exact OSM object via
+# Overpass, so cuisine, address, and opening hours work without any API key.
+# Yelp Fusion v3 is only an optional enrichment when a key is configured.
+OSM_RESTAURANT_CACHE_TTL_SECONDS = 3_600
+OSM_RESTAURANT_CACHE_MAX_ITEMS = 512
+OSM_RESTAURANT_TYPES = {"node", "way", "relation"}
+OSM_RESTAURANT_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
+OSM_RESTAURANT_CACHE_LOCK = threading.Lock()
+YELP_SEARCH_URL = "https://api.yelp.com/v3/businesses/search"
+YELP_BUSINESS_URL = "https://api.yelp.com/v3/businesses/{business_id}"
+YELP_DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
 def _map_plain_text(value: object) -> str:
@@ -3030,6 +3060,593 @@ def search_wikipedia_nearby(
     return results
 
 
+def search_nearby_restaurants(
+    latitude: float,
+    longitude: float,
+    radius_meters: int = MAP_RESTAURANT_RADIUS_METERS,
+    limit: int = MAP_RESTAURANT_LIMIT,
+) -> list[dict]:
+    """List named restaurants near a coordinate with the Overpass API."""
+    radius = max(100, min(int(radius_meters), 5_000))
+    query = (
+        "[out:json][timeout:25];\n"
+        "(\n"
+        "  nwr[\"amenity\"~\"^(restaurant|fast_food|cafe|food_court)$\"]"
+        f"(around:{radius},{latitude},{longitude});\n"
+        ");\n"
+        "out center 80;"
+    )
+    data = None
+    last_error: Exception | None = None
+    for endpoint in OVERPASS_API_URLS:
+        try:
+            response = requests.get(
+                endpoint,
+                params={"data": query},
+                headers={**chat.HTTP_HEADERS, "User-Agent": MAP_USER_AGENT},
+                timeout=(8, 35),
+            )
+            response.raise_for_status()
+            data = response.json()
+            break
+        except (requests.RequestException, ValueError) as exc:
+            last_error = exc
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"OpenStreetMap Overpass search failed: {last_error}"
+        )
+
+    elements = data.get("elements")
+    if not isinstance(elements, list):
+        raise RuntimeError(
+            "OpenStreetMap Overpass returned an unexpected response."
+        )
+
+    results: list[dict] = []
+    seen: set[str] = set()
+    yelp_available = bool(yelp_api_key())
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        tags = element.get("tags")
+        if not isinstance(tags, dict):
+            tags = {}
+        name = _map_plain_text(tags.get("name"))
+        if not name:
+            continue
+
+        element_latitude = element.get("lat")
+        element_longitude = element.get("lon")
+        if not isinstance(element_latitude, (int, float)) or not isinstance(
+            element_longitude, (int, float)
+        ):
+            center = element.get("center")
+            if isinstance(center, dict):
+                element_latitude = center.get("lat")
+                element_longitude = center.get("lon")
+        if not isinstance(element_latitude, (int, float)) or not isinstance(
+            element_longitude, (int, float)
+        ):
+            continue
+
+        osm_type = str(element.get("type") or "node")
+        osm_id = element.get("id")
+        if osm_id is None:
+            continue
+        link = f"https://www.openstreetmap.org/{osm_type}/{osm_id}"
+        if link in seen:
+            continue
+        seen.add(link)
+
+        distance = _haversine_meters(
+            latitude, longitude, float(element_latitude), float(element_longitude)
+        )
+        amenity = str(tags.get("amenity") or "restaurant")
+        kind = amenity.replace("_", " ").title()
+        cuisine = _map_plain_text(tags.get("cuisine"))
+        address = " ".join(
+            value
+            for value in (
+                _map_plain_text(tags.get("addr:housenumber")),
+                _map_plain_text(tags.get("addr:street")),
+                _map_plain_text(tags.get("addr:city")),
+                _map_plain_text(tags.get("addr:postcode")),
+            )
+            if value
+        ).strip()
+        website = str(
+            tags.get("website") or tags.get("contact:website") or ""
+        ).strip()
+        phone = str(tags.get("phone") or tags.get("contact:phone") or "").strip()
+        hours = _map_plain_text(tags.get("opening_hours"))
+        distance_text = _map_distance(distance)
+
+        section = " · ".join(
+            value for value in (distance_text, kind, cuisine) if value
+        )
+        summary = " · ".join(
+            value for value in (kind, cuisine, address) if value
+        )
+        paragraphs: list[str] = []
+        if summary:
+            paragraphs.append(summary)
+        details: list[str] = []
+        if distance_text:
+            details.append(f"Distance: {distance_text}")
+        if address:
+            details.append(f"Address: {address}")
+        if hours:
+            details.append(f"Opening hours: {hours}")
+        if phone:
+            details.append(f"Phone: {phone}")
+        if website:
+            details.append(f"Website: {website}")
+        if details:
+            paragraphs.append(" · ".join(details))
+
+        results.append(
+            {
+                "title": name,
+                "link": link,
+                "section": section,
+                "summary": summary,
+                "paragraphs": paragraphs,
+                "coordinates": (
+                    f"{float(element_latitude):.6g}, "
+                    f"{float(element_longitude):.6g}"
+                ),
+                "distance_m": distance,
+                "source": "OpenStreetMap",
+                "docs": True,
+                "docs_label": "OpenStreetMap",
+                "learnable": False,
+                "osm": True,
+                "osm_type": osm_type,
+                "osm_id": osm_id,
+                "cuisine": cuisine,
+                "address": address,
+                "hours": hours,
+                "phone": phone,
+                "website": website,
+                "yelp": yelp_available,
+                "latitude": float(element_latitude),
+                "longitude": float(element_longitude),
+            }
+        )
+    results.sort(key=lambda item: item["distance_m"])
+    return results[: max(1, min(int(limit), 100))]
+
+
+def _osm_tag_text(tags: dict, *keys: str) -> str:
+    """Return the first non-empty plain-text value for the given OSM keys."""
+    for key in keys:
+        value = _map_plain_text(tags.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _osm_coordinates(element: dict) -> tuple[float | None, float | None]:
+    """Read a node's coordinates, or a way/relation's Overpass center."""
+    latitude = element.get("lat")
+    longitude = element.get("lon")
+    if not isinstance(latitude, (int, float)) or not isinstance(
+        longitude, (int, float)
+    ):
+        center = element.get("center")
+        if isinstance(center, dict):
+            latitude = center.get("lat")
+            longitude = center.get("lon")
+    if isinstance(latitude, (int, float)) and isinstance(
+        longitude, (int, float)
+    ):
+        return float(latitude), float(longitude)
+    return None, None
+
+
+def _osm_hours_summary(
+    value: object, latitude: float | None, longitude: float | None
+) -> dict:
+    """Summarize an OSM opening_hours value, falling back to the raw text.
+
+    Parsing uses opening_hours_py when it is installed. The public Overpass
+    workflow must remain keyless and dependency-free, so a missing parser or
+    an unusual expression is never fatal: the raw OSM expression is returned.
+    """
+    raw = _map_plain_text(value)
+    result = {
+        "raw": raw,
+        "open_now": None,
+        "next_change": None,
+        "parsed": False,
+    }
+    if not raw:
+        return result
+    try:
+        from opening_hours import OpeningHours  # type: ignore import-not-found
+
+        coordinates = (
+            (latitude, longitude)
+            if latitude is not None and longitude is not None
+            else None
+        )
+        hours = OpeningHours(raw, coords=coordinates)
+        state = hours.state()
+        if state in {"open", "closed", "unknown"}:
+            result["open_now"] = state == "open" if state != "unknown" else None
+        if result["open_now"] is not None:
+            try:
+                result["next_change"] = hours.next_change().isoformat()
+            except Exception:
+                result["next_change"] = None
+            result["parsed"] = True
+    except Exception:
+        # No parser, unsupported syntax, or missing coordinates. Show raw.
+        pass
+    return result
+
+
+def _normalize_osm_restaurant(
+    element: dict, fallback_type: str = "", fallback_id: int | None = None
+) -> dict:
+    """Normalize one Overpass element into the restaurant-modal model."""
+    tags = element.get("tags")
+    if not isinstance(tags, dict):
+        tags = {}
+    osm_type = str(element.get("type") or fallback_type or "node")
+    osm_id = element.get("id", fallback_id)
+    latitude, longitude = _osm_coordinates(element)
+
+    raw_cuisine = _osm_tag_text(tags, "cuisine")
+    cuisine = [
+        part.strip()
+        for part in raw_cuisine.split(";")
+        if part.strip()
+    ]
+    address = " ".join(
+        value
+        for value in (
+            _osm_tag_text(tags, "addr:housenumber"),
+            _osm_tag_text(tags, "addr:street", "addr:place"),
+            _osm_tag_text(tags, "addr:city", "addr:town", "addr:village"),
+            _osm_tag_text(tags, "addr:postcode"),
+        )
+        if value
+    ).strip()
+    amenity = _osm_tag_text(tags, "amenity") or "restaurant"
+    opening_hours = _osm_hours_summary(
+        tags.get("opening_hours"), latitude, longitude
+    )
+    kitchen_hours = _map_plain_text(tags.get("opening_hours:kitchen"))
+    website = _osm_tag_text(tags, "website", "contact:website", "url")
+    phone = _osm_tag_text(tags, "phone", "contact:phone")
+
+    dietary = {
+        key: _osm_tag_text(tags, f"diet:{key}")
+        for key in ("vegetarian", "vegan", "halal", "kosher", "gluten_free")
+    }
+    dietary = {key: value for key, value in dietary.items() if value}
+    service = {
+        key: _osm_tag_text(tags, key)
+        for key in (
+            "takeaway",
+            "delivery",
+            "outdoor_seating",
+            "wheelchair",
+            "internet_access",
+        )
+    }
+    service = {key: value for key, value in service.items() if value}
+
+    coordinates = ""
+    if latitude is not None and longitude is not None:
+        coordinates = f"{latitude:.6g}, {longitude:.6g}"
+
+    return {
+        "found": True,
+        "osm_type": osm_type,
+        "osm_id": osm_id,
+        "name": _osm_tag_text(tags, "name"),
+        "type": amenity.replace("_", " ").title(),
+        "amenity": amenity,
+        "cuisine": cuisine,
+        "address": address,
+        "opening_hours": opening_hours,
+        "kitchen_hours": kitchen_hours,
+        "phone": phone,
+        "website": website,
+        "service": service,
+        "dietary": dietary,
+        "stars": _osm_tag_text(tags, "stars"),
+        "brand": _osm_tag_text(tags, "brand"),
+        "coordinates": coordinates,
+        "latitude": latitude,
+        "longitude": longitude,
+        "url": f"https://www.openstreetmap.org/{osm_type}/{osm_id}",
+        "attribution": "© OpenStreetMap contributors",
+    }
+
+
+def fetch_osm_restaurant(osm_type: str, osm_id: str | int) -> dict:
+    """Fetch one restaurant's details from Overpass by its OSM identity.
+
+    The /map list already knows the exact OSM object, so querying that object
+    is cheaper and more accurate than a second name search. Results are cached
+    per OSM id because restaurant names, addresses, and hours rarely change.
+    """
+    identifier = str(osm_id).strip()
+    if not identifier.isdigit() or int(identifier) <= 0:
+        raise ValueError("Invalid OSM id")
+    osm_type = str(osm_type or "").strip().lower()
+    if osm_type not in OSM_RESTAURANT_TYPES:
+        raise ValueError("Invalid OSM type")
+
+    cache_key = (osm_type, identifier)
+    now = time.monotonic()
+    with OSM_RESTAURANT_CACHE_LOCK:
+        cached = OSM_RESTAURANT_CACHE.get(cache_key)
+        if cached and now - cached[0] <= OSM_RESTAURANT_CACHE_TTL_SECONDS:
+            return cached[1]
+
+    query = (
+        "[out:json][timeout:15];\n"
+        f"{osm_type}({identifier});\n"
+        "out center;"
+    )
+    data = None
+    last_error: Exception | None = None
+    for endpoint in OVERPASS_API_URLS:
+        try:
+            response = requests.get(
+                endpoint,
+                params={"data": query},
+                headers={**chat.HTTP_HEADERS, "User-Agent": MAP_USER_AGENT},
+                timeout=(8, 30),
+            )
+            response.raise_for_status()
+            data = response.json()
+            break
+        except (requests.RequestException, ValueError) as exc:
+            last_error = exc
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"OpenStreetMap Overpass detail lookup failed: {last_error}"
+        )
+
+    elements = data.get("elements")
+    if not isinstance(elements, list):
+        raise RuntimeError(
+            "OpenStreetMap Overpass returned an unexpected response."
+        )
+    element = next(
+        (
+            item
+            for item in elements
+            if isinstance(item, dict) and isinstance(item.get("tags"), dict)
+        ),
+        None,
+    )
+    if element is None:
+        result = {
+            "found": False,
+            "osm_type": osm_type,
+            "osm_id": int(identifier),
+        }
+    else:
+        result = _normalize_osm_restaurant(element, osm_type, int(identifier))
+
+    with OSM_RESTAURANT_CACHE_LOCK:
+        if len(OSM_RESTAURANT_CACHE) >= OSM_RESTAURANT_CACHE_MAX_ITEMS:
+            OSM_RESTAURANT_CACHE.pop(next(iter(OSM_RESTAURANT_CACHE)), None)
+        OSM_RESTAURANT_CACHE[cache_key] = (now, result)
+    return result
+
+
+def yelp_api_key() -> str:
+    """Return the configured Yelp Fusion API key, or an empty string."""
+    key = os.environ.get("YELP_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        return (Path.home() / ".yelp_api_key").read_text(
+            encoding="utf-8"
+        ).strip()
+    except OSError:
+        return ""
+
+
+def _yelp_name_key(value: object) -> str:
+    """Normalize a business name for exact-match selection."""
+    return " ".join(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
+
+
+def _yelp_clock(value: object) -> str:
+    """Turn Yelp's HHMM clock value into HH:MM."""
+    text = str(value or "").strip()
+    if len(text) == 4 and text.isdigit():
+        return f"{text[:2]}:{text[2:]}"
+    if len(text) == 3 and text.isdigit():
+        return f"0{text[0]}:{text[1:]}"
+    return text
+
+
+def _yelp_hours(hours: object) -> tuple[list[str], bool | None]:
+    """Flatten Yelp's regular opening hours into display lines."""
+    lines: list[str] = []
+    is_open_now = None
+    if not isinstance(hours, list):
+        return lines, is_open_now
+    for block in hours:
+        if not isinstance(block, dict):
+            continue
+        if block.get("is_open_now") is not None:
+            is_open_now = bool(block.get("is_open_now"))
+        hours_type = str(block.get("hours_type") or "").upper()
+        if hours_type and hours_type != "REGULAR":
+            continue
+        entries = block.get("open")
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                day = int(entry.get("day"))
+            except (TypeError, ValueError):
+                continue
+            if not 0 <= day < 7:
+                continue
+            start = _yelp_clock(entry.get("start"))
+            end = _yelp_clock(entry.get("end"))
+            if start and end:
+                lines.append(f"{YELP_DAY_NAMES[day]} {start}–{end}")
+    return lines, is_open_now
+
+
+def fetch_yelp_restaurant(
+    latitude: float, longitude: float, name: str
+) -> dict:
+    """Look up a restaurant by coordinates and name with Yelp Fusion v3."""
+    key = yelp_api_key()
+    if not key:
+        raise RuntimeError(
+            "Yelp API key is not configured. Set YELP_API_KEY or add "
+            "~/.yelp_api_key, then restart the server."
+        )
+    query = " ".join(str(name or "").split())
+    if not query:
+        raise ValueError("Missing restaurant name")
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Accept": "application/json",
+    }
+    try:
+        response = requests.get(
+            YELP_SEARCH_URL,
+            params={
+                "latitude": latitude,
+                "longitude": longitude,
+                "term": query,
+                "limit": 10,
+                "sort_by": "distance",
+            },
+            headers=headers,
+            timeout=(10, 30),
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Yelp search failed: {exc}") from exc
+    if response.status_code in {401, 403}:
+        raise RuntimeError(
+            f"Yelp rejected the API key (HTTP {response.status_code}). "
+            "Check YELP_API_KEY."
+        )
+    if response.status_code == 429:
+        raise RuntimeError("Yelp rate limit reached. Try again later.")
+    try:
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"Yelp search failed: {exc}") from exc
+
+    businesses = data.get("businesses") if isinstance(data, dict) else None
+    if not isinstance(businesses, list) or not businesses:
+        return {"found": False, "query": query}
+    businesses = [item for item in businesses if isinstance(item, dict)]
+    if not businesses:
+        return {"found": False, "query": query}
+
+    target = _yelp_name_key(query)
+    best = next(
+        (
+            item
+            for item in businesses
+            if _yelp_name_key(item.get("name")) == target
+        ),
+        businesses[0],
+    )
+    business_id = str(best.get("id") or "")
+    details: dict = {}
+    if business_id:
+        try:
+            detail_response = requests.get(
+                YELP_BUSINESS_URL.format(
+                    business_id=quote(business_id, safe="")
+                ),
+                headers=headers,
+                timeout=(10, 30),
+            )
+            if detail_response.status_code == 200:
+                payload = detail_response.json()
+                if isinstance(payload, dict):
+                    details = payload
+        except (requests.RequestException, ValueError):
+            details = {}
+
+    merged = {**best, **details}
+    hours, is_open_now = _yelp_hours(merged.get("hours"))
+    raw_categories = merged.get("categories")
+    categories = [
+        str(item.get("title") or "").strip()
+        for item in raw_categories
+        if isinstance(item, dict)
+    ] if isinstance(raw_categories, list) else []
+    location = merged.get("location")
+    location = location if isinstance(location, dict) else {}
+    raw_address = location.get("display_address")
+    address = ", ".join(
+        str(part).strip()
+        for part in raw_address
+        if str(part).strip()
+    ) if isinstance(raw_address, list) else ""
+    raw_photos = merged.get("photos")
+    photos = [
+        str(url).strip()
+        for url in raw_photos
+        if str(url).strip()
+    ] if isinstance(raw_photos, list) else []
+    raw_transactions = merged.get("transactions")
+    transactions = [
+        str(value).strip()
+        for value in raw_transactions
+        if str(value).strip()
+    ] if isinstance(raw_transactions, list) else []
+    try:
+        rating = float(merged.get("rating"))
+    except (TypeError, ValueError):
+        rating = None
+    try:
+        review_count = int(merged.get("review_count"))
+    except (TypeError, ValueError):
+        review_count = 0
+    try:
+        distance = float(merged.get("distance"))
+    except (TypeError, ValueError):
+        distance = None
+
+    return {
+        "found": True,
+        "id": business_id,
+        "name": str(merged.get("name") or query),
+        "rating": rating,
+        "review_count": review_count,
+        "price": str(merged.get("price") or ""),
+        "categories": categories,
+        "address": address,
+        "phone": str(
+            merged.get("display_phone") or merged.get("phone") or ""
+        ),
+        "url": str(merged.get("url") or ""),
+        "image_url": str(merged.get("image_url") or ""),
+        "photos": photos[:6],
+        "hours": hours,
+        "is_open_now": is_open_now,
+        "transactions": transactions,
+        "distance_m": distance,
+        "is_closed": bool(merged.get("is_closed")),
+    }
+
+
 def search_map_places(location: str) -> tuple[dict, list[dict]]:
     """Geocode a location and return nearby Wikipedia article cards."""
     geo = geocode_location(location)
@@ -3197,7 +3814,7 @@ MATHUTOR_PROBLEMS_PER_BATCH = 5
 MATHUTOR_GENERATION_ATTEMPTS = 5
 MATHUTOR_GENERATION_TOKENS = 5_000
 MATHUTOR_SOURCE_CHAR_LIMIT = 16_000
-# The mathtutor uses the answer model (ornith:35b), as required by
+# The mathtutor uses the answer model (ornith-1.5:35b), as required by
 # performance_improvement.prompt's back_to_ornith_35b task.
 MATHUTOR_MODEL = chat.ANSWER_MODEL
 
@@ -3979,16 +4596,94 @@ YOUTUBE_BOOKMARK_LIMIT = 500
 # sends it as a data URL in the /api/ask JSON body; the server validates it and
 # forwards the raw base64 payload to the vision model through Ollama's
 # `images` field. Questions and answers still use the normal SSE stream.
-IMAGE_MODEL = os.environ.get("OLLAMA_IMAGE_MODEL", chat.CHAT_MODEL)
-# The server runs only the chat model. If a local build exposes it as a
-# text-only model, the image question reports that no vision model is
-# available instead of loading a second model. Operators who need a vision
-# model can still opt in with OLLAMA_IMAGE_FALLBACK_MODELS (comma separated).
+# Image questions use the answer model by default: it is already kept resident
+# for normal chat and current builds advertise vision support. The small helper
+# chat model is text-only, so it must never be the image default. If the
+# preferred model cannot read images, the server discovers another installed
+# vision model through Ollama's model metadata. Operators can still pin one
+# with OLLAMA_IMAGE_MODEL or list extra candidates with
+# OLLAMA_IMAGE_FALLBACK_MODELS (comma separated).
+IMAGE_MODEL = os.environ.get("OLLAMA_IMAGE_MODEL", chat.ANSWER_MODEL)
 IMAGE_FALLBACK_MODELS = tuple(
     name.strip()
     for name in os.environ.get("OLLAMA_IMAGE_FALLBACK_MODELS", "").split(",")
     if name.strip()
 )
+IMAGE_VISION_CACHE_SECONDS = 300
+_IMAGE_VISION_CACHE: tuple[float, tuple[str, ...]] = (0.0, ())
+_IMAGE_VISION_CACHE_LOCK = threading.Lock()
+
+
+def installed_vision_models() -> list[str]:
+    """Return installed Ollama models that advertise image support.
+
+    Ollama's /api/tags response includes ``capabilities`` on recent versions.
+    Older daemons omit it, so those models are checked with /api/show. Results
+    are cached briefly because this only runs when an image question needs a
+    model and never on the normal text path.
+    """
+    global _IMAGE_VISION_CACHE
+    now = time.monotonic()
+    with _IMAGE_VISION_CACHE_LOCK:
+        cached_at, cached = _IMAGE_VISION_CACHE
+        if cached and now - cached_at < IMAGE_VISION_CACHE_SECONDS:
+            return list(cached)
+
+    try:
+        response = requests.get(
+            f"{chat.OLLAMA_HOST}/api/tags", timeout=(3, 10)
+        )
+        response.raise_for_status()
+        entries = response.json().get("models") or []
+    except (requests.RequestException, ValueError):
+        return []
+
+    vision: list[str] = []
+    needs_show: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or entry.get("model") or "").strip()
+        # Never auto-select a hosted cloud model for an image question; only an
+        # explicitly configured IMAGE_MODEL may point outside this machine.
+        if not name or name.endswith(":cloud"):
+            continue
+        capabilities = entry.get("capabilities")
+        if capabilities is None:
+            needs_show.append(name)
+        elif "vision" in capabilities:
+            vision.append(name)
+
+    for name in needs_show:
+        try:
+            response = requests.post(
+                f"{chat.OLLAMA_HOST}/api/show",
+                json={"model": name},
+                timeout=(3, 10),
+            )
+            response.raise_for_status()
+            capabilities = response.json().get("capabilities") or []
+        except (requests.RequestException, ValueError):
+            continue
+        if "vision" in capabilities:
+            vision.append(name)
+
+    result = tuple(dict.fromkeys(vision))
+    with _IMAGE_VISION_CACHE_LOCK:
+        _IMAGE_VISION_CACHE = (now, result)
+    return list(result)
+
+
+def image_model_candidates() -> list[str]:
+    """Return the ordered image-model candidates for one question."""
+    models: list[str] = []
+    for name in (IMAGE_MODEL, *IMAGE_FALLBACK_MODELS):
+        if name and name not in models:
+            models.append(name)
+    for name in installed_vision_models():
+        if name not in models:
+            models.append(name)
+    return models
 IMAGE_NUM_CTX = chat.ANSWER_NUM_CTX
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_QUESTION_CHARS = 8_000
@@ -4178,7 +4873,7 @@ try:
 except ValueError:
     KEEPALIVE_WATCHDOG_INTERVAL_SECONDS = 300
 
-# Code-generation uses ornith:35b, matching the answer and math tutor models.
+# Code-generation uses ornith-1.5:35b, matching the answer and math tutor models.
 # The small LFM3 model remains the helper model for short internal calls.
 CODE_GENERATION_MODEL = chat.ANSWER_MODEL
 
@@ -12217,6 +12912,84 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"symbol": symbol, "items": items})
             return
+        if path == "/api/map_restaurants":
+            params = parse_qs(parsed.query)
+            try:
+                latitude = float((params.get("lat") or [""])[0])
+                longitude = float((params.get("lon") or [""])[0])
+            except (TypeError, ValueError):
+                self._send_error_json("Missing or invalid map coordinates", 400)
+                return
+            if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+                self._send_error_json("Missing or invalid map coordinates", 400)
+                return
+            raw_radius = (params.get("radius") or [""])[0]
+            try:
+                radius = (
+                    int(float(raw_radius))
+                    if raw_radius
+                    else MAP_RESTAURANT_RADIUS_METERS
+                )
+            except (TypeError, ValueError):
+                radius = MAP_RESTAURANT_RADIUS_METERS
+            try:
+                items = search_nearby_restaurants(
+                    latitude, longitude, radius
+                )
+            except RuntimeError as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json({"items": items})
+            return
+        if path == "/api/osm_restaurant":
+            params = parse_qs(parsed.query)
+            osm_type = (params.get("type") or [""])[0].strip().lower()
+            osm_id = (params.get("id") or [""])[0].strip()
+            if osm_type not in OSM_RESTAURANT_TYPES or not osm_id.isdigit():
+                self._send_error_json("Missing or invalid OSM identity", 400)
+                return
+            try:
+                result = fetch_osm_restaurant(osm_type, osm_id)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except RuntimeError as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json(result)
+            return
+        if path == "/api/yelp_restaurant":
+            params = parse_qs(parsed.query)
+            name = " ".join((params.get("name") or [""])[0].split())
+            if not name:
+                self._send_error_json("Missing restaurant name", 400)
+                return
+            try:
+                latitude = float((params.get("lat") or [""])[0])
+                longitude = float((params.get("lon") or [""])[0])
+            except (TypeError, ValueError):
+                self._send_error_json("Missing or invalid map coordinates", 400)
+                return
+            if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+                self._send_error_json("Missing or invalid map coordinates", 400)
+                return
+            if not yelp_api_key():
+                self._send_error_json(
+                    "Yelp API key is not configured. Set YELP_API_KEY or "
+                    "add ~/.yelp_api_key, then restart the server.",
+                    503,
+                )
+                return
+            try:
+                result = fetch_yelp_restaurant(latitude, longitude, name)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except RuntimeError as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json(result)
+            return
         if path == "/api/stock_summary":
             params = parse_qs(parsed.query)
             symbol = (params.get("symbol") or [""])[0].strip().upper()
@@ -13182,10 +13955,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             conversation=image_conversation_context(state.conversation),
         )
 
-        models: list[str] = []
-        for name in (IMAGE_MODEL, *IMAGE_FALLBACK_MODELS):
-            if name and name not in models:
-                models.append(name)
+        models = image_model_candidates()
         answer = ""
         for index, model in enumerate(models):
             if index:
@@ -15950,18 +16720,29 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         description = (
             f"{geo['display_name']} · "
             f"{geo['latitude']:.5f}, {geo['longitude']:.5f} · "
-            f"Wikipedia articles within {MAP_SEARCH_RADIUS_METERS / 1000:g} km"
+            f"places within {MAP_SEARCH_RADIUS_METERS / 1000:g} km · "
+            f"restaurants within {MAP_RESTAURANT_RADIUS_METERS / 1000:g} km"
         )
         self._sse(
             "news",
             {
                 "type": "start",
-                "source": "Wikipedia",
+                "source": "Nearby Places",
                 "feed": WIKIPEDIA_API_URL,
                 "sources": ["Wikipedia"],
                 "docs": True,
                 "docs_label": "Wikipedia",
                 "description": description,
+                "tabs": [
+                    {"id": "places", "label": "Nearby Places"},
+                    {"id": "restaurants", "label": "Nearby Restaurants"},
+                ],
+                "location": {
+                    "display_name": geo["display_name"],
+                    "latitude": geo["latitude"],
+                    "longitude": geo["longitude"],
+                    "radius_meters": MAP_RESTAURANT_RADIUS_METERS,
+                },
             },
         )
         for index, result in enumerate(results, 1):

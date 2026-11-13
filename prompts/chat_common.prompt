@@ -1,4 +1,22 @@
 task (completed) {
+  bug:
+  question: who is mark wiens, give me a research paper of 600 words
+  expect: there are many trunks of text so we should be able to give an answer
+  actual: ...The context chunks contain no information about anyone named "Mark Wiens."...
+}
+
+task (completed) {
+  bug: 
+  question: who is mark wiens, give me a detail answer of 600 words
+  expect: there are many trunks of text so we should be able to give an answer
+  actual: I need to answer your question about Mark Wiens, but I have to be honest with you about a limitation here. The provided context does not contain sufficient information to answer this question
+}
+
+task (completed) {
+  please add word count for each answer, we would need to know how many words are there in each answer
+}
+
+task (completed) {
   bug: question chain:
   1. where is nijo market
      (answer correctly)

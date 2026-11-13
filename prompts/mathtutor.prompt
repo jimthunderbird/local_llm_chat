@@ -1,4 +1,4 @@
-mathtutor_llm: ollama local model ornith:35b with no thinking
+mathtutor_llm: ollama local model ornith-1.5:35b with no thinking
 
 task.graph_linear_equations (completed) {
   for example:
@@ -29,7 +29,7 @@ task.graph_linear_equations (completed) {
   - Headless Chrome renders the model's actual `lines`-with-`expr` output for
     the reported system as two SVG paths with both legend labels; `functions`,
     full `y = ...` equations, and Unicode expressions also render two lines.
-  - A live ornith:35b answer for the reported system now emits one graph block
+  - A live ornith-1.5:35b answer for the reported system now emits one graph block
     with two `functions` entries and an intersection marker at (2.4, 0.2).
   - node --check on the browser script and py_compile on app/chat_server.py
     pass.
@@ -123,7 +123,7 @@ task.bug (completed) {
     test-paper source, avoid-list, and worked answers fit without an extra
     Ollama model reload.
   - Both generation and grading/solution prompts use the mathtutor model
-    (ornith:35b) with thinking disabled, as required.
+    (ornith-1.5:35b) with thinking disabled, as required.
 }
 
 task.mathtutor_command (completed) {

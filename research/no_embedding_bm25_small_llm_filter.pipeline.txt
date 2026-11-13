@@ -28,5 +28,5 @@ User Query
               ┌──────────────────────────
               │        Stage 1 & 2        
               │   (Filter -> Synthesis)
-              │   Synthesis Model:ornith:35b
+              │   Synthesis Model:ornith-1.5:35b
               └───────────────────────────┘

@@ -127,7 +127,7 @@
       The app tells Ollama to keep each model for <code>30m</code> after the last request.
       Every question resets that timer. If you stop asking for longer than the timer — or if
       Ollama evicts a model to make room — the next question must load the 21.4 GB
-      answer model again. Measured on this machine today, loading <code>ornith:35b</code>
+      answer model again. Measured on this machine today, loading <code>ornith-1.5:35b</code>
       took a median of <strong>5.9 s</strong> (up to 9.9 s), and the small
       <code>qwen3:1.7b</code> took 1.3 s. That time is paid before retrieval and before
       the first token.
@@ -151,7 +151,7 @@
       <a href="#verify">8. How to verify</a>
       <a href="#appendix">9. Appendix: code map</a>
       <a href="#models">10. Complete model inventory</a>
-      <a href="#small-model">11. Replacing ornith:35b with qwen3:1.7b</a>
+      <a href="#small-model">11. Replacing ornith-1.5:35b with qwen3:1.7b</a>
       <a href="#qwen-only">12. qwen3:1.7b-only configuration and prompt playbook</a>
       <a href="#lfm3-aura">13. LFM3-aura-grounded vs qwen3 and ornith</a>
     </div>
@@ -183,14 +183,14 @@
             │    ├─ SQLite FTS5 / BM25 over 26,334 chunks
             │    └─ sufficiency / candidate filter          → qwen3:1.7b, 8192 ctx
             └─ chat.answer → chat.stream_answer
-                 └─ answer generation                       → ornith:35b, 32768 ctx</code></pre>
+                 └─ answer generation                       → ornith-1.5:35b, 32768 ctx</code></pre>
 
     <table>
       <thead>
         <tr><th>Role</th><th>Model</th><th class="num">Resident size</th><th>Context used by the normal path</th></tr>
       </thead>
       <tbody>
-        <tr><td>Answer / dict / coding / wiki</td><td><code>ornith:35b</code> (34.7B Q4_K_M)</td><td class="num">21.4 GB</td><td>32768 for answers; 8192–16384 in some helper paths</td></tr>
+        <tr><td>Answer / dict / coding / wiki</td><td><code>ornith-1.5:35b</code> (34.7B Q4_K_M)</td><td class="num">21.4 GB</td><td>32768 for answers; 8192–16384 in some helper paths</td></tr>
         <tr><td>Query expansion / filter / translation</td><td><code>qwen3:1.7b</code> (2.0B Q4_K_M)</td><td class="num">1.9 GB</td><td>8192</td></tr>
         <tr><td>Conversation follow-up resolver</td><td><code>ministral-3:3b</code></td><td class="num">~3 GB</td><td>8192</td></tr>
       </tbody>
@@ -199,7 +199,7 @@
     <p>The important code constants are in <code>chat.py</code> and
       <code>app/chat_server.py</code>:</p>
     <pre><code>chat.py:126   EXPANSION_MODEL = "qwen3:1.7b"
-chat.py:129   CHAT_MODEL      = "ornith:35b"
+chat.py:129   CHAT_MODEL      = "ornith-1.5:35b"
 chat.py:201   EXPANSION_NUM_CTX = 8192
 chat.py:245   ANSWER_NUM_CTX    = 32768
 chat.py:247   OLLAMA_KEEP_ALIVE = "30m"
@@ -219,10 +219,10 @@ app/chat_server.py:2322  CONVERSATION_MODEL = "ministral-3:3b"</code></pre>
       <div class="card">
         <div class="k">Resident at 21:13 PST</div>
         <div class="v">21.4 GB + 1.9 GB</div>
-        <div class="n"><code>ornith:35b</code> @ 32768 ctx + <code>qwen3:1.7b</code> @ 8192 ctx, both 100% GPU. <code>ollama ps</code> showed “29 minutes from now” / “28 minutes from now”.</div>
+        <div class="n"><code>ornith-1.5:35b</code> @ 32768 ctx + <code>qwen3:1.7b</code> @ 8192 ctx, both 100% GPU. <code>ollama ps</code> showed “29 minutes from now” / “28 minutes from now”.</div>
       </div>
       <div class="card">
-        <div class="k">ornith:35b load today</div>
+        <div class="k">ornith-1.5:35b load today</div>
         <div class="v">5.9 s median</div>
         <div class="n">14 load events; min 1.5 s, max 9.9 s. All-time median 6.3 s, max 15.9 s (169 events).</div>
       </div>
@@ -267,7 +267,7 @@ app/chat_server.py:2322  CONVERSATION_MODEL = "ministral-3:3b"</code></pre>
       llama-server to start responding”. The distribution on 2026-11-11:</p>
 
     <div class="bar-row">
-      <div class="bar-label">ornith:35b</div>
+      <div class="bar-label">ornith-1.5:35b</div>
       <div class="bar-track"><div class="bar-fill bad" style="width:59%"></div></div>
       <div class="bar-label">5.9 s med</div>
     </div>
@@ -287,7 +287,7 @@ app/chat_server.py:2322  CONVERSATION_MODEL = "ministral-3:3b"</code></pre>
     <table>
       <thead><tr><th>Model</th><th class="num">Loads today</th><th class="num">Median</th><th class="num">Max</th><th class="num">All-time loads</th><th class="num">All-time median / max</th></tr></thead>
       <tbody>
-        <tr><td><code>ornith:35b</code></td><td class="num">14</td><td class="num">5.9 s</td><td class="num">9.9 s</td><td class="num">169</td><td class="num">6.3 s / 15.9 s</td></tr>
+        <tr><td><code>ornith-1.5:35b</code></td><td class="num">14</td><td class="num">5.9 s</td><td class="num">9.9 s</td><td class="num">169</td><td class="num">6.3 s / 15.9 s</td></tr>
         <tr><td><code>ministral-3:3b</code></td><td class="num">8</td><td class="num">2.4 s</td><td class="num">3.0 s</td><td class="num">32</td><td class="num">2.3 s / 3.0 s</td></tr>
         <tr><td><code>qwen3:1.7b</code></td><td class="num">16</td><td class="num">1.3 s</td><td class="num">1.5 s</td><td class="num">144</td><td class="num">1.3 s / 2.3 s</td></tr>
       </tbody>
@@ -300,7 +300,7 @@ app/chat_server.py:2322  CONVERSATION_MODEL = "ministral-3:3b"</code></pre>
     <table>
       <thead><tr><th>Model</th><th>Context-size occurrences in the log</th></tr></thead>
       <tbody>
-        <tr><td><code>ornith:35b</code></td><td><code>-c 32768</code> ×118, <code>-c 4096</code> ×25, <code>-c 8192</code> ×17, <code>-c 16384</code> ×9, <code>-c 2048</code> ×1</td></tr>
+        <tr><td><code>ornith-1.5:35b</code></td><td><code>-c 32768</code> ×118, <code>-c 4096</code> ×25, <code>-c 8192</code> ×17, <code>-c 16384</code> ×9, <code>-c 2048</code> ×1</td></tr>
         <tr><td><code>qwen3:1.7b</code></td><td><code>-c 8192</code> ×106, <code>-c 32768</code> ×21, <code>-c 4096</code> ×16, <code>-c 2048</code> ×1</td></tr>
         <tr><td><code>ministral-3:3b</code></td><td><code>-c 8192</code> ×31, <code>-c 32768</code> ×1</td></tr>
       </tbody>
@@ -308,13 +308,13 @@ app/chat_server.py:2322  CONVERSATION_MODEL = "ministral-3:3b"</code></pre>
     <p>Some of those events are historical, but the current code still contains live
       mismatches for the large model:</p>
     <pre><code>chat.py:245                 ANSWER_NUM_CTX = 32768             # normal answers
-app/chat_server.py:2031     ANSWER_TRANSLATION_NUM_CTX = 8192   # 中文 button, ornith:35b
+app/chat_server.py:2031     ANSWER_TRANSLATION_NUM_CTX = 8192   # 中文 button, ornith-1.5:35b
 app/chat_server.py:2043     LINE_EXPLAIN_NUM_CTX = 16384        # code line “?” button
 app/chat_server.py:2150     IMAGE_NUM_CTX = 16384               # image questions
 chat.py:2494                generate_text(..., num_ctx=8192)    # default; /wiki helpers omit it</code></pre>
     <p>The <code>/wiki</code> path uses <code>WIKI_ENTITY_MODEL</code>,
       <code>WIKI_KEYWORD_MODEL</code>, and <code>WIKI_ANSWER_MODEL</code>, all aliases of
-      <code>CHAT_MODEL = "ornith:35b"</code> (<code>chat.py:440–442</code>), and calls
+      <code>CHAT_MODEL = "ornith-1.5:35b"</code> (<code>chat.py:440–442</code>), and calls
       <code>generate_text()</code> without an explicit context, so those calls load
       ornith at 8192. The next ordinary question then asks for 32768 and forces a reload.
       The same applies after the 中文 translation button (8192), a line explanation (16384),
@@ -465,7 +465,7 @@ chat.py:2494                generate_text(..., num_ctx=8192)    # default; /wiki
       ministral (8192). This refreshes the 30-minute timer without generating a real
       answer.</p>
     <pre><code># pseudo-code, not implemented
-targets = [("ornith:35b", 32768), ("qwen3:1.7b", 8192), ("ministral-3:3b", 8192)]
+targets = [("ornith-1.5:35b", 32768), ("qwen3:1.7b", 8192), ("ministral-3:3b", 8192)]
 while True:
     sleep(5 * 60)
     for model, num_ctx in targets:
@@ -484,7 +484,7 @@ while True:
       machine less responsive.</p>
 
     <h3>7.2 Use one <code>num_ctx</code> per model</h3>
-    <p>Make every call to <code>ornith:35b</code> use the same context length (for example
+    <p>Make every call to <code>ornith-1.5:35b</code> use the same context length (for example
       32768), and every call to <code>qwen3:1.7b</code>/<code>ministral-3:3b</code> use
       8192. In particular, change:</p>
     <ul>
@@ -590,7 +590,7 @@ curl -s http://localhost:11434/api/generate \
     <table>
       <thead><tr><th>Area</th><th>Location</th><th>Why it matters</th></tr></thead>
       <tbody>
-        <tr><td>Model names</td><td><code>chat.py:126–139</code></td><td>ornith:35b is the answer model; qwen3:1.7b handles expansion/filter/translation.</td></tr>
+        <tr><td>Model names</td><td><code>chat.py:126–139</code></td><td>ornith-1.5:35b is the answer model; qwen3:1.7b handles expansion/filter/translation.</td></tr>
         <tr><td>Context sizes</td><td><code>chat.py:201</code>, <code>chat.py:245</code></td><td>8192 for small helpers, 32768 for answers.</td></tr>
         <tr><td>Keep-alive</td><td><code>chat.py:247</code>, <code>chat.py:2516</code>, <code>chat.py:2868</code>, <code>chat.py:5217</code></td><td>Every request asks Ollama to keep the model for 30 minutes.</td></tr>
         <tr><td>Prewarm</td><td><code>chat.py:5196–5223</code></td><td>Warms qwen (8192) and ornith (32768); does not warm ministral.</td></tr>
@@ -628,7 +628,7 @@ curl -s http://localhost:11434/api/generate \
       <div class="card">
         <div class="k">Distinct model names</div>
         <div class="v">4</div>
-        <div class="n"><code>ornith:35b</code>, <code>qwen3:1.7b</code>,
+        <div class="n"><code>ornith-1.5:35b</code>, <code>qwen3:1.7b</code>,
           <code>ministral-3:3b</code>, <code>gemma3:latest</code></div>
       </div>
       <div class="card">
@@ -640,7 +640,7 @@ curl -s http://localhost:11434/api/generate \
       <div class="card">
         <div class="k">Warmed at startup</div>
         <div class="v">2</div>
-        <div class="n"><code>ornith:35b</code> and <code>qwen3:1.7b</code>; the
+        <div class="n"><code>ornith-1.5:35b</code> and <code>qwen3:1.7b</code>; the
           conversation and vision models are not prewarmed.</div>
       </div>
       <div class="card">
@@ -658,7 +658,7 @@ curl -s http://localhost:11434/api/generate \
       </thead>
       <tbody>
         <tr>
-          <td><code>ornith:35b</code></td>
+          <td><code>ornith-1.5:35b</code></td>
           <td>Main answer and generation model</td>
           <td class="num">21.4 GB</td>
           <td>Normal RAG answers, coding, wiki, math tutor, dictionary, summaries,
@@ -685,7 +685,7 @@ curl -s http://localhost:11434/api/generate \
           <td><code>gemma3:latest</code></td>
           <td>Vision fallback</td>
           <td class="num">3.3 GB</td>
-          <td>Used only if the configured image model (<code>ornith:35b</code> by default)
+          <td>Used only if the configured image model (<code>ornith-1.5:35b</code> by default)
             is text-only or unavailable. Text questions never use it. The fallback list can
             be overridden with <code>OLLAMA_IMAGE_FALLBACK_MODELS</code>.</td>
         </tr>
@@ -699,7 +699,7 @@ curl -s http://localhost:11434/api/generate \
       </thead>
       <tbody>
         <tr>
-          <td rowspan="10"><code>ornith:35b</code></td>
+          <td rowspan="10"><code>ornith-1.5:35b</code></td>
           <td><code>chat.CHAT_MODEL</code></td>
           <td>Default RAG answer used by <code>/api/ask</code>, /article, /news,
             /video, /gutenberg and other scoped chats</td>
@@ -795,7 +795,7 @@ curl -s http://localhost:11434/api/generate \
         <tr>
           <td><code>gemma3:latest</code></td>
           <td><code>IMAGE_FALLBACK_MODELS</code></td>
-          <td>Retry image questions when <code>ornith:35b</code> rejects the image or is
+          <td>Retry image questions when <code>ornith-1.5:35b</code> rejects the image or is
             not installed</td>
           <td><code>app/chat_server.py:2143–2146, 9789–9801</code></td>
         </tr>
@@ -804,11 +804,11 @@ curl -s http://localhost:11434/api/generate \
 
     <div class="callout warn">
       <strong>Performance consequence.</strong> There are only three text models, but
-      <code>ornith:35b</code> is requested with several context sizes: 32768 for normal
+      <code>ornith-1.5:35b</code> is requested with several context sizes: 32768 for normal
       answers, 16384 for line explanation and image questions, and 8192 for the 中文
       button and some helper paths. Ollama treats a changed <code>num_ctx</code> as a
       different runtime configuration and reloads the model. In addition,
-      <code>chat.prewarm()</code> warms only <code>ornith:35b</code> (32768) and
+      <code>chat.prewarm()</code> warms only <code>ornith-1.5:35b</code> (32768) and
       <code>qwen3:1.7b</code> (8192); it does not warm <code>ministral-3:3b</code> or
       <code>gemma3:latest</code>. A first follow-up or the first image question can
       therefore still pay a cold-load penalty.
@@ -823,10 +823,10 @@ curl -s http://localhost:11434/api/generate \
       counted as a language model.</p>
 
   <section id="small-model">
-    <h2>11. Replacing <code>ornith:35b</code> with <code>qwen3:1.7b</code></h2>
+    <h2>11. Replacing <code>ornith-1.5:35b</code> with <code>qwen3:1.7b</code></h2>
     <p class="muted small">Added 2026-11-11. Research only; no application code was changed for this task.
       This section answers: is it feasible to use only <code>qwen3:1.7b</code> and remove
-      <code>ornith:35b</code>, what breaks, and what configuration would be required?</p>
+      <code>ornith-1.5:35b</code>, what breaks, and what configuration would be required?</p>
 
     <div class="callout bad">
       <strong>Verdict: not feasible as a wholesale replacement.</strong>
@@ -835,14 +835,14 @@ curl -s http://localhost:11434/api/generate \
       <code>/ask</code> path). It is not a safe replacement for the final RAG answer,
       code generation, the math tutor, image questions, or long-context synthesis.
       The practical configuration is a <strong>hybrid</strong>: keep
-      <code>ornith:35b</code> for the high-stakes answer path and use
+      <code>ornith-1.5:35b</code> for the high-stakes answer path and use
       <code>qwen3:1.7b</code> where a small model is enough.
     </div>
 
     <h3>11.1 What was measured</h3>
     <p>All measurements were made on the same machine as the rest of this report:
       macOS, 36 GiB unified memory, Ollama 0.40.14, <code>qwen3:1.7b</code> Q4_K_M,
-      <code>ornith:35b</code> Q4_K_M, thinking disabled, temperature 0.1–0.2.
+      <code>ornith-1.5:35b</code> Q4_K_M, thinking disabled, temperature 0.1–0.2.
       The answer-style test used a 186-token RAG prompt; the long-context test used a
       15.9k-token prompt with 30 numbered passages and one needle. These are spot
       measurements, not a formal benchmark suite, but they reproduce the behaviour
@@ -850,7 +850,7 @@ curl -s http://localhost:11434/api/generate \
 
     <table>
       <thead>
-        <tr><th>Signal</th><th class="num">qwen3:1.7b</th><th class="num">ornith:35b</th><th>Implication</th></tr>
+        <tr><th>Signal</th><th class="num">qwen3:1.7b</th><th class="num">ornith-1.5:35b</th><th>Implication</th></tr>
       </thead>
       <tbody>
         <tr>
@@ -911,7 +911,7 @@ curl -s http://localhost:11434/api/generate \
 
     <table>
       <thead>
-        <tr><th>App-like task</th><th><code>qwen3:1.7b</code></th><th><code>ornith:35b</code></th><th>Impact if replaced</th></tr>
+        <tr><th>App-like task</th><th><code>qwen3:1.7b</code></th><th><code>ornith-1.5:35b</code></th><th>Impact if replaced</th></tr>
       </thead>
       <tbody>
         <tr>
@@ -956,7 +956,7 @@ curl -s http://localhost:11434/api/generate \
     </table>
 
     <p>The Qwen3 technical report confirms the general size gap even though it does
-      not benchmark <code>ornith:35b</code>: the non-thinking Qwen3-1.7B scores
+      not benchmark <code>ornith-1.5:35b</code>: the non-thinking Qwen3-1.7B scores
       <strong>64.4 on MMLU-Redux</strong>, <strong>73.0 on MATH-500</strong>, and
       <strong>11.6 on LiveCodeBench v5</strong> (Table 20 of the report). Those are
       respectable for 1.7B, but they are not the profile of a model that should own
@@ -978,7 +978,7 @@ curl -s http://localhost:11434/api/generate \
           <td>Multi-step arithmetic and strict JSON problem batches need the stronger
             model; the failure mode is a wrong worked answer, not just style.</td></tr>
         <tr><td>Image questions</td><td><strong>No</strong></td>
-          <td><code>qwen3:1.7b</code> is text-only. Keep <code>ornith:35b</code> (or the
+          <td><code>qwen3:1.7b</code> is text-only. Keep <code>ornith-1.5:35b</code> (or the
             configured vision fallback).</td></tr>
         <tr><td>Wiki / article synthesis</td><td><strong>No</strong></td>
           <td>Long-context synthesis and entity handling are weaker; the existing
@@ -994,7 +994,7 @@ curl -s http://localhost:11434/api/generate \
             sentence groups. Spot-check terminology; fall back on failure.</td></tr>
         <tr><td>Conversation follow-up resolver</td><td><strong>Only with hardening</strong></td>
           <td>The measured rewrite failed. Require a standalone question containing a
-            named entity, or fall back to <code>ornith:35b</code>.</td></tr>
+            named entity, or fall back to <code>ornith-1.5:35b</code>.</td></tr>
         <tr><td>Dictionary lookup</td><td><strong>Yes, with a quality check</strong></td>
           <td>Short, constrained generation. It may be less nuanced; keep the existing
             structured output format.</td></tr>
@@ -1008,12 +1008,12 @@ curl -s http://localhost:11434/api/generate \
 
     <h3>11.4 Recommended configuration</h3>
     <h4>Option A — recommended hybrid (keep both)</h4>
-    <p>Keep <code>ornith:35b</code> as the answer model and move only narrow helper
+    <p>Keep <code>ornith-1.5:35b</code> as the answer model and move only narrow helper
       roles to <code>qwen3:1.7b</code>:</p>
     <pre><code># Answer / code / math / image / wiki / podcast
-CHAT_MODEL          = "ornith:35b"   # num_ctx 32768, think=False, keep_alive=30m
-CODE_GENERATION_MODEL = "ornith:35b"
-MATHUTOR_MODEL      = "ornith:35b"
+CHAT_MODEL          = "ornith-1.5:35b"   # num_ctx 32768, think=False, keep_alive=30m
+CODE_GENERATION_MODEL = "ornith-1.5:35b"
+MATHUTOR_MODEL      = "ornith-1.5:35b"
 
 # Narrow helpers
 EXPANSION_MODEL     = "qwen3:1.7b"   # num_ctx 8192, think=False
@@ -1023,7 +1023,7 @@ DICT_MODEL          = "qwen3:1.7b"
 SIMPLE_ANSWER_MODEL = "qwen3:1.7b"
 
 # Follow-up resolver: prefer ornith; use qwen only with a rewrite validator
-CONVERSATION_MODEL  = "ornith:35b"</code></pre>
+CONVERSATION_MODEL  = "ornith-1.5:35b"</code></pre>
     <p>Use <strong>one <code>num_ctx</code> per model</strong> and prewarm both at
       those exact values (see §7.1–7.3). With <code>qwen3:1.7b</code> at 8192 the
       combined resident set is roughly 21 GB + 2 GB, which is much safer than
@@ -1084,7 +1084,7 @@ CONVERSATION_MODEL  = "ornith:35b"</code></pre>
       <strong>Note on §10.</strong> The inventory in §10 describes the pre-unification
       code, when expansion/filter/translation used <code>qwen3:1.7b</code> and
       conversation used <code>ministral-3:3b</code>. The current code uses
-      <code>ornith:35b</code> for all text roles. This section is the feasibility
+      <code>ornith-1.5:35b</code> for all text roles. This section is the feasibility
       analysis for deliberately moving some of those roles back to a small model.
     </div>
 
@@ -1116,7 +1116,7 @@ CONVERSATION_MODEL  = "ornith:35b"</code></pre>
 
     <h3>12.1 What changes when the engine is 1.7B instead of 35B</h3>
     <table>
-      <thead><tr><th>Property</th><th><code>ornith:35b</code> behaviour</th><th><code>qwen3:1.7b</code> behaviour</th><th>Design response</th></tr></thead>
+      <thead><tr><th>Property</th><th><code>ornith-1.5:35b</code> behaviour</th><th><code>qwen3:1.7b</code> behaviour</th><th>Design response</th></tr></thead>
       <tbody>
         <tr><td>Instruction following</td><td>Handles several rules and negative constraints in one prompt</td><td>Follows 2–3 short, positive rules; long rule lists are partially ignored</td><td>One task per call, short checklist, show an example instead of describing the format</td></tr>
         <tr><td>Long-context synthesis</td><td>Composes facts across 10–20 passages and resolves conflicts</td><td>Finds a needle but misses surrounding qualifications; loses middle context</td><td>8–12 short passages, strongest evidence first and last, extract sentences before writing</td></tr>
@@ -1473,7 +1473,7 @@ no title; if the word is unknown, say so in Contextual Meaning.</code></pre>
       JSON and a repair loop, is worth more than any wording change. Expect helper roles to
       match the current behaviour, expect simple factual RAG answers to remain usable, and
       expect code generation, multi-step math, and high-stakes synthesis to stay below
-      <code>ornith:35b</code>. Keep the evaluation set and the calibrated “partial answer +
+      <code>ornith-1.5:35b</code>. Keep the evaluation set and the calibrated “partial answer +
       gap” response so the remaining quality loss is visible instead of silent.
     </div>
     <p>If the constraint can be relaxed later, the cheapest upgrade is not a 35B model for
@@ -1495,7 +1495,7 @@ no title; if the word is unknown, say so in Contextual Meaning.</code></pre>
       macOS, 36 GiB unified memory, Ollama 0.40.14, Metal offload, thinking disabled.
       This section answers: would it be a good replacement for <code>qwen3:1.7b</code>,
       how fast is it, how does its answer quality compare with <code>qwen3:1.7b</code>
-      and <code>ornith:35b</code>, and what is the best configuration?</p>
+      and <code>ornith-1.5:35b</code>, and what is the best configuration?</p>
 
     <div class="callout warn">
       <strong>Verdict: a strong grounding/refusal gate, not a drop-in general replacement.</strong>
@@ -1568,7 +1568,7 @@ Question: &lt;User Question&gt;</code></pre>
 
     <table>
       <thead>
-        <tr><th>Signal</th><th class="num">LFM3 aura Q8_0</th><th class="num">qwen3:1.7b</th><th class="num">ornith:35b</th><th>Reading</th></tr>
+        <tr><th>Signal</th><th class="num">LFM3 aura Q8_0</th><th class="num">qwen3:1.7b</th><th class="num">ornith-1.5:35b</th><th>Reading</th></tr>
       </thead>
       <tbody>
         <tr><td>Resident size at 32k</td><td class="num">2.05 GB</td><td class="num">4.94 GB</td><td class="num">21.36 GB</td><td>LFM uses 58% less memory than qwen at the same context.</td></tr>
@@ -1605,7 +1605,7 @@ Question: &lt;User Question&gt;</code></pre>
       <code>research/100_trunks_prompt.txt</code> answer prompt with four real corpus chunks.</p>
 
     <table>
-      <thead><tr><th>Role / test</th><th>LFM3 aura</th><th>qwen3:1.7b</th><th>ornith:35b</th><th>Use LFM?</th></tr></thead>
+      <thead><tr><th>Role / test</th><th>LFM3 aura</th><th>qwen3:1.7b</th><th>ornith-1.5:35b</th><th>Use LFM?</th></tr></thead>
       <tbody>
         <tr><td>Short grounded answer (“Where is Nijo Market and what does it sell?”)</td><td>Correct, one sentence</td><td>Correct, adds unasked opening time</td><td>Correct, bullet list</td><td>Yes</td></tr>
         <tr><td>Unanswerable (“How many stalls?”)</td><td>Exact fixed refusal, 53 chars</td><td>Refuses in 455 chars</td><td>Echoed “[1] Nijo Market” in this format</td><td>Yes, strongest</td></tr>
@@ -1642,7 +1642,7 @@ The provided context does not contain sufficient information to answer this ques
 
     <h3>13.4 Is it a good replacement for <code>qwen3:1.7b</code>?</h3>
     <p>It depends on which job <code>qwen3:1.7b</code> was doing. The current working tree has
-      already unified every text role on <code>ornith:35b</code> (§7.1), so the practical question
+      already unified every text role on <code>ornith-1.5:35b</code> (§7.1), so the practical question
       is really “should this model enter the stack at all?” The role-by-role answer:</p>
 
     <table>
@@ -1666,7 +1666,7 @@ The provided context does not contain sufficient information to answer this ques
       <strong>Best fit in this codebase.</strong> Add it as a second, small
       <em>grounding verifier</em> alongside the writer: use it to decide whether the retrieved
       evidence can answer the question, and/or to check each claim in a generated answer against
-      the evidence. At 32k, <code>ornith:35b</code> (21.4 GB) plus this model (2.05 GB) fits in
+      the evidence. At 32k, <code>ornith-1.5:35b</code> (21.4 GB) plus this model (2.05 GB) fits in
       36 GB with room for the browser, so both can stay resident. This addresses the exact failure
       seen in §11/§12 — a small model that hallucinates on unanswerable questions — without
       accepting its short-answer limitation.
@@ -1742,14 +1742,14 @@ Schema: {"type":"object","properties":{
       location, seafood, and opening time.</p>
 
     <h3>13.6 How to integrate without breaking the current stack</h3>
-    <p>The working tree currently uses <code>ornith:35b</code> for every text role. Three options,
+    <p>The working tree currently uses <code>ornith-1.5:35b</code> for every text role. Three options,
       in order of preference:</p>
     <ol>
       <li><strong>Verifier alongside ornith (recommended).</strong> Add a
         <code>GROUNDING_MODEL</code> constant and a small verification module. Use it only for:
         (a) pre-answer sufficiency on contexts above roughly 8k tokens or high-risk questions
         (prices, dates, visa/medical/legal rules), and (b) post-answer claim checks. Keep
-        <code>ornith:35b</code> as the writer. Set <code>OLLAMA_MAX_LOADED_MODELS=2</code> and
+        <code>ornith-1.5:35b</code> as the writer. Set <code>OLLAMA_MAX_LOADED_MODELS=2</code> and
         refresh both models in the watchdog. Expected benefit: fewer confident wrong answers and
         no change to answer style.</li>
       <li><strong>Retire qwen3:1.7b, keep one small model.</strong> Since qwen is already gone
@@ -1791,7 +1791,7 @@ Schema: {"type":"object","properties":{
       writer.</strong> It is the best model tested at the one thing this RAG stack most needs:
       declining when the evidence is insufficient, without inventing a price, a stall count, or
       a location. Its 32k footprint (2.05 GB) and prefill speed (1.2–1.5k tok/s) make it practical
-      to run beside <code>ornith:35b</code> and to verify long evidence cheaply. Its weaknesses
+      to run beside <code>ornith-1.5:35b</code> and to verify long evidence cheaply. Its weaknesses
       are exactly the roles that need free-form generation: long answers, follow-up rewriting,
       translation, code, and math. Do not replace <code>qwen3:1.7b</code> wholesale with it;
       replace only the verifier/relevance/refusal roles, keep deterministic validation and JSON
@@ -1836,7 +1836,7 @@ Schema: {"type":"object","properties":{
       refuse unanswerable questions cleanly, answer partially answerable questions without a false
       refusal, list explicitly stated items, detect conflicts, and answer in Simplified Chinese.
       It does this in ~0.3 s for the gate plus ~1–5 s for the answer, at ~2.0 GB resident.
-      It remains weaker than <code>ornith:35b</code> at long-form 200+ word articles, multi-entity
+      It remains weaker than <code>ornith-1.5:35b</code> at long-form 200+ word articles, multi-entity
       synthesis, dense grading taxonomies, visa/legal synthesis, code, and math. The best LFM-only
       product is therefore a <em>shorter, more conservative, better-grounded</em> assistant, not an
       equal-quality replacement for the 35B writer.
@@ -2031,7 +2031,7 @@ markets.
 Question: What time does Nijo Market open, what does it sell, and where is it?</code></pre>
     <p>More important than the format is precision. The current app can feed the model up to
       20 BM25 chunks and 4,096 estimated context tokens. LFM3-aura is much more distractible than
-      <code>ornith:35b</code>. In a real-corpus test, a Nijo Market article retrieved two chunks
+      <code>ornith-1.5:35b</code>. In a real-corpus test, a Nijo Market article retrieved two chunks
       whose bodies were about the adjacent <em>Sapporo Morning Market</em> (5am opening, blankets
       and folding chairs). The model transferred those facts into the Nijo article. A wagyu
       “levels” question retrieved a video chunk about “ten levels of Wagyu” and the model answered
@@ -2083,7 +2083,7 @@ Question: What time does Nijo Market open, what does it sell, and where is it?</
 
     <h3>14.6 Measured results on the real corpus</h3>
     <p>These runs used the real 26,356-trunk global corpus, top-12 BM25 contexts, the gate + writer
-      pipeline above, and <code>ornith:35b</code> with the current
+      pipeline above, and <code>ornith-1.5:35b</code> with the current
       <code>research/100_trunks_prompt.txt</code> as the quality reference. They are small
       spot-checks, not a production benchmark.</p>
     <table>
@@ -2135,7 +2135,7 @@ Question: What time does Nijo Market open, what does it sell, and where is it?</
       comparisons, dense taxonomies (wagyu grades, visa categories), code generation, math, or
       translation of nuanced prose. On those tasks the measured gap is large, not marginal.</p>
     <p>If the product can keep a second model on disk but not resident, use an escalation policy:
-      LFM handles the default path; route to <code>ornith:35b</code> (load on demand) when the
+      LFM handles the default path; route to <code>ornith-1.5:35b</code> (load on demand) when the
       question matches a long-form/code/math/translation intent, when the gate is true but the
       writer answer is shorter than the requested length, or when the answer mentions a sibling
       entity that the question did not ask about. If only LFM may run, accept shorter answers and
@@ -2212,7 +2212,7 @@ def clean_answer(text):
       phrases, and keep <code>num_ctx=8192</code>, <code>think=false</code>,
       <code>temperature=0.1</code>. This is a substantial improvement over the current path, but it
       is still a 1.7B writer: expect shorter, more conservative answers and weaker long-form
-      synthesis than <code>ornith:35b</code>.
+      synthesis than <code>ornith-1.5:35b</code>.
     </div>
 
     <p class="small muted">Sources: local Ollama measurements and prompt experiments in §14.2–14.6;

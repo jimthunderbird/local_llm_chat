@@ -274,7 +274,7 @@
       termination.
     </li>
     <li>
-      <strong>The answer is streamed by <code>ornith:35b</code>.</strong>
+      <strong>The answer is streamed by <code>ornith-1.5:35b</code>.</strong>
       The prompt is the existing file-based 100-trunk prompt template, with
       article-specific instructions prepended. Answers stream over SSE into a
       per-book chat pane, and every word remains dictionary-clickable.
@@ -319,7 +319,7 @@
                           article router
                           → BM25 / section expansion / iterative evidence
                           → prompt template + book evidence
-                          → ornith:35b streams tokens
+                          → ornith-1.5:35b streams tokens
               └─ SSE: meta → delta* → done
                     └─ right pane renders Markdown + clickable words</pre>
   <p>
@@ -822,7 +822,7 @@ sort by document order; enforce the final token cap</code></pre>
   <div class="grid">
     <div class="card">
       <h4>Answer model</h4>
-      <p><code>ornith:35b</code>, thinking disabled, requested context window
+      <p><code>ornith-1.5:35b</code>, thinking disabled, requested context window
         <code>ANSWER_NUM_CTX = 32,768</code> tokens, streamed token by token.</p>
     </div>
     <div class="card">
@@ -1014,7 +1014,7 @@ sort by document order; enforce the final token cap</code></pre>
       question term.
     </li>
     <li>
-      <strong>Answer time:</strong> dominated by <code>ornith:35b</code>
+      <strong>Answer time:</strong> dominated by <code>ornith-1.5:35b</code>
       generation. Retrieval is lexical and local.
     </li>
   </ul>

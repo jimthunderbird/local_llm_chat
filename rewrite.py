@@ -33,7 +33,7 @@ def normalize_argv(argv):
 
 
 # The YouTube-learning pipeline always uses the large answer model.
-MODEL = os.environ.get("OLLAMA_YOUTUBE_MODEL", "ornith:35b")
+MODEL = os.environ.get("OLLAMA_YOUTUBE_MODEL", "ornith-1.5:35b")
 OUTPUT_DIR = Path.cwd() / ".chat" / "articles_cache"
 YOUTUBE_PREFIX = "youtube_"
 

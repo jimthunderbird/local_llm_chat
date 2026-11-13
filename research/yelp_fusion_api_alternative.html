@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Free, no-API-key alternatives to Yelp Fusion v3 for restaurant details</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a22;
+    --panel-2: #1d2130;
+    --text: #e6e8ee;
+    --muted: #9aa3b2;
+    --line: #2b3142;
+    --accent: #7aa2ff;
+    --accent-2: #5ee0b5;
+    --warn: #ffcc66;
+    --bad: #ff7a7a;
+    --good: #6ee7a8;
+    --code: #0b0d12;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    padding: 44px 28px 28px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #171b26 0%, #0f1117 100%);
+  }
+  header .wrap, main { max-width: 1080px; margin: 0 auto; }
+  h1 { margin: 0 0 10px; font-size: 2.05rem; line-height: 1.2; letter-spacing: -0.02em; }
+  h2 { margin: 42px 0 14px; font-size: 1.38rem; letter-spacing: -0.01em; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+  h3 { margin: 26px 0 8px; font-size: 1.08rem; color: #dfe4ef; }
+  p { margin: 10px 0; }
+  .sub { color: var(--muted); margin: 0; }
+  .sub code { color: #cfd6e6; }
+  main { padding: 18px 28px 80px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, kbd { font-family: var(--mono); font-size: 0.9em; }
+  code { background: #232838; color: #dbe3f7; padding: 0.12em 0.35em; border-radius: 4px; }
+  pre {
+    background: var(--code);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    line-height: 1.45;
+  }
+  pre code { background: none; padding: 0; color: #d7dcea; }
+  .callout {
+    border: 1px solid #33405d;
+    background: #182033;
+    border-left: 4px solid var(--accent);
+    padding: 14px 16px;
+    border-radius: 6px;
+    margin: 18px 0;
+  }
+  .callout.good { border-left-color: var(--good); background: #14251f; border-color: #24513f; }
+  .callout.warn { border-left-color: var(--warn); background: #2a2414; border-color: #5a4a22; }
+  .callout.bad { border-left-color: var(--bad); background: #2a1719; border-color: #5a2a2e; }
+  .callout strong { color: #fff; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.92rem; }
+  th, td { text-align: left; vertical-align: top; padding: 10px 11px; border-bottom: 1px solid var(--line); }
+  th { color: #cfd8e8; background: #1b2030; font-weight: 600; }
+  tr:hover td { background: #151a25; }
+  .tag { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 0.72rem; font-weight: 700; letter-spacing: .02em; }
+  .tag.free { background: #153326; color: #7ee2ad; }
+  .tag.key { background: #2a2414; color: #ffd479; }
+  .tag.paid { background: #2a1719; color: #ff9b9b; }
+  .tag.partial { background: #222a3d; color: #a9c1ff; }
+  .toc { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 20px; margin: 20px 0 8px; }
+  .toc ol { margin: 8px 0 0; padding-left: 22px; }
+  .toc li { margin: 4px 0; }
+  .muted { color: var(--muted); }
+  .score { font-weight: 700; }
+  .good-text { color: var(--good); }
+  .warn-text { color: var(--warn); }
+  .bad-text { color: var(--bad); }
+  ul, ol { padding-left: 24px; }
+  li { margin: 5px 0; }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+  .card h3 { margin-top: 0; }
+  .small { font-size: 0.88rem; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 28px 0; }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>Free, no-API-key alternatives to Yelp Fusion v3</h1>
+    <p class="sub">
+      Research for the <code>/map → Nearby Restaurants</code> feature:
+      given a restaurant's latitude and longitude, retrieve its style of food,
+      address, and opening hours without a Yelp key or per-call charges.
+      Researched 2026-11-13.
+    </p>
+  </div>
+</header>
+
+<main>
+  <div class="callout good">
+    <strong>Recommendation:</strong> use the
+    <a href="https://wiki.openstreetmap.org/wiki/Overpass_API">OpenStreetMap Overpass API</a>
+    as the primary source (it is already what the <code>/map</code> list uses),
+    add a small cache, and parse <code>opening_hours</code> with a real
+    parser. For broader name/category/address coverage, optionally index
+    <a href="https://docs.overturemaps.org/guides/places/">Overture Maps Places</a>
+    or <a href="https://docs.foursquare.com/data-products/docs/fsq-places-open-source">Foursquare OS Places</a>
+    locally. If an API key is acceptable, <a href="https://www.geoapify.com/places-api/">Geoapify</a>
+    (3,000 credits/day free) is the closest drop-in hosted alternative.
+    Keep Yelp only if Yelp ratings/reviews or Yelp-branded content are a hard
+    requirement.
+  </div>
+
+  <div class="toc">
+    <strong>Contents</strong>
+    <ol>
+      <li><a href="#requirements">Requirements and evaluation criteria</a></li>
+      <li><a href="#matrix">Options at a glance</a></li>
+      <li><a href="#overpass">OpenStreetMap Overpass API (recommended)</a></li>
+      <li><a href="#nominatim">Nominatim (address only)</a></li>
+      <li><a href="#geoapify">Geoapify Places / Place Details (key, free tier)</a></li>
+      <li><a href="#overture">Overture Maps Places (open data)</a></li>
+      <li><a href="#foursquare">Foursquare OS Places (open data)</a></li>
+      <li><a href="#yelp">Yelp Fusion v3 (baseline / paid)</a></li>
+      <li><a href="#thirdparty">No-key third-party wrappers and paid proxies</a></li>
+      <li><a href="#hours">Opening-hours parsing</a></li>
+      <li><a href="#limits">Rate limits, caching, licensing</a></li>
+      <li><a href="#decision">Decision matrix</a></li>
+      <li><a href="#architecture">Recommended architecture for this project</a></li>
+      <li><a href="#implementation">Implementation sketch</a></li>
+      <li><a href="#references">References</a></li>
+    </ol>
+  </div>
+
+  <h2 id="requirements">1. Requirements and evaluation criteria</h2>
+  <p>The feature needs a detail lookup keyed by coordinates (or by the OSM
+    object already present in the <code>/map</code> result), returning as much
+    of the following as possible:</p>
+  <ul>
+    <li><strong>Name</strong> and restaurant/café/fast-food type.</li>
+    <li><strong>Style of food</strong> (cuisine), ideally normalized.</li>
+    <li><strong>Address</strong> (street, number, city, postcode).</li>
+    <li><strong>Opening hours</strong>, preferably machine-readable and
+      summarizable ("open now", "closes at 22:00").</li>
+    <li>Bonus: phone, website, price level, dietary/accessibility tags,
+      outdoor seating, delivery/takeaway.</li>
+    <li><strong>Free</strong> and <strong>no API key</strong> for the primary
+      path; no mandatory billing account.</li>
+    <li>Usable from a local Python server with a normal HTTP client and a
+      reasonable response time.</li>
+  </ul>
+  <p>Criteria used in the matrix: cost, key requirement, coordinate lookup,
+    cuisine, address, hours, coverage, freshness, operational risk, and
+    licensing/caching constraints.</p>
+
+  <h2 id="matrix">2. Options at a glance</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Option</th>
+        <th>Cost / key</th>
+        <th>Cuisine</th>
+        <th>Address</th>
+        <th>Hours</th>
+        <th>Lookup model</th>
+        <th>Verdict</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>OSM Overpass</strong></td>
+        <td><span class="tag free">free, no key</span></td>
+        <td>Yes (<code>cuisine</code>)</td>
+        <td>Yes (<code>addr:*</code>)</td>
+        <td>Yes (<code>opening_hours</code>)</td>
+        <td>Live HTTP query by radius or OSM id</td>
+        <td class="good-text">Best fit; already in use</td>
+      </tr>
+      <tr>
+        <td><strong>OSM Nominatim</strong></td>
+        <td><span class="tag free">free, no key</span></td>
+        <td>No</td>
+        <td>Yes</td>
+        <td>No</td>
+        <td>Geocoding / reverse geocoding</td>
+        <td>Geocoding only</td>
+      </tr>
+      <tr>
+        <td><strong>Geoapify Places + Details</strong></td>
+        <td><span class="tag key">key, 3,000 credits/day free</span></td>
+        <td>Yes (categories + conditions)</td>
+        <td>Yes</td>
+        <td>Yes</td>
+        <td>Hosted JSON API</td>
+        <td class="good-text">Best key-based fallback</td>
+      </tr>
+      <tr>
+        <td><strong>Overture Maps Places</strong></td>
+        <td><span class="tag free">free, no key</span></td>
+        <td>Yes (taxonomy)</td>
+        <td>Yes</td>
+        <td class="bad-text">No</td>
+        <td>Bulk Parquet / DuckDB / S3</td>
+        <td>Great enrichment, not real-time</td>
+      </tr>
+      <tr>
+        <td><strong>Foursquare OS Places</strong></td>
+        <td><span class="tag free">free, account/token</span></td>
+        <td>Yes (categories)</td>
+        <td>Yes</td>
+        <td class="bad-text">No (OS schema)</td>
+        <td>Bulk Parquet / Iceberg / HuggingFace</td>
+        <td>Great enrichment, not real-time</td>
+      </tr>
+      <tr>
+        <td><strong>Yelp Fusion v3</strong></td>
+        <td><span class="tag paid">paid after trial</span></td>
+        <td>Yes</td>
+        <td>Yes</td>
+        <td>Yes</td>
+        <td>Hosted API</td>
+        <td>Best reviews/ratings, costly</td>
+      </tr>
+      <tr>
+        <td><strong>Third-party OSM wrappers</strong></td>
+        <td><span class="tag partial">varies</span></td>
+        <td>Usually</td>
+        <td>Usually</td>
+        <td>Usually</td>
+        <td>Hosted wrapper</td>
+        <td>Convenience, weak guarantees</td>
+      </tr>
+      <tr>
+        <td><strong>Scraping Yelp/Google</strong></td>
+        <td><span class="tag free">no key</span></td>
+        <td>Yes</td>
+        <td>Yes</td>
+        <td>Yes</td>
+        <td>HTML scraping</td>
+        <td class="bad-text">Avoid: ToS/legal/anti-bot risk</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="overpass">3. OpenStreetMap Overpass API (recommended)</h2>
+  <p>Overpass is a read-only query engine over OpenStreetMap. It needs no key,
+    supports a radius search around a coordinate, and returns the raw OSM tags
+    that contain exactly the fields we need. The existing <code>/map</code>
+    restaurant tab already obtains its list this way.</p>
+
+  <h3>Query by coordinate</h3>
+<pre><code>[out:json][timeout:20];
+(
+  nwr["amenity"~"^(restaurant|fast_food|cafe|food_court)$"]
+    (around:1200,37.7955487,-122.3934746);
+);
+out center 60;</code></pre>
+
+  <p>Each returned element has <code>type</code> (<code>node</code>,
+    <code>way</code>, or <code>relation</code>), <code>id</code>, a coordinate
+    (or <code>center</code> for ways), and a <code>tags</code> object.</p>
+
+  <h3>Query one exact restaurant</h3>
+  <p>The list already knows the OSM object identity, so the detail lookup can
+    fetch that exact object instead of re-searching by name and risking a
+    mismatch:</p>
+<pre><code>[out:json][timeout:15];
+node(365489125);
+out center;</code></pre>
+  <p>Use <code>way(...)</code> or <code>relation(...)</code> for the other OSM
+    types. This is cheaper and more accurate than a second <code>around</code>
+    query.</p>
+
+  <h3>Useful tags</h3>
+  <table>
+    <thead>
+      <tr><th>Tag</th><th>Meaning / use</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>name</code></td><td>Restaurant name.</td></tr>
+      <tr><td><code>amenity</code></td><td><code>restaurant</code>, <code>cafe</code>, <code>fast_food</code>, <code>food_court</code>, <code>pub</code>, <code>bar</code>.</td></tr>
+      <tr><td><code>cuisine</code></td><td>Food style; can be a semicolon list such as <code>pizza;italian</code>.</td></tr>
+      <tr><td><code>addr:housenumber</code>, <code>addr:street</code>, <code>addr:city</code>, <code>addr:postcode</code></td><td>Address components.</td></tr>
+      <tr><td><code>opening_hours</code></td><td>OSM opening-hours expression; may be complex.</td></tr>
+      <tr><td><code>opening_hours:kitchen</code></td><td>Kitchen hours when they differ from the venue hours.</td></tr>
+      <tr><td><code>website</code>, <code>contact:website</code></td><td>Official site or menu page.</td></tr>
+      <tr><td><code>phone</code>, <code>contact:phone</code></td><td>Contact number.</td></tr>
+      <tr><td><code>takeaway</code>, <code>delivery</code></td><td><code>yes</code>/<code>no</code> service flags.</td></tr>
+      <tr><td><code>outdoor_seating</code>, <code>wheelchair</code></td><td>Useful extra detail.</td></tr>
+      <tr><td><code>diet:vegetarian</code>, <code>diet:vegan</code>, <code>diet:halal</code>, <code>diet:kosher</code></td><td>Dietary options.</td></tr>
+      <tr><td><code>stars</code></td><td>Michelin-starred restaurants, when mapped.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Coverage and quality</h3>
+  <p>OSM is community-maintained, so completeness varies by city. A real
+    Berlin restaurant extract (August 2026) illustrates the pattern:</p>
+  <table>
+    <thead>
+      <tr><th>Field</th><th>Filled</th><th>Share of 4,760 restaurants</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>name</code></td><td>4,732</td><td>99.4%</td></tr>
+      <tr><td><code>addr:street</code></td><td>3,869</td><td>81.3%</td></tr>
+      <tr><td><code>cuisine</code></td><td>3,787</td><td>79.6%</td></tr>
+      <tr><td><code>opening_hours</code></td><td>3,679</td><td>77.3%</td></tr>
+      <tr><td><code>website</code></td><td>1,807</td><td>38.0%</td></tr>
+      <tr><td><code>phone</code></td><td>1,594</td><td>33.5%</td></tr>
+    </tbody>
+  </table>
+  <p class="muted small">Berlin is one of the best-mapped cities; smaller or
+    less-edited areas will have lower coverage. Identity and location are
+    near-complete, food category and hours are usually present, and contact
+    details are the weak spot. OSM has no ratings, reviews, or popularity
+    signals.</p>
+
+  <h3>Strengths</h3>
+  <ul>
+    <li>Free, no key, no billing account, no per-call charge.</li>
+    <li>Direct lat/lon radius query and exact OSM-object lookup.</li>
+    <li>Returns cuisine, address, opening hours, phone, website, dietary and
+      accessibility tags in one request.</li>
+    <li>ODbL data can be stored, transformed, and used commercially with
+      attribution; a derivative database may need to remain ODbL.</li>
+  </ul>
+
+  <h3>Weaknesses</h3>
+  <ul>
+    <li>No ratings, reviews, photos, or popularity.</li>
+    <li>Coverage and freshness vary; some restaurants are missing or stale.</li>
+    <li>Public servers are volunteer-run and can be slow, return 429/504, or
+      change policy. Commercial apps are expected to self-host or pay a
+      provider.</li>
+    <li><code>opening_hours</code> is a rich, non-trivial syntax and must be
+      parsed rather than shown raw for a polished UI.</li>
+  </ul>
+
+  <h2 id="nominatim">4. Nominatim (address only)</h2>
+  <p><a href="https://nominatim.openstreetmap.org/">Nominatim</a> is OSM's
+    geocoder. It is free and keyless, but it only resolves names to
+    coordinates or coordinates to an address/place. It does not expose
+    cuisine or opening hours and should not be used as a POI database.</p>
+  <ul>
+    <li>Good for: geocoding <code>/map &lt;location&gt;</code> and reverse
+      geocoding a point to a formatted address.</li>
+    <li>Usage policy: identify the app with a real User-Agent and contact,
+      maximum ~1 request/second, cache results, no bulk scraping.</li>
+    <li>Already used by <code>/map</code> for geocoding.</li>
+  </ul>
+
+  <h2 id="geoapify">5. Geoapify Places / Place Details (key, free tier)</h2>
+  <p><a href="https://www.geoapify.com/places-api/">Geoapify</a> is a hosted
+    location platform built primarily on OpenStreetMap plus Wikidata. It is
+    the closest hosted replacement for the Yelp detail call if a free API key
+    is acceptable.</p>
+  <table>
+    <thead>
+      <tr><th>Item</th><th>Details</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Key</td><td>Required (free account, no credit card for the free plan).</td></tr>
+      <tr><td>Free plan</td><td>3,000 credits/day, up to 5 requests/second.</td></tr>
+      <tr><td>Places cost</td><td>1 credit per 20 returned places (e.g. 50 results = 3 credits).</td></tr>
+      <tr><td>Place Details</td><td>1 credit for the <code>details</code> feature; optional radius/isochrone features cost extra.</td></tr>
+      <tr><td>Fields</td><td>Name, address, categories, opening hours, website, contact data, cuisine/category conditions, geometry.</td></tr>
+      <tr><td>Lookup</td><td>By <code>place_id</code>, by <code>lat</code>/<code>lon</code>, or by OSM <code>osm_id</code> + <code>osm_type</code>.</td></tr>
+      <tr><td>Storage</td><td>Results may be cached/stored/redistributed with attribution.</td></tr>
+      <tr><td>Attribution</td><td>OpenStreetMap required; "Powered by Geoapify" required on the free plan.</td></tr>
+    </tbody>
+  </table>
+  <p>Example details lookup by OSM identity:</p>
+<pre><code>GET https://api.geoapify.com/v2/place-details
+    ?osm_id=365489125&amp;osm_type=n
+    &amp;apiKey=YOUR_KEY</code></pre>
+  <p>Why not make it primary? It still requires a key and account, and the
+    free plan has a daily credit ceiling. It is an excellent fallback when OSM
+    tags are missing or when normalized categories/hours are worth the key
+    management.</p>
+
+  <h2 id="overture">6. Overture Maps Places (open data)</h2>
+  <p><a href="https://docs.overturemaps.org/guides/places/">Overture Places</a>
+    is a free, open, global POI dataset (88.4 million places in the October
+    2026 release). It is not a live point-query API: the data is distributed as
+    GeoParquet on Amazon S3 and Azure Blob Storage, queried with DuckDB, Spark,
+    or the Overture Python client.</p>
+  <ul>
+    <li><strong>License:</strong> CDLA Permissive 2.0 / Apache 2.0 depending on
+      source; no ODbL share-alike for the Overture data itself.</li>
+    <li><strong>Fields:</strong> names, <code>basic_category</code> and
+      <code>taxonomy</code>, addresses, websites, phones, socials, emails,
+      brand, <code>confidence</code>, <code>operating_status</code>, GERS id.</li>
+    <li><strong>Missing:</strong> opening hours. <code>operating_status</code>
+      means "open / temporarily closed / permanently closed", not opening
+      hours.</li>
+    <li><strong>Coverage:</strong> global, but the project documents duplicates,
+      a high junk rate, and low property completeness; filter by
+      <code>confidence</code>.</li>
+    <li><strong>Use:</strong> download or pre-index a city/region and use it to
+      fill missing names, categories, addresses, phones, and websites around
+      an OSM restaurant. Keep OSM as the hours source.</li>
+  </ul>
+
+  <h2 id="foursquare">7. Foursquare OS Places (open data)</h2>
+  <p><a href="https://docs.foursquare.com/data-products/docs/fsq-places-open-source">Foursquare
+    OS Places</a> is a free, Apache-2.0 global POI dataset (20+ attributes
+    and more than 1,000 categories). Like Overture, it is bulk data (Parquet/Iceberg, ~263 GB at one
+    point), not a keyless REST detail endpoint.</p>
+  <ul>
+    <li>Fields include name, address parts, locality/region/postcode, phone,
+      website, email, social handles, and Foursquare category ids/labels.</li>
+    <li>The open schema does <strong>not</strong> include opening hours; hours,
+      photos, and richer attributes are in the commercial Places Pro/Premium
+      products.</li>
+    <li>Access now requires a free Places Portal account/access token, or
+      approved HuggingFace access; attribution to Foursquare and the Apache
+      NOTICE is required.</li>
+    <li>Best used as a local enrichment index for names, categories, and
+      contact details, not as a keyless replacement for Yelp hours.</li>
+  </ul>
+
+  <h2 id="yelp">8. Yelp Fusion v3 (baseline / paid)</h2>
+  <p>Yelp remains the strongest source for ratings, review counts, price
+    level, photos, and Yelp-branded content. It is no longer a permanent free
+    API:</p>
+  <ul>
+    <li>30-day trial: 5,000 API calls for evaluation only.</li>
+    <li>Paid plans (checked 2026): Base <strong>$229/month</strong>, Enhanced
+      <strong>$299/month</strong>, Premium <strong>$643/month</strong>, each
+      including 30,000 calls/month and a 5,000/day cap; overage billed per
+      1,000 calls.</li>
+    <li>The Base plan has no photos and no review excerpts; Enhanced/Premium
+      add a few photos/excerpts.</li>
+    <li>Caching of Yelp content is limited to 24 hours; business IDs may be
+      stored indefinitely.</li>
+    <li>Business Search + Business Details provide exactly the fields this
+      feature uses (name, categories, address, phone, hours, rating, price),
+      which is why the current implementation works well when a key is
+      available.</li>
+  </ul>
+  <p>Verdict: keep Yelp as an optional enrichment if ratings/reviews or
+    Yelp-branded data are required, not as the only path for basic restaurant
+    details.</p>
+
+  <h2 id="thirdparty">9. No-key third-party wrappers and paid proxies</h2>
+  <p>Several services wrap OSM/Overpass and expose a "no key" REST endpoint.
+    They can be useful for prototypes, but they add a dependency, have no
+    service-level guarantee, and often have unclear long-term funding or
+    rate-limit policies.</p>
+  <table>
+    <thead>
+      <tr><th>Service</th><th>Model</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>BizData API</td>
+        <td>Free, no key, OSM-backed</td>
+        <td>37 categories, returns name, address, phone, website, coordinates,
+          opening hours. Advertises no key and no rate limit; no SLA. Useful
+          for a quick prototype, not a critical dependency.</td>
+      </tr>
+      <tr>
+        <td>2s.io <code>poi.near</code></td>
+        <td>No key, pay-per-call (USDC)</td>
+        <td>Overpass-backed, nearest-first POIs with cuisine, address, phone,
+          website, opening hours. A free trial call exists, but it is not a
+          free production service and requires a crypto wallet.</td>
+      </tr>
+      <tr>
+        <td>POS.DO</td>
+        <td>Free tier, no key; paid fields</td>
+        <td>Restaurant records in selected markets, core fields free, reviews
+          and AI insights paid per call. Niche coverage; not a general
+          worldwide replacement.</td>
+      </tr>
+      <tr>
+        <td>Commercial Overpass hosts</td>
+        <td>Key / paid</td>
+        <td>Geofabrik, Overspan, Tracestrack, etc. Useful if this grows into a
+          production app that must not depend on volunteer servers.</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="callout warn">
+    <strong>Scraping warning:</strong> scraping Yelp or Google Maps pages may
+    appear free, but it violates their terms, is fragile against markup and
+    anti-bot changes, and creates legal/operational risk. It is not a
+    recommended replacement.
+  </div>
+
+  <h2 id="hours">10. Opening-hours parsing</h2>
+  <p>OSM's <code>opening_hours</code> value is a specification, not a simple
+    string. Examples range from <code>24/7</code> and
+    <code>Mo-Fr 11:00-22:00</code> to rules with holidays, seasonal ranges,
+    sunset, and "off" overrides:</p>
+<pre><code>Mo-Fr 11:00-22:00; Sa 10:00-23:00; Su 10:00-21:00
+Mo-Fr 12:00-18:00; We off; Sa,PH 12:00-17:00
+Mo-Su 08:30-09:00 off; Tu-Su,PH 14:00-14:30 off</code></pre>
+  <p>Recommended parsers for this project:</p>
+  <table>
+    <thead>
+      <tr><th>Library</th><th>Language</th><th>License</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><a href="https://github.com/remi-dupre/opening-hours-rs/tree/master/opening-hours-py">opening_hours_py</a></td>
+        <td>Python (Rust bindings)</td>
+        <td>MIT OR Apache-2.0</td>
+        <td>Fast, supports state, next change, normalization, timezone and
+          holiday data. Best fit for a Python server.</td>
+      </tr>
+      <tr>
+        <td><a href="https://github.com/opening-hours/opening_hours.js">opening_hours.js</a></td>
+        <td>JavaScript</td>
+        <td>LGPL-3.0</td>
+        <td>Reference implementation; can be run from Node if a JS service is
+          preferred.</td>
+      </tr>
+      <tr>
+        <td><a href="https://github.com/opening-hours/pyopening_hours">pyopening_hours</a></td>
+        <td>Python wrapper</td>
+        <td>AGPL-3.0</td>
+        <td>Wraps opening_hours.js; check the AGPL implications before
+          shipping.</td>
+      </tr>
+      <tr>
+        <td><a href="https://github.com/rezemika/humanized_opening_hours">humanized_opening_hours</a></td>
+        <td>Python</td>
+        <td>AGPL-3.0</td>
+        <td>Human-readable descriptions; project development is paused.</td>
+      </tr>
+      <tr>
+        <td><a href="https://github.com/KDE/kopeninghours">KOpeningHours</a></td>
+        <td>C++/Python bindings</td>
+        <td>KDE license</td>
+        <td>Very complete parser/validator; heavier dependency.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>Minimum useful behavior for the UI: show the raw expression when parsing
+    fails, compute <code>open now</code> and <code>next change</code> when
+    parsing succeeds, and never invent hours for restaurants without an
+    <code>opening_hours</code> tag.</p>
+
+  <h2 id="limits">11. Rate limits, caching, licensing</h2>
+  <h3>Overpass</h3>
+  <ul>
+    <li>The main <code>overpass-api.de</code> fair-use guideline is roughly
+      <strong>10,000 queries and 1 GB of downloads per day</strong> for
+      occasional use; recurring apps should stay around 100 queries and 10 MB
+      per day, and all users of an app count toward the total.</li>
+    <li>Commercial use should use a self-hosted or paid Overpass instance.</li>
+    <li>Send a meaningful <code>User-Agent</code>; avoid parallel query
+      storms; on 429 pause at least 30 seconds and check
+      <code>/api/status</code>; on 504 reduce <code>[timeout:]</code> /
+      <code>[maxsize:]</code>. Overpass may not provide a useful
+      <code>Retry-After</code>, so back off conservatively.</li>
+    <li>The public <code>overpass-api.de</code> instance is frequently
+      overloaded. Alternatives with global coverage include
+      <code>overpass.openstreetmap.fr</code>,
+      <code>overpass.private.coffee</code>, and
+      <code>maps.mail.ru/osm/tools/overpass</code>; read each instance's usage
+      policy. The current <code>/map</code> code already tries the French
+      instance first, then <code>overpass-api.de</code>, then
+      <code>kumi.systems</code>.</li>
+  </ul>
+
+  <h3>Geoapify</h3>
+  <ul>
+    <li>Free plan: 3,000 credits/day, 5 requests/second.</li>
+    <li>Places: 1 credit per 20 returned places; Place Details:
+      1 credit for the details feature.</li>
+    <li>OSM attribution required; "Powered by Geoapify" on the free plan.</li>
+    <li>Results may be cached, stored, and redistributed with attribution.</li>
+  </ul>
+
+  <h3>Licensing</h3>
+  <ul>
+    <li><strong>OSM:</strong> ODbL. Attribution "© OpenStreetMap contributors"
+      is required. A derived database may need to be offered under ODbL; using
+      the data internally or building an app on top needs attribution.</li>
+    <li><strong>Overture:</strong> CDLA Permissive 2.0 / Apache 2.0 per source;
+      attribution/licensing page applies.</li>
+    <li><strong>Foursquare OS Places:</strong> Apache 2.0 plus the Foursquare
+      NOTICE; preserve attribution.</li>
+    <li><strong>Yelp:</strong> Yelp display requirements; content caching
+      limited to 24 hours, business IDs may be stored indefinitely.</li>
+  </ul>
+
+  <h2 id="decision">12. Decision matrix</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Option</th>
+        <th>No key</th>
+        <th>No cost</th>
+        <th>Lat/lon detail</th>
+        <th>Cuisine</th>
+        <th>Address</th>
+        <th>Hours</th>
+        <th>Ops risk</th>
+        <th>Overall</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>OSM Overpass</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="warn-text">Medium (public servers)</td>
+        <td class="score good-text">5/5</td>
+      </tr>
+      <tr>
+        <td>Geoapify</td>
+        <td class="bad-text">No</td>
+        <td class="good-text">Free tier</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Low</td>
+        <td class="score warn-text">4/5</td>
+      </tr>
+      <tr>
+        <td>Overture Places</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="bad-text">Bulk only</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="bad-text">No</td>
+        <td class="warn-text">Medium (indexing)</td>
+        <td class="score warn-text">3.5/5</td>
+      </tr>
+      <tr>
+        <td>Foursquare OS Places</td>
+        <td class="good-text">Account/token</td>
+        <td class="good-text">Yes</td>
+        <td class="bad-text">Bulk only</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="bad-text">No</td>
+        <td class="warn-text">Medium (indexing)</td>
+        <td class="score warn-text">3.5/5</td>
+      </tr>
+      <tr>
+        <td>Yelp Fusion</td>
+        <td class="bad-text">No</td>
+        <td class="bad-text">Trial only</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Low</td>
+        <td class="score warn-text">3/5</td>
+      </tr>
+      <tr>
+        <td>Third-party OSM wrapper</td>
+        <td class="good-text">Usually</td>
+        <td class="warn-text">Varies</td>
+        <td class="good-text">Usually</td>
+        <td class="good-text">Usually</td>
+        <td class="good-text">Usually</td>
+        <td class="good-text">Usually</td>
+        <td class="bad-text">High (no SLA)</td>
+        <td class="score warn-text">2.5/5</td>
+      </tr>
+      <tr>
+        <td>Scraping</td>
+        <td class="good-text">No key</td>
+        <td class="good-text">No fee</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="good-text">Yes</td>
+        <td class="bad-text">Very high (legal/ToS)</td>
+        <td class="score bad-text">1/5</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="architecture">13. Recommended architecture for this project</h2>
+  <ol>
+    <li><strong>Primary detail call:</strong> use the OSM object already
+      selected in the <code>Nearby Restaurants</code> list. Return
+      <code>osm_type</code> and <code>osm_id</code> with the list payload, then
+      fetch that exact object from Overpass when the modal opens. Keep the
+      lat/lon radius query as a fallback if the OSM id is missing.</li>
+    <li><strong>Normalize tags</strong> into the UI model: name, type,
+      cuisine list, address, hours, phone, website, service flags, dietary
+      and accessibility tags.</li>
+    <li><strong>Parse hours</strong> with <code>opening_hours_py</code>; show
+      "open now", "closes at …", and the next change when available; fall
+      back to the raw expression if parsing fails.</li>
+    <li><strong>Cache</strong> per OSM id (for example 1–24 hours) and
+      rate-limit Overpass calls. A restaurant's name/address/hours do not
+      change every minute.</li>
+    <li><strong>Keep Yelp optional:</strong> if <code>YELP_API_KEY</code> is
+      present, merge rating, review count, price, and photos into the same
+      modal. If absent, the OSM section still works with no key.</li>
+    <li><strong>Optional enrichment later:</strong> index a city extract from
+      Overture or Foursquare OS Places to fill missing names/categories/
+      addresses/phones, or use Geoapify if a free key is acceptable. Do not
+      use either as the hours source.</li>
+    <li><strong>Attribution:</strong> display "© OpenStreetMap contributors"
+      wherever the OSM detail data is shown; add the Yelp or Geoapify
+      attribution when those sources are enabled.</li>
+  </ol>
+
+  <h2 id="implementation">14. Implementation sketch</h2>
+  <p>Fetch one restaurant by its OSM identity:</p>
+<pre><code>import requests
+
+OVERPASS_URL = "https://overpass.openstreetmap.fr/api/interpreter"
+
+def fetch_osm_restaurant(osm_type: str, osm_id: int) -&gt; dict:
+    query = f"[out:json][timeout:15];\n{osm_type}({osm_id});\nout center;"
+    response = requests.get(
+        OVERPASS_URL,
+        params={"data": query},
+        headers={
+            "User-Agent": "local-llm-chat/1.0 (+https://github.com/)",
+            "Accept": "application/json",
+        },
+        timeout=(8, 30),
+    )
+    response.raise_for_status()
+    elements = response.json().get("elements", [])
+    return elements[0] if elements else {}</code></pre>
+
+  <p>Normalize the tags:</p>
+<pre><code>def normalize_restaurant(element: dict) -&gt; dict:
+    tags = element.get("tags") or {}
+    return {
+        "name": tags.get("name", ""),
+        "type": (tags.get("amenity") or "").replace("_", " ").title(),
+        "cuisine": [
+            value.strip()
+            for value in (tags.get("cuisine") or "").split(";")
+            if value.strip()
+        ],
+        "address": " ".join(
+            value for value in (
+                tags.get("addr:housenumber", ""),
+                tags.get("addr:street", ""),
+                tags.get("addr:city", ""),
+                tags.get("addr:postcode", ""),
+            ) if value
+        ),
+        "opening_hours": tags.get("opening_hours", ""),
+        "phone": tags.get("phone") or tags.get("contact:phone", ""),
+        "website": tags.get("website") or tags.get("contact:website", ""),
+        "takeaway": tags.get("takeaway", ""),
+        "delivery": tags.get("delivery", ""),
+        "outdoor_seating": tags.get("outdoor_seating", ""),
+        "wheelchair": tags.get("wheelchair", ""),
+    }</code></pre>
+
+  <p>Parse the hours (optional but recommended):</p>
+<pre><code>from opening_hours import OpeningHours
+
+def summarize_hours(value: str, lat: float, lon: float) -&gt; dict:
+    if not value:
+        return {"raw": "", "open_now": None, "next_change": None}
+    try:
+        hours = OpeningHours(value, coords=(lat, lon))
+        return {
+            "raw": value,
+            "open_now": hours.state() == "open",
+            "next_change": hours.next_change().isoformat(),
+        }
+    except Exception:
+        return {"raw": value, "open_now": None, "next_change": None}</code></pre>
+
+  <p class="muted small">The exact <code>opening_hours_py</code> API can vary
+    by version; check the installed package's documentation. The important
+    design rule is to keep parsing failures non-fatal and show the raw
+    expression.</p>
+
+  <h2 id="references">15. References</h2>
+  <ul>
+    <li>OpenStreetMap Wiki — Overpass API:
+      <a href="https://wiki.openstreetmap.org/wiki/Overpass_API">https://wiki.openstreetmap.org/wiki/Overpass_API</a></li>
+    <li>OpenStreetMap Wiki — <code>amenity=restaurant</code>:
+      <a href="https://wiki.openstreetmap.org/wiki/Tag:amenity%3Drestaurant">https://wiki.openstreetmap.org/wiki/Tag:amenity%3Drestaurant</a></li>
+    <li>OpenStreetMap Wiki — <code>Key:opening_hours</code> specification:
+      <a href="https://wiki.openstreetmap.org/wiki/Key:opening_hours/specification">https://wiki.openstreetmap.org/wiki/Key:opening_hours/specification</a></li>
+    <li>Overpass API user manual — Commons / fair use:
+      <a href="https://dev.overpass-api.de/overpass-doc/en/preface/commons.html">https://dev.overpass-api.de/overpass-doc/en/preface/commons.html</a></li>
+    <li>Overspan — “Get every restaurant in a city as a dataset, free and legally” (Berlin coverage figures, 2026):
+      <a href="https://overspan.dev/blog/build-poi-dataset">https://overspan.dev/blog/build-poi-dataset</a></li>
+    <li>Nominatim usage policy:
+      <a href="https://operations.osmfoundation.org/policies/nominatim/">https://operations.osmfoundation.org/policies/nominatim/</a></li>
+    <li>Geoapify — Places API and pricing:
+      <a href="https://www.geoapify.com/places-api/">https://www.geoapify.com/places-api/</a>,
+      <a href="https://www.geoapify.com/pricing/">https://www.geoapify.com/pricing/</a>,
+      <a href="https://apidocs.geoapify.com/how-to/place-discovery/place-details-by-id-or-coordinates/">Place Details by ID or coordinates</a></li>
+    <li>Overture Maps — Places guide and schema:
+      <a href="https://docs.overturemaps.org/guides/places/">https://docs.overturemaps.org/guides/places/</a>,
+      <a href="https://docs.overturemaps.org/schema/reference/places/place/">https://docs.overturemaps.org/schema/reference/places/place/</a></li>
+    <li>Foursquare — OS Places schema and access:
+      <a href="https://docs.foursquare.com/data-products/docs/places-os-data-schema">https://docs.foursquare.com/data-products/docs/places-os-data-schema</a>,
+      <a href="https://docs.foursquare.com/data-products/docs/access-fsq-os-places">https://docs.foursquare.com/data-products/docs/access-fsq-os-places</a></li>
+    <li>Yelp — Places API plans, pricing, FAQ:
+      <a href="https://docs.developer.yelp.com/docs/plans">https://docs.developer.yelp.com/docs/plans</a>,
+      <a href="https://business.yelp.com/data/resources/pricing/">https://business.yelp.com/data/resources/pricing/</a>,
+      <a href="https://docs.developer.yelp.com/docs/places-faq">https://docs.developer.yelp.com/docs/places-faq</a></li>
+    <li>opening-hours parsers:
+      <a href="https://github.com/remi-dupre/opening-hours-rs/tree/master/opening-hours-py">opening_hours_py</a>,
+      <a href="https://github.com/opening-hours/opening_hours.js">opening_hours.js</a>,
+      <a href="https://github.com/opening-hours/pyopening_hours">pyopening_hours</a>,
+      <a href="https://github.com/rezemika/humanized_opening_hours">humanized_opening_hours</a></li>
+  </ul>
+
+  <hr>
+  <p class="muted small">
+    Scope note: this report evaluates free/keyless options for restaurant
+    detail fields only. Ratings, review text, popularity, and photos are not
+    available from OSM at Yelp's depth; if those are required, Yelp or another
+    commercial provider remains necessary.
+  </p>
+</main>
+</body>
+</html>

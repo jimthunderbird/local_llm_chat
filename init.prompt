@@ -23,7 +23,7 @@ group app/chat.html and app/chat_server.py {
   }
 
   task (completed) {
-    DO NOT display "ornith:35b" in the chat window UI
+    DO NOT display "ornith-1.5:35b" in the chat window UI
   }
 
   task (completed) {
@@ -106,7 +106,7 @@ group app/chat.html and app/chat_server.py {
 
   task (completed) {
     if the tag is rust or golang, if the answer is not found, do not switch to another tag to search, instead:
-    1. turn to the rust or golang documents together with ollama local model ornith:35b see if we can get the answer
+    1. turn to the rust or golang documents together with ollama local model ornith-1.5:35b see if we can get the answer
   }
 
   task (completed) {
@@ -149,7 +149,7 @@ group app/chat.html and app/chat_server.py {
   }
 
   task.code_sample_question (completed) {
-    when the question is about showing code sample on certain programming language feature/structure/architecture, use CODING_MODE ollama local model: ornith:35b without the thinking option
+    when the question is about showing code sample on certain programming language feature/structure/architecture, use CODING_MODE ollama local model: ornith-1.5:35b without the thinking option
   }
 
   task (completed) {
@@ -174,7 +174,7 @@ group app/chat.html and app/chat_server.py {
 
   task (completed) {
     add a button "中文" next to the beginning of the answer, when click:
-    - translate the answer to chinese using ollama local model ornith:35b to translate the answer to simplified chinese, paragraph by paragraph with streaming
+    - translate the answer to chinese using ollama local model ornith-1.5:35b to translate the answer to simplified chinese, paragraph by paragraph with streaming
   }
 
   task (completed) {
@@ -266,7 +266,7 @@ group chat.py {
   }
 
   task (completed) {
-    use ollama local model ornith:35b as the chat model    
+    use ollama local model ornith-1.5:35b as the chat model    
   }
 
   task (completed) {
@@ -274,7 +274,7 @@ group chat.py {
   }
 
   task (completed) {
-    use ollama local model ornith:35b as the chat model    
+    use ollama local model ornith-1.5:35b as the chat model    
   }
 
   task (completed) {
@@ -322,7 +322,7 @@ group chat.py {
   }
 
   task (completed) {
-    use ollama local model ornith:35b as the chat model
+    use ollama local model ornith-1.5:35b as the chat model
   }
 
   task (completed) {
@@ -379,7 +379,7 @@ group chat.py {
     - find {the corresponding trunk contents} for {top_embeddings}
     - add all corresponding trunk contents to {context}
     - question_prompt: <context>{context}</context> based on <context>, perform the instruction or answer the following question: {question}
-    - send {question_prompt} to ollama local model ornith:35b, stream output
+    - send {question_prompt} to ollama local model ornith-1.5:35b, stream output
   }
 
   task (completed) {
@@ -590,7 +590,7 @@ task (completed) {
   - it should have one cil argument <youtube_video_hash>
   - logic:
   - transcript_content: take ./.chat/youtube_transcripts/<youtube_video_hash>.transcript 
-  - rewritten_content: use ollama model ornith:35b to rewrite {transcript_content}
+  - rewritten_content: use ollama model ornith-1.5:35b to rewrite {transcript_content}
   - note: 
   - during the transcript rewriting process, extract all the detail knowledges
   - during the transcript rewriting process, stream the rewritten content to the terminal
@@ -604,7 +604,7 @@ task (completed) {
   example: FTwxtyOEGyM
   we then fetch the english transcript of https://www.youtube.com/watch?v=FTwxtyOEGyM
   - it should use free youtube api to fetch the transcript of a youtube video
-  - use ollama model ornith:35b to summarize transcript into 20 words and store into ./.chat/youtube_transcripts/<youtube_video_hash>.title
+  - use ollama model ornith-1.5:35b to summarize transcript into 20 words and store into ./.chat/youtube_transcripts/<youtube_video_hash>.title
   - the transcript should be stored in ./.chat/youtube_transcripts/<youtube_video_hash>.transcript
 }
 
@@ -633,7 +633,7 @@ group golang_doc_search.py {
     create ./golang_doc_search.py <question>:
     - source: https://go.dev/doc/
     - use {source} as the only source of truth
-    - use ollama local model ornith:35b (no thinking mode) to understand the question, find out keywords to search in {source}
+    - use ollama local model ornith-1.5:35b (no thinking mode) to understand the question, find out keywords to search in {source}
   }
 }
 
@@ -765,7 +765,7 @@ group: generate_tags.py {
       youtube_video_hash: youtube_video_hash_related_to_{title}
       for each {tag} in {tags} {
         if {youtube_video_hash} does not exist in ./tags/{tag} {
-          use ollama local model ornith:35b to find out if {youtube_video_hash} is related to {tag}
+          use ollama local model ornith-1.5:35b to find out if {youtube_video_hash} is related to {tag}
           if yes {
             append youtube_video_hash_related_to_{title} to ./tags/{tag} with new line at the end 
           }
@@ -780,7 +780,7 @@ group: generate_tags.py {
     - tags: examine all files in ./tags
     for each {tag} in {tags} {
       if {youtube_video_hash} does not exist in ./tags/{tag} {
-        use ollama local model ornith:35b to find out if {youtube_video_hash} is related to {tag}
+        use ollama local model ornith-1.5:35b to find out if {youtube_video_hash} is related to {tag}
         if yes {
           append youtube_video_hash_related_to_{title} to ./tags/{tag} with new line at the end 
         }

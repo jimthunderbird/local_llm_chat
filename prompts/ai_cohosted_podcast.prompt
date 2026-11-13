@@ -25,7 +25,7 @@ keeps that 12-hour window and adds the word "news" to receive stories.
 lets the browser add the podcast action only to this list.
 - Added `POST /api/ai_news_podcast`. It accepts the five stories, fetches any
 missing article bodies on demand, builds a bounded source block, and streams a
-HOST/GUEST script from ornith:35b (approximately 2000 words, 5000-token
+HOST/GUEST script from ornith-1.5:35b (approximately 2000 words, 5000-token
 budget). The `start` event returns the two male TTS voices.
 - `/api/tts` now accepts an optional `voice`; the cache key includes the voice.
 `_podcast_voice_defaults()` picks `am_michael`/`am_adam` for Kokoro,
