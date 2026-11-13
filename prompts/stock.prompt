@@ -1,0 +1,27 @@
+task (completed) {
+  create command /stock <stock_symobl> {
+    use endpoint: https://query2.finance.yahoo.com/v1/finance/search?q=<stock_symbol>
+
+    please show:
+    - brief description on this symbol
+    - detail of this symbol {
+      # 1. Define a realistic User-Agent (Yahoo blocks default curl user-agents)
+      UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+      # 2. Fetch the initial session cookie from fc.yahoo.com
+      curl -s -c cookies.txt -A "$UA" "https://fc.yahoo.com" > /dev/null
+
+      # 3. Use that cookie to fetch your dynamic crumb token
+      CRUMB=$(curl -s -b cookies.txt -A "$UA" "https://query1.finance.yahoo.com/v1/test/getcrumb")
+
+      # 4. Query quoteSummary passing both the cookie jar and the URL-encoded crumb
+      curl -s -b cookies.txt -A "$UA" \
+      --get \
+      --data-urlencode "modules=assetProfile,financialData,defaultKeyStatistics,incomeStatementHistory" \
+      --data-urlencode "crumb=$CRUMB" \
+      "https://query2.finance.yahoo.com/v10/finance/quoteSummary/AAPL" | jq .
+    }
+    - list of articles related to this symbol
+    UI/UX should be similar to /news search <keyword>
+  }
+}

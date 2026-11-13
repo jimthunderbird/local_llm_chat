@@ -1085,6 +1085,19 @@
     letter-spacing: 0;
     text-transform: none;
   }
+  .news-description {
+    color: #cfdae5;
+    font-size: 12px;
+    line-height: 1.55;
+    margin: 0 0 10px;
+    padding: 8px 10px;
+    background: #0f1821;
+    border: 1px solid var(--border);
+    border-left: 2px solid var(--accent);
+    border-radius: 5px;
+    user-select: text;
+    white-space: pre-line;
+  }
   .news-source-head {
     color: var(--accent);
     font-size: 11px;
@@ -5348,6 +5361,7 @@ function makeEntry(kind, options = {}) {
     translateController: null,
     newsItems: [],
     newsSource: "",
+    newsDescription: "",
     newsFeed: "",
     newsSources: [],
     newsDocs: false,
@@ -5655,6 +5669,7 @@ function addNewsEvent(entry, data) {
   if (data.ai_news_podcast) entry.aiNewsPodcast = true;
   if (type === "start") {
     entry.newsSource = data.source || "News";
+    entry.newsDescription = String(data.description || "");
     entry.newsFeed = data.feed || "";
     entry.newsSources = Array.isArray(data.sources) ? data.sources : [];
     entry.newsDocs = Boolean(data.docs || data.mdn);
@@ -6010,7 +6025,7 @@ function renderNewsList(entry) {
   if (!container) return;
   container.textContent = "";
   const items = Array.isArray(entry.newsItems) ? entry.newsItems : [];
-  if (!items.length) {
+  if (!items.length && !entry.newsDescription) {
     container.hidden = true;
     return;
   }
@@ -6047,6 +6062,13 @@ function renderNewsList(entry) {
   head.appendChild(source);
   head.appendChild(note);
   container.appendChild(head);
+
+  if (entry.newsDescription) {
+    const description = document.createElement("div");
+    description.className = "news-description";
+    description.textContent = entry.newsDescription;
+    container.appendChild(description);
+  }
 
   const showSourceHeads = groups.length > 1;
   let position = 0;
@@ -11041,7 +11063,8 @@ function submitText(text, fromChoice = false) {
     commandName === "news"
       && String(commandArgs[0] || "").toLowerCase() === "search"
   ) || commandName === "mdn" || commandName === "wikivoyage"
-    || commandName === "reddit" || commandName === "tablelog";
+    || commandName === "reddit" || commandName === "tablelog"
+    || commandName === "stock";
 
   addUserEcho(question, image);
   const isCommand = question.startsWith("/");
@@ -11063,7 +11086,9 @@ function submitText(text, fromChoice = false) {
                 ? "HowStuffWorks"
                 : commandName === "tablelog"
                   ? "Tabelog"
-                  : commandName === "medium"
+                  : commandName === "stock"
+                    ? "Yahoo Finance"
+                    : commandName === "medium"
                     ? "Medium"
                     : commandName === "gutenberg"
                       ? "Project Gutenberg"

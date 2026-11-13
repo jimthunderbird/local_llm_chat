@@ -4,7 +4,7 @@
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /youtube, /news, /mdn, /stackoverflow,
-/reddit, /tablelog, /googlenews, /medium,
+/reddit, /tablelog, /stock, /googlenews, /medium,
 /gutenberg, /openlibrary, /changelog, /wikivoyage, /wiki, /wiki_article,
 /article, /dict, and /ask. The browser is a
 pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
@@ -189,6 +189,7 @@ WEB_COMMANDS = {
     "/stackoverflow": "search Stack Overflow: /stackoverflow tag <tag> or /stackoverflow search <keywords>",
     "/reddit": "search Reddit posts by keywords: /reddit <keywords>; also searches related subreddits; click a post to read it",
     "/tablelog": "japan food and restaurant guide for travelers — search Tabelog restaurant pages by keywords: /tablelog <keywords>",
+    "/stock": "show a Yahoo Finance symbol profile, financial details, and related news articles: /stock <stock_symbol>",
 }
 
 # News sources accepted by /news and completed by news_fetch.php.
@@ -273,6 +274,23 @@ MDN_DOCS_BASE_URL = "https://developer.mozilla.org"
 MDN_LOCALE = "en-US"
 MDN_RESULT_LIMIT = 10
 MDN_HIGHLIGHT_LIMIT = 3
+
+# /stock looks up one Yahoo Finance symbol and renders its related articles as
+# a /news-style result list. The search endpoint returns both the matching
+# quote metadata and the latest news stories for that symbol. The quoteSummary
+# endpoint adds the company profile and financial details shown above the list.
+STOCK_SEARCH_URL = "https://query2.finance.yahoo.com/v1/finance/search"
+STOCK_QUOTE_SUMMARY_URL = "https://query2.finance.yahoo.com/v10/finance/quoteSummary"
+STOCK_CRUMB_URL = "https://query1.finance.yahoo.com/v1/test/getcrumb"
+STOCK_COOKIE_URL = "https://fc.yahoo.com"
+STOCK_QUOTE_MODULES = (
+    "assetProfile,financialData,defaultKeyStatistics,incomeStatementHistory"
+)
+STOCK_NEWS_LIMIT = 20
+STOCK_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 # /ai_news_podcast lists the five newest stories from the last 12 hours and
 # turns their full article bodies into a two-host podcast script, read aloud
@@ -663,6 +681,319 @@ def search_mdn_docs(keyword: str, limit: int = MDN_RESULT_LIMIT) -> list[dict]:
             }
         )
     return results
+
+
+def _yahoo_stock_value(value) -> str:
+    """Return one readable Yahoo Finance value.
+
+    Quote responses usually wrap numbers as ``{"raw": ..., "fmt": ...}``.
+    Prefer the formatted value, fall back to a sensible rendering of the raw
+    number, and treat Yahoo's empty placeholders as missing.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        for key in ("fmt", "longFmt"):
+            formatted = value.get(key)
+            if formatted not in (None, ""):
+                text = str(formatted).strip()
+                if text and text not in {"--", "-", "N/A", "n/a"}:
+                    return text
+        value = value.get("raw")
+        if value is None:
+            return ""
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return ""
+        if abs(value) >= 1000:
+            return f"{value:,.2f}".rstrip("0").rstrip(".")
+        return f"{value:,.6f}".rstrip("0").rstrip(".")
+    text = str(value).strip()
+    return "" if text in {"--", "-", "N/A", "n/a"} else text
+
+
+def _yahoo_stock_summary(value: str, limit: int = 900) -> str:
+    """Collapse a long business summary and trim it at a sentence boundary."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    boundary = max(cut.rfind(". "), cut.rfind("; "))
+    if boundary >= limit // 2:
+        cut = cut[: boundary + 1]
+    return cut.rstrip() + " …"
+
+
+def fetch_yahoo_quote_summary(symbol: str) -> dict:
+    """Fetch the /stock detail modules from Yahoo Finance's quoteSummary.
+
+    Yahoo requires a session cookie and a matching crumb token for this
+    endpoint. The browser user agent matters too: Yahoo rejects the default
+    Python/curl agents with a rate-limit response.
+    """
+    query = " ".join(str(symbol or "").split())
+    if not query:
+        return {}
+
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": STOCK_USER_AGENT,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+    )
+    try:
+        # fc.yahoo.com sets the consent/cookie pair used by the crumb endpoint.
+        # It answers 404, so only the cookie side effect matters here.
+        session.get(STOCK_COOKIE_URL, timeout=(5, 15))
+        crumb_response = session.get(STOCK_CRUMB_URL, timeout=(5, 15))
+        crumb_response.raise_for_status()
+        crumb = crumb_response.text.strip()
+        if not crumb or len(crumb) > 80 or any(ch.isspace() for ch in crumb):
+            raise RuntimeError("Yahoo Finance did not return a valid crumb")
+
+        response = session.get(
+            f"{STOCK_QUOTE_SUMMARY_URL}/{quote(query, safe='')}",
+            params={"modules": STOCK_QUOTE_MODULES, "crumb": crumb},
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"Yahoo Finance detail lookup failed: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise RuntimeError("Yahoo Finance returned an unexpected detail response.")
+    container = data.get("quoteSummary")
+    results = container.get("result") if isinstance(container, dict) else None
+    if not isinstance(results, list) or not results or not isinstance(results[0], dict):
+        error = container.get("error") if isinstance(container, dict) else None
+        message = ""
+        if isinstance(error, dict):
+            message = str(error.get("description") or error.get("code") or "")
+        raise RuntimeError(
+            f"Yahoo Finance has no detail for {query!r}"
+            + (f": {message}" if message else ".")
+        )
+    return results[0]
+
+
+def stock_quote_details(summary: dict) -> str:
+    """Render quoteSummary modules as readable lines for the result header."""
+    if not isinstance(summary, dict) or not summary:
+        return ""
+
+    def module(name: str) -> dict:
+        value = summary.get(name)
+        return value if isinstance(value, dict) else {}
+
+    sections: list[str] = []
+
+    profile = module("assetProfile")
+    company: list[str] = []
+
+    def add_company(label: str, value) -> None:
+        text = _yahoo_stock_value(value)
+        if text:
+            company.append(f"{label}: {text}")
+
+    add_company("Sector", profile.get("sector"))
+    add_company("Industry", profile.get("industry"))
+    add_company("Employees", profile.get("fullTimeEmployees"))
+    headquarters = ", ".join(
+        part
+        for part in (
+            _yahoo_stock_value(profile.get("city")),
+            _yahoo_stock_value(profile.get("state")),
+            _yahoo_stock_value(profile.get("country")),
+        )
+        if part
+    )
+    if headquarters:
+        company.append(f"Headquarters: {headquarters}")
+    add_company("Website", profile.get("website"))
+    if company:
+        sections.append("Company\n" + "\n".join(company))
+    business = _yahoo_stock_summary(profile.get("longBusinessSummary"))
+    if business:
+        sections.append("Business summary\n" + business)
+
+    financial = module("financialData")
+    stats = module("defaultKeyStatistics")
+    financials: list[str] = []
+
+    def add_financial(label: str, value) -> None:
+        text = _yahoo_stock_value(value)
+        if text:
+            financials.append(f"{label}: {text}")
+
+    add_financial("Current price", financial.get("currentPrice"))
+    add_financial("Market cap", stats.get("marketCap") or financial.get("marketCap"))
+    add_financial("Target mean price", financial.get("targetMeanPrice"))
+    add_financial("Target high price", financial.get("targetHighPrice"))
+    add_financial("Target low price", financial.get("targetLowPrice"))
+    add_financial("Analyst recommendation", financial.get("recommendationKey"))
+    add_financial("Analyst count", financial.get("numberOfAnalystOpinions"))
+    add_financial("Revenue (ttm)", financial.get("totalRevenue"))
+    add_financial("Revenue growth", financial.get("revenueGrowth"))
+    add_financial("Gross margin", financial.get("grossMargins"))
+    add_financial("Operating margin", financial.get("operatingMargins"))
+    add_financial("Profit margin", financial.get("profitMargins"))
+    add_financial("Return on equity", financial.get("returnOnEquity"))
+    add_financial("Total cash", financial.get("totalCash"))
+    add_financial("Total debt", financial.get("totalDebt"))
+    add_financial("Debt/equity", financial.get("debtToEquity"))
+    add_financial("Current ratio", financial.get("currentRatio"))
+    add_financial("Free cash flow", financial.get("freeCashflow"))
+    add_financial("Operating cash flow", financial.get("operatingCashflow"))
+    add_financial("Trailing EPS", stats.get("trailingEps"))
+    add_financial("Forward EPS", stats.get("forwardEps"))
+    add_financial("Trailing P/E", stats.get("trailingPE"))
+    add_financial("Forward P/E", stats.get("forwardPE"))
+    add_financial("PEG ratio", stats.get("pegRatio"))
+    add_financial("Price/book", stats.get("priceToBook"))
+    add_financial("Beta", stats.get("beta"))
+    add_financial("52-week change", stats.get("52WeekChange"))
+    add_financial("Shares outstanding", stats.get("sharesOutstanding"))
+    add_financial("Float shares", stats.get("floatShares"))
+    add_financial("Insiders held", stats.get("heldPercentInsiders"))
+    add_financial("Institutions held", stats.get("heldPercentInstitutions"))
+    add_financial("Most recent quarter", stats.get("mostRecentQuarter"))
+    if financials:
+        sections.append("Financials\n" + "\n".join(financials))
+
+    income_container = module("incomeStatementHistory")
+    history = income_container.get("incomeStatementHistory")
+    if isinstance(history, list) and history and isinstance(history[0], dict):
+        latest = history[0]
+        period = _yahoo_stock_value(latest.get("endDate"))
+        heading = "Income statement" + (f" ({period})" if period else " (latest fiscal year)")
+        statement: list[str] = []
+
+        def add_statement(label: str, value) -> None:
+            text = _yahoo_stock_value(value)
+            if text:
+                statement.append(f"{label}: {text}")
+
+        add_statement("Revenue", latest.get("totalRevenue"))
+        add_statement("Gross profit", latest.get("grossProfit"))
+        add_statement("Operating income", latest.get("operatingIncome"))
+        add_statement("Net income", latest.get("netIncome"))
+        if statement:
+            sections.append(heading + "\n" + "\n".join(statement))
+
+    return "\n\n".join(sections)
+
+
+def search_yahoo_finance_symbol(symbol: str) -> tuple[dict, list[dict]]:
+    """Look up one Yahoo Finance symbol and return (quote, news articles).
+
+    The quote is the best matching entry from the search endpoint, preferring
+    an exact symbol match over the other instruments that mention it. News
+    entries are normalized to the fields used by the /news list: title, link,
+    source (publisher), and an ISO-8601 published timestamp.
+    """
+    query = " ".join(str(symbol or "").split())
+    if not query:
+        return {}, []
+    try:
+        response = requests.get(
+            STOCK_SEARCH_URL,
+            params={"q": query, "newsCount": STOCK_NEWS_LIMIT},
+            headers={
+                "User-Agent": STOCK_USER_AGENT,
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"Yahoo Finance lookup failed: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise RuntimeError("Yahoo Finance returned an unexpected response.")
+
+    raw_quotes = data.get("quotes")
+    quotes = (
+        [quote for quote in raw_quotes if isinstance(quote, dict)]
+        if isinstance(raw_quotes, list)
+        else []
+    )
+    wanted = query.casefold()
+    quote = next(
+        (
+            candidate
+            for candidate in quotes
+            if str(candidate.get("symbol", "")).casefold() == wanted
+        ),
+        quotes[0] if quotes else {},
+    )
+
+    raw_news = data.get("news")
+    articles: list[dict] = []
+    if isinstance(raw_news, list):
+        for story in raw_news:
+            if not isinstance(story, dict):
+                continue
+            link = str(story.get("link") or "").strip()
+            title = str(story.get("title") or "").strip()
+            if not link or not title:
+                continue
+            published = ""
+            timestamp = story.get("providerPublishTime")
+            if isinstance(timestamp, (int, float)):
+                try:
+                    published = datetime.fromtimestamp(timestamp).astimezone().isoformat()
+                except (OverflowError, OSError, ValueError):
+                    published = ""
+            articles.append(
+                {
+                    "title": title,
+                    "link": link,
+                    "source": str(story.get("publisher") or "Yahoo Finance").strip(),
+                    "published": published,
+                    "summary": "",
+                }
+            )
+            if len(articles) >= STOCK_NEWS_LIMIT:
+                break
+    return quote, articles
+
+
+def stock_quote_description(quote: dict, symbol: str) -> str:
+    """Build a short readable description from a Yahoo Finance quote."""
+    name = str(
+        quote.get("longname") or quote.get("shortname") or symbol
+    ).strip()
+    resolved = str(quote.get("symbol") or symbol).strip().upper()
+    parts: list[str] = []
+    quote_type = str(quote.get("typeDisp") or quote.get("quoteType") or "").strip()
+    exchange = str(quote.get("exchange") or "").strip()
+    exchange_display = str(quote.get("exchDisp") or exchange).strip()
+    description = f"{name} ({resolved})"
+    if quote_type:
+        description += f" is listed as {quote_type}"
+    if exchange_display:
+        description += f" on {exchange_display}"
+        if exchange and exchange != exchange_display:
+            description += f" ({exchange})"
+    description += "."
+    sector = str(quote.get("sector") or "").strip()
+    industry = str(quote.get("industry") or "").strip()
+    if sector:
+        parts.append(f"Sector: {sector}.")
+    if industry:
+        parts.append(f"Industry: {industry}.")
+    if parts:
+        description += " " + " ".join(parts)
+    return description
 
 
 # /stackoverflow tag <tag> and /stackoverflow search <keywords> query the
@@ -2485,6 +2816,7 @@ COMMAND_ARGUMENTS = {
     "/googlenews",
     "/howstuffworks",
     "/tablelog",
+    "/stock",
     "/medium",
     "/gutenberg",
     "/openlibrary",
@@ -12815,6 +13147,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_howstuffworks(argument)
         elif name == "/tablelog":
             self._command_tablelog(argument)
+        elif name == "/stock":
+            self._command_stock(argument)
         elif name == "/wikivoyage":
             self._command_wikivoyage(argument)
         elif name == "/medium":
@@ -14820,6 +15154,101 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 f"site:tabelog.com/en {keywords}",
             ],
         )
+
+    def _command_stock(self, argument: str) -> None:
+        """Show one Yahoo Finance symbol and its related articles.
+
+        Usage: /stock <stock_symbol>
+        The Yahoo Finance search endpoint supplies the quote metadata and the
+        latest stories for the symbol. Its quoteSummary endpoint adds the
+        company profile, financial statistics, and latest income statement.
+        The browser renders everything with the same /news story-list and
+        detail modal, so each article supports the usual Learn, Chat,
+        translate, and read-aloud actions.
+        """
+        symbol = argument.strip().strip('"').strip("'")
+        if not symbol:
+            self._sse_text(
+                "output",
+                "\nUsage: /stock <stock_symbol>\n"
+                "Example: /stock AAPL\n"
+                "Example: /stock 7203.T\n",
+            )
+            return
+
+        self._sse_text(
+            "log", f"[stock: looking up {symbol!r} on Yahoo Finance]"
+        )
+        try:
+            quote, articles = search_yahoo_finance_symbol(symbol)
+        except RuntimeError as exc:
+            self._sse_text("error", f"\n/stock: {exc}\n")
+            return
+
+        if not quote and not articles:
+            self._sse_text(
+                "output", f"\n/stock: no Yahoo Finance match for {symbol!r}.\n"
+            )
+            return
+
+        resolved = str(quote.get("symbol") or symbol).strip().upper()
+        summary: dict = {}
+        try:
+            summary = fetch_yahoo_quote_summary(resolved)
+        except RuntimeError as exc:
+            # The article list is still useful when Yahoo refuses the detail
+            # request (for example, after a temporary rate limit).
+            self._sse_text("log", f"[stock: detail unavailable: {exc}]")
+
+        profile = summary.get("assetProfile")
+        if isinstance(profile, dict):
+            for key in ("sector", "industry"):
+                if not str(quote.get(key) or "").strip():
+                    value = str(profile.get(key) or "").strip()
+                    if value:
+                        quote[key] = value
+
+        description = stock_quote_description(quote, resolved)
+        details = stock_quote_details(summary)
+        if details:
+            description += "\n\n" + details
+        feed = f"{STOCK_SEARCH_URL}?q={quote_plus(symbol)}"
+        self._sse(
+            "news",
+            {
+                "type": "start",
+                "source": "Yahoo Finance",
+                "feed": feed,
+                "sources": ["Yahoo Finance"],
+                "description": description,
+            },
+        )
+        for index, article in enumerate(articles, 1):
+            item = {
+                "type": "item",
+                "index": index,
+                "title": article["title"],
+                "link": article["link"],
+                "source": article["source"],
+                "published": article["published"],
+                "summary": article["summary"],
+            }
+            # Attach the stable learned-story id so Learn and Chat work from
+            # the stock article list exactly as they do for /news search.
+            try:
+                news_id = news_id_for_item(item)
+            except ValueError:
+                news_id = ""
+            item["news_id"] = news_id
+            item["learned"] = bool(news_id and news_is_learned(news_id))
+            self._sse("news", item)
+            self._sse("news", {"type": "item_end", "index": index})
+        self._sse("news", {"type": "done"})
+        if not articles:
+            self._sse_text(
+                "output",
+                f"\n/stock: no related articles were found for {resolved}.\n",
+            )
 
     def _command_medium(self, argument: str) -> None:
         """Stream the latest stories from the configured Medium author.
