@@ -2607,7 +2607,7 @@ def fuzzy_entity_terms(
     query_tokens: list[str],
     index: BM25Index,
     corrections: list[str],
-) -> list[frozenset[str]]:
+) -> list[tuple[str, ...]]:
     """Return strongly co-occurring query words grouped into entity phrases.
 
     Adjacent query words whose documents almost always contain both words are
@@ -2616,6 +2616,14 @@ def fuzzy_entity_terms(
     almost never do. Each returned phrase groups words that belong to the same
     entity; the caller uses :func:`entity_focus_terms` to decide which of
     those words are distinctive enough to identify it.
+
+    Single-letter middle initials are transparent when looking for adjacent
+    name parts. Without this, ``Steven D. Pletcher`` tokenizes to
+    ``steven / d / pletcher`` and the surname is never grouped with the given
+    name. In a comparison such as ``Knott ... and Steven D. Pletcher``, only
+    the first entity was recognized, so the entity-focus filter dropped every
+    paragraph about the second doctor. Treating initials as transparent keeps
+    every named entity in the query and lets the caller union their chunks.
     """
     if not query_tokens or not index.document_count:
         return []
@@ -2650,11 +2658,32 @@ def fuzzy_entity_terms(
             pair_frequency[key] = index.bm25.count_matching([a, b], "AND")
         return pair_frequency[key]
 
-    entity_phrases: list[frozenset[str]] = []
-    seen_phrases: set[frozenset[str]] = set()
+    entity_phrases: list[tuple[str, ...]] = []
+    seen_phrases: set[tuple[str, ...]] = set()
+
+    def entity_neighbour(position: int, step: int) -> int | None:
+        """Return the nearest position that can supply a name component.
+
+        A one-letter alphabetic token is a middle initial (``P.``, ``D.``)
+        and does not break an entity phrase. Stopwords and other tokens are
+        not skipped, so the two sides of ``Knott and Pletcher`` cannot become
+        one phrase merely because a conjunction sits between them.
+        """
+        cursor = position + step
+        while 0 <= cursor < len(effective):
+            if all(
+                len(token) == 1 and token.isalpha()
+                for token in effective[cursor]
+            ):
+                cursor += step
+                continue
+            return cursor
+        return None
+
     for position, words in enumerate(effective):
-        for neighbour_position in (position - 1, position + 1):
-            if not 0 <= neighbour_position < len(effective):
+        for step in (1, -1):
+            neighbour_position = entity_neighbour(position, step)
+            if neighbour_position is None:
                 continue
             for left in words:
                 for right in effective[neighbour_position]:
@@ -2676,7 +2705,13 @@ def fuzzy_entity_terms(
                         together >= FUZZY_ENTITY_MIN_COOCCURRENCE
                         and ratio >= FUZZY_ENTITY_COOCCURRENCE_RATIO
                     ):
-                        phrase = frozenset((left, right))
+                        # Keep the words in query order. The last word is the
+                        # phrase's head noun ("Market" in "Nijo Market"),
+                        # which :func:`entity_focus_terms` needs to distinguish
+                        # a generic head noun from a common given name.
+                        phrase = (
+                            (right, left) if step < 0 else (left, right)
+                        )
                         if phrase not in seen_phrases:
                             seen_phrases.add(phrase)
                             entity_phrases.append(phrase)
@@ -2684,8 +2719,8 @@ def fuzzy_entity_terms(
 
 
 def entity_focus_terms(
-    entity_phrases: list[frozenset[str]], index: BM25Index
-) -> tuple[list[frozenset[str]], set[str]]:
+    entity_phrases: list[tuple[str, ...]], index: BM25Index
+) -> tuple[list[tuple[str, ...]], set[str]]:
     """Split entity phrases into complete-phrase and distinctive-term filters.
 
     A generic head noun such as ``market`` occurs in hundreds of chunks, while
@@ -2695,6 +2730,15 @@ def entity_focus_terms(
     phrase is similarly distinctive (for example ``terence`` and ``tao``), any
     one word is enough, so a chunk using an alias such as ``Terry Tao`` can
     still match through the shared surname.
+
+    The same frequency test must not be applied blindly to person names. A
+    common given name can be much more frequent than the surname (``steven``
+    occurs in many more documents than ``pletcher``), but the surname is the
+    head noun. Requiring ``steven`` in every paragraph dropped all of
+    Pletcher's own biography paragraphs, which usually say only "Pletcher"
+    after the first sentence. A generic word that is *not* the phrase's last
+    word is therefore treated as a modifier: the distinctive words remain
+    loose anchors while the generic modifier is ignored.
 
     Returns ``(strict_phrases, loose_tokens)`` where each strict phrase must
     occur in full and a loose token may match on its own.
@@ -2709,17 +2753,32 @@ def entity_focus_terms(
             frequencies[token] = index.document_frequency.get(token, 0)
         return frequencies[token]
 
-    strict_phrases: list[frozenset[str]] = []
+    strict_phrases: list[tuple[str, ...]] = []
     loose_tokens: set[str] = set()
     for phrase in entity_phrases:
         phrase_frequencies = {token: df(token) for token in phrase}
         rarest = min(phrase_frequencies.values())
         if rarest <= 0:
             continue
-        if max(phrase_frequencies.values()) >= (
-            rarest * FUZZY_ENTITY_GENERIC_DF_RATIO
-        ):
+        generic = max(
+            phrase_frequencies, key=lambda token: phrase_frequencies[token]
+        )
+        has_generic = (
+            phrase_frequencies[generic]
+            >= rarest * FUZZY_ENTITY_GENERIC_DF_RATIO
+        )
+        if has_generic and phrase and phrase[-1] == generic:
+            # The generic word is the head noun ("Market" in "Nijo Market"),
+            # so the complete phrase is required.
             strict_phrases.append(phrase)
+        elif has_generic:
+            # The generic word is a common modifier (usually a given name),
+            # not the head noun. Requiring it would hide the entity's other
+            # paragraphs; matching it alone would add noise. Anchor on the
+            # distinctive words instead.
+            loose_tokens.update(
+                token for token in phrase if token != generic
+            )
         else:
             loose_tokens.update(phrase)
     return strict_phrases, loose_tokens
@@ -2884,7 +2943,7 @@ def _lfm_intent_expansion_terms(question: str) -> list[str]:
 
 def _lfm_body_entity_filter(
     focused: list[tuple[Chunk, float]],
-    strict_phrases: list[frozenset[str]],
+    strict_phrases: list[tuple[str, ...]],
     loose_tokens: set[str],
 ) -> list[tuple[Chunk, float]]:
     """Keep entity chunks whose paragraph body mentions the entity.
@@ -2898,7 +2957,7 @@ def _lfm_body_entity_filter(
 
     def body_matches(chunk: Chunk) -> bool:
         body_tokens = set(tokenize(paragraph_text(chunk)))
-        if any(phrase <= body_tokens for phrase in strict_phrases):
+        if any(set(phrase) <= body_tokens for phrase in strict_phrases):
             return True
         return bool(loose_tokens & body_tokens)
 
@@ -3035,7 +3094,9 @@ def top_chunks(
             # keeps the chunk about Tao's book rather than every chunk that
             # merely contains his name. The topic filter is a fallback: if it
             # would remove everything, keep the entity-only matches.
-            entity_tokens = set().union(*entity_phrases)
+            entity_tokens = {
+                token for phrase in entity_phrases for token in phrase
+            }
             topic_terms = {
                 token
                 for token in question_tokens

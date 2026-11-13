@@ -1,4 +1,11 @@
 task (completed) {
+  question: i want to compare Dr. P. Daniel Knott, MD and Dr. Steven D. Pletcher, MD, can you give me a research report
+  expect: the answer should give me information for both Dr. P. Daniel Knott and Dr. Steven D. Pletcher, MD
+  actual: there is no information provided about Dr. Steven D
+  please provide a systematic fix
+}
+
+task (completed) {
   when running app/chat_server.py, if there is one process already running, kill that process first before starting the server
 }
 
