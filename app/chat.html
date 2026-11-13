@@ -1098,6 +1098,166 @@
     user-select: text;
     white-space: pre-line;
   }
+  /* /stock ETF holdings: each symbol opens a company-summary modal. */
+  .stock-holdings {
+    color: #cfdae5;
+    font-size: 12px;
+    line-height: 1.55;
+    margin: 0 0 10px;
+    padding: 8px 10px;
+    background: #0f1821;
+    border: 1px solid var(--border);
+    border-left: 2px solid var(--accent);
+    border-radius: 5px;
+    user-select: text;
+  }
+  .stock-holdings-head {
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 3px;
+  }
+  .stock-holdings-note {
+    color: var(--dim);
+    font-size: 11px;
+    margin-bottom: 6px;
+  }
+  .stock-holding-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 8px;
+    margin: 3px 0;
+  }
+  .stock-holding-link {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--accent-2);
+    font: inherit;
+    font-weight: 600;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .stock-holding-link:hover { color: #fff; }
+  .stock-holding-name, .stock-holding-weight { color: var(--dim); }
+  #stock-company-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 62;
+    background: rgba(2, 6, 10, .72);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  #stock-company-panel[hidden] { display: none; }
+  .stock-company-card {
+    width: min(760px, 100%);
+    max-height: 84vh;
+    display: flex;
+    flex-direction: column;
+    background: #0d151e;
+    border: 1px solid #2b4056;
+    border-radius: 10px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.7);
+    overflow: hidden;
+  }
+  .stock-company-body {
+    min-height: 0;
+    padding: 14px 18px 18px;
+    overflow-y: auto;
+    color: #cfdae5;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .stock-company-body .markdown p:first-child { margin-top: 0; }
+  .stock-company-facts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 5px 14px;
+    margin: 14px 0 0;
+    padding: 10px 12px;
+    background: #0f1821;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .stock-company-facts dt { color: var(--dim); }
+  .stock-company-facts dd { margin: 0; color: #e2edf7; word-break: break-word; }
+  .stock-company-source {
+    color: var(--dim);
+    font-size: 11px;
+    margin-top: 12px;
+  }
+  #stock-company-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+    user-select: none;
+  }
+  #stock-company-close:hover { color: var(--text); }
+  /* /stock keeps the profile card above a News/Reddit tab group. */
+  .news-tabs {
+    display: flex;
+    align-items: flex-end;
+    gap: 4px;
+    margin: 2px 0 10px;
+    border-bottom: 1px solid var(--border);
+    user-select: none;
+  }
+  .news-tab {
+    appearance: none;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 6px 12px;
+    color: var(--dim);
+    font: inherit;
+    font-size: 12px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-bottom: 0;
+    border-radius: 5px 5px 0 0;
+    cursor: pointer;
+  }
+  .news-tab:hover { color: var(--text); background: #111d29; }
+  .news-tab.is-active {
+    color: var(--accent-2);
+    background: #0f1821;
+    border-color: var(--border);
+    margin-bottom: -1px;
+    padding-bottom: 7px;
+  }
+  .news-tab-count {
+    color: var(--dimmer);
+    font-size: 10px;
+    letter-spacing: .04em;
+  }
+  .news-tab.is-active .news-tab-count { color: var(--accent); }
+  .news-tab-status {
+    color: var(--warn);
+    font-size: 12px;
+    line-height: 1.5;
+    padding: 8px 4px;
+  }
+  .news-tab-status.is-error { color: var(--error); }
+  .news-tab-retry {
+    margin-left: 8px;
+    padding: 2px 8px;
+    color: var(--accent-2);
+    font: inherit;
+    font-size: 11px;
+    background: #111d29;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .news-tab-retry:hover { border-color: var(--accent); color: var(--text); }
   .news-source-head {
     color: var(--accent);
     font-size: 11px;
@@ -2943,6 +3103,20 @@
   </div>
 </div>
 
+<div id="stock-company-panel" hidden>
+  <div class="stock-company-card" role="dialog" aria-modal="true" aria-labelledby="stock-company-title">
+    <div class="news-head">
+      <div class="news-head-main">
+        <div id="stock-company-title" class="news-modal-title">Company</div>
+        <div id="stock-company-meta" class="news-modal-meta"></div>
+      </div>
+      <a id="stock-company-link" class="news-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open profile ↗</a>
+      <button id="stock-company-close" type="button" title="Close (Esc)">×</button>
+    </div>
+    <div id="stock-company-body" class="stock-company-body"></div>
+  </div>
+</div>
+
 <div id="changelog-panel" hidden>
   <div class="changelog-card" role="dialog" aria-modal="true" aria-labelledby="changelog-title">
     <div class="news-head">
@@ -3171,6 +3345,12 @@ const popupRestoreWordEl = $("#popup-restore-word");
 const popupPrevEl = $("#popup-prev");
 const popupNextEl = $("#popup-next");
 const newsPanelEl = $("#news-panel");
+const stockCompanyPanelEl = $("#stock-company-panel");
+const stockCompanyTitleEl = $("#stock-company-title");
+const stockCompanyMetaEl = $("#stock-company-meta");
+const stockCompanyLinkEl = $("#stock-company-link");
+const stockCompanyBodyEl = $("#stock-company-body");
+const stockCompanyCloseEl = $("#stock-company-close");
 const newsTitleEl = $("#news-title");
 const newsMetaEl = $("#news-meta");
 const newsLinkEl = $("#news-link");
@@ -5664,6 +5844,64 @@ function formatNewsDate(value) {
   }
 }
 
+function makeNewsItem(entry, data) {
+  return {
+    index: Number(data.index) || entry.newsItems.length + 1,
+    newsId: String(data.news_id || ""),
+    learned: Boolean(data.learned),
+    aiNewsPodcast: Boolean(data.ai_news_podcast || entry.aiNewsPodcast),
+    docs: Boolean(data.docs || data.mdn || entry.newsDocs),
+    docsLabel: String(data.docs_label || entry.newsDocsLabel || ""),
+    learnable: data.learnable !== undefined
+      ? Boolean(data.learnable)
+      : !(data.docs || data.mdn || entry.newsDocs),
+    learnNoun: String(data.learn_noun || ""),
+    entry,
+    podcast: null,
+    title: data.title || "(untitled)",
+    link: data.link || "",
+    published: data.published || "",
+    source: data.source || entry.newsSource || "News",
+    section: data.section || "",
+    summary: data.summary || "",
+    paragraphs: Array.isArray(data.paragraphs)
+      ? data.paragraphs.map((text) => String(text || "")).filter(Boolean)
+      : [],
+    blocks: [],
+    questionBlocks: Array.isArray(data.blocks) ? data.blocks : [],
+    questionId: String(data.question_id || ""),
+    answerCount: Number(data.answer_count) || 0,
+    questionScore: Number(data.score) || 0,
+    acceptedAnswerId: data.accepted_answer_id ?? null,
+    answers: [],
+    answersFetched: false,
+    answersLoading: false,
+    answersError: "",
+    fullArticleLoaded: false,
+    articleFetched: false,
+    articleApi: String(data.article_api || ""),
+    articleRetryCount: 0,
+    iframeUrl: String(data.iframe_url || data.iframeUrl || ""),
+    articlePartial: Boolean(data.partial),
+    images: Array.isArray(data.images)
+      ? data.images.map((url) => String(url || "").trim()).filter(Boolean)
+      : [],
+    complete: Boolean(data.complete),
+    articleLoading: false,
+    articleError: "",
+    titleTranslation: {
+      text: "",
+      sourceText: "",
+      error: "",
+      busy: false,
+      done: false,
+      visible: false,
+      controller: null,
+      generation: 0,
+    },
+  };
+}
+
 function addNewsEvent(entry, data) {
   const type = String(data.type || "");
   if (data.ai_news_podcast) entry.aiNewsPodcast = true;
@@ -5674,63 +5912,25 @@ function addNewsEvent(entry, data) {
     entry.newsSources = Array.isArray(data.sources) ? data.sources : [];
     entry.newsDocs = Boolean(data.docs || data.mdn);
     entry.newsDocsLabel = String(data.docs_label || "");
+    entry.newsTabs = Array.isArray(data.tabs)
+      ? data.tabs.map((tab) => String(tab || "")).filter(Boolean)
+      : [];
+    entry.newsSymbol = String(data.symbol || "").trim();
+    entry.newsCompanyName = String(data.company_name || "").trim();
+    entry.stockHoldings = data.holdings && typeof data.holdings === "object"
+      ? data.holdings
+      : null;
+    if (entry.newsTabs.length > 1) {
+      entry.newsTab = "news";
+      if (!entry.stockReddit) {
+        entry.stockReddit = { status: "idle", items: [], error: "" };
+      }
+    }
     scheduleRender(entry);
     return;
   }
   if (type === "item") {
-    entry.newsItems.push({
-      index: Number(data.index) || entry.newsItems.length + 1,
-      newsId: String(data.news_id || ""),
-      learned: Boolean(data.learned),
-      aiNewsPodcast: Boolean(data.ai_news_podcast || entry.aiNewsPodcast),
-      docs: Boolean(data.docs || data.mdn || entry.newsDocs),
-      docsLabel: String(data.docs_label || entry.newsDocsLabel || ""),
-      learnable: data.learnable !== undefined
-        ? Boolean(data.learnable)
-        : !(data.docs || data.mdn || entry.newsDocs),
-      learnNoun: String(data.learn_noun || ""),
-      entry,
-      podcast: null,
-      title: data.title || "(untitled)",
-      link: data.link || "",
-      published: data.published || "",
-      source: data.source || entry.newsSource || "News",
-      section: data.section || "",
-      summary: data.summary || "",
-      paragraphs: [],
-      blocks: [],
-      questionBlocks: Array.isArray(data.blocks) ? data.blocks : [],
-      questionId: String(data.question_id || ""),
-      answerCount: Number(data.answer_count) || 0,
-      questionScore: Number(data.score) || 0,
-      acceptedAnswerId: data.accepted_answer_id ?? null,
-      answers: [],
-      answersFetched: false,
-      answersLoading: false,
-      answersError: "",
-      fullArticleLoaded: false,
-      articleFetched: false,
-      articleApi: String(data.article_api || ""),
-      articleRetryCount: 0,
-      iframeUrl: String(data.iframe_url || data.iframeUrl || ""),
-      articlePartial: Boolean(data.partial),
-      images: Array.isArray(data.images)
-        ? data.images.map((url) => String(url || "").trim()).filter(Boolean)
-        : [],
-      complete: false,
-      articleLoading: false,
-      articleError: "",
-      titleTranslation: {
-        text: "",
-        sourceText: "",
-        error: "",
-        busy: false,
-        done: false,
-        visible: false,
-        controller: null,
-        generation: 0,
-      },
-    });
+    entry.newsItems.push(makeNewsItem(entry, data));
     scheduleRender(entry);
     return;
   }
@@ -6020,12 +6220,155 @@ function toggleNewsTitleTranslation(entry, item) {
     });
 }
 
+function newsTabDefinitions(entry) {
+  return (Array.isArray(entry.newsTabs) ? entry.newsTabs : [])
+    .map((tab) => {
+      if (tab && typeof tab === "object") {
+        const label = String(tab.label || tab.id || "").trim();
+        const id = String(tab.id || label).trim().toLowerCase();
+        return { id, label };
+      }
+      const label = String(tab || "").trim();
+      return { id: label.toLowerCase(), label };
+    })
+    .filter((tab) => tab.id && tab.label);
+}
+
+function ensureStockRedditLoaded(entry) {
+  const state = entry.stockReddit;
+  if (!state || state.status === "loading") return;
+  const symbol = String(entry.newsSymbol || "").trim();
+  if (!symbol) {
+    state.status = "error";
+    state.error = "This stock has no symbol to search on Reddit.";
+    scheduleRender(entry);
+    return;
+  }
+  state.status = "loading";
+  state.error = "";
+  scheduleRender(entry);
+  const params = new URLSearchParams({ symbol });
+  fetch(`/api/stock_reddit?${params.toString()}`, { cache: "no-store" })
+    .then((response) => response.json().then((data) => {
+      if (!response.ok) {
+        throw new Error(data?.error || `HTTP ${response.status}`);
+      }
+      return data;
+    }))
+    .then((data) => {
+      const items = Array.isArray(data.items) ? data.items : [];
+      state.items = items.map((payload, index) => makeNewsItem(entry, {
+        ...payload,
+        index: Number(payload.index) || index + 1,
+        complete: payload.complete !== undefined
+          ? Boolean(payload.complete)
+          : true,
+      }));
+      state.status = "ready";
+    })
+    .catch((error) => {
+      state.status = "error";
+      state.error = error?.message || String(error);
+    })
+    .finally(() => scheduleRender(entry));
+}
+
+function renderNewsTabs(container, entry, tabs, newsItems) {
+  const bar = document.createElement("div");
+  bar.className = "news-tabs";
+  bar.setAttribute("role", "tablist");
+  const redditItems = Array.isArray(entry.stockReddit?.items)
+    ? entry.stockReddit.items
+    : [];
+  for (const tab of tabs) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "news-tab";
+    button.setAttribute("role", "tab");
+    const selected = (entry.newsTab || tabs[0].id) === tab.id;
+    button.setAttribute("aria-selected", selected ? "true" : "false");
+    button.classList.toggle("is-active", selected);
+    const label = document.createElement("span");
+    label.textContent = tab.label;
+    button.appendChild(label);
+    const count = tab.id === "reddit" ? redditItems.length : newsItems.length;
+    const countEl = document.createElement("span");
+    countEl.className = "news-tab-count";
+    countEl.textContent = tab.id === "reddit" && entry.stockReddit?.status !== "ready"
+      ? ""
+      : String(count);
+    button.appendChild(countEl);
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if ((entry.newsTab || tabs[0].id) === tab.id) return;
+      entry.newsTab = tab.id;
+      if (tab.id === "reddit" && entry.stockReddit?.status === "idle") {
+        ensureStockRedditLoaded(entry);
+      }
+      scheduleRender(entry);
+    });
+    bar.appendChild(button);
+  }
+  container.appendChild(bar);
+}
+
+function appendNewsTabStatus(container, entry) {
+  const state = entry.stockReddit;
+  if (!state) return;
+  const showEmpty = state.status === "ready"
+    && !(Array.isArray(state.items) && state.items.length);
+  if (
+    state.status !== "loading"
+    && state.status !== "error"
+    && !showEmpty
+  ) {
+    return;
+  }
+  const status = document.createElement("div");
+  status.className = "news-tab-status";
+  if (state.status === "loading") {
+    status.textContent = "Loading Reddit posts from r/stock and this stock's subreddit…";
+  } else if (state.status === "error") {
+    status.classList.add("is-error");
+    status.textContent = `Could not load Reddit posts: ${state.error}`;
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "news-tab-retry";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      ensureStockRedditLoaded(entry);
+    });
+    status.appendChild(retry);
+  } else {
+    status.textContent = "No Reddit posts were found for this stock.";
+  }
+  container.appendChild(status);
+}
+
 function renderNewsList(entry) {
   const container = entry.newsEl;
   if (!container) return;
   container.textContent = "";
   const items = Array.isArray(entry.newsItems) ? entry.newsItems : [];
-  if (!items.length && !entry.newsDescription) {
+  const tabs = newsTabDefinitions(entry);
+  const hasTabs = tabs.length > 1;
+  const activeTab = hasTabs
+    ? (entry.newsTab === "reddit" ? "reddit" : tabs[0].id)
+    : "";
+  const redditState = entry.stockReddit || null;
+  const redditItems = Array.isArray(redditState?.items)
+    ? redditState.items
+    : [];
+  const visibleItems = activeTab === "reddit" ? redditItems : items;
+  if (
+    !visibleItems.length
+    && !items.length
+    && !entry.newsDescription
+    && !hasTabs
+  ) {
     container.hidden = true;
     return;
   }
@@ -6035,7 +6378,7 @@ function renderNewsList(entry) {
   // per feed, while a single-source request still renders one clean list.
   const groups = [];
   const groupsBySource = new Map();
-  for (const item of items) {
+  for (const item of visibleItems) {
     const source = item.source || entry.newsSource || "News";
     let group = groupsBySource.get(source);
     if (!group) {
@@ -6049,16 +6392,28 @@ function renderNewsList(entry) {
   const head = document.createElement("div");
   head.className = "news-list-head";
   const source = document.createElement("span");
-  source.textContent = entry.newsSource
-    || (groups.length === 1 ? groups[0].source : "News");
+  source.textContent = activeTab === "reddit"
+    ? "Reddit"
+    : (entry.newsSource || (groups.length === 1 ? groups[0].source : "News"));
   const note = document.createElement("span");
   note.className = "news-list-note";
-  const storyWord = entry.newsDocs
-    ? (items.length === 1 ? "result" : "results")
-    : (items.length === 1 ? "story" : "stories");
-  note.textContent = entry.newsDone
-    ? `${items.length} ${storyWord}`
-    : `${items.length} loaded…`;
+  if (activeTab === "reddit") {
+    if (redditState?.status === "loading") {
+      note.textContent = "loading…";
+    } else if (redditState?.status === "error") {
+      note.textContent = "not loaded";
+    } else {
+      const count = visibleItems.length;
+      note.textContent = `${count} ${count === 1 ? "post" : "posts"}`;
+    }
+  } else {
+    const storyWord = entry.newsDocs
+      ? (visibleItems.length === 1 ? "result" : "results")
+      : (visibleItems.length === 1 ? "story" : "stories");
+    note.textContent = entry.newsDone
+      ? `${visibleItems.length} ${storyWord}`
+      : `${visibleItems.length} loaded…`;
+  }
   head.appendChild(source);
   head.appendChild(note);
   container.appendChild(head);
@@ -6068,6 +6423,16 @@ function renderNewsList(entry) {
     description.className = "news-description";
     description.textContent = entry.newsDescription;
     container.appendChild(description);
+  }
+
+  renderStockHoldings(container, entry);
+
+  if (hasTabs) {
+    renderNewsTabs(container, entry, tabs, items);
+    if (activeTab === "reddit") {
+      if (redditState?.status === "idle") ensureStockRedditLoaded(entry);
+      appendNewsTabStatus(container, entry);
+    }
   }
 
   const showSourceHeads = groups.length > 1;
@@ -6155,9 +6520,203 @@ function renderNewsList(entry) {
     container.appendChild(list);
   }
 
-  if (entry.aiNewsPodcast && items.length) {
-    container.appendChild(newsPodcastAction(entry, items));
+  if (entry.aiNewsPodcast && visibleItems.length && activeTab !== "reddit") {
+    container.appendChild(newsPodcastAction(entry, visibleItems));
   }
+}
+
+/* ------------------------------------------------------------------ *
+ *  /stock ETF holdings and the company-summary modal
+ * ------------------------------------------------------------------ */
+let stockCompanyGeneration = 0;
+
+function closeStockCompanyModal() {
+  stockCompanyGeneration += 1;
+  if (!stockCompanyPanelEl) return;
+  stockCompanyPanelEl.hidden = true;
+  stockCompanyBodyEl.textContent = "";
+  stockCompanyLinkEl.hidden = true;
+}
+
+function renderStockCompanyFacts(data) {
+  const facts = [];
+  const price = [data.last_price, data.currency]
+    .filter(Boolean)
+    .join(" ");
+  if (price) facts.push(["Last price", price]);
+  const change = [data.change, data.change_pct]
+    .filter(Boolean)
+    .join(" / ");
+  if (change) facts.push(["Change", change]);
+  if (data.market_cap) facts.push(["Market cap", String(data.market_cap)]);
+  if (data.next_earnings_date) {
+    facts.push(["Next earnings date", String(data.next_earnings_date)]);
+  }
+  if (!facts.length) return null;
+  const list = document.createElement("dl");
+  list.className = "stock-company-facts";
+  for (const [label, value] of facts) {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    list.appendChild(dt);
+    list.appendChild(dd);
+  }
+  return list;
+}
+
+function renderStockCompanySummary(data) {
+  if (!stockCompanyPanelEl) return;
+  stockCompanyBodyEl.textContent = "";
+  const symbol = String(data.symbol || "").trim();
+  const name = String(data.name || symbol || "Company").trim();
+  stockCompanyTitleEl.textContent = symbol ? `${name} (${symbol})` : name;
+  const metaParts = [
+    data.exchange,
+    data.asset_type,
+    data.sector,
+    data.industry,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  stockCompanyMetaEl.textContent = metaParts.join(" · ") || "Company summary";
+
+  const url = String(
+    data.wiki_url || data.source_url || data.website || data.cnbc_url || ""
+  ).trim();
+  if (url) {
+    stockCompanyLinkEl.href = url;
+    stockCompanyLinkEl.textContent = data.wiki_url
+      ? "Open Wikipedia ↗"
+      : (data.website ? "Open company site ↗" : "Open quote ↗");
+    stockCompanyLinkEl.hidden = false;
+  } else {
+    stockCompanyLinkEl.hidden = true;
+  }
+
+  const summary = String(data.summary || "").trim();
+  if (summary) {
+    stockCompanyBodyEl.appendChild(renderMarkdown(summary, false));
+  } else {
+    const empty = document.createElement("p");
+    empty.textContent = "No company summary is available for this symbol.";
+    stockCompanyBodyEl.appendChild(empty);
+  }
+  const facts = renderStockCompanyFacts(data);
+  if (facts) stockCompanyBodyEl.appendChild(facts);
+  const sources = Array.isArray(data.data_source)
+    ? data.data_source.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
+  if (sources.length) {
+    const source = document.createElement("div");
+    source.className = "stock-company-source";
+    source.textContent = `Data source: ${sources.join("; ")}.`;
+    stockCompanyBodyEl.appendChild(source);
+  }
+}
+
+async function openStockCompanyModal(symbol) {
+  if (!stockCompanyPanelEl) return;
+  const ticker = String(symbol || "").trim();
+  if (!ticker) return;
+  const generation = ++stockCompanyGeneration;
+  stockCompanyTitleEl.textContent = ticker.toUpperCase();
+  stockCompanyMetaEl.textContent = "Loading company summary…";
+  stockCompanyLinkEl.hidden = true;
+  stockCompanyBodyEl.textContent = "";
+  const loading = document.createElement("p");
+  loading.textContent = "Loading company summary…";
+  stockCompanyBodyEl.appendChild(loading);
+  stockCompanyPanelEl.hidden = false;
+
+  try {
+    const params = new URLSearchParams({ symbol: ticker });
+    const response = await fetch(
+      `/api/stock_summary?${params.toString()}`,
+      { cache: "no-store" }
+    );
+    let data = {};
+    try { data = await response.json(); } catch { /* keep empty */ }
+    if (!response.ok) {
+      throw new Error(data?.error || `HTTP ${response.status}`);
+    }
+    if (generation !== stockCompanyGeneration) return;
+    renderStockCompanySummary(data || {});
+  } catch (error) {
+    if (generation !== stockCompanyGeneration) return;
+    stockCompanyMetaEl.textContent = "Company summary unavailable";
+    stockCompanyBodyEl.textContent = "";
+    const message = document.createElement("p");
+    message.className = "error-text";
+    message.textContent = `Could not load the company summary: ${
+      error?.message || String(error)
+    }`;
+    stockCompanyBodyEl.appendChild(message);
+  }
+}
+
+function renderStockHoldings(container, entry) {
+  const holdings = entry.stockHoldings;
+  const rows = Array.isArray(holdings?.holdings) ? holdings.holdings : [];
+  if (!rows.length) return;
+  const block = document.createElement("div");
+  block.className = "stock-holdings";
+  const head = document.createElement("div");
+  head.className = "stock-holdings-head";
+  head.textContent = "Top stock holdings";
+  block.appendChild(head);
+  const details = [];
+  const shown = rows.length;
+  const total = holdings.total;
+  if (Number.isFinite(Number(total)) && Number(total) > shown) {
+    details.push(`${shown} of ${Number(total)} positions`);
+  } else {
+    details.push(`${shown} ${shown === 1 ? "position" : "positions"}`);
+  }
+  if (holdings.as_of) details.push(`as of ${holdings.as_of}`);
+  const note = document.createElement("div");
+  note.className = "stock-holdings-note";
+  note.textContent = details.join("; ");
+  block.appendChild(note);
+
+  for (const row of rows) {
+    const symbol = String(row?.symbol || "").trim().toUpperCase();
+    if (!symbol) continue;
+    const line = document.createElement("div");
+    line.className = "stock-holding-row";
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "stock-holding-link";
+    link.textContent = symbol;
+    link.title = `Show the company summary for ${symbol}`;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openStockCompanyModal(symbol);
+    });
+    line.appendChild(link);
+    const earnings = document.createElement("span");
+    earnings.textContent = `next earnings date: ${
+      row.earnings_date || "not available"
+    }`;
+    line.appendChild(earnings);
+    if (row.name) {
+      const name = document.createElement("span");
+      name.className = "stock-holding-name";
+      name.textContent = `— ${row.name}`;
+      line.appendChild(name);
+    }
+    const weight = Number(row.weight);
+    if (Number.isFinite(weight) && weight > 0) {
+      const weightEl = document.createElement("span");
+      weightEl.className = "stock-holding-weight";
+      weightEl.textContent = `${weight.toFixed(2)}%`;
+      line.appendChild(weightEl);
+    }
+    block.appendChild(line);
+  }
+  container.appendChild(block);
 }
 
 function newsPodcastAction(entry, items) {
@@ -10348,6 +10907,14 @@ newsTranslateBtn.addEventListener("click", (event) => {
 newsPanelEl.addEventListener("click", (event) => {
   if (event.target === newsPanelEl) closeNewsModal();
 });
+stockCompanyPanelEl.addEventListener("click", (event) => {
+  if (event.target === stockCompanyPanelEl) closeStockCompanyModal();
+});
+stockCompanyCloseEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  closeStockCompanyModal();
+});
 changelogPanelEl.addEventListener("click", (event) => {
   if (event.target === changelogPanelEl) closeChangelogModal();
 });
@@ -11087,7 +11654,7 @@ function submitText(text, fromChoice = false) {
                 : commandName === "tablelog"
                   ? "Tabelog"
                   : commandName === "stock"
-                    ? "Yahoo Finance"
+                    ? "Stock"
                     : commandName === "medium"
                     ? "Medium"
                     : commandName === "gutenberg"
@@ -11854,6 +12421,12 @@ function handleKeyDown(event) {
     return;
   }
 
+  if (!stockCompanyPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeStockCompanyModal();
+    return;
+  }
+
   if (!newsPanelEl.hidden && key === "Escape") {
     event.preventDefault();
     closeNewsModal();
@@ -12275,6 +12848,11 @@ document.addEventListener("keydown", (event) => {
     closeLineHelp();
     return;
   }
+  if (!stockCompanyPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeStockCompanyModal();
+    return;
+  }
   if (!newsPanelEl.hidden && key === "Escape") {
     event.preventDefault();
     closeNewsModal();
@@ -12350,6 +12928,7 @@ inputEl.addEventListener("blur", () => {
       !popupEl.hidden ||
       !helpPanel.hidden ||
       !lineHelpPanel.hidden ||
+      !stockCompanyPanelEl.hidden ||
       !newsPanelEl.hidden ||
       !changelogPanelEl.hidden ||
       !videoPanelEl.hidden

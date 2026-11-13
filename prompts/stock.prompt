@@ -1,4 +1,44 @@
 task (completed) {
+  in the stock details section for ETF, do the following:
+  for each {stock} in major stocks the ETF invested in {
+    next to the {stock}, display its upcoming earnings date
+    display format:
+    <a link with stock symbol> next earnings date: <date>
+
+    for <a link with stock symbol>, when click, open up a modal showing the company summary of this stock symbol
+  }
+}
+
+task (completed) {
+  after the stock profile details section, add a tab group including 2 horizontal tabs:
+  tab 1: News {
+    display the current list of news
+  }
+  tab 2: Reddit {
+    display list of unique posts in site:reddit.com/r/stock and site:reddit.com/r/<stock_symobl>
+    learn from /reddit commands on the behavior
+  }
+  when clicking on each tab in the tab group, the tab will be active and the other tab will be inactive
+}
+
+task (completed) {
+  when i search ETF like SOXL, i would like to know what major stocks does it invest into, please get those information without using yahoo finance
+}
+
+task (completed) {
+  DO NOT use yahoo finance apis to get the stock data
+  try your best to use other apis to get the stock's detail information
+}
+
+task (completed) {
+  bug:
+  the /stock SOXL got "Unkown server error"
+  can we fix it?
+  make sure we fix it in a systematic way
+  also, if we want to test, only test once, do not cause the yahoo api server to block the ip
+}
+
+task (completed) {
   create command /stock <stock_symobl> {
     use endpoint: https://query2.finance.yahoo.com/v1/finance/search?q=<stock_symbol>
 

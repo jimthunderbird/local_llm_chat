@@ -69,6 +69,10 @@ Endpoints:
                                   detail modal when the list feed had no body
     GET  /api/reddit_article     ?url=<post_url> fetch a Reddit post body and
                                   comments for the /reddit detail modal
+    GET  /api/stock_reddit       ?symbol=<ticker> fetch unique Reddit posts from
+                                  r/stock and r/<ticker> for the /stock modal
+    GET  /api/stock_summary      ?symbol=<ticker> fetch a company summary for a
+                                  /stock holding, shown in its own modal
     GET  /api/stackoverflow_answers
                                   ?id=<question_id> fetch a question's answers
                                   for the /stackoverflow detail modal
@@ -99,6 +103,7 @@ from __future__ import annotations
 import argparse
 import base64
 import codecs
+import csv
 import gc
 import hashlib
 import html
@@ -189,7 +194,7 @@ WEB_COMMANDS = {
     "/stackoverflow": "search Stack Overflow: /stackoverflow tag <tag> or /stackoverflow search <keywords>",
     "/reddit": "search Reddit posts by keywords: /reddit <keywords>; also searches related subreddits; click a post to read it",
     "/tablelog": "japan food and restaurant guide for travelers — search Tabelog restaurant pages by keywords: /tablelog <keywords>",
-    "/stock": "show a Yahoo Finance symbol profile, financial details, and related news articles: /stock <stock_symbol>",
+    "/stock": "show a stock symbol profile, financial details, and related news articles: /stock <stock_symbol>",
 }
 
 # News sources accepted by /news and completed by news_fetch.php.
@@ -275,22 +280,62 @@ MDN_LOCALE = "en-US"
 MDN_RESULT_LIMIT = 10
 MDN_HIGHLIGHT_LIMIT = 3
 
-# /stock looks up one Yahoo Finance symbol and renders its related articles as
-# a /news-style result list. The search endpoint returns both the matching
-# quote metadata and the latest news stories for that symbol. The quoteSummary
-# endpoint adds the company profile and financial details shown above the list.
-STOCK_SEARCH_URL = "https://query2.finance.yahoo.com/v1/finance/search"
-STOCK_QUOTE_SUMMARY_URL = "https://query2.finance.yahoo.com/v10/finance/quoteSummary"
-STOCK_CRUMB_URL = "https://query1.finance.yahoo.com/v1/test/getcrumb"
-STOCK_COOKIE_URL = "https://fc.yahoo.com"
-STOCK_QUOTE_MODULES = (
-    "assetProfile,financialData,defaultKeyStatistics,incomeStatementHistory"
+# /stock resolves a ticker through CNBC's public quote service and enriches it
+# with Nasdaq's company profile/financial statements and a Wikipedia summary.
+# Related stories come from Google News through news_fetch.php, so /stock uses
+# the same story-list and detail modal as /news without touching Yahoo Finance.
+STOCK_CNBC_QUOTE_URL = (
+    "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
 )
-STOCK_NEWS_LIMIT = 20
+STOCK_NASDAQ_QUOTE_URL = "https://api.nasdaq.com/api/quote"
+STOCK_NASDAQ_COMPANY_URL = "https://api.nasdaq.com/api/company"
+STOCK_NASDAQ_AUTOCOMPLETE_URL = (
+    "https://api.nasdaq.com/api/autocomplete/slookup/10"
+)
+STOCK_WIKIPEDIA_SEARCH_URL = "https://en.wikipedia.org/w/api.php"
+STOCK_WIKIPEDIA_SUMMARY_URL = (
+    "https://en.wikipedia.org/api/rest_v1/page/summary"
+)
 STOCK_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+STOCK_CACHE_TTL = 600.0
+STOCK_STALE_CACHE_TTL = 86_400.0
+STOCK_CACHE_MAX_ENTRIES = 32
+_STOCK_CACHE: dict[str, tuple[float, dict]] = {}
+_STOCK_CACHE_LOCK = threading.Lock()
+
+# ETF holdings show each constituent's next earnings date. CNBC's quote feed
+# already carries EventData.next_earnings_date, so no extra provider is needed.
+# Dates change rarely, so cache them longer than quotes; a miss is retried
+# sooner in case the upstream response was temporarily incomplete.
+STOCK_EARNINGS_CACHE_TTL = 3_600.0
+STOCK_EARNINGS_MISS_TTL = 300.0
+_STOCK_EARNINGS_CACHE: dict[str, tuple[float, str]] = {}
+_STOCK_EARNINGS_CACHE_LOCK = threading.Lock()
+
+STOCK_INCOME_ROWS = (
+    "Total Revenue",
+    "Gross Profit",
+    "Operating Income",
+    "Net Income",
+    "Net Income Applicable to Common Shareholders",
+)
+
+# ETFs publish their portfolio holdings every business day. Direxion exposes a
+# per-fund CSV; StockAnalysis.com renders the same top-holdings table for most
+# other issuers. Both sources are independent of Yahoo Finance.
+STOCK_DIREXION_HOLDINGS_URL = "https://www.direxion.com/holdings/{symbol}.csv"
+STOCK_ANALYSIS_HOLDINGS_URL = "https://stockanalysis.com/etf/{symbol}/holdings/"
+STOCK_HOLDINGS_LIMIT = 10
+_STOCK_HOLDINGS_NON_EQUITY = re.compile(
+    r"\b(SWAP|CASH|TREASUR|TRSRY|TREASURY|GOVERNMENT|GOVT|MONEY MARKET|"
+    r"DREYFUS|GOLDMAN|J\.?P\.? MORGAN|MUNICIPAL)\b",
+    re.IGNORECASE,
+)
+_STOCK_HOLDINGS_TICKER = re.compile(r"[A-Z][A-Z0-9.\-]{0,11}")
+
 
 # /ai_news_podcast lists the five newest stories from the last 12 hours and
 # turns their full article bodies into a two-host podcast script, read aloud
@@ -683,25 +728,18 @@ def search_mdn_docs(keyword: str, limit: int = MDN_RESULT_LIMIT) -> list[dict]:
     return results
 
 
-def _yahoo_stock_value(value) -> str:
-    """Return one readable Yahoo Finance value.
-
-    Quote responses usually wrap numbers as ``{"raw": ..., "fmt": ...}``.
-    Prefer the formatted value, fall back to a sensible rendering of the raw
-    number, and treat Yahoo's empty placeholders as missing.
-    """
+def _stock_value(value) -> str:
+    """Render one Nasdaq/CNBC field, unwrapping their label/value objects."""
     if value is None:
         return ""
     if isinstance(value, dict):
-        for key in ("fmt", "longFmt"):
+        for key in ("value", "fmt", "longFmt"):
             formatted = value.get(key)
             if formatted not in (None, ""):
                 text = str(formatted).strip()
-                if text and text not in {"--", "-", "N/A", "n/a"}:
+                if text and text not in {"--", "-", "N/A", "n/a", "NA"}:
                     return text
-        value = value.get("raw")
-        if value is None:
-            return ""
+        return ""
     if isinstance(value, bool):
         return "Yes" if value else "No"
     if isinstance(value, int):
@@ -713,11 +751,11 @@ def _yahoo_stock_value(value) -> str:
             return f"{value:,.2f}".rstrip("0").rstrip(".")
         return f"{value:,.6f}".rstrip("0").rstrip(".")
     text = str(value).strip()
-    return "" if text in {"--", "-", "N/A", "n/a"} else text
+    return "" if text in {"--", "-", "N/A", "n/a", "NA"} else text
 
 
-def _yahoo_stock_summary(value: str, limit: int = 900) -> str:
-    """Collapse a long business summary and trim it at a sentence boundary."""
+def _stock_summary_text(value: str, limit: int = 900) -> str:
+    """Collapse a long company description and trim it at a sentence boundary."""
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if len(text) <= limit:
         return text
@@ -728,272 +766,864 @@ def _yahoo_stock_summary(value: str, limit: int = 900) -> str:
     return cut.rstrip() + " …"
 
 
-def fetch_yahoo_quote_summary(symbol: str) -> dict:
-    """Fetch the /stock detail modules from Yahoo Finance's quoteSummary.
+def _stock_cache_key(symbol: str) -> str:
+    """Normalize a symbol or query for the in-memory stock cache."""
+    return " ".join(str(symbol or "").split()).casefold()
 
-    Yahoo requires a session cookie and a matching crumb token for this
-    endpoint. The browser user agent matters too: Yahoo rejects the default
-    Python/curl agents with a rate-limit response.
+
+def _stock_cache_read(key: str, ttl: float, *, allow_stale: bool = False):
+    """Return (value, is_stale) for a cache entry, or None on a miss."""
+    now = time.time()
+    with _STOCK_CACHE_LOCK:
+        entry = _STOCK_CACHE.get(key)
+        if entry is None:
+            return None
+        stored, value = entry
+        age = now - stored
+        if age <= ttl:
+            return value, False
+        if allow_stale and age <= STOCK_STALE_CACHE_TTL:
+            return value, True
+        if age > STOCK_STALE_CACHE_TTL:
+            _STOCK_CACHE.pop(key, None)
+        return None
+
+
+def _stock_cache_store(key: str, value: dict) -> None:
+    with _STOCK_CACHE_LOCK:
+        if len(_STOCK_CACHE) >= STOCK_CACHE_MAX_ENTRIES and key not in _STOCK_CACHE:
+            oldest = min(_STOCK_CACHE, key=lambda item: _STOCK_CACHE[item][0])
+            _STOCK_CACHE.pop(oldest, None)
+        _STOCK_CACHE[key] = (time.time(), value)
+
+
+def _stock_get_json(url: str, params: dict, *, referer: str = ""):
+    """Fetch one public JSON endpoint with browser-like request headers."""
+    headers = {
+        "User-Agent": STOCK_USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    if referer:
+        headers["Origin"] = "https://www.nasdaq.com"
+        headers["Referer"] = referer
+    try:
+        response = requests.get(
+            url, params=params, headers=headers, timeout=(8, 25)
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"stock data request failed: {exc}") from exc
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"stock data request returned HTTP {response.status_code}."
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError(f"stock data request returned invalid JSON: {exc}") from exc
+    return payload if isinstance(payload, (dict, list)) else {}
+
+
+def fetch_cnbc_quote(symbol: str) -> dict:
+    """Resolve one symbol through CNBC's public quote endpoint.
+
+    CNBC covers US and many international exchanges without an API key. The
+    response carries the quote, valuation ratios, margins, and dividend data
+    that used to come from quoteSummary. An unknown symbol yields ``code`` 1
+    and is returned as an empty dict.
     """
     query = " ".join(str(symbol or "").split())
     if not query:
         return {}
-
-    session = requests.Session()
-    session.headers.update(
+    payload = _stock_get_json(
+        STOCK_CNBC_QUOTE_URL,
         {
-            "User-Agent": STOCK_USER_AGENT,
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
+            "symbols": query,
+            "requestMethod": "itv",
+            "noform": "1",
+            "partnerId": "2",
+            "fund": "1",
+            "exthrs": "1",
+            "output": "json",
+            "events": "1",
+        },
     )
+    result = payload.get("FormattedQuoteResult")
+    quotes = result.get("FormattedQuote") if isinstance(result, dict) else None
+    if not isinstance(quotes, list) or not quotes:
+        return {}
+    quote = quotes[0] if isinstance(quotes[0], dict) else {}
     try:
-        # fc.yahoo.com sets the consent/cookie pair used by the crumb endpoint.
-        # It answers 404, so only the cookie side effect matters here.
-        session.get(STOCK_COOKIE_URL, timeout=(5, 15))
-        crumb_response = session.get(STOCK_CRUMB_URL, timeout=(5, 15))
-        crumb_response.raise_for_status()
-        crumb = crumb_response.text.strip()
-        if not crumb or len(crumb) > 80 or any(ch.isspace() for ch in crumb):
-            raise RuntimeError("Yahoo Finance did not return a valid crumb")
+        code = int(quote.get("code") or 0)
+    except (TypeError, ValueError):
+        code = 0
+    if code != 0 or not str(quote.get("symbol") or "").strip():
+        return {}
+    return quote
 
-        response = session.get(
-            f"{STOCK_QUOTE_SUMMARY_URL}/{quote(query, safe='')}",
-            params={"modules": STOCK_QUOTE_MODULES, "crumb": crumb},
-            timeout=(10, 30),
+
+def fetch_nasdaq_autocomplete(query: str) -> list[dict]:
+    """Return Nasdaq's symbol suggestions, used when a CNBC name lookup fails."""
+    text = " ".join(str(query or "").split())
+    if not text:
+        return []
+    try:
+        payload = _stock_get_json(
+            STOCK_NASDAQ_AUTOCOMPLETE_URL,
+            {"search": text},
+            referer="https://www.nasdaq.com/",
         )
-        response.raise_for_status()
-        data = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        raise RuntimeError(f"Yahoo Finance detail lookup failed: {exc}") from exc
+    except RuntimeError:
+        return []
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return []
+    return [row for row in data if isinstance(row, dict)]
 
+
+def resolve_stock_symbol(query: str) -> tuple[dict, str]:
+    """Resolve a ticker or company name to (CNBC quote, resolved symbol)."""
+    text = " ".join(str(query or "").split())
+    if not text:
+        return {}, ""
+    quote = fetch_cnbc_quote(text)
+    if quote:
+        return quote, str(quote.get("symbol") or text).strip().upper()
+
+    # A company name such as "apple" is not a CNBC symbol. Nasdaq's
+    # autocomplete maps it to a US ticker; verify each suggestion through CNBC
+    # before committing to it.
+    candidates = fetch_nasdaq_autocomplete(text)
+    tried: set[str] = set()
+    for candidate in candidates[:5]:
+        candidate_symbol = str(candidate.get("symbol") or "").strip()
+        if not candidate_symbol or candidate_symbol.casefold() in tried:
+            continue
+        tried.add(candidate_symbol.casefold())
+        quote = fetch_cnbc_quote(candidate_symbol)
+        if quote:
+            return quote, str(quote.get("symbol") or candidate_symbol).upper()
+    return {}, text.upper()
+
+
+def fetch_nasdaq_summary(symbol: str, asset_class: str) -> dict:
+    """Return Nasdaq's summary table (target, yield, AUM, expense ratio, ...)."""
+    try:
+        payload = _stock_get_json(
+            f"{STOCK_NASDAQ_QUOTE_URL}/{quote(symbol, safe='')}/summary",
+            {"assetclass": asset_class},
+            referer="https://www.nasdaq.com/",
+        )
+    except RuntimeError:
+        return {}
+    data = payload.get("data")
     if not isinstance(data, dict):
-        raise RuntimeError("Yahoo Finance returned an unexpected detail response.")
-    container = data.get("quoteSummary")
-    results = container.get("result") if isinstance(container, dict) else None
-    if not isinstance(results, list) or not results or not isinstance(results[0], dict):
-        error = container.get("error") if isinstance(container, dict) else None
-        message = ""
-        if isinstance(error, dict):
-            message = str(error.get("description") or error.get("code") or "")
-        raise RuntimeError(
-            f"Yahoo Finance has no detail for {query!r}"
-            + (f": {message}" if message else ".")
+        return {}
+    summary = data.get("summaryData")
+    return summary if isinstance(summary, dict) else {}
+
+
+def fetch_nasdaq_company_profile(symbol: str) -> dict:
+    """Return Nasdaq's company description, sector, industry, and website."""
+    try:
+        payload = _stock_get_json(
+            f"{STOCK_NASDAQ_COMPANY_URL}/{quote(symbol, safe='')}/company-profile",
+            {"assetclass": "stocks"},
+            referer="https://www.nasdaq.com/",
         )
-    return results[0]
+    except RuntimeError:
+        return {}
+    data = payload.get("data")
+    return data if isinstance(data, dict) else {}
 
 
-def stock_quote_details(summary: dict) -> str:
-    """Render quoteSummary modules as readable lines for the result header."""
-    if not isinstance(summary, dict) or not summary:
+def fetch_nasdaq_financials(symbol: str) -> dict:
+    """Return Nasdaq's annual income statement (latest columns first)."""
+    try:
+        payload = _stock_get_json(
+            f"{STOCK_NASDAQ_COMPANY_URL}/{quote(symbol, safe='')}/financials",
+            {"frequency": "1", "assetclass": "stocks"},
+            referer="https://www.nasdaq.com/",
+        )
+    except RuntimeError:
+        return {}
+    data = payload.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _stock_holding_weight(value) -> float:
+    """Parse a holdings percentage such as '5.85%' or '5.8465700134'."""
+    match = re.search(r"-?\d+(?:\.\d+)?", str(value or "").replace(",", ""))
+    if not match:
+        return 0.0
+    try:
+        return float(match.group())
+    except ValueError:
+        return 0.0
+
+
+def _stock_holding_symbol(value) -> str:
+    symbol = str(value or "").strip().upper().lstrip("$")
+    if symbol in {"", "N/A", "NA", "NONE", "-", "--"}:
         return ""
-
-    def module(name: str) -> dict:
-        value = summary.get(name)
-        return value if isinstance(value, dict) else {}
-
-    sections: list[str] = []
-
-    profile = module("assetProfile")
-    company: list[str] = []
-
-    def add_company(label: str, value) -> None:
-        text = _yahoo_stock_value(value)
-        if text:
-            company.append(f"{label}: {text}")
-
-    add_company("Sector", profile.get("sector"))
-    add_company("Industry", profile.get("industry"))
-    add_company("Employees", profile.get("fullTimeEmployees"))
-    headquarters = ", ".join(
-        part
-        for part in (
-            _yahoo_stock_value(profile.get("city")),
-            _yahoo_stock_value(profile.get("state")),
-            _yahoo_stock_value(profile.get("country")),
-        )
-        if part
-    )
-    if headquarters:
-        company.append(f"Headquarters: {headquarters}")
-    add_company("Website", profile.get("website"))
-    if company:
-        sections.append("Company\n" + "\n".join(company))
-    business = _yahoo_stock_summary(profile.get("longBusinessSummary"))
-    if business:
-        sections.append("Business summary\n" + business)
-
-    financial = module("financialData")
-    stats = module("defaultKeyStatistics")
-    financials: list[str] = []
-
-    def add_financial(label: str, value) -> None:
-        text = _yahoo_stock_value(value)
-        if text:
-            financials.append(f"{label}: {text}")
-
-    add_financial("Current price", financial.get("currentPrice"))
-    add_financial("Market cap", stats.get("marketCap") or financial.get("marketCap"))
-    add_financial("Target mean price", financial.get("targetMeanPrice"))
-    add_financial("Target high price", financial.get("targetHighPrice"))
-    add_financial("Target low price", financial.get("targetLowPrice"))
-    add_financial("Analyst recommendation", financial.get("recommendationKey"))
-    add_financial("Analyst count", financial.get("numberOfAnalystOpinions"))
-    add_financial("Revenue (ttm)", financial.get("totalRevenue"))
-    add_financial("Revenue growth", financial.get("revenueGrowth"))
-    add_financial("Gross margin", financial.get("grossMargins"))
-    add_financial("Operating margin", financial.get("operatingMargins"))
-    add_financial("Profit margin", financial.get("profitMargins"))
-    add_financial("Return on equity", financial.get("returnOnEquity"))
-    add_financial("Total cash", financial.get("totalCash"))
-    add_financial("Total debt", financial.get("totalDebt"))
-    add_financial("Debt/equity", financial.get("debtToEquity"))
-    add_financial("Current ratio", financial.get("currentRatio"))
-    add_financial("Free cash flow", financial.get("freeCashflow"))
-    add_financial("Operating cash flow", financial.get("operatingCashflow"))
-    add_financial("Trailing EPS", stats.get("trailingEps"))
-    add_financial("Forward EPS", stats.get("forwardEps"))
-    add_financial("Trailing P/E", stats.get("trailingPE"))
-    add_financial("Forward P/E", stats.get("forwardPE"))
-    add_financial("PEG ratio", stats.get("pegRatio"))
-    add_financial("Price/book", stats.get("priceToBook"))
-    add_financial("Beta", stats.get("beta"))
-    add_financial("52-week change", stats.get("52WeekChange"))
-    add_financial("Shares outstanding", stats.get("sharesOutstanding"))
-    add_financial("Float shares", stats.get("floatShares"))
-    add_financial("Insiders held", stats.get("heldPercentInsiders"))
-    add_financial("Institutions held", stats.get("heldPercentInstitutions"))
-    add_financial("Most recent quarter", stats.get("mostRecentQuarter"))
-    if financials:
-        sections.append("Financials\n" + "\n".join(financials))
-
-    income_container = module("incomeStatementHistory")
-    history = income_container.get("incomeStatementHistory")
-    if isinstance(history, list) and history and isinstance(history[0], dict):
-        latest = history[0]
-        period = _yahoo_stock_value(latest.get("endDate"))
-        heading = "Income statement" + (f" ({period})" if period else " (latest fiscal year)")
-        statement: list[str] = []
-
-        def add_statement(label: str, value) -> None:
-            text = _yahoo_stock_value(value)
-            if text:
-                statement.append(f"{label}: {text}")
-
-        add_statement("Revenue", latest.get("totalRevenue"))
-        add_statement("Gross profit", latest.get("grossProfit"))
-        add_statement("Operating income", latest.get("operatingIncome"))
-        add_statement("Net income", latest.get("netIncome"))
-        if statement:
-            sections.append(heading + "\n" + "\n".join(statement))
-
-    return "\n\n".join(sections)
+    return symbol if _STOCK_HOLDINGS_TICKER.fullmatch(symbol) else ""
 
 
-def search_yahoo_finance_symbol(symbol: str) -> tuple[dict, list[dict]]:
-    """Look up one Yahoo Finance symbol and return (quote, news articles).
+def _stock_is_equity_holding(symbol: str, name: str) -> bool:
+    """Keep operating-company positions, not swaps, cash, or treasuries."""
+    if not symbol:
+        return False
+    return not _STOCK_HOLDINGS_NON_EQUITY.search(str(name or ""))
 
-    The quote is the best matching entry from the search endpoint, preferring
-    an exact symbol match over the other instruments that mention it. News
-    entries are normalized to the fields used by the /news list: title, link,
-    source (publisher), and an ISO-8601 published timestamp.
-    """
-    query = " ".join(str(symbol or "").split())
-    if not query:
-        return {}, []
+
+def _stock_holding_row(
+    symbol: str,
+    name: str,
+    weight: float,
+    shares: str = "",
+    value: str = "",
+) -> dict:
+    return {
+        "symbol": symbol,
+        "name": " ".join(str(name or "").split()),
+        "weight": weight,
+        "shares": " ".join(str(shares or "").split()),
+        "value": " ".join(str(value or "").split()),
+    }
+
+
+def _stock_trade_date(value: str) -> str:
+    """Return the date portion of a Direxion TradeDate field."""
+    text = " ".join(str(value or "").split())
+    match = re.match(r"(\d{1,2}/\d{1,2}/\d{4})", text)
+    return match.group(1) if match else text
+
+
+def fetch_direxion_etf_holdings(symbol: str) -> dict:
+    """Fetch one Direxion fund's daily holdings CSV."""
+    ticker = str(symbol or "").strip().upper()
+    if not ticker:
+        return {}
+    url = STOCK_DIREXION_HOLDINGS_URL.format(symbol=quote(ticker, safe=""))
     try:
         response = requests.get(
-            STOCK_SEARCH_URL,
-            params={"q": query, "newsCount": STOCK_NEWS_LIMIT},
+            url,
             headers={
                 "User-Agent": STOCK_USER_AGENT,
-                "Accept": "application/json, text/plain, */*",
+                "Accept": "text/csv,text/plain,*/*",
+            },
+            timeout=(8, 25),
+        )
+    except requests.RequestException:
+        return {}
+    if response.status_code != 200:
+        return {}
+    lines = response.text.splitlines()
+    header_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if "AccountTicker" in line and "HoldingsPercent" in line
+        ),
+        None,
+    )
+    if header_index is None:
+        return {}
+    try:
+        rows = list(csv.DictReader(lines[header_index:]))
+    except csv.Error:
+        return {}
+    holdings: list[dict] = []
+    as_of = ""
+    for row in rows:
+        holding_symbol = _stock_holding_symbol(row.get("StockTicker"))
+        name = row.get("SecurityDescription") or ""
+        weight = _stock_holding_weight(row.get("HoldingsPercent"))
+        if not _stock_is_equity_holding(holding_symbol, name) or weight <= 0:
+            continue
+        as_of = as_of or _stock_trade_date(row.get("TradeDate") or "")
+        holdings.append(
+            _stock_holding_row(
+                holding_symbol,
+                name,
+                weight,
+                row.get("Shares") or "",
+                row.get("MarketValue") or "",
+            )
+        )
+    if not holdings:
+        return {}
+    holdings.sort(key=lambda item: item["weight"], reverse=True)
+    return {
+        "source": "Direxion daily fund holdings",
+        "source_url": url,
+        "as_of": as_of,
+        "total": len(rows),
+        "holdings": holdings,
+    }
+
+
+class _StockHoldingsTableParser(HTMLParser):
+    """Collect the rows of StockAnalysis.com's holdings table."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._in_table = False
+        self._in_row = False
+        self._in_cell = False
+        self._cell: list[str] = []
+        self._row: list[str] = []
+        self.rows: list[list[str]] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        attributes = dict(attrs)
+        if tag == "table" and attributes.get("id") == "main-table":
+            self._in_table = True
+        elif self._in_table and tag == "tr":
+            self._in_row = True
+            self._row = []
+        elif self._in_row and tag in {"td", "th"}:
+            self._in_cell = True
+            self._cell = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "table" and self._in_table:
+            self._in_table = False
+        elif self._in_row and tag == "tr":
+            if self._row:
+                self.rows.append(self._row)
+            self._in_row = False
+            self._row = []
+        elif self._in_cell and tag in {"td", "th"}:
+            self._row.append(" ".join("".join(self._cell).split()))
+            self._in_cell = False
+            self._cell = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_cell:
+            self._cell.append(data)
+
+
+def fetch_stockanalysis_etf_holdings(symbol: str) -> dict:
+    """Fetch an ETF's top holdings from StockAnalysis.com's public table."""
+    ticker = str(symbol or "").strip().upper()
+    if not ticker:
+        return {}
+    url = STOCK_ANALYSIS_HOLDINGS_URL.format(symbol=quote(ticker.lower(), safe=""))
+    try:
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent": STOCK_USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml",
                 "Accept-Language": "en-US,en;q=0.9",
             },
-            timeout=(10, 30),
+            timeout=(8, 25),
         )
-        response.raise_for_status()
-        data = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        raise RuntimeError(f"Yahoo Finance lookup failed: {exc}") from exc
-
-    if not isinstance(data, dict):
-        raise RuntimeError("Yahoo Finance returned an unexpected response.")
-
-    raw_quotes = data.get("quotes")
-    quotes = (
-        [quote for quote in raw_quotes if isinstance(quote, dict)]
-        if isinstance(raw_quotes, list)
-        else []
-    )
-    wanted = query.casefold()
-    quote = next(
-        (
-            candidate
-            for candidate in quotes
-            if str(candidate.get("symbol", "")).casefold() == wanted
-        ),
-        quotes[0] if quotes else {},
-    )
-
-    raw_news = data.get("news")
-    articles: list[dict] = []
-    if isinstance(raw_news, list):
-        for story in raw_news:
-            if not isinstance(story, dict):
-                continue
-            link = str(story.get("link") or "").strip()
-            title = str(story.get("title") or "").strip()
-            if not link or not title:
-                continue
-            published = ""
-            timestamp = story.get("providerPublishTime")
-            if isinstance(timestamp, (int, float)):
-                try:
-                    published = datetime.fromtimestamp(timestamp).astimezone().isoformat()
-                except (OverflowError, OSError, ValueError):
-                    published = ""
-            articles.append(
-                {
-                    "title": title,
-                    "link": link,
-                    "source": str(story.get("publisher") or "Yahoo Finance").strip(),
-                    "published": published,
-                    "summary": "",
-                }
+    except requests.RequestException:
+        return {}
+    if response.status_code != 200 or "main-table" not in response.text:
+        return {}
+    parser = _StockHoldingsTableParser()
+    try:
+        parser.feed(response.text)
+    except Exception:
+        return {}
+    holdings: list[dict] = []
+    for row in parser.rows:
+        if len(row) < 4 or row[0].strip().casefold().rstrip(".") == "no":
+            continue
+        holding_symbol = _stock_holding_symbol(row[1])
+        name = row[2]
+        weight = _stock_holding_weight(row[3])
+        if not _stock_is_equity_holding(holding_symbol, name) or weight <= 0:
+            continue
+        holdings.append(
+            _stock_holding_row(
+                holding_symbol,
+                name,
+                weight,
+                row[4] if len(row) > 4 else "",
             )
-            if len(articles) >= STOCK_NEWS_LIMIT:
-                break
-    return quote, articles
+        )
+    if not holdings:
+        return {}
+    holdings.sort(key=lambda item: item["weight"], reverse=True)
+    as_of_match = re.search(r'Updated:"?([A-Z][a-z]{2} \d{1,2}, \d{4})"?', response.text)
+    total_match = re.search(
+        r"total of\s+([\d,]+)\s+individual holdings", response.text, re.I
+    )
+    total = 0
+    if total_match:
+        try:
+            total = int(total_match.group(1).replace(",", ""))
+        except ValueError:
+            total = 0
+    return {
+        "source": "StockAnalysis.com ETF holdings",
+        "source_url": url,
+        "as_of": as_of_match.group(1) if as_of_match else "",
+        "total": total or len(holdings),
+        "holdings": holdings,
+    }
 
 
-def stock_quote_description(quote: dict, symbol: str) -> str:
-    """Build a short readable description from a Yahoo Finance quote."""
-    name = str(
-        quote.get("longname") or quote.get("shortname") or symbol
-    ).strip()
+def fetch_etf_holdings(symbol: str) -> dict:
+    """Resolve ETF holdings without using Yahoo Finance."""
+    for fetcher in (
+        fetch_direxion_etf_holdings,
+        fetch_stockanalysis_etf_holdings,
+    ):
+        try:
+            data = fetcher(symbol)
+        except Exception:
+            data = {}
+        if isinstance(data, dict) and data.get("holdings"):
+            return data
+    return {}
+
+
+def fetch_stock_next_earnings_date(symbol: str) -> str:
+    """Return one stock's next earnings date from CNBC's quote events.
+
+    CNBC's public quote response includes ``EventData.next_earnings_date`` for
+    most US and international listings (for example ``11/17/2026``). The value
+    is cached per symbol because ETF constituents change slowly and one /stock
+    request asks about every major holding.
+    """
+    ticker = str(symbol or "").strip().upper()
+    if not ticker:
+        return ""
+    now = time.time()
+    with _STOCK_EARNINGS_CACHE_LOCK:
+        cached = _STOCK_EARNINGS_CACHE.get(ticker)
+        if cached is not None:
+            stored, value = cached
+            ttl = STOCK_EARNINGS_CACHE_TTL if value else STOCK_EARNINGS_MISS_TTL
+            if now - stored <= ttl:
+                return value
+
+    try:
+        quote = fetch_cnbc_quote(ticker)
+    except RuntimeError:
+        quote = {}
+    events = quote.get("EventData")
+    value = ""
+    if isinstance(events, dict):
+        value = " ".join(
+            str(events.get("next_earnings_date") or "").split()
+        )
+    with _STOCK_EARNINGS_CACHE_LOCK:
+        _STOCK_EARNINGS_CACHE[ticker] = (time.time(), value)
+    return value
+
+
+def fetch_holding_earnings_dates(holdings: dict) -> dict[str, str]:
+    """Fetch next earnings dates for an ETF's displayed stock holdings."""
+    rows = holdings.get("holdings") if isinstance(holdings, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return {}
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for row in rows[:STOCK_HOLDINGS_LIMIT]:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        symbols.append(symbol)
+    if not symbols:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(8, len(symbols))) as executor:
+        dates = list(executor.map(fetch_stock_next_earnings_date, symbols))
+    return dict(zip(symbols, dates))
+
+
+def stock_holdings_payload(
+    holdings: dict, earnings_dates: dict[str, str] | None = None
+) -> dict:
+    """Return structured ETF holdings for the browser's clickable list."""
+    rows = holdings.get("holdings") if isinstance(holdings, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return {}
+    if earnings_dates is None:
+        earnings_dates = fetch_holding_earnings_dates(holdings)
+    items: list[dict] = []
+    for row in rows[:STOCK_HOLDINGS_LIMIT]:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        try:
+            weight = float(row.get("weight") or 0)
+        except (TypeError, ValueError):
+            weight = 0.0
+        items.append(
+            {
+                "symbol": symbol,
+                "name": " ".join(str(row.get("name") or "").split()),
+                "weight": round(weight, 2) if weight > 0 else 0,
+                "earnings_date": str(earnings_dates.get(symbol) or "").strip(),
+            }
+        )
+    if not items:
+        return {}
+    return {
+        "source": str(holdings.get("source") or "ETF holdings"),
+        "as_of": str(holdings.get("as_of") or "").strip(),
+        "total": holdings.get("total"),
+        "holdings": items,
+    }
+
+
+def fetch_wikipedia_company_summary(name: str) -> dict:
+    """Return the English Wikipedia summary for a company name, if any."""
+    text = " ".join(str(name or "").split())
+    if not text:
+        return {}
+    try:
+        payload = _stock_get_json(
+            STOCK_WIKIPEDIA_SEARCH_URL,
+            {
+                "action": "opensearch",
+                "search": text,
+                "limit": "8",
+                "namespace": "0",
+                "format": "json",
+            },
+        )
+    except RuntimeError:
+        return {}
+    titles = payload[1] if isinstance(payload, list) and len(payload) > 1 else []
+    if not isinstance(titles, list) or not titles:
+        return {}
+
+    # Opensearch can rank a plant, subsidiary, or list page above the company
+    # itself. Prefer an exact/near-exact title and penalise those narrow pages.
+    query_tokens = set(re.findall(r"[a-z0-9]+", text.casefold()))
+    best_title = ""
+    best_score = float("-inf")
+    for candidate in titles[:8]:
+        title_text = str(candidate or "").strip()
+        if not title_text:
+            continue
+        candidate_lower = title_text.casefold()
+        candidate_tokens = set(re.findall(r"[a-z0-9]+", candidate_lower))
+        overlap = len(query_tokens & candidate_tokens)
+        extra = len(candidate_tokens - query_tokens)
+        score = overlap * 10 - extra * 3 - len(candidate_tokens) * 0.1
+        if candidate_lower == text.casefold():
+            score += 100
+        if any(
+            word in candidate_lower
+            for word in (
+                "plant",
+                "factory",
+                "headquarters",
+                "building",
+                "subsidiary",
+                "list of",
+                "disambiguation",
+            )
+        ):
+            score -= 50
+        if score > best_score:
+            best_score = score
+            best_title = title_text
+    title = best_title
+    if not title:
+        return {}
+    try:
+        summary = _stock_get_json(
+            f"{STOCK_WIKIPEDIA_SUMMARY_URL}/{quote(title, safe='')}", {}
+        )
+    except RuntimeError:
+        return {}
+    if str(summary.get("type") or "") == "disambiguation":
+        return {}
+    extract = _stock_summary_text(summary.get("extract"), 900)
+    if not extract:
+        return {}
+    content_urls = summary.get("content_urls")
+    desktop = content_urls.get("desktop") if isinstance(content_urls, dict) else None
+    url = desktop.get("page") if isinstance(desktop, dict) else ""
+    return {
+        "title": str(summary.get("title") or title),
+        "extract": extract,
+        "description": str(summary.get("description") or ""),
+        "url": str(url or ""),
+    }
+
+
+def stock_quote_description(
+    quote: dict,
+    profile: dict,
+    summary: dict,
+    financials: dict,
+    wiki: dict,
+    symbol: str,
+    holdings: dict | None = None,
+) -> str:
+    """Compose the /stock header from CNBC, Nasdaq, and Wikipedia data."""
+    name = str(quote.get("name") or quote.get("altName") or symbol).strip()
     resolved = str(quote.get("symbol") or symbol).strip().upper()
-    parts: list[str] = []
-    quote_type = str(quote.get("typeDisp") or quote.get("quoteType") or "").strip()
+    subtype = str(quote.get("subType") or quote.get("type") or "").strip()
     exchange = str(quote.get("exchange") or "").strip()
-    exchange_display = str(quote.get("exchDisp") or exchange).strip()
-    description = f"{name} ({resolved})"
-    if quote_type:
-        description += f" is listed as {quote_type}"
-    if exchange_display:
-        description += f" on {exchange_display}"
-        if exchange and exchange != exchange_display:
-            description += f" ({exchange})"
-    description += "."
-    sector = str(quote.get("sector") or "").strip()
-    industry = str(quote.get("industry") or "").strip()
+    country = str(quote.get("countryCode") or "").strip()
+    sector = _stock_value(profile.get("Sector")) or _stock_value(
+        summary.get("Sector")
+    )
+    industry = _stock_value(profile.get("Industry")) or _stock_value(
+        summary.get("Industry")
+    )
+    website = _stock_value(profile.get("CompanyUrl"))
+
+    intro = f"{name} ({resolved})"
+    if subtype:
+        intro += f" is listed as {subtype}"
+    if exchange:
+        intro += f" on {exchange}"
+    if country:
+        intro += f" ({country})"
+    intro += "."
     if sector:
-        parts.append(f"Sector: {sector}.")
+        intro += f" Sector: {sector}."
     if industry:
-        parts.append(f"Industry: {industry}.")
-    if parts:
-        description += " " + " ".join(parts)
-    return description
+        intro += f" Industry: {industry}."
+
+    sections: list[str] = [intro]
+
+    company: list[str] = []
+    if sector:
+        company.append(f"Sector: {sector}")
+    if industry:
+        company.append(f"Industry: {industry}")
+    region = _stock_value(profile.get("Region")) or country
+    if region:
+        company.append(f"Region: {region}")
+    if website:
+        company.append(f"Website: {website}")
+    if company:
+        sections.append("Company\n" + "\n".join(company))
+
+    business = _stock_summary_text(
+        _stock_value(profile.get("CompanyDescription"))
+    )
+    if business:
+        sections.append("Business summary\n" + business)
+    elif wiki.get("extract"):
+        label = "About (Wikipedia)"
+        if wiki.get("url"):
+            label += f"\n{wiki['url']}"
+        sections.append(label + "\n" + str(wiki["extract"]))
+
+    financial_lines: list[str] = []
+
+    def add_financial(label: str, value, *, suffix: str = "") -> None:
+        text = _stock_value(value)
+        if text:
+            financial_lines.append(f"{label}: {text}{suffix}")
+
+    currency = str(quote.get("currencyCode") or "").strip()
+    last = _stock_value(quote.get("last"))
+    change = _stock_value(quote.get("change"))
+    percent = _stock_value(quote.get("change_pct"))
+    if last:
+        line = last + (f" {currency}" if currency else "")
+        if change or percent:
+            line += f" ({change}{', ' if change and percent else ''}{percent})"
+        add_financial("Last price", line)
+    add_financial("Previous close", quote.get("previous_day_closing"))
+    low = _stock_value(quote.get("low"))
+    high = _stock_value(quote.get("high"))
+    if low or high:
+        add_financial("Day range", f"{low or '?'} - {high or '?'}")
+    year_low = _stock_value(quote.get("yrloprice"))
+    year_high = _stock_value(quote.get("yrhiprice"))
+    if year_low or year_high:
+        add_financial("52-week range", f"{year_low or '?'} - {year_high or '?'}")
+    add_financial("Volume", quote.get("volume"))
+    add_financial("Market cap", quote.get("mktcapView"))
+    add_financial("Enterprise value (millions)", quote.get("enterpriseValue"))
+    add_financial("P/E (TTM)", quote.get("pe"))
+    add_financial("Forward P/E", quote.get("fpe"))
+    add_financial("EPS (TTM)", quote.get("eps"))
+    add_financial("Forward EPS", quote.get("feps"))
+    add_financial("Revenue (TTM)", quote.get("revenuettm"))
+    add_financial("Gross margin", quote.get("GROSMGNTTM"))
+    add_financial("Net profit margin", quote.get("NETPROFTTM"))
+    add_financial("Return on equity", quote.get("ROETTM"))
+    add_financial("Debt/equity", quote.get("DEBTEQTYQ"))
+    add_financial("Beta", quote.get("beta"))
+    dividend = _stock_value(quote.get("dividend"))
+    dividend_yield = _stock_value(quote.get("dividendyield"))
+    if dividend:
+        add_financial(
+            "Dividend",
+            f"{dividend} ({dividend_yield})" if dividend_yield else dividend,
+        )
+    add_financial("Shares outstanding", quote.get("sharesout"))
+    add_financial("Cash (MRQ, millions)", quote.get("cashmrq"))
+    target = _stock_value(summary.get("OneYrTarget"))
+    if target:
+        add_financial("1-year target", target)
+    expense_ratio = _stock_value(summary.get("ExpenseRatio"))
+    if expense_ratio:
+        add_financial("Expense ratio", expense_ratio)
+    aum = _stock_value(summary.get("AUM"))
+    if aum:
+        add_financial("Assets under management ($000)", aum)
+    market_status = str(quote.get("curmktstatus") or "").strip()
+    if market_status:
+        add_financial("Market status", market_status)
+    events = quote.get("EventData")
+    if isinstance(events, dict):
+        add_financial("Next earnings", events.get("next_earnings_date"))
+        add_financial("Ex-dividend date", events.get("div_ex_date"))
+    if financial_lines:
+        sections.append("Financials\n" + "\n".join(financial_lines))
+
+    income = fetch_income_statement_lines(financials)
+    if income:
+        sections.append(income)
+
+    # ETF holdings are rendered separately in the browser so every symbol can
+    # link to its own company-summary modal. The description keeps the source
+    # attribution below, and the command sends the structured holdings table
+    # alongside this text.
+    has_holdings = bool(
+        isinstance(holdings, dict) and holdings.get("holdings")
+    )
+    wiki_line = ""
+    if wiki.get("url") and business:
+        wiki_line = f"\nWikipedia: {wiki['url']}"
+    sources_used = ["CNBC quote"]
+    if profile or financials or summary:
+        sources_used.append("Nasdaq company profile and financials")
+    if wiki:
+        sources_used.append("Wikipedia")
+    if has_holdings:
+        sources_used.append(
+            str((holdings or {}).get("source") or "ETF holdings")
+        )
+    sources_used.append("Google News related stories")
+    sections.append("Data source: " + "; ".join(sources_used) + "." + wiki_line)
+    return "\n\n".join(section for section in sections if section.strip())
+
+
+def fetch_stock_company_summary(symbol: str) -> dict:
+    """Return the company summary shown when an ETF holding is clicked.
+
+    Holdings are ordinary tickers, so CNBC supplies the quote and next
+    earnings date. US listings also get Nasdaq's business description and
+    profile; other exchanges fall back to the English Wikipedia summary. The
+    result is cached with the other /stock data so clicking several holdings
+    does not repeatedly hit the upstream services.
+    """
+    ticker = " ".join(str(symbol or "").split()).strip()
+    if not ticker:
+        raise RuntimeError("Missing stock symbol.")
+    cache_key = _stock_cache_key(f"company:{ticker}")
+    cached = _stock_cache_read(cache_key, STOCK_CACHE_TTL)
+    if cached is not None:
+        return cached[0]
+
+    quote = fetch_cnbc_quote(ticker)
+    if not quote:
+        quote, _ = resolve_stock_symbol(ticker)
+    if not quote:
+        raise RuntimeError(f"no company summary found for {ticker!r}")
+
+    resolved = str(quote.get("symbol") or ticker).strip().upper()
+    name = str(quote.get("name") or quote.get("altName") or resolved).strip()
+    is_us_listing = str(quote.get("countryCode") or "").upper() == "US"
+    profile = fetch_nasdaq_company_profile(resolved) if is_us_listing else {}
+    wiki = fetch_wikipedia_company_summary(name)
+    business = _stock_summary_text(
+        _stock_value(profile.get("CompanyDescription")), 2400
+    )
+    summary_text = business or str(wiki.get("extract") or "").strip()
+    events = quote.get("EventData")
+    next_earnings = ""
+    if isinstance(events, dict):
+        next_earnings = " ".join(
+            str(events.get("next_earnings_date") or "").split()
+        )
+
+    source_url = str(wiki.get("url") or "").strip()
+    if not source_url:
+        source_url = str(_stock_value(profile.get("CompanyUrl")) or "").strip()
+    result = {
+        "symbol": resolved,
+        "name": name,
+        "exchange": str(quote.get("exchange") or "").strip(),
+        "asset_type": str(
+            quote.get("subType") or quote.get("type") or ""
+        ).strip(),
+        "sector": str(_stock_value(profile.get("Sector")) or "").strip(),
+        "industry": str(_stock_value(profile.get("Industry")) or "").strip(),
+        "website": str(_stock_value(profile.get("CompanyUrl")) or "").strip(),
+        "summary": summary_text,
+        "wiki_url": str(wiki.get("url") or "").strip(),
+        "last_price": _stock_value(quote.get("last")),
+        "currency": str(quote.get("currencyCode") or "").strip(),
+        "change": _stock_value(quote.get("change")),
+        "change_pct": _stock_value(quote.get("change_pct")),
+        "market_cap": _stock_value(quote.get("mktcapView")),
+        "next_earnings_date": next_earnings,
+        "source_url": source_url,
+        "cnbc_url": "https://www.cnbc.com/quotes/" + quote_plus(
+            resolved, safe=""
+        ),
+        "data_source": [
+            source
+            for source in (
+                "CNBC quote",
+                "Nasdaq company profile" if profile else "",
+                "Wikipedia" if wiki else "",
+            )
+            if source
+        ],
+    }
+    _stock_cache_store(cache_key, result)
+    return result
+
+
+
+def fetch_income_statement_lines(financials: dict) -> str:
+    """Render the latest fiscal-year income statement from Nasdaq's table."""
+    table = financials.get("incomeStatementTable")
+    if not isinstance(table, dict):
+        return ""
+    headers = table.get("headers")
+    headers = headers if isinstance(headers, dict) else {}
+    rows = table.get("rows")
+    rows = rows if isinstance(rows, list) else []
+    period = _stock_value(headers.get("value2"))
+    lines: list[str] = []
+    wanted = {label.casefold() for label in STOCK_INCOME_ROWS}
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        label = _stock_value(row.get("value1"))
+        if not label or label.casefold() not in wanted:
+            continue
+        if label.casefold() in seen:
+            continue
+        value = _stock_value(row.get("value2"))
+        if not value:
+            continue
+        seen.add(label.casefold())
+        lines.append(f"{label}: {value}")
+    if not lines:
+        return ""
+    heading = "Income statement"
+    if period:
+        heading += f" ({period})"
+    return heading + "\n" + "\n".join(lines)
 
 
 # /stackoverflow tag <tag> and /stackoverflow search <keywords> query the
@@ -5882,6 +6512,267 @@ def _reddit_result_sort_key(entry: dict) -> tuple[bool, float]:
         entry.get("payload", {}).get("published")
     )
     return (timestamp is not None, timestamp or 0.0)
+
+
+def collect_reddit_entries(
+    queries: list[tuple[str, str]],
+    *,
+    log: Callable[[str], None] | None = None,
+    error: Callable[[str], None] | None = None,
+) -> list[dict]:
+    """Run Reddit searches and return one merged, unique, newest-first list.
+
+    ``queries`` holds ``(label, google_news_query)`` pairs. Each search is an
+    independent ``news_fetch.php`` process. Duplicate threads are dropped by
+    canonical Reddit URL (or by normalized title for Google News wrapper
+    links), then the merged list is sorted newest-first by publish date. Every
+    post is labelled with the subreddit it belongs to; Google News wrapper
+    links are resolved in parallel so the label is the real community rather
+    than the search query.
+
+    ``log`` and ``error`` receive progress/error text. The /reddit command
+    forwards both to the SSE stream, while the /stock Reddit tab just wants the
+    finished payloads.
+    """
+    def emit_log(text: str) -> None:
+        if log is not None:
+            log(text)
+
+    def emit_error(text: str) -> None:
+        if error is not None:
+            error(text)
+
+    script = SCRIPT_DIR / "news_fetch.php"
+    if not script.exists():
+        raise RuntimeError("missing news_fetch.php")
+
+    collected: list[dict] = []
+    key_to_entry: dict[str, dict] = {}
+    for position, (label, query) in enumerate(queries):
+        if position:
+            emit_log(f"[reddit: searching {query!r}]")
+        limit = REDDIT_MAIN_LIMIT if position == 0 else REDDIT_ENTITY_LIMIT
+        argv = [
+            "php",
+            str(script),
+            "--json",
+            "--lazy",
+            "--source",
+            "googlenews",
+            "--search",
+            query,
+            "--limit",
+            str(limit),
+        ]
+        process = None
+        returncode = 0
+        active: dict[int, dict] = {}
+        try:
+            process = subprocess.Popen(
+                argv,
+                cwd=SCRIPT_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            assert process.stdout is not None
+            for raw_line in process.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    emit_log(f"[reddit: {line}]")
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                kind = payload.get("type")
+                if kind in {"start", "done"}:
+                    # One start/done pair is emitted for the whole merge.
+                    continue
+                if kind == "warning":
+                    message = str(payload.get("message") or "").strip()
+                    if message:
+                        emit_log(f"[reddit: {message}]")
+                    continue
+                if kind == "error":
+                    message = str(payload.get("message") or "").strip()
+                    if message:
+                        emit_error(f"\n/reddit: {message}\n")
+                    continue
+
+                try:
+                    source_index = int(payload.get("index"))
+                except (TypeError, ValueError):
+                    continue
+
+                if kind == "item":
+                    keys = _reddit_result_keys(payload)
+                    if not keys:
+                        continue
+                    existing = next(
+                        (
+                            key_to_entry[key]
+                            for key in keys
+                            if key in key_to_entry
+                        ),
+                        None,
+                    )
+                    if existing is not None:
+                        if label not in existing["labels"]:
+                            existing["labels"].append(label)
+                        active[source_index] = existing
+                        continue
+                    entry = {
+                        "payload": payload,
+                        "labels": [label],
+                        "paragraphs": [],
+                        "ended": False,
+                    }
+                    collected.append(entry)
+                    for key in keys:
+                        key_to_entry[key] = entry
+                    active[source_index] = entry
+                    continue
+
+                if kind in {"paragraph", "item_end"}:
+                    entry = active.get(source_index)
+                    if entry is None:
+                        continue
+                    if kind == "paragraph":
+                        text = str(payload.get("text") or "").strip()
+                        if text and text not in entry["paragraphs"]:
+                            entry["paragraphs"].append(text)
+                    else:
+                        entry["ended"] = True
+                    continue
+
+            returncode = process.wait()
+        except ClientDisconnected:
+            if process is not None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise
+        except OSError as exc:
+            emit_error(f"\n/reddit: could not run {script.name}: {exc}\n")
+            continue
+        if returncode != 0:
+            emit_error(
+                f"\n/reddit: {script.name} exited with code "
+                f"{returncode} while searching {query!r}.\n"
+            )
+
+    # Newest first; undated results (if any) stay at the end.
+    collected.sort(key=_reddit_result_sort_key, reverse=True)
+    selected = collected[:REDDIT_MAX_RESULTS]
+
+    # Google News hides the Reddit thread behind a wrapper URL, so fetch
+    # those wrappers concurrently to label each post with its real
+    # subreddit. Direct reddit.com links need no network call.
+    unresolved = [
+        entry
+        for entry in selected
+        if not _reddit_section(str(entry["payload"].get("link") or ""))
+        and GOOGLE_NEWS_ARTICLE_RE.match(
+            str(entry["payload"].get("link") or "")
+        )
+    ]
+    if unresolved:
+        with ThreadPoolExecutor(
+            max_workers=min(8, len(unresolved))
+        ) as executor:
+            futures = {
+                executor.submit(
+                    resolve_google_news_url,
+                    str(entry["payload"].get("link") or ""),
+                ): entry
+                for entry in unresolved
+            }
+            for future in as_completed(futures):
+                entry = futures[future]
+                try:
+                    resolved = future.result()
+                except Exception:
+                    resolved = ""
+                section = _reddit_section(resolved) if resolved else ""
+                if section:
+                    entry["resolved_section"] = section
+
+    for emitted_index, entry in enumerate(selected, 1):
+        payload = entry["payload"]
+        link = str(payload.get("link") or "").strip()
+        section = _reddit_section(link)
+        if not section:
+            section = str(entry.get("resolved_section") or "")
+        if not section:
+            # Fall back to the subreddit-specific query that found it.
+            for label in entry["labels"]:
+                if label.startswith("r/"):
+                    section = label
+                    break
+        payload["index"] = emitted_index
+        payload["source"] = "Reddit"
+        payload["section"] = section
+        payload["article_api"] = "/api/reddit_article"
+        payload["docs"] = True
+        payload["docs_label"] = "Reddit"
+        payload["learnable"] = True
+        payload["learn_noun"] = "post"
+        payload["images"] = []
+        try:
+            news_id = news_id_for_item(payload)
+        except ValueError:
+            news_id = ""
+        payload["news_id"] = news_id
+        payload["learned"] = bool(news_id and news_is_learned(news_id))
+
+    return selected
+
+
+def stock_reddit_queries(symbol: str) -> list[tuple[str, str]]:
+    """Return the two subreddit-restricted searches used by /stock.
+
+    The first search covers r/stock, the second covers the ticker's own
+    subreddit (for example r/AAPL). The symbol is the search topic in both
+    communities so the Reddit tab stays focused on this exact stock.
+    """
+    cleaned = str(symbol or "").strip().upper()
+    if not cleaned:
+        return []
+    subreddit = re.sub(r"[^A-Za-z0-9_]", "", cleaned)
+    topic = _reddit_quote_phrase(cleaned)
+    queries: list[tuple[str, str]] = [
+        ("r/stock", f"site:reddit.com/r/stock {topic}")
+    ]
+    if subreddit and subreddit.casefold() != "stock":
+        queries.append(
+            (
+                f"r/{subreddit}",
+                f"site:reddit.com/r/{subreddit} {topic}",
+            )
+        )
+    return queries
+
+
+def fetch_stock_reddit_items(symbol: str) -> list[dict]:
+    """Collect unique Reddit posts for one stock's Reddit tab."""
+    queries = stock_reddit_queries(symbol)
+    if not queries:
+        return []
+    entries = collect_reddit_entries(queries)
+    items: list[dict] = []
+    for entry in entries:
+        payload = dict(entry["payload"])
+        payload["complete"] = True
+        payload["paragraphs"] = list(entry.get("paragraphs") or [])
+        items.append(payload)
+    return items
 
 
 def _reddit_clean_entity(value: object) -> str:
@@ -11023,6 +11914,32 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(article)
             return
+        if path == "/api/stock_reddit":
+            params = parse_qs(parsed.query)
+            symbol = (params.get("symbol") or [""])[0].strip().upper()
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,19}", symbol):
+                self._send_error_json("Missing or invalid stock symbol", 400)
+                return
+            try:
+                items = fetch_stock_reddit_items(symbol)
+            except RuntimeError as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json({"symbol": symbol, "items": items})
+            return
+        if path == "/api/stock_summary":
+            params = parse_qs(parsed.query)
+            symbol = (params.get("symbol") or [""])[0].strip().upper()
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,19}", symbol):
+                self._send_error_json("Missing or invalid stock symbol", 400)
+                return
+            try:
+                summary = fetch_stock_company_summary(symbol)
+            except RuntimeError as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json(summary)
+            return
         if path == "/api/stackoverflow_answers":
             params = parse_qs(parsed.query)
             question_id = (params.get("id") or [""])[0].strip()
@@ -14744,15 +15661,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     ) -> int:
         """Run several Reddit searches and stream one merged, unique list.
 
-        ``queries`` holds ``(label, google_news_query)`` pairs. Each search is
-        an independent ``news_fetch.php`` process, but the browser receives a
-        single ``start`` event, sequentially renumbered items, and a single
-        ``done`` event. Duplicate threads are dropped by canonical Reddit URL
-        (or by normalized title for Google News wrapper links), then the
-        merged list is sorted newest-first by publish date. Every post is
-        labelled with the subreddit it belongs to; Google News wrapper links
-        are resolved in parallel so the label is the real community rather
-        than the search query.
+        ``queries`` holds ``(label, google_news_query)`` pairs. Collection is
+        delegated to :func:`collect_reddit_entries`; this method only emits the
+        single ``start`` event, the renumbered items (with their paragraphs),
+        and the final ``done`` event.
         """
         script = SCRIPT_DIR / "news_fetch.php"
         if not script.exists():
@@ -14772,206 +15684,16 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             },
         )
 
-        # Collect first so the merged output can be sorted by publish date,
-        # while retaining paragraph/item_end events for the final emission.
-        collected: list[dict] = []
-        key_to_entry: dict[str, dict] = {}
-        for position, (label, query) in enumerate(queries):
-            if position:
-                self._sse_text(
-                    "log", f"[reddit: searching {query!r}]"
-                )
-            limit = (
-                REDDIT_MAIN_LIMIT
-                if position == 0
-                else REDDIT_ENTITY_LIMIT
-            )
-            argv = [
-                "php",
-                str(script),
-                "--json",
-                "--lazy",
-                "--source",
-                "googlenews",
-                "--search",
-                query,
-                "--limit",
-                str(limit),
-            ]
-            process = None
-            returncode = 0
-            active: dict[int, dict] = {}
-            try:
-                process = subprocess.Popen(
-                    argv,
-                    cwd=SCRIPT_DIR,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                )
-                assert process.stdout is not None
-                for raw_line in process.stdout:
-                    line = raw_line.strip()
-                    if not line:
-                        continue
-                    try:
-                        payload = json.loads(line)
-                    except json.JSONDecodeError:
-                        self._sse_text("log", f"[reddit: {line}]")
-                        continue
-                    if not isinstance(payload, dict):
-                        continue
-                    kind = payload.get("type")
-                    if kind in {"start", "done"}:
-                        # One start/done pair is emitted for the whole merge.
-                        continue
-                    if kind == "warning":
-                        message = str(payload.get("message") or "").strip()
-                        if message:
-                            self._sse_text("log", f"[reddit: {message}]")
-                        continue
-                    if kind == "error":
-                        message = str(payload.get("message") or "").strip()
-                        if message:
-                            self._sse_text(
-                                "output", f"\n/reddit: {message}\n"
-                            )
-                        continue
-
-                    try:
-                        source_index = int(payload.get("index"))
-                    except (TypeError, ValueError):
-                        continue
-
-                    if kind == "item":
-                        keys = _reddit_result_keys(payload)
-                        if not keys:
-                            continue
-                        existing = next(
-                            (
-                                key_to_entry[key]
-                                for key in keys
-                                if key in key_to_entry
-                            ),
-                            None,
-                        )
-                        if existing is not None:
-                            if label not in existing["labels"]:
-                                existing["labels"].append(label)
-                            active[source_index] = existing
-                            continue
-                        entry = {
-                            "payload": payload,
-                            "labels": [label],
-                            "paragraphs": [],
-                            "ended": False,
-                        }
-                        collected.append(entry)
-                        for key in keys:
-                            key_to_entry[key] = entry
-                        active[source_index] = entry
-                        continue
-
-                    if kind in {"paragraph", "item_end"}:
-                        entry = active.get(source_index)
-                        if entry is None:
-                            continue
-                        if kind == "paragraph":
-                            text = str(payload.get("text") or "").strip()
-                            if text and text not in entry["paragraphs"]:
-                                entry["paragraphs"].append(text)
-                        else:
-                            entry["ended"] = True
-                        continue
-
-                returncode = process.wait()
-            except ClientDisconnected:
-                if process is not None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait()
-                raise
-            except OSError as exc:
-                self._sse_text(
-                    "output",
-                    f"\n/reddit: could not run {script.name}: {exc}\n",
-                )
-                continue
-            if returncode != 0:
-                self._sse_text(
-                    "output",
-                    f"\n/reddit: {script.name} exited with code "
-                    f"{returncode} while searching {query!r}.\n",
-                )
-
-        # Newest first; undated results (if any) stay at the end.
-        collected.sort(key=_reddit_result_sort_key, reverse=True)
-        selected = collected[:REDDIT_MAX_RESULTS]
-
-        # Google News hides the Reddit thread behind a wrapper URL, so fetch
-        # those wrappers concurrently to label each post with its real
-        # subreddit. Direct reddit.com links need no network call.
-        unresolved = [
-            entry
-            for entry in selected
-            if not _reddit_section(str(entry["payload"].get("link") or ""))
-            and GOOGLE_NEWS_ARTICLE_RE.match(
-                str(entry["payload"].get("link") or "")
-            )
-        ]
-        if unresolved:
-            with ThreadPoolExecutor(
-                max_workers=min(8, len(unresolved))
-            ) as executor:
-                futures = {
-                    executor.submit(
-                        resolve_google_news_url,
-                        str(entry["payload"].get("link") or ""),
-                    ): entry
-                    for entry in unresolved
-                }
-                for future in as_completed(futures):
-                    entry = futures[future]
-                    try:
-                        resolved = future.result()
-                    except Exception:
-                        resolved = ""
-                    section = _reddit_section(resolved) if resolved else ""
-                    if section:
-                        entry["resolved_section"] = section
+        selected = collect_reddit_entries(
+            queries,
+            log=lambda text: self._sse_text("log", text),
+            error=lambda text: self._sse_text("output", text),
+        )
 
         item_count = 0
         for emitted_index, entry in enumerate(selected, 1):
-            payload = entry["payload"]
-            link = str(payload.get("link") or "").strip()
-            section = _reddit_section(link)
-            if not section:
-                section = str(entry.get("resolved_section") or "")
-            if not section:
-                # Fall back to the subreddit-specific query that found it.
-                for label in entry["labels"]:
-                    if label.startswith("r/"):
-                        section = label
-                        break
+            payload = dict(entry["payload"])
             payload["index"] = emitted_index
-            payload["source"] = "Reddit"
-            payload["section"] = section
-            payload["article_api"] = "/api/reddit_article"
-            payload["docs"] = True
-            payload["docs_label"] = "Reddit"
-            payload["learnable"] = True
-            payload["learn_noun"] = "post"
-            payload["images"] = []
-            try:
-                news_id = news_id_for_item(payload)
-            except ValueError:
-                news_id = ""
-            payload["news_id"] = news_id
-            payload["learned"] = bool(news_id and news_is_learned(news_id))
             self._sse("news", payload)
             for text in entry["paragraphs"]:
                 self._sse(
@@ -15156,15 +15878,17 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _command_stock(self, argument: str) -> None:
-        """Show one Yahoo Finance symbol and its related articles.
+        """Show one stock symbol, its profile/financials, and related articles.
 
         Usage: /stock <stock_symbol>
-        The Yahoo Finance search endpoint supplies the quote metadata and the
-        latest stories for the symbol. Its quoteSummary endpoint adds the
-        company profile, financial statistics, and latest income statement.
-        The browser renders everything with the same /news story-list and
-        detail modal, so each article supports the usual Learn, Chat,
-        translate, and read-aloud actions.
+        CNBC's public quote service supplies the quote, valuation ratios, and
+        margins for US and international tickers. Nasdaq's public company
+        endpoints add the business description, profile, and annual income
+        statement for US listings; a Wikipedia summary fills in the company
+        background for other exchanges. Related stories come from Google News
+        through news_fetch.php, so the article list reuses the /news story
+        modal and its Learn, Chat, translate, and read-aloud actions. No Yahoo
+        Finance API is used.
         """
         symbol = argument.strip().strip('"').strip("'")
         if not symbol:
@@ -15176,79 +15900,148 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        self._sse_text(
-            "log", f"[stock: looking up {symbol!r} on Yahoo Finance]"
-        )
-        try:
-            quote, articles = search_yahoo_finance_symbol(symbol)
-        except RuntimeError as exc:
-            self._sse_text("error", f"\n/stock: {exc}\n")
-            return
-
-        if not quote and not articles:
+        cache_key = _stock_cache_key(symbol)
+        cached = _stock_cache_read(cache_key, STOCK_CACHE_TTL)
+        if cached is not None:
+            data, _ = cached
             self._sse_text(
-                "output", f"\n/stock: no Yahoo Finance match for {symbol!r}.\n"
+                "log", f"[stock: using cached data for {symbol!r}]"
             )
-            return
+        else:
+            self._sse_text(
+                "log",
+                f"[stock: looking up {symbol!r} via CNBC and Nasdaq]",
+            )
+            try:
+                quote, resolved = resolve_stock_symbol(symbol)
+                if not quote:
+                    raise RuntimeError(f"no stock quote match for {symbol!r}")
 
-        resolved = str(quote.get("symbol") or symbol).strip().upper()
-        summary: dict = {}
-        try:
-            summary = fetch_yahoo_quote_summary(resolved)
-        except RuntimeError as exc:
-            # The article list is still useful when Yahoo refuses the detail
-            # request (for example, after a temporary rate limit).
-            self._sse_text("log", f"[stock: detail unavailable: {exc}]")
+                asset_text = " ".join(
+                    str(quote.get(key) or "")
+                    for key in ("subType", "type")
+                )
+                asset_class = (
+                    "etf"
+                    if re.search(r"\b(etf|fund|trust)\b", asset_text, re.I)
+                    else "stocks"
+                )
+                is_us_listing = (
+                    str(quote.get("countryCode") or "").upper() == "US"
+                )
+                summary = (
+                    fetch_nasdaq_summary(resolved, asset_class)
+                    if is_us_listing
+                    else {}
+                )
+                if asset_class == "etf" or not is_us_listing:
+                    profile: dict = {}
+                    financials: dict = {}
+                else:
+                    profile = fetch_nasdaq_company_profile(resolved)
+                    financials = fetch_nasdaq_financials(resolved)
+                wiki = fetch_wikipedia_company_summary(
+                    str(quote.get("name") or resolved)
+                )
+                holdings = (
+                    fetch_etf_holdings(resolved)
+                    if asset_class == "etf"
+                    else {}
+                )
+                data = {
+                    "quote": quote,
+                    "summary": summary,
+                    "profile": profile,
+                    "financials": financials,
+                    "wiki": wiki,
+                    "holdings": holdings,
+                    "asset_class": asset_class,
+                    "resolved": resolved,
+                }
+            except RuntimeError as exc:
+                stale = _stock_cache_read(
+                    cache_key, STOCK_CACHE_TTL, allow_stale=True
+                )
+                if stale is not None:
+                    data, _ = stale
+                    self._sse_text(
+                        "log",
+                        "[stock: live data unavailable "
+                        f"({exc}); using cached data]",
+                    )
+                else:
+                    self._sse_text("output", f"\n/stock: {exc}\n")
+                    return
+            else:
+                _stock_cache_store(cache_key, data)
+                _stock_cache_store(
+                    _stock_cache_key(data["resolved"]), data
+                )
 
-        profile = summary.get("assetProfile")
-        if isinstance(profile, dict):
-            for key in ("sector", "industry"):
-                if not str(quote.get(key) or "").strip():
-                    value = str(profile.get(key) or "").strip()
-                    if value:
-                        quote[key] = value
-
-        description = stock_quote_description(quote, resolved)
-        details = stock_quote_details(summary)
-        if details:
-            description += "\n\n" + details
-        feed = f"{STOCK_SEARCH_URL}?q={quote_plus(symbol)}"
+        quote = data.get("quote") if isinstance(data.get("quote"), dict) else {}
+        resolved = str(
+            data.get("resolved") or quote.get("symbol") or symbol
+        ).strip().upper()
+        quote_asset_text = " ".join(
+            str(quote.get(key) or "") for key in ("subType", "type")
+        )
+        is_etf = bool(
+            re.search(r"\b(etf|fund|trust)\b", quote_asset_text, re.I)
+        )
+        holdings = data.get("holdings")
+        if not isinstance(holdings, dict):
+            holdings = {}
+        if is_etf and not holdings:
+            holdings = fetch_etf_holdings(resolved)
+        description = stock_quote_description(
+            quote,
+            data.get("profile") if isinstance(data.get("profile"), dict) else {},
+            data.get("summary") if isinstance(data.get("summary"), dict) else {},
+            data.get("financials") if isinstance(data.get("financials"), dict) else {},
+            data.get("wiki") if isinstance(data.get("wiki"), dict) else {},
+            resolved,
+            holdings,
+        )
+        earnings_dates = (
+            fetch_holding_earnings_dates(holdings)
+            if isinstance(holdings.get("holdings"), list)
+            and holdings.get("holdings")
+            else {}
+        )
+        holdings_payload = stock_holdings_payload(holdings, earnings_dates)
+        company_name = str(quote.get("name") or resolved).strip()
+        search_query = f"{company_name} stock"
+        sources = ["CNBC"]
+        if data.get("profile") or data.get("financials") or data.get("summary"):
+            sources.append("Nasdaq")
+        if data.get("wiki"):
+            sources.append("Wikipedia")
+        if holdings.get("holdings"):
+            sources.append(str(holdings.get("source") or "ETF holdings"))
+        sources.append("Google News")
         self._sse(
             "news",
             {
                 "type": "start",
-                "source": "Yahoo Finance",
-                "feed": feed,
-                "sources": ["Yahoo Finance"],
+                "source": "Stock",
+                "feed": (
+                    "https://www.cnbc.com/quotes/"
+                    f"{quote_plus(resolved, safe='')}"
+                ),
+                "sources": sources,
                 "description": description,
+                "holdings": holdings_payload,
+                "symbol": resolved,
+                "company_name": company_name,
+                "tabs": ["News", "Reddit"],
             },
         )
-        for index, article in enumerate(articles, 1):
-            item = {
-                "type": "item",
-                "index": index,
-                "title": article["title"],
-                "link": article["link"],
-                "source": article["source"],
-                "published": article["published"],
-                "summary": article["summary"],
-            }
-            # Attach the stable learned-story id so Learn and Chat work from
-            # the stock article list exactly as they do for /news search.
-            try:
-                news_id = news_id_for_item(item)
-            except ValueError:
-                news_id = ""
-            item["news_id"] = news_id
-            item["learned"] = bool(news_id and news_is_learned(news_id))
-            self._sse("news", item)
-            self._sse("news", {"type": "item_end", "index": index})
-        self._sse("news", {"type": "done"})
-        if not articles:
-            self._sse_text(
-                "output",
-                f"\n/stock: no related articles were found for {resolved}.\n",
-            )
+        self._stream_news_events(
+            "news_fetch.php",
+            "/stock",
+            ["--source", "googlenews", "--search", search_query],
+            skip_start=True,
+        )
 
     def _command_medium(self, argument: str) -> None:
         """Stream the latest stories from the configured Medium author.
@@ -15429,6 +16222,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         extra_argv: list[str],
         podcast: bool = False,
         event_transform: Callable[[dict], dict] | None = None,
+        skip_start: bool = False,
     ) -> int:
         """Stream a news fetcher's NDJSON events as `news` SSE events.
 
@@ -15470,6 +16264,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         self._sse_text("log", f"[{log_prefix}: {line}]")
                         continue
                     if not isinstance(payload, dict):
+                        continue
+                    if skip_start and payload.get("type") == "start":
                         continue
                     if event_transform is not None:
                         payload = event_transform(payload)
