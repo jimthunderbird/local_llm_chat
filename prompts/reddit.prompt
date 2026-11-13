@@ -33,6 +33,21 @@ knowledge {
   }
 }
 
+task.streaming_for_entities (completed) {
+  when we use llm to extract entities from <keywords>, stream the output so that user knows which entities are being extracted from the keywords
+}
+
+task.enhance_search_for_subreddit.whole_word_search (completed) {
+  reference task.enhance_search_for_subreddit:
+  in this logic:
+  for each {entity} as {entities} {
+    result[] = search the keywords against site:reddit.com/r/{entity}
+  }
+  we should search the "whole" keywords against site:reddit.com/r/{entity}
+  example:
+  search "jensen huang" against site:reddit.com/r/{entity}, need to apply the double quote
+}
+
 task.enhance_search_for_subreddit.sorting (completed) {
   reference task.enhance_search_for_subreddit:
   - sort the result by publish date in descending order

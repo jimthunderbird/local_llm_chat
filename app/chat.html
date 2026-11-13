@@ -11041,7 +11041,7 @@ function submitText(text, fromChoice = false) {
     commandName === "news"
       && String(commandArgs[0] || "").toLowerCase() === "search"
   ) || commandName === "mdn" || commandName === "wikivoyage"
-    || commandName === "reddit";
+    || commandName === "reddit" || commandName === "tablelog";
 
   addUserEcho(question, image);
   const isCommand = question.startsWith("/");
@@ -11060,18 +11060,20 @@ function submitText(text, fromChoice = false) {
             : commandName === "reddit"
               ? "Reddit"
               : commandName === "howstuffworks"
-              ? "HowStuffWorks"
-              : commandName === "medium"
-                ? "Medium"
-                : commandName === "gutenberg"
-                  ? "Project Gutenberg"
-                  : commandName === "openlibrary"
-                    ? "Open Library"
-                    : commandName === "mathtutor"
-                      ? "Math Tutor"
-                      : commandName === "changelog"
-                        ? "Changelog"
-                        : undefined,
+                ? "HowStuffWorks"
+                : commandName === "tablelog"
+                  ? "Tabelog"
+                  : commandName === "medium"
+                    ? "Medium"
+                    : commandName === "gutenberg"
+                      ? "Project Gutenberg"
+                      : commandName === "openlibrary"
+                        ? "Open Library"
+                        : commandName === "mathtutor"
+                          ? "Math Tutor"
+                          : commandName === "changelog"
+                            ? "Changelog"
+                            : undefined,
   });
   appendEntry(entry);
   resetAnswerSourceStatus();
@@ -11110,6 +11112,9 @@ function submitText(text, fromChoice = false) {
       }
     },
     log: (data) => {
+      // A regular log line ends an in-place progress line, so a later
+      // log_update starts a fresh line instead of overwriting this one.
+      entry.progressLogIndex = null;
       // /wiki_article is an article reader: progress logs would push the
       // pinned title around while the article streams, so keep them hidden.
       if (entry.pinToTop) return;
@@ -11124,6 +11129,26 @@ function submitText(text, fromChoice = false) {
         return;
       }
       addLog(entry, data.text || "");
+    },
+    log_update: (data) => {
+      // Streaming entity extraction sends many partial chunks. Keep them on
+      // one log line so the list is readable while the model is still
+      // producing it. Unlike ordinary progress logs, this one is safe for
+      // pinned result lists (/reddit): it replaces a single line rather than
+      // appending new lines above the results.
+      if (entry.el.classList.contains("wiki-article")) return;
+      if (entry.kind === "assistant" && isDocumentationLanguage(entry.language)) {
+        return;
+      }
+      const clean = scrubModelNames(data.text || "").replace(/\s+$/g, "");
+      if (!clean) return;
+      if (entry.progressLogIndex == null) {
+        entry.logs.push(clean);
+        entry.progressLogIndex = entry.logs.length - 1;
+      } else {
+        entry.logs[entry.progressLogIndex] = clean;
+      }
+      scheduleRender(entry);
     },
     source: (data) => setAnswerSource(entry, data),
     delta: (data) => {

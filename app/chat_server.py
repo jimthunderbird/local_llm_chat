@@ -4,7 +4,7 @@
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /youtube, /news, /mdn, /stackoverflow,
-/reddit, /googlenews, /medium,
+/reddit, /tablelog, /googlenews, /medium,
 /gutenberg, /openlibrary, /changelog, /wikivoyage, /wiki, /wiki_article,
 /article, /dict, and /ask. The browser is a
 pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
@@ -188,6 +188,7 @@ WEB_COMMANDS = {
     "/changelog": "list completed-task summaries from .logs (newest first); click one to read it",
     "/stackoverflow": "search Stack Overflow: /stackoverflow tag <tag> or /stackoverflow search <keywords>",
     "/reddit": "search Reddit posts by keywords: /reddit <keywords>; also searches related subreddits; click a post to read it",
+    "/tablelog": "japan food and restaurant guide for travelers — search Tabelog restaurant pages by keywords: /tablelog <keywords>",
 }
 
 # News sources accepted by /news and completed by news_fetch.php.
@@ -2483,6 +2484,7 @@ COMMAND_ARGUMENTS = {
     "/mdn",
     "/googlenews",
     "/howstuffworks",
+    "/tablelog",
     "/medium",
     "/gutenberg",
     "/openlibrary",
@@ -5587,38 +5589,24 @@ def _reddit_fallback_entities(keyword: str) -> list[str]:
     return result
 
 
-@lru_cache(maxsize=256)
-def _reddit_entities(keyword: str) -> tuple[str, ...]:
-    """Return up to three subreddit names related to a /reddit query.
+def _reddit_entities_from_response(response: str, keyword: str) -> list[str]:
+    """Parse an entity-model response and normalize it into subreddit names.
 
-    The 35B answer model is good at turning "best ramen in tokyo" into
-    ``tokyo, ramen, JapanFood`` and "jensen huang" into ``nvidia, ...``. A
-    deterministic keyword fallback keeps the command useful when Ollama is
-    unavailable or returns prose instead of the requested JSON array.
+    The model is asked for a JSON array, but small/local models occasionally
+    wrap it in prose or return a comma-separated line. Both forms are accepted,
+    and an empty result falls back to deterministic keyword candidates.
     """
-    keyword = " ".join(keyword.split())
-    if not keyword:
-        return ()
     candidates: list[object] = []
-    try:
-        response = chat.generate_text(
-            REDDIT_ENTITY_PROMPT.format(query=keyword),
-            model=REDDIT_ENTITY_MODEL,
-            temperature=0.0,
-            num_predict=80,
-        )
-        match = re.search(r"\[.*?\]", response, re.DOTALL)
-        if match:
-            try:
-                parsed = json.loads(match.group(0))
-            except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, list):
-                candidates.extend(parsed)
-        if not candidates:
-            candidates.extend(re.split(r"[,\n]", response))
-    except (RuntimeError, ValueError):
-        pass
+    match = re.search(r"\[.*?\]", response, re.DOTALL)
+    if match:
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            candidates.extend(parsed)
+    if not candidates:
+        candidates.extend(re.split(r"[,\n]", response))
 
     result: list[str] = []
     seen: set[str] = set()
@@ -5632,7 +5620,104 @@ def _reddit_entities(keyword: str) -> tuple[str, ...]:
             break
     if not result:
         result = _reddit_fallback_entities(keyword)
-    return tuple(result)
+    return result
+
+
+@lru_cache(maxsize=256)
+def _reddit_entities(keyword: str) -> tuple[str, ...]:
+    """Return up to three subreddit names related to a /reddit query.
+
+    The 35B answer model is good at turning "best ramen in tokyo" into
+    ``tokyo, ramen, JapanFood`` and "jensen huang" into ``nvidia, ...``. A
+    deterministic keyword fallback keeps the command useful when Ollama is
+    unavailable or returns prose instead of the requested JSON array.
+    """
+    keyword = " ".join(keyword.split())
+    if not keyword:
+        return ()
+    try:
+        response = chat.generate_text(
+            REDDIT_ENTITY_PROMPT.format(query=keyword),
+            model=REDDIT_ENTITY_MODEL,
+            temperature=0.0,
+            num_predict=80,
+        )
+    except (RuntimeError, ValueError):
+        response = ""
+    return tuple(_reddit_entities_from_response(response, keyword))
+
+
+def _reddit_entities_streaming(
+    keyword: str, emit: Callable[[str], None] | None = None
+) -> tuple[str, ...]:
+    """Extract related subreddits while streaming the model's raw output.
+
+    ``/reddit`` calls this variant so the browser can show the entity list
+    being produced instead of waiting for an unlabelled pause. ``emit`` receives
+    each token as Ollama returns it; the accumulated text is then parsed with
+    the same rules as :func:`_reddit_entities`.
+    """
+    keyword = " ".join(keyword.split())
+    if not keyword:
+        return ()
+    payload = {
+        "model": REDDIT_ENTITY_MODEL,
+        "prompt": REDDIT_ENTITY_PROMPT.format(query=keyword),
+        "stream": True,
+        "think": False,
+        "keep_alive": chat.OLLAMA_KEEP_ALIVE,
+        "options": {
+            "temperature": 0.0,
+            "num_ctx": chat.ANSWER_NUM_CTX,
+            "num_predict": 80,
+        },
+    }
+    parts: list[str] = []
+    try:
+        with requests.post(
+            f"{chat.OLLAMA_HOST}/api/generate",
+            json=payload,
+            stream=True,
+            timeout=(10, 120),
+        ) as response:
+            response.raise_for_status()
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("error"):
+                    break
+                token = str(event.get("response") or "")
+                if token:
+                    parts.append(token)
+                    if emit is not None:
+                        emit(token)
+                if event.get("done"):
+                    break
+    except requests.RequestException:
+        pass
+    return tuple(
+        _reddit_entities_from_response("".join(parts), keyword)
+    )
+
+
+def _reddit_quote_phrase(keyword: str) -> str:
+    """Return a query's keywords as one exact phrase.
+
+    The related-subreddit searches repeat the same keywords that the main
+    ``site:reddit.com`` search uses. Without quotes a multi-word query such as
+    ``jensen huang`` is ranked as two independent terms, so an entity search
+    can return posts that mention only one of them. Wrapping the whole query
+    in double quotes keeps the words adjacent; an explicitly quoted query is
+    left untouched so the user's own operators are preserved.
+    """
+    phrase = " ".join(str(keyword or "").split())
+    if not phrase or '"' in phrase or "\u201c" in phrase or "\u201d" in phrase:
+        return phrase
+    return f'"{phrase}"'
 
 
 def _reddit_result_keys(payload: dict) -> tuple[str, ...]:
@@ -12728,6 +12813,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_googlenews(argument)
         elif name == "/howstuffworks":
             self._command_howstuffworks(argument)
+        elif name == "/tablelog":
+            self._command_tablelog(argument)
         elif name == "/wikivoyage":
             self._command_wikivoyage(argument)
         elif name == "/medium":
@@ -14607,10 +14694,29 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        entities = _reddit_entities(keyword)
+        self._sse_text(
+            "log_update",
+            f"[reddit: extracting entities from {keyword!r}...]",
+        )
+        entity_text = ""
+
+        def emit_entity_token(token: str) -> None:
+            nonlocal entity_text
+            entity_text += token
+            preview = " ".join(entity_text.split())
+            if len(preview) > 240:
+                preview = "..." + preview[-240:]
+            self._sse_text(
+                "log_update",
+                f"[reddit: extracted entities: {preview}]",
+            )
+
+        entities = _reddit_entities_streaming(
+            keyword, emit=emit_entity_token
+        )
         if entities:
             self._sse_text(
-                "log",
+                "log_update",
                 "[reddit: related subreddits: "
                 + ", ".join(f"r/{entity}" for entity in entities)
                 + "]",
@@ -14618,9 +14724,16 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         queries: list[tuple[str, str]] = [
             ("Reddit", f"site:reddit.com {keyword}")
         ]
+        # Inside each related subreddit, search the complete keyword phrase so
+        # "jensen huang" is not reduced to separate "jensen" and "huang"
+        # matches. The main site-wide search keeps its original query.
+        subreddit_keyword = _reddit_quote_phrase(keyword)
         for entity in entities:
             queries.append(
-                (f"r/{entity}", f"site:reddit.com/r/{entity} {keyword}")
+                (
+                    f"r/{entity}",
+                    f"site:reddit.com/r/{entity} {subreddit_keyword}",
+                )
             )
         self._sse_text(
             "log",
@@ -14675,6 +14788,36 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "googlenews",
                 "--search",
                 f"site:howstuffworks.com {keywords}",
+            ],
+        )
+
+    def _command_tablelog(self, argument: str) -> None:
+        """Search Tabelog restaurant pages by keywords.
+
+        Usage: /tablelog <keywords>
+        This is the /news search pipeline restricted to tabelog.com/en: the
+        query becomes ``site:tabelog.com/en <keywords>`` and news_fetch.php
+        streams Google News RSS matches. The browser renders the same story
+        list as /news, and each result supports the article modal, Learn, and
+        Chat like any other news story.
+        """
+        keywords = argument.strip()
+        if not keywords:
+            self._sse_text(
+                "output",
+                "\nJapan food and restaurant guide for travelers\n"
+                "Usage: /tablelog <keywords>\n"
+                "Example: /tablelog sushi in ginza\n",
+            )
+            return
+        self._stream_news_events(
+            "news_fetch.php",
+            "/tablelog",
+            [
+                "--source",
+                "googlenews",
+                "--search",
+                f"site:tabelog.com/en {keywords}",
             ],
         )
 

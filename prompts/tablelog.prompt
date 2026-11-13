@@ -1,0 +1,12 @@
+task (completed) {
+  in the /tablelog command help menu, say "japan food and restaurant guide for travelers"
+}
+
+task (completed) {
+  - create command /tablelog <keyword>:
+    internally, simply perform /news search <keyword> https://tabelog.com/en/
+
+  - the UI/UX should be very similar to /news search <keyword>
+
+  - please allow learn and chat in each article
+}
