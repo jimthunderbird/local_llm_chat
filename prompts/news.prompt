@@ -66,6 +66,10 @@ task (persistent) {
 ////////////////////////////////////////////////////////////////////////////////////////////
 
 task (completed) {
+  bug: in the article model, it should load the full article of https://folklore.org/Switcher.html
+}
+
+task (completed) {
   bug: in the article model, it should load the full article of https://www.pbs.org/newshour/economy/consumer-concerns-grow-as-retailers-adopt-ai-assisted-pricing-tools
 }
 

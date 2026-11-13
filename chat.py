@@ -151,7 +151,11 @@ RESIDENT_MODELS = tuple(dict.fromkeys((CHAT_MODEL, ANSWER_MODEL)))
 # ./prompts/programming_language_tips.prompt, without thinking enabled.
 CODING_MODEL = ANSWER_MODEL
 # Local model used by /ask for quick questions that do not use retrieval.
-SIMPLE_ANSWER_MODEL = LFM_MODEL
+# prompts/ask_command.prompt requires the declared simple_answer_model
+# (ornith:35b), so keep this separate from the smaller helper model.
+SIMPLE_ANSWER_MODEL = os.environ.get(
+    "OLLAMA_SIMPLE_ANSWER_MODEL", "ornith:35b"
+)
 # Local model used to translate Simplified Chinese questions for retrieval.
 TRANSLATION_MODEL = LFM_MODEL
 # Local model used for translation into Simplified Chinese, as required by

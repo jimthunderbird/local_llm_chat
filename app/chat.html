@@ -1529,6 +1529,16 @@
     max-height: 360px;
     object-fit: contain;
   }
+  /* /map articles put related YouTube videos below the article. A compact
+     lead image keeps the video list in view without hiding the article. */
+  #news-panel.is-map .news-image img {
+    height: 150px;
+  }
+  #news-panel.is-map .news-image:only-child img {
+    height: 180px;
+    max-height: 180px;
+    object-fit: cover;
+  }
   .news-body .news-loading { color: var(--warn); font-size: 12px; }
   .news-body .news-summary { color: #dfeaf4; font-style: italic; }
   .news-reddit-embed {
@@ -1620,6 +1630,12 @@
     border-top: 1px solid #223344;
   }
   .video-results[hidden] { display: none; }
+  .map-videos {
+    margin-top: 18px;
+  }
+  .map-videos .video-cards {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
   .video-list-head {
     display: flex;
     align-items: baseline;
@@ -5609,10 +5625,15 @@ function makeEntry(kind, options = {}) {
     label.appendChild(translateBtn);
     entry.el.appendChild(label);
   } else if (kind === "command") {
-    const label = document.createElement("div");
-    label.className = "command-label";
-    label.textContent = options.label || "Output";
-    entry.el.appendChild(label);
+    // /ask renders a plain answer, so it passes an empty label and gets no
+    // command heading (previously every command showed "Output").
+    const labelText = options.label ?? "Output";
+    if (labelText) {
+      const label = document.createElement("div");
+      label.className = "command-label";
+      label.textContent = labelText;
+      entry.el.appendChild(label);
+    }
   } else if (kind === "system") {
     const label = document.createElement("div");
     label.className = "system-label";
@@ -5852,6 +5873,12 @@ function makeNewsItem(entry, data) {
     aiNewsPodcast: Boolean(data.ai_news_podcast || entry.aiNewsPodcast),
     docs: Boolean(data.docs || data.mdn || entry.newsDocs),
     docsLabel: String(data.docs_label || entry.newsDocsLabel || ""),
+    map: Boolean(data.map),
+    mapVideos: [],
+    mapVideosLoading: false,
+    mapVideosFetched: false,
+    mapVideosError: "",
+    mapVideosHasMore: false,
     learnable: data.learnable !== undefined
       ? Boolean(data.learnable)
       : !(data.docs || data.mdn || entry.newsDocs),
@@ -7476,6 +7503,139 @@ async function loadMoreVideos(entry) {
   }
 }
 
+function makeVideoCard(item, playlistEntry) {
+  const card = document.createElement("div");
+  card.className = item.noThumbnail ? "video-card no-thumb" : "video-card";
+  card.tabIndex = 0;
+  card.setAttribute("role", "button");
+  card.title = item.channel
+    ? `${item.title || item.id} · ${item.channel}`
+    : (item.title || item.id);
+  const openPlayer = () => openVideoModal(item, "play", playlistEntry);
+  card.addEventListener("click", openPlayer);
+  card.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openPlayer();
+  });
+
+  const thumb = document.createElement("div");
+  thumb.className = "video-thumb";
+  if (!item.noThumbnail) {
+    const image = document.createElement("img");
+    image.alt = item.title || "YouTube video thumbnail";
+    image.loading = "lazy";
+    image.referrerPolicy = "no-referrer";
+    const fallback = `https://i.ytimg.com/vi/${encodeURIComponent(item.id)}/mqdefault.jpg`;
+    image.src = item.thumbnail || fallback;
+    image.addEventListener("error", () => {
+      if (image.dataset.fallback === "1") {
+        image.hidden = true;
+        return;
+      }
+      image.dataset.fallback = "1";
+      image.src = fallback;
+    });
+    thumb.appendChild(image);
+  }
+
+  if (item.duration > 0) {
+    const duration = document.createElement("span");
+    duration.className = "video-duration";
+    duration.textContent = formatVideoDuration(item.duration);
+    thumb.appendChild(duration);
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "video-meta";
+  const title = document.createElement("div");
+  title.className = "video-title";
+  title.textContent = item.title || item.id;
+  meta.appendChild(title);
+  if (item.channel) {
+    const channel = document.createElement("div");
+    channel.className = "video-channel";
+    channel.textContent = item.channel;
+    meta.appendChild(channel);
+  }
+  if (item.noThumbnail && item.url) {
+    const url = document.createElement("div");
+    url.className = "video-url";
+    url.textContent = item.url;
+    meta.appendChild(url);
+  }
+  const dateValue = item.published || item.uploadDate;
+  if (dateValue || item.publishedText) {
+    const published = document.createElement("div");
+    published.className = "video-date";
+    published.textContent = dateValue
+      ? `Published ${formatVideoDate(dateValue)}`
+      : `Published ${item.publishedText}`;
+    if (item.duration > 0) {
+      published.textContent += ` · ${formatVideoDuration(item.duration)}`;
+    }
+    meta.appendChild(published);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "video-actions";
+
+  const learnBtn = document.createElement("button");
+  learnBtn.type = "button";
+  learnBtn.className = "video-summary-btn video-learn-btn";
+  learnBtn.textContent = "Learn";
+  learnBtn.title = "Learn this video in the background";
+  learnBtn.dataset.videoLearnId = item.id;
+  learnBtn.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+  });
+  learnBtn.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    startVideoLearn(item);
+  });
+  updateVideoLearnButton(learnBtn, videoLearnState.get(item.id));
+  actions.appendChild(learnBtn);
+
+  const relearnBtn = document.createElement("button");
+  relearnBtn.type = "button";
+  relearnBtn.className = "video-summary-btn video-relearn-btn";
+  relearnBtn.textContent = "Relearn";
+  relearnBtn.title =
+    "Rebuild this video's title and trunks from the saved transcript";
+  relearnBtn.dataset.videoRelearnId = item.id;
+  relearnBtn.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+  });
+  relearnBtn.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    startVideoLearn(item, { relearn: true });
+  });
+  updateVideoRelearnButton(relearnBtn, videoLearnState.get(item.id));
+  actions.appendChild(relearnBtn);
+  meta.appendChild(actions);
+
+  const learnProgress = document.createElement("div");
+  learnProgress.className = "video-learn-progress";
+  learnProgress.dataset.videoLearnId = item.id;
+  const learnTrack = document.createElement("div");
+  learnTrack.className = "video-learn-track";
+  const learnFill = document.createElement("div");
+  learnFill.className = "video-learn-fill";
+  learnTrack.appendChild(learnFill);
+  const learnLabel = document.createElement("div");
+  learnLabel.className = "video-learn-label";
+  learnProgress.appendChild(learnTrack);
+  learnProgress.appendChild(learnLabel);
+  applyVideoLearnUi(learnProgress, videoLearnState.get(item.id));
+  meta.appendChild(learnProgress);
+
+  if (!item.noThumbnail) card.appendChild(thumb);
+  card.appendChild(meta);
+  return card;
+}
+
 function renderVideoResults(entry) {
   const container = entry.videosEl;
   if (!container) return;
@@ -7503,136 +7663,7 @@ function renderVideoResults(entry) {
   const cards = document.createElement("div");
   cards.className = "video-cards";
   for (const item of items) {
-    const card = document.createElement("div");
-    card.className = item.noThumbnail ? "video-card no-thumb" : "video-card";
-    card.tabIndex = 0;
-    card.setAttribute("role", "button");
-    card.title = item.channel
-      ? `${item.title || item.id} · ${item.channel}`
-      : (item.title || item.id);
-    const openPlayer = () => openVideoModal(item, "play", entry);
-    card.addEventListener("click", openPlayer);
-    card.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      openPlayer();
-    });
-
-    const thumb = document.createElement("div");
-    thumb.className = "video-thumb";
-    if (!item.noThumbnail) {
-      const image = document.createElement("img");
-      image.alt = item.title || "YouTube video thumbnail";
-      image.loading = "lazy";
-      image.referrerPolicy = "no-referrer";
-      const fallback = `https://i.ytimg.com/vi/${encodeURIComponent(item.id)}/mqdefault.jpg`;
-      image.src = item.thumbnail || fallback;
-      image.addEventListener("error", () => {
-        if (image.dataset.fallback === "1") {
-          image.hidden = true;
-          return;
-        }
-        image.dataset.fallback = "1";
-        image.src = fallback;
-      });
-      thumb.appendChild(image);
-    }
-
-    if (item.duration > 0) {
-      const duration = document.createElement("span");
-      duration.className = "video-duration";
-      duration.textContent = formatVideoDuration(item.duration);
-      thumb.appendChild(duration);
-    }
-
-    const meta = document.createElement("div");
-    meta.className = "video-meta";
-    const title = document.createElement("div");
-    title.className = "video-title";
-    title.textContent = item.title || item.id;
-    meta.appendChild(title);
-    if (item.channel) {
-      const channel = document.createElement("div");
-      channel.className = "video-channel";
-      channel.textContent = item.channel;
-      meta.appendChild(channel);
-    }
-    if (item.noThumbnail && item.url) {
-      const url = document.createElement("div");
-      url.className = "video-url";
-      url.textContent = item.url;
-      meta.appendChild(url);
-    }
-    const dateValue = item.published || item.uploadDate;
-    if (dateValue || item.publishedText) {
-      const published = document.createElement("div");
-      published.className = "video-date";
-      published.textContent = dateValue
-        ? `Published ${formatVideoDate(dateValue)}`
-        : `Published ${item.publishedText}`;
-      if (item.duration > 0) {
-        published.textContent += ` · ${formatVideoDuration(item.duration)}`;
-      }
-      meta.appendChild(published);
-    }
-
-    const actions = document.createElement("div");
-    actions.className = "video-actions";
-
-    const learnBtn = document.createElement("button");
-    learnBtn.type = "button";
-    learnBtn.className = "video-summary-btn video-learn-btn";
-    learnBtn.textContent = "Learn";
-    learnBtn.title = "Learn this video in the background";
-    learnBtn.dataset.videoLearnId = item.id;
-    learnBtn.addEventListener("keydown", (event) => {
-      event.stopPropagation();
-    });
-    learnBtn.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      startVideoLearn(item);
-    });
-    updateVideoLearnButton(learnBtn, videoLearnState.get(item.id));
-    actions.appendChild(learnBtn);
-
-    const relearnBtn = document.createElement("button");
-    relearnBtn.type = "button";
-    relearnBtn.className = "video-summary-btn video-relearn-btn";
-    relearnBtn.textContent = "Relearn";
-    relearnBtn.title =
-      "Rebuild this video's title and trunks from the saved transcript";
-    relearnBtn.dataset.videoRelearnId = item.id;
-    relearnBtn.addEventListener("keydown", (event) => {
-      event.stopPropagation();
-    });
-    relearnBtn.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      startVideoLearn(item, { relearn: true });
-    });
-    updateVideoRelearnButton(relearnBtn, videoLearnState.get(item.id));
-    actions.appendChild(relearnBtn);
-    meta.appendChild(actions);
-
-    const learnProgress = document.createElement("div");
-    learnProgress.className = "video-learn-progress";
-    learnProgress.dataset.videoLearnId = item.id;
-    const learnTrack = document.createElement("div");
-    learnTrack.className = "video-learn-track";
-    const learnFill = document.createElement("div");
-    learnFill.className = "video-learn-fill";
-    learnTrack.appendChild(learnFill);
-    const learnLabel = document.createElement("div");
-    learnLabel.className = "video-learn-label";
-    learnProgress.appendChild(learnTrack);
-    learnProgress.appendChild(learnLabel);
-    applyVideoLearnUi(learnProgress, videoLearnState.get(item.id));
-    meta.appendChild(learnProgress);
-
-    if (!item.noThumbnail) card.appendChild(thumb);
-    card.appendChild(meta);
-    cards.appendChild(card);
+    cards.appendChild(makeVideoCard(item, entry));
   }
   container.appendChild(cards);
 
@@ -10148,10 +10179,10 @@ function renderNewsModal(item) {
   renderStackoverflowAnswers(item);
   // Keep the (possibly streaming) translation after the article body.
   renderNewsTranslation();
+  renderMapVideos(item);
   renderNewsPodcast(item);
   syncNewsTtsButton();
   syncNewsPodcastButton();
-  newsBodyEl.scrollTop = 0;
 }
 
 function cancelNewsPodcastGeneration(item) {
@@ -10167,6 +10198,7 @@ function cancelNewsPodcastGeneration(item) {
 function openNewsModal(item) {
   if (newsItem && newsItem !== item) cancelNewsPodcastGeneration(newsItem);
   newsItem = item;
+  newsPanelEl.classList.toggle("is-map", Boolean(item.map));
   resetNewsTts();
   resetNewsTranslation();
   resetNewsChat();
@@ -10183,6 +10215,7 @@ function openNewsModal(item) {
   resetNewsBodyScroll(item);
   ensureNewsArticle(item);
   ensureStackoverflowAnswers(item);
+  if (item.map) ensureMapVideos(item);
 }
 
 let newsBodyScrollFrame = 0;
@@ -10300,6 +10333,144 @@ function ensureNewsArticle(item) {
         }, 1200);
       }
     });
+}
+
+/* /map Wikipedia cards show related YouTube videos under the article. The
+ * list comes from the same /youtube search backend used by the main chat, so
+ * cards, playlists, Learn, and Summary behave identically. */
+function mapVideoRequest(item, exclude = []) {
+  return fetch("/api/youtube_more", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      keyword: item.title || "",
+      exclude,
+    }),
+  }).then((response) => response.json().then((data) => {
+    if (!response.ok) {
+      throw new Error(data?.error || `HTTP ${response.status}`);
+    }
+    return data;
+  }));
+}
+
+function ensureMapVideos(item) {
+  if (!item?.map || item.mapVideosFetched || item.mapVideosLoading) return;
+  item.mapVideosLoading = true;
+  item.mapVideosError = "";
+  if (newsItem === item) renderNewsModal(item);
+  mapVideoRequest(item)
+    .then((data) => {
+      item.mapVideosFetched = true;
+      item.mapVideos = normalizeVideoItems(data?.items);
+      item.mapVideosHasMore = Boolean(data?.has_more);
+    })
+    .catch((error) => {
+      item.mapVideosError = error?.message || String(error);
+    })
+    .finally(() => {
+      item.mapVideosLoading = false;
+      if (newsItem === item) renderNewsModal(item);
+    });
+}
+
+function loadMoreMapVideos(item) {
+  if (!item?.map || item.mapVideosLoading) return;
+  item.mapVideosLoading = true;
+  item.mapVideosError = "";
+  if (newsItem === item) renderNewsModal(item);
+  const seen = new Set((item.mapVideos || []).map((video) => video.id));
+  mapVideoRequest(item, [...seen])
+    .then((data) => {
+      const items = normalizeVideoItems(data?.items).filter(
+        (video) => !seen.has(video.id)
+      );
+      if (items.length) item.mapVideos = item.mapVideos.concat(items);
+      item.mapVideosHasMore = Boolean(data?.has_more);
+    })
+    .catch((error) => {
+      item.mapVideosError = error?.message || String(error);
+    })
+    .finally(() => {
+      item.mapVideosLoading = false;
+      if (newsItem === item) renderNewsModal(item);
+    });
+}
+
+function renderMapVideos(item) {
+  if (!item?.map) return;
+  const videos = Array.isArray(item.mapVideos) ? item.mapVideos : [];
+  const section = document.createElement("section");
+  section.className = "video-results map-videos";
+
+  const head = document.createElement("div");
+  head.className = "video-list-head";
+  const label = document.createElement("span");
+  label.textContent = "YouTube";
+  const note = document.createElement("span");
+  note.className = "video-list-note";
+  if (item.mapVideosError) {
+    note.textContent = "not loaded";
+  } else if (item.mapVideosLoading) {
+    note.textContent = "searching…";
+  } else {
+    note.textContent = `${videos.length} result${videos.length === 1 ? "" : "s"}`;
+  }
+  head.appendChild(label);
+  head.appendChild(note);
+  section.appendChild(head);
+
+  if (videos.length) {
+    const cards = document.createElement("div");
+    cards.className = "video-cards";
+    const playlist = { videos: item.mapVideos };
+    for (const video of videos) {
+      cards.appendChild(makeVideoCard(video, playlist));
+    }
+    section.appendChild(cards);
+  }
+
+  if (item.mapVideosError) {
+    const error = document.createElement("div");
+    error.className = "video-more-error";
+    error.textContent = item.mapVideosError;
+    section.appendChild(error);
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "video-more-btn";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      item.mapVideosError = "";
+      if (videos.length) loadMoreMapVideos(item);
+      else ensureMapVideos(item);
+    });
+    section.appendChild(retry);
+  } else if (item.mapVideosLoading) {
+    const loading = document.createElement("div");
+    loading.className = "news-loading";
+    loading.textContent = "Searching YouTube for related videos…";
+    section.appendChild(loading);
+  }
+
+  if (item.mapVideosHasMore && !item.mapVideosLoading && !item.mapVideosError) {
+    const moreRow = document.createElement("div");
+    moreRow.className = "video-more-row";
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "video-more-btn";
+    more.textContent = "More videos";
+    more.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      loadMoreMapVideos(item);
+    });
+    moreRow.appendChild(more);
+    section.appendChild(moreRow);
+  }
+
+  newsBodyEl.appendChild(section);
 }
 
 /*
@@ -11624,30 +11795,38 @@ function submitText(text, fromChoice = false) {
   const commandArgs = question.startsWith("/")
     ? question.slice(1).split(/\s+/).slice(1)
     : [];
-  // /news search, /mdn, /wikivoyage, and /reddit stream their result lists;
-  // anchor each list at the top so new results do not drag the viewport down.
+  // /news search, /mdn, /wikivoyage, /map, /reddit, /tablelog, /stock, and
+  // /changelog stream their result lists; anchor each list at the top so new
+  // results do not drag the viewport down.
   const pinsNewsSearch = (
     commandName === "news"
       && String(commandArgs[0] || "").toLowerCase() === "search"
   ) || commandName === "mdn" || commandName === "wikivoyage"
-    || commandName === "reddit" || commandName === "tablelog"
-    || commandName === "stock";
+    || commandName === "map" || commandName === "reddit"
+    || commandName === "tablelog" || commandName === "stock"
+    || commandName === "changelog";
 
   addUserEcho(question, image);
   const isCommand = question.startsWith("/");
+  // /ask answers are plain text like a regular assistant reply: keep every
+  // word clickable for /dict and omit the command "Output" heading.
   const entry = makeEntry(isCommand ? "command" : "assistant", {
-    clickable: !isCommand,
+    clickable: !isCommand || commandName === "ask",
     language: appState?.code_language || "",
     wikiArticle: commandName === "wiki_article",
     label: image
       ? "Image"
-      : commandName === "news"
-        ? "News"
-        : commandName === "mdn"
+      : commandName === "ask"
+        ? ""
+        : commandName === "news"
+          ? "News"
+          : commandName === "mdn"
           ? "MDN Web Docs"
           : commandName === "wikivoyage"
             ? "Wikivoyage"
-            : commandName === "reddit"
+            : commandName === "map"
+              ? "Map"
+              : commandName === "reddit"
               ? "Reddit"
               : commandName === "howstuffworks"
                 ? "HowStuffWorks"

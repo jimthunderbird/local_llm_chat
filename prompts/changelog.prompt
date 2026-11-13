@@ -1,4 +1,9 @@
 task (completed) {
+  currently, after /changelog command is enter, the result will scroll to the bottom
+  please, do not scroll the result
+}
+
+task (completed) {
   create a new command /changelog {
     it will examine {directory_of_this_prompt}/../.log directory
     list: find all the log files with time descending order

@@ -1,0 +1,28 @@
+knowledge {
+  openstreetmap {
+    example {
+      curl -H "User-Agent: MyLocalApp/1.0 (contact@example.com)" \
+      "https://nominatim.openstreetmap.org/search?q=Ferry+Building+San+Francisco&format=jsonv2&limit=1"
+    }
+  }
+}
+
+task {
+  in additionl to showing list of related wiki entries, 
+}
+
+task (completed) {
+  bug:
+  refer to {task.list_of_youtube_videos}, the list youtube videos are not showing up!
+}
+
+task.list_of_youtube_videos (completed) {
+  after click open the wikipedia entry modal, under the article, show me list of videos from /youtube search <title of the article>
+}
+
+task (completed) {
+  create command /map <location>, learn from {knowlege.openstreetmap.example}
+  - get the location's getlocation information
+  - get a list of related wikipedia entries using "Wikipedia built-in GeoSearch API"
+  - the UI/UX of the wiki location list should be very similar to /news search <keyword>
+}

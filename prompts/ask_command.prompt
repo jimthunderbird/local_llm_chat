@@ -1,5 +1,14 @@
 simple_answer_model: ollama local model ornith:35b
 
+task (completed) {
+  - please remove the word "OUTPUT" before the actual answer
+  - please make each word in the answer dictionary searchable
+}
+
+task (completed) {
+  please use {simple_answer_model} to get the answer!
+}
+
 task.symbol_rendering (completed) {
   found the following content in the answer:
   $$ \text{Score}(A, B) = \sum{w \in A \cap B} \text{tf}{A}(w) \cdot \text{tf}_{B}(w) \cdot \text{idf}(w) $$

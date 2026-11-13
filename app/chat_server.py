@@ -5,7 +5,8 @@ The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /youtube, /news, /mdn, /stackoverflow,
 /reddit, /tablelog, /stock, /googlenews, /medium,
-/gutenberg, /openlibrary, /changelog, /wikivoyage, /wiki, /wiki_article,
+/gutenberg, /openlibrary, /changelog, /wikivoyage, /map, /wiki,
+/wiki_article,
 /article, /dict, and /ask. The browser is a
 pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
 
@@ -184,6 +185,7 @@ WEB_COMMANDS = {
     "/googlenews": "search Google News for the latest stories: /googlenews <keywords>",
     "/howstuffworks": "search HowStuffWorks articles by keywords: /howstuffworks <keywords>",
     "/wikivoyage": "search Wikivoyage destinations by keywords: /wikivoyage <keywords>",
+    "/map": "geocode a location with OpenStreetMap and list nearby Wikipedia articles: /map <location>",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/ai_news_podcast": "show the top five stories from the last 12 hours and create a two-voice AI news podcast",
     "/gutenberg": "search Project Gutenberg books: /gutenberg search <keywords>; click a book to read it and ask questions",
@@ -2797,6 +2799,294 @@ def fetch_wikivoyage_article(url: str, title: str = "") -> dict:
     }
     _wikivoyage_store_article(cache_key, article)
     return article
+
+
+# /map geocodes a location with OpenStreetMap's Nominatim service and lists
+# nearby English Wikipedia articles from the MediaWiki GeoSearch API. The
+# browser renders the results with the same /news-style list and modal used by
+# /wikivoyage, so each place can be read or translated in place.
+#
+# Nominatim requires a User-Agent that identifies the application. A real
+# contact URL is used because example.com addresses are rejected with HTTP 403.
+MAP_USER_AGENT = "local-llm-chat/1.0 (+https://github.com/)"
+NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
+WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
+WIKIPEDIA_BASE_URL = "https://en.wikipedia.org"
+MAP_SEARCH_RADIUS_METERS = 10_000
+MAP_RESULT_LIMIT = 15
+MAP_RETRY_MAX_SECONDS = 20.0
+
+
+def _map_plain_text(value: object) -> str:
+    """Turn a Wikipedia excerpt, extract, or description into plain text."""
+    text = html.unescape(re.sub(r"<[^>]*>", "", str(value or "")))
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _map_distance(meters: object) -> str:
+    """Format a GeoSearch distance for the result card."""
+    if not isinstance(meters, (int, float)):
+        return ""
+    if meters < 1000:
+        return f"{meters:.0f} m"
+    return f"{meters / 1000:.1f} km"
+
+
+def geocode_location(location: str) -> dict:
+    """Resolve a place name to coordinates with OpenStreetMap Nominatim."""
+    location = " ".join(str(location or "").split())
+    if not location:
+        raise RuntimeError("Missing location")
+    try:
+        response = requests.get(
+            NOMINATIM_SEARCH_URL,
+            params={
+                "q": location,
+                "format": "jsonv2",
+                "limit": 1,
+                "addressdetails": 1,
+            },
+            headers={
+                **chat.HTTP_HEADERS,
+                "User-Agent": MAP_USER_AGENT,
+                "Accept-Language": "en",
+            },
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"OpenStreetMap geocoding failed: {exc}") from exc
+
+    matches = data if isinstance(data, list) else []
+    match = matches[0] if matches and isinstance(matches[0], dict) else None
+    if match is None:
+        raise RuntimeError(f"No location matched {location!r}.")
+    try:
+        latitude = float(match.get("lat"))
+        longitude = float(match.get("lon"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"OpenStreetMap returned invalid coordinates for {location!r}."
+        ) from exc
+
+    display_name = _map_plain_text(match.get("display_name")) or location
+    address = match.get("address")
+    return {
+        "query": location,
+        "display_name": display_name,
+        "latitude": latitude,
+        "longitude": longitude,
+        "category": str(match.get("category") or match.get("class") or ""),
+        "type": str(match.get("type") or ""),
+        "osm_type": str(match.get("osm_type") or ""),
+        "osm_id": match.get("osm_id"),
+        "address": address if isinstance(address, dict) else {},
+    }
+
+
+def _map_retry_delay(response: requests.Response, attempt: int) -> float:
+    """Return a bounded delay for a MediaWiki rate-limit response."""
+    value = response.headers.get("Retry-After")
+    try:
+        delay = float(value)
+    except (TypeError, ValueError):
+        delay = 1.5 * (attempt + 1)
+    return min(MAP_RETRY_MAX_SECONDS, max(0.5, delay))
+
+
+def _haversine_meters(
+    latitude: float, longitude: float, other_latitude: float, other_longitude: float
+) -> float:
+    """Return the great-circle distance between two coordinates in meters."""
+    earth_radius = 6_371_000.0
+    lat1 = math.radians(latitude)
+    lat2 = math.radians(other_latitude)
+    delta_lat = math.radians(other_latitude - latitude)
+    delta_lon = math.radians(other_longitude - longitude)
+    value = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+    )
+    return earth_radius * 2 * math.asin(min(1.0, math.sqrt(value)))
+
+
+def search_wikipedia_nearby(
+    latitude: float,
+    longitude: float,
+    radius_meters: int = MAP_SEARCH_RADIUS_METERS,
+    limit: int = MAP_RESULT_LIMIT,
+) -> list[dict]:
+    """List Wikipedia pages near one coordinate with the GeoSearch API.
+
+    A single ``generator=geosearch`` query also returns each page's extract,
+    thumbnail, short description, coordinates, and canonical URL. Keeping this
+    to one MediaWiki request avoids the API's per-IP rate limit that one
+    summary request per result would quickly hit.
+    """
+    params = {
+        "action": "query",
+        "generator": "geosearch",
+        "ggscoord": f"{latitude}|{longitude}",
+        "ggsradius": max(10, min(int(radius_meters), 10_000)),
+        "ggslimit": max(1, min(int(limit), 50)),
+        "prop": "coordinates|pageimages|extracts|description|info",
+        "inprop": "url",
+        "exintro": 1,
+        "explaintext": 1,
+        "exchars": 1500,
+        "piprop": "thumbnail",
+        "pithumbsize": 320,
+        "format": "json",
+        "formatversion": 2,
+    }
+    data = None
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            response = requests.get(
+                WIKIPEDIA_API_URL,
+                params=params,
+                headers=chat.HTTP_HEADERS,
+                timeout=(10, 30),
+            )
+            if response.status_code in {429, 503} and attempt < 2:
+                time.sleep(_map_retry_delay(response, attempt))
+                continue
+            response.raise_for_status()
+            data = response.json()
+            break
+        except (requests.RequestException, ValueError) as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(1.0 + attempt)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Wikipedia GeoSearch failed: {last_error}")
+
+    query = data.get("query")
+    pages = query.get("pages") if isinstance(query, dict) else None
+    if isinstance(pages, dict):
+        pages = list(pages.values())
+    if not isinstance(pages, list):
+        raise RuntimeError("Wikipedia GeoSearch returned an unexpected response.")
+
+    results: list[dict] = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        page_latitude = None
+        page_longitude = None
+        coordinates = page.get("coordinates")
+        if isinstance(coordinates, list) and coordinates:
+            first = coordinates[0]
+            if isinstance(first, dict):
+                try:
+                    page_latitude = float(first.get("lat"))
+                    page_longitude = float(first.get("lon"))
+                except (TypeError, ValueError):
+                    page_latitude = None
+                    page_longitude = None
+        distance_meters = None
+        if page_latitude is not None and page_longitude is not None:
+            distance_meters = _haversine_meters(
+                latitude, longitude, page_latitude, page_longitude
+            )
+
+        thumbnail = page.get("thumbnail") or {}
+        image_url = ""
+        if isinstance(thumbnail, dict):
+            image_url = str(thumbnail.get("source") or "").strip()
+            if image_url.startswith("//"):
+                image_url = "https:" + image_url
+
+        link = str(page.get("fullurl") or "").strip()
+        if not link:
+            title = str(page.get("title") or "").strip()
+            if title:
+                link = WIKIPEDIA_BASE_URL + "/wiki/" + quote(
+                    title.replace(" ", "_"), safe="/()_',.:!-~"
+                )
+
+        results.append(
+            {
+                "title": str(page.get("title") or ""),
+                "description": str(page.get("description") or ""),
+                "extract": str(page.get("extract") or ""),
+                "link": link,
+                "latitude": page_latitude,
+                "longitude": page_longitude,
+                "distance_m": distance_meters,
+                "image": image_url,
+            }
+        )
+    results.sort(
+        key=lambda item: (
+            item["distance_m"] is None,
+            item["distance_m"] if item["distance_m"] is not None else 0.0,
+        )
+    )
+    return results
+
+
+def search_map_places(location: str) -> tuple[dict, list[dict]]:
+    """Geocode a location and return nearby Wikipedia article cards."""
+    geo = geocode_location(location)
+    pages = search_wikipedia_nearby(geo["latitude"], geo["longitude"])
+
+    results: list[dict] = []
+    for page in pages:
+        title = _map_plain_text(page.get("title")) or "(untitled)"
+        description = _map_plain_text(page.get("description"))
+        extract = _map_plain_text(page.get("extract"))
+        link = str(page.get("link") or "").strip()
+        if not link and not extract:
+            continue
+
+        distance = _map_distance(page.get("distance_m"))
+        coordinates = ""
+        latitude = page.get("latitude")
+        longitude = page.get("longitude")
+        if isinstance(latitude, (int, float)) and isinstance(
+            longitude, (int, float)
+        ):
+            coordinates = f"{latitude:.6g}, {longitude:.6g}"
+
+        paragraphs: list[str] = []
+        if extract:
+            paragraphs.append(extract)
+        detail_parts: list[str] = []
+        if distance:
+            detail_parts.append(
+                f"Distance: {distance} from {geo['display_name']}"
+            )
+        if coordinates:
+            detail_parts.append(f"Coordinates: {coordinates}")
+        if detail_parts:
+            paragraphs.append(" · ".join(detail_parts))
+
+        # The list shows the distance and description in its meta line; the
+        # modal already renders the extract paragraph, so keep the summary to
+        # the one-line description to avoid showing the extract twice.
+        card_summary = description
+        section = " · ".join(value for value in (distance, description) if value)
+
+        image_url = str(page.get("image") or "").strip()
+
+        results.append(
+            {
+                "title": title,
+                "link": link,
+                "section": section,
+                "summary": card_summary,
+                "paragraphs": paragraphs,
+                "images": [image_url] if image_url else [],
+                "distance": distance,
+                "coordinates": coordinates,
+            }
+        )
+    return geo, results
 
 
 # ---- /changelog ------------------------------------------------------
@@ -14068,6 +14358,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_stock(argument)
         elif name == "/wikivoyage":
             self._command_wikivoyage(argument)
+        elif name == "/map":
+            self._command_map(argument)
         elif name == "/medium":
             self._command_medium(argument)
         elif name == "/ai_news_podcast":
@@ -15625,6 +15917,83 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if not results:
             self._sse_text(
                 "output", f"\n/wikivoyage: no destinations matched {keyword!r}.\n"
+            )
+
+    def _command_map(self, argument: str) -> None:
+        """Geocode a location and list nearby Wikipedia articles.
+
+        Usage: /map <location>
+        OpenStreetMap Nominatim resolves the location, then the MediaWiki
+        GeoSearch API lists English Wikipedia pages within 10 km. The browser
+        renders them with the /news-style result list and detail modal.
+        """
+        location = " ".join(argument.split())
+        if not location:
+            self._sse_text(
+                "output",
+                "\nUsage: /map <location>\n"
+                "Example: /map Ferry Building San Francisco\n"
+                "Example: /map Nijo Market Sapporo\n",
+            )
+            return
+
+        self._sse_text(
+            "log",
+            f"[map: geocoding {location!r} with OpenStreetMap Nominatim]",
+        )
+        try:
+            geo, results = search_map_places(location)
+        except RuntimeError as exc:
+            self._sse_text("error", f"\n/map: {exc}\n")
+            return
+
+        description = (
+            f"{geo['display_name']} · "
+            f"{geo['latitude']:.5f}, {geo['longitude']:.5f} · "
+            f"Wikipedia articles within {MAP_SEARCH_RADIUS_METERS / 1000:g} km"
+        )
+        self._sse(
+            "news",
+            {
+                "type": "start",
+                "source": "Wikipedia",
+                "feed": WIKIPEDIA_API_URL,
+                "sources": ["Wikipedia"],
+                "docs": True,
+                "docs_label": "Wikipedia",
+                "description": description,
+            },
+        )
+        for index, result in enumerate(results, 1):
+            self._sse(
+                "news",
+                {
+                    "type": "item",
+                    "index": index,
+                    "title": result["title"],
+                    "link": result["link"],
+                    "source": "Wikipedia",
+                    "section": result["section"],
+                    "summary": result["summary"],
+                    "images": result["images"],
+                    "docs": True,
+                    "docs_label": "Wikipedia",
+                    "learnable": False,
+                    "map": True,
+                },
+            )
+            for text in result["paragraphs"]:
+                self._sse(
+                    "news", {"type": "paragraph", "index": index, "text": text}
+                )
+            self._sse("news", {"type": "item_end", "index": index})
+        self._sse("news", {"type": "done"})
+        if not results:
+            self._sse_text(
+                "output",
+                f"\n/map: no Wikipedia articles were found within "
+                f"{MAP_SEARCH_RADIUS_METERS / 1000:g} km of "
+                f"{geo['display_name']}.\n",
             )
 
     def _command_changelog(self, argument: str) -> None:
