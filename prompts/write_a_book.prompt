@@ -1,0 +1,21 @@
+book_writing_llm: ollama local model ornith-1.5:35b
+book_directory: {diretory_of_this_prompt}/../.chat/books
+words_per_chapter: 800
+max_number_of_chapters: 10
+
+task (completed) {
+  reference task.write_a_book:
+  - update {book_directory}  
+  - each book should have between 3 to {max_number_of_chapters}
+  - each chapter should have about {words_per_chapter}
+}
+
+task.write_a_book (completed) {
+  command: /write_a_book <subject> {
+    keywords: based on <subject>, use {book_writing_llm} to construct one list of keywords i should search
+    lists_of_knowledge: learn from /new search {keywords}, but only target on results that are from the pass 2 years only, only extract top 10 results
+    learn all the text in {lists_of_knowledge}
+    write a book chapter by chapter, each chapter has maximum 600 words
+    save the book to {book_directory}/{subject}.html
+  }
+}

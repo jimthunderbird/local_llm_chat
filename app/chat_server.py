@@ -6,7 +6,7 @@ Ollama streaming, transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /youtube, /news, /mdn, /stackoverflow,
 /reddit, /tablelog, /stock, /googlenews, /medium,
 /gutenberg, /openlibrary, /changelog, /wikivoyage, /map, /wiki,
-/wiki_article, /deepresearch,
+/wiki_article, /deepresearch, /write_a_book,
 /article, /dict, and /ask. The browser is a
 pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
 
@@ -26,6 +26,8 @@ Endpoints:
     GET  /api/transcripts?q=...  ag title search results
     GET  /api/changelog_file     ?name=<summary.html> one completed-task page
                                   used by /changelog's detail modal
+    GET  /api/book_file          ?name=<book.html> one book written by
+                                  /write_a_book, served as an HTML page
     GET  /api/gutenberg_book     ?id=<book_id>&url=<plaintext_url>&title=...
                                   the cached plaintext used by the book modal
     POST /api/ask                SSE: question or slash-command stream
@@ -137,7 +139,7 @@ import threading
 import wave
 import zipfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import redirect_stderr, redirect_stdout
@@ -212,6 +214,7 @@ WEB_COMMANDS = {
     "/tablelog": "japan food and restaurant guide for travelers — search Tabelog restaurant pages by keywords: /tablelog <keywords>",
     "/stock": "show a stock symbol profile, financial details, and related news articles: /stock <stock_symbol>",
     "/deepresearch": "run a bounded multi-round research report on <topic>: /deepresearch <topic>",
+    "/write_a_book": "research the last 2 years and write a 3-10 chapter book (~800 words each) into .chat/books/: /write_a_book <subject>",
 }
 
 # News sources accepted by /news and completed by news_fetch.php.
@@ -388,6 +391,477 @@ Source material:
 {source}
 
 Podcast script:
+"""
+
+
+# /write_a_book researches recent news, plans chapters from that material,
+# and writes each chapter with the local book-writing model. The finished
+# book is saved as a self-contained HTML document under ./.chat/books and served by
+# /api/book_file so the browser can open it in a new tab.
+WRITE_A_BOOK_MODEL = os.environ.get(
+    "OLLAMA_BOOK_MODEL", chat.ANSWER_MODEL
+)
+WRITE_A_BOOK_DIR = SCRIPT_DIR / ".chat" / "books"
+WRITE_A_BOOK_KEYWORD_LIMIT = 6
+WRITE_A_BOOK_SOURCE_LIMIT = 10
+WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD = 8
+WRITE_A_BOOK_RESEARCH_YEARS = 2
+WRITE_A_BOOK_CHAPTER_LIMIT = 10
+WRITE_A_BOOK_MIN_CHAPTERS = 3
+WRITE_A_BOOK_CHAPTER_WORDS = 800
+WRITE_A_BOOK_EVIDENCE_CHARS = 12_000
+WRITE_A_BOOK_DIGEST_CHARS = 8_000
+WRITE_A_BOOK_KEYWORD_PROMPT = """You are a research librarian planning a
+book about the following subject:
+
+{subject}
+
+Produce up to {limit} web-search queries that would find recent, factual
+articles useful for writing this book. Cover the main angles, not just
+synonyms of the subject.
+
+Rules:
+- Return one search query per line.
+- Do not number the lines, add bullets, or write commentary.
+- Keep every query under 100 characters.
+"""
+WRITE_A_BOOK_OUTLINE_PROMPT = """You are the editor of a researched
+non-fiction book.
+
+Book subject: {subject}
+
+Recent research material:
+{digest}
+
+Design a focused book with {min_chapters} to {max_chapters} chapters. Each
+chapter should cover a distinct, useful part of the subject and should be
+supported by the research material above.
+
+Rules:
+- Return one chapter title per line.
+- Do not number the lines, add bullets, or write commentary.
+- Do not include a preface, table of contents, or sources chapter.
+- Keep every title under 90 characters.
+"""
+WRITE_A_BOOK_CHAPTER_PROMPT = """You are writing one chapter of a researched
+non-fiction book.
+
+Book subject: {subject}
+Chapter {number}: {title}
+
+Use the research excerpts below as the factual basis. You may explain and
+synthesize them, but do not invent names, numbers, dates, or events that are
+not supported by the excerpts. Write for a general, curious reader.
+
+Rules:
+- Return only the chapter prose. Do not write a chapter title, heading,
+  preface, summary of this prompt, notes, or a source list.
+- Use flowing paragraphs, not bullet lists unless a list is genuinely clearer.
+- Aim for about {target_words} words. The chapter must never exceed
+  {max_words} words.
+
+Research excerpts:
+{evidence}
+
+Chapter prose:
+"""
+
+
+def _book_filename(subject: str) -> str:
+    """Return a safe, human-readable HTML filename for one book."""
+    name = re.sub(r'[\x00-\x1f\x7f/\\:*?"<>|]+', "_", subject).strip(" .")
+    name = re.sub(r"\s+", " ", name)[:120].rstrip(" .")
+    return f"{name or 'book'}.html"
+
+
+def written_book_path(name: str) -> Path | None:
+    """Resolve a book filename inside ./.chat/books without allowing traversal."""
+    name = str(name or "").strip()
+    if (
+        not name
+        or "/" in name
+        or "\\" in name
+        or name != Path(name).name
+        or not name.lower().endswith(".html")
+    ):
+        return None
+    path = (WRITE_A_BOOK_DIR / name).resolve()
+    try:
+        path.relative_to(WRITE_A_BOOK_DIR.resolve())
+    except ValueError:
+        return None
+    return path
+
+
+def _book_news_timestamp(value: str) -> float | None:
+    """Parse an RSS/ISO publication date into a UTC timestamp."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parsed = None
+    try:
+        parsed = parsedate_to_datetime(text)
+    except (TypeError, ValueError, OverflowError):
+        parsed = None
+    if parsed is None:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _parse_book_model_lines(raw: str, limit: int) -> list[str]:
+    """Parse a model's one-item-per-line list, removing common wrappers."""
+    lines: list[str] = []
+    seen: set[str] = set()
+    text = (raw or "").strip()
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            text = "\n".join(str(item) for item in parsed)
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        line = re.sub(r"^\s*(?:[-*\u2022]+|\d+[.)])\s*", "", line)
+        line = re.sub(
+            r"^\s*(?:keywords?|search queries?|queries|chapters?|outline)\s*[:\uff1a]\s*",
+            "",
+            line,
+            flags=re.IGNORECASE,
+        )
+        line = line.strip(" \t\"'`#")
+        if not line or len(line) > 160:
+            continue
+        if line.casefold().startswith(
+            ("here are", "sure,", "certainly", "i cannot", "as an ai")
+        ):
+            continue
+        key = line.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(line)
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+def _book_keyword_list(raw: str, subject: str) -> list[str]:
+    """Turn the keyword-model reply into a bounded, deduplicated list."""
+    keywords = _parse_book_model_lines(raw, WRITE_A_BOOK_KEYWORD_LIMIT)
+    if len(keywords) == 1 and "," in keywords[0]:
+        split = [
+            part.strip(" \t\"'`")
+            for part in keywords[0].split(",")
+            if part.strip(" \t\"'`")
+        ]
+        if len(split) > 1:
+            keywords = split[:WRITE_A_BOOK_KEYWORD_LIMIT]
+    return keywords or [subject]
+
+
+def _book_chapter_titles(raw: str, subject: str) -> list[str]:
+    """Return a usable chapter outline, with a stable fallback."""
+    titles = _parse_book_model_lines(raw, WRITE_A_BOOK_CHAPTER_LIMIT)
+    cleaned: list[str] = []
+    for title in titles:
+        title = re.sub(
+            r"^chapter\s*\d+\s*[:.\-\u2013]\s*", "", title, flags=re.IGNORECASE
+        ).strip()
+        if title:
+            cleaned.append(title)
+    if len(cleaned) < WRITE_A_BOOK_MIN_CHAPTERS:
+        cleaned = [
+            "Introduction",
+            f"Understanding {subject}",
+            "Key Developments",
+            "People and Institutions",
+            "Practical Implications",
+            "Challenges and Debates",
+            "What Comes Next",
+            "Conclusion",
+        ]
+    return cleaned[:WRITE_A_BOOK_CHAPTER_LIMIT]
+
+
+def _book_search_tokens(text: str) -> list[str]:
+    """Tokenize a string for inexpensive lexical evidence selection."""
+    return [
+        token
+        for token in re.findall(r"[a-z0-9][a-z0-9'-]*", text.casefold())
+        if len(token) > 2
+        and token
+        not in {
+            "the", "and", "for", "from", "that", "this", "with", "into",
+            "about", "after", "before", "their", "there", "these", "those",
+            "have", "has", "had", "was", "were", "are", "you", "your",
+            "but", "not", "can", "could", "will", "would", "more", "most",
+        }
+    ]
+
+
+def _book_source_digest(sources: list[dict], max_chars: int) -> str:
+    """Build a compact source digest for chapter planning."""
+    parts: list[str] = []
+    used = 0
+    for source in sources:
+        paragraphs = source.get("paragraphs") or []
+        summary = " ".join(str(source.get("summary") or "").split())
+        if not summary and paragraphs:
+            summary = " ".join(str(paragraphs[0]).split())
+        published = str(source.get("published") or "").strip()
+        line = f"- {source.get('title', 'Untitled')}"
+        if published:
+            line += f" ({published})"
+        if summary:
+            line += f": {summary[:520]}"
+        if used + len(line) > max_chars and parts:
+            break
+        parts.append(line)
+        used += len(line) + 1
+    return "\n".join(parts)
+
+
+def _book_chapter_evidence(
+    sources: list[dict], subject: str, chapter_title: str, max_chars: int
+) -> str:
+    """Select the most relevant source paragraphs for one chapter."""
+    query = set(_book_search_tokens(f"{subject} {chapter_title}"))
+    ranked: list[tuple[float, int, int, str]] = []
+    for source_index, source in enumerate(sources):
+        for paragraph_index, paragraph in enumerate(
+            source.get("paragraphs") or []
+        ):
+            tokens = set(_book_search_tokens(str(paragraph)))
+            if not tokens:
+                continue
+            overlap = len(query & tokens)
+            score = overlap / math.sqrt(max(len(tokens), 1))
+            ranked.append(
+                (score, source_index, paragraph_index, str(paragraph))
+            )
+    ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
+
+    selected: set[tuple[int, int]] = set()
+    used = 0
+    for score, source_index, paragraph_index, paragraph in ranked:
+        if selected and score <= 0:
+            break
+        if len(paragraph) > max_chars and selected:
+            continue
+        if used + len(paragraph) > max_chars and selected:
+            break
+        selected.add((source_index, paragraph_index))
+        used += len(paragraph) + 2
+
+    if not selected:
+        for source_index, source in enumerate(sources):
+            paragraphs = source.get("paragraphs") or []
+            if not paragraphs:
+                continue
+            selected.add((source_index, 0))
+            used += len(str(paragraphs[0])) + 2
+            if used >= max_chars:
+                break
+
+    grouped: dict[int, list[str]] = {}
+    for source_index, paragraph_index in sorted(selected):
+        grouped.setdefault(source_index, []).append(
+            str(sources[source_index]["paragraphs"][paragraph_index])
+        )
+
+    blocks: list[str] = []
+    used = 0
+    for source_index, paragraphs in grouped.items():
+        source = sources[source_index]
+        header = f"SOURCE: {source.get('title', 'Untitled')}"
+        link = str(source.get("link") or "").strip()
+        if link:
+            header += f" ({link})"
+        block = header + "\n" + "\n\n".join(paragraphs)
+        if used + len(block) > max_chars and blocks:
+            break
+        blocks.append(block)
+        used += len(block) + 2
+    return "\n\n".join(blocks)
+
+
+def _book_limit_words(text: str, limit: int) -> str:
+    """Hard-cap a chapter at ``limit`` words, preferring a sentence end."""
+    matches = list(re.finditer(r"\S+", text or ""))
+    if len(matches) <= limit:
+        return (text or "").strip()
+    cut = matches[limit - 1].end()
+    trimmed = text[:cut].rstrip()
+    sentence_ends = list(re.finditer(r"[.!?][\"')\]]?(?=\s|$)", trimmed))
+    if sentence_ends and sentence_ends[-1].end() > len(trimmed) * 0.7:
+        trimmed = trimmed[: sentence_ends[-1].end()].rstrip()
+    return trimmed
+
+
+def _book_strip_chapter_heading(text: str, title: str) -> str:
+    """Remove a title the model repeated at the start of a chapter."""
+    cleaned = (text or "").strip()
+    first, _, rest = cleaned.partition("\n")
+    first_plain = re.sub(r"^#+\s*", "", first).strip(" *#")
+    if first_plain and (
+        first_plain.casefold() == title.casefold()
+        or re.match(r"^chapter\s*\d+\b", first_plain, re.IGNORECASE)
+    ):
+        cleaned = rest.strip()
+    return cleaned
+
+
+def _book_inline_html(text: str) -> str:
+    """Escape a line and render the small amount of inline Markdown we use."""
+    escaped = html.escape(text)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+    escaped = re.sub(
+        r"(?<!\*)\*(?!\*)([^*\n]+?)(?<!\*)\*(?!\*)", r"<em>\1</em>", escaped
+    )
+    return escaped
+
+
+def _book_text_html(text: str) -> str:
+    """Render plain chapter prose as safe HTML paragraphs and lists."""
+    blocks = re.split(r"\n\s*\n", (text or "").strip())
+    rendered: list[str] = []
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        if all(re.match(r"^(?:[-*\u2022]|\d+[.)])\s+", line) for line in lines):
+            items = []
+            for line in lines:
+                item = re.sub(
+                    r"^(?:[-*\u2022]|\d+[.)])\s+", "", line
+                ).strip()
+                items.append(f"<li>{_book_inline_html(item)}</li>")
+            rendered.append("<ul>" + "".join(items) + "</ul>")
+            continue
+        paragraph = "<br>".join(_book_inline_html(line) for line in lines)
+        rendered.append(f"<p>{paragraph}</p>")
+    return "\n".join(rendered)
+
+
+def _book_html_document(
+    subject: str,
+    chapters: list[tuple[str, str]],
+    sources: list[dict],
+    created: str,
+) -> str:
+    """Build the standalone HTML file saved for /write_a_book."""
+    title = html.escape(subject)
+    toc: list[str] = []
+    sections: list[str] = []
+    for index, (chapter_title, chapter_text) in enumerate(chapters, 1):
+        words = len(chapter_text.split())
+        toc.append(
+            f'<li><a href="#chapter-{index}">Chapter {index}: '
+            f'{html.escape(chapter_title)}</a></li>'
+        )
+        sections.append(
+            f'<section class="chapter" id="chapter-{index}">'
+            f'<h2><span class="chapter-number">Chapter {index}</span>'
+            f'{html.escape(chapter_title)}</h2>'
+            f'{_book_text_html(chapter_text)}'
+            f'<p class="chapter-words">{words:,} words</p>'
+            "</section>"
+        )
+
+    source_items: list[str] = []
+    for source in sources:
+        source_title = html.escape(str(source.get("title") or "Untitled"))
+        link = str(source.get("link") or "").strip()
+        published = html.escape(str(source.get("published") or ""))
+        if re.match(r"^https?://", link, re.IGNORECASE):
+            source_title = (
+                f'<a href="{html.escape(link, quote=True)}" '
+                f'target="_blank" rel="noopener noreferrer">{source_title}</a>'
+            )
+        suffix = f' <span class="muted">{published}</span>' if published else ""
+        source_items.append(f"<li>{source_title}{suffix}</li>")
+
+    total_words = sum(len(text.split()) for _title, text in chapters)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  :root {{ color-scheme: light dark; --ink: #1f2328; --muted: #667085;
+          --paper: #f7f4ed; --accent: #9a3f1f; --rule: #d8d0c2; }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{ --ink: #e8e3da; --muted: #a8a29a; --paper: #171614;
+            --accent: #e0a37c; --rule: #3b3833; }}
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{ margin: 0; background: var(--paper); color: var(--ink);
+         font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
+         line-height: 1.72; }}
+  main {{ max-width: 46rem; margin: 0 auto; padding: 3rem 1.35rem 6rem; }}
+  header {{ border-bottom: 2px solid var(--rule); margin-bottom: 2.5rem;
+           padding-bottom: 1.7rem; }}
+  h1 {{ font-size: clamp(2.1rem, 6vw, 3.4rem); line-height: 1.08;
+        margin: 0 0 .7rem; letter-spacing: -.02em; }}
+  h2 {{ font-size: clamp(1.45rem, 3.5vw, 2rem); line-height: 1.2;
+        margin: 0 0 1.2rem; }}
+  .chapter-number {{ display: block; color: var(--accent); font-family:
+        -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: .78rem; font-weight: 700; letter-spacing: .14em;
+        text-transform: uppercase; margin-bottom: .45rem; }}
+  .meta, .muted, .chapter-words {{ color: var(--muted); }}
+  .meta {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           font-size: .9rem; }}
+  nav {{ background: color-mix(in srgb, var(--paper) 82%, var(--rule));
+         border: 1px solid var(--rule); border-radius: .65rem;
+         padding: 1.1rem 1.4rem; margin-bottom: 3rem; }}
+  nav h2 {{ font-size: .8rem; letter-spacing: .13em; text-transform: uppercase;
+            color: var(--muted); margin-bottom: .6rem; }}
+  nav ol {{ margin: 0; padding-left: 1.3rem; }}
+  nav a, a {{ color: var(--accent); }}
+  .chapter {{ margin: 0 0 4rem; scroll-margin-top: 2rem; }}
+  p {{ margin: 0 0 1.05rem; }}
+  ul {{ padding-left: 1.4rem; }}
+  li {{ margin: .35rem 0; }}
+  .chapter-words {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                    font-size: .78rem; text-align: right; margin-top: 1.4rem; }}
+  .sources {{ border-top: 2px solid var(--rule); padding-top: 1.8rem; margin-top: 4rem; }}
+  .sources h2 {{ font-size: 1.35rem; }}
+  .sources li {{ margin: .6rem 0; }}
+  code {{ background: color-mix(in srgb, var(--ink) 10%, transparent);
+          border-radius: .25rem; padding: .1rem .3rem; font-size: .92em; }}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>{title}</h1>
+  <p class="meta">A researched book · {len(chapters)} chapters · {total_words:,} words · generated {html.escape(created)}</p>
+</header>
+<nav>
+  <h2>Contents</h2>
+  <ol>
+    {''.join(toc)}
+  </ol>
+</nav>
+{''.join(sections)}
+<section class="sources">
+  <h2>Research sources</h2>
+  <ol>
+    {''.join(source_items)}
+  </ol>
+</section>
+</main>
+</body>
+</html>
 """
 
 
@@ -4686,6 +5160,7 @@ COMMAND_ARGUMENTS = {
     "/openlibrary",
     "/stackoverflow",
     "/deepresearch",
+    "/write_a_book",
 }
 
 # Subcommands grouped under /gutenberg and /openlibrary.
@@ -7730,6 +8205,164 @@ def fetch_news_article(url: str, title: str = "") -> dict:
     }
 
 
+def _read_news_ndjson(output: str) -> list[dict]:
+    """Collect item and paragraph events from news_fetch.php's NDJSON."""
+    by_index: dict[int, dict] = {}
+    order: list[int] = []
+    for raw_line in (output or "").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        try:
+            index = int(event.get("index"))
+        except (TypeError, ValueError):
+            index = len(order) + 1
+        event_type = str(event.get("type") or "")
+        if event_type == "item":
+            item = dict(event)
+            item["paragraphs"] = []
+            by_index[index] = item
+            order.append(index)
+        elif event_type == "paragraph":
+            item = by_index.get(index)
+            text = str(event.get("text") or "").strip()
+            if item is not None and text:
+                item.setdefault("paragraphs", []).append(text)
+    return [by_index[index] for index in order if index in by_index]
+
+
+def _book_clean_paragraphs(values) -> list[str]:
+    """Normalize article paragraphs and drop common page furniture."""
+    paragraphs: list[str] = []
+    seen: set[str] = set()
+    if not isinstance(values, list):
+        return paragraphs
+    for value in values:
+        text = " ".join(str(value or "").split())
+        if not text or text.casefold() in seen:
+            continue
+        lowered = text.casefold()
+        if lowered in {
+            "article continues below this ad",
+            "advertisement",
+            "read more",
+            "related stories",
+            "more from",
+        }:
+            continue
+        seen.add(lowered)
+        paragraphs.append(text)
+    return paragraphs
+
+
+def _book_search_candidates(
+    keywords: list[str], limit: int, log: Callable[[str], None]
+) -> list[dict]:
+    """Search recent Google News stories for the book's keyword list."""
+    script = SCRIPT_DIR / "news_fetch.php"
+    if not script.exists():
+        raise RuntimeError("missing news_fetch.php")
+    cutoff = time.time() - (
+        WRITE_A_BOOK_RESEARCH_YEARS * 365.25 * 24 * 60 * 60
+    )
+    selected: list[dict] = []
+    seen: set[str] = set()
+    for keyword in keywords[:WRITE_A_BOOK_KEYWORD_LIMIT]:
+        keyword = " ".join(str(keyword).split())
+        if not keyword:
+            continue
+        query = f"when:{WRITE_A_BOOK_RESEARCH_YEARS}y {keyword}"
+        log(f"[book: searching recent articles for {keyword!r}]")
+        command = [
+            "php",
+            str(script),
+            "--json",
+            "--lazy",
+            "--source",
+            "googlenews",
+            "--search",
+            query,
+            "--limit",
+            str(WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD),
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                cwd=SCRIPT_DIR,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            log(f"[book: search failed for {keyword!r}: {exc}]")
+            continue
+        for item in _read_news_ndjson(result.stdout):
+            title = " ".join(str(item.get("title") or "").split())
+            link = str(item.get("link") or "").strip()
+            key = (link or title).casefold()
+            if not title or not key or key in seen:
+                continue
+            published_ts = _book_news_timestamp(
+                str(item.get("published") or "")
+            )
+            if published_ts is not None and published_ts < cutoff:
+                continue
+            seen.add(key)
+            selected.append(
+                {
+                    "title": title,
+                    "link": link,
+                    "published": str(item.get("published") or "").strip(),
+                    "summary": " ".join(
+                        str(item.get("summary") or "").split()
+                    ),
+                    "paragraphs": _book_clean_paragraphs(
+                        item.get("paragraphs") or []
+                    ),
+                }
+            )
+            if len(selected) >= limit:
+                return selected
+    return selected
+
+
+def _book_load_source(
+    item: dict, log: Callable[[str], None]
+) -> dict | None:
+    """Fetch the full article body when the search list only has a summary."""
+    title = str(item.get("title") or "").strip()
+    link = str(item.get("link") or "").strip()
+    paragraphs = _book_clean_paragraphs(item.get("paragraphs") or [])
+    if len(paragraphs) < 2 and link:
+        try:
+            article = fetch_news_article(link, title)
+            fetched = _book_clean_paragraphs(article.get("paragraphs") or [])
+            if len(fetched) > len(paragraphs):
+                paragraphs = fetched
+                link = str(article.get("link") or link).strip()
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
+            log(f"[book: could not read {title!r}: {exc}]")
+    if not paragraphs:
+        summary = " ".join(str(item.get("summary") or "").split())
+        if summary:
+            paragraphs = [summary]
+    if not paragraphs:
+        return None
+    return {
+        "title": title or "Untitled",
+        "link": link,
+        "published": str(item.get("published") or "").strip(),
+        "summary": " ".join(str(item.get("summary") or "").split()),
+        "paragraphs": paragraphs,
+    }
+
+
 # /reddit <keywords> searches Google News RSS restricted to reddit.com. The
 # result cards reuse the /news list, and each post body is fetched on demand
 # from Reddit's public JSON (or Atom RSS) endpoint.
@@ -10665,7 +11298,7 @@ def _iterative_evidence(
         if not added:
             break
         log(
-            f"[{label} iterative: round {round_number}/{max_rounds}, "
+            f"[{label}: round {round_number}/{max_rounds}, "
             f"added {added} paragraph(s), evidence ~{used:,} token(s)]"
         )
         if long_form:
@@ -10673,7 +11306,7 @@ def _iterative_evidence(
             # essay, report, or guide request.
             sufficient = True
             log(
-                f"[{label} iterative: long-form request; using the "
+                f"[{label}: long-form request; using the "
                 f"{len(evidence)} gathered paragraph(s)]"
             )
             break
@@ -10683,7 +11316,7 @@ def _iterative_evidence(
         if not enumerative and _evidence_covers_question(question, evidence):
             sufficient = True
             log(
-                f"[{label} iterative: evidence covers the question terms; "
+                f"[{label}: evidence covers the question terms; "
                 "stopping]"
             )
             break
@@ -10703,7 +11336,7 @@ def _iterative_evidence(
         )
         if verdict["sufficient"]:
             sufficient = True
-            log(f"[{label} iterative: evidence is sufficient; stopping]")
+            log(f"[{label}: evidence is sufficient; stopping]")
             break
         if verdict["missing"]:
             missing_terms = _missing_search_terms(verdict["missing"])
@@ -10712,7 +11345,7 @@ def _iterative_evidence(
                 # The last round did not change what the model says is
                 # missing, so another identical search will not help.
                 log(
-                    f"[{label} iterative: missing terms did not change; "
+                    f"[{label}: missing terms did not change; "
                     "stopping early]"
                 )
                 break
@@ -10726,7 +11359,7 @@ def _iterative_evidence(
             # to the normal retrieval path instead of forcing unrelated
             # evidence into the prompt.
             log(
-                f"[{label} iterative: evidence stayed insufficient after "
+                f"[{label}: evidence stayed insufficient after "
                 f"{max_rounds} round(s); using normal retrieval]"
             )
             return []
@@ -10736,7 +11369,7 @@ def _iterative_evidence(
         # repeated roughly two seconds of work and replaced broader evidence
         # with a much smaller context.
         log(
-            f"[{label} iterative: checker still wanted more after "
+            f"[{label}: checker still wanted more after "
             f"{max_rounds} round(s); using the {len(evidence)} gathered "
             "paragraph(s)]"
         )
@@ -10784,7 +11417,7 @@ def _article_iterative_evidence(
         chunks,
         budget,
         log,
-        label="article",
+        label="context gathering",
         structure=structure,
         max_rounds=ARTICLE_ITERATIVE_MAX_ROUNDS,
         batch=ARTICLE_ITERATIVE_BATCH,
@@ -10875,7 +11508,7 @@ def _youtube_iterative_evidence(
             chunks,
             effective_budget,
             log,
-            label="youtube",
+            label="context gathering",
             max_rounds=(
                 YOUTUBE_ITERATIVE_ENUMERATIVE_ROUNDS
                 if enumerative
@@ -13416,6 +14049,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             name = (params.get("name") or [""])[0]
             self._send_changelog_file(name)
             return
+        if path == "/api/book_file":
+            params = parse_qs(parsed.query)
+            name = (params.get("name") or [""])[0]
+            self._send_written_book(name)
+            return
         if path == "/api/wiki":
             params = parse_qs(parsed.query)
             word = (params.get("word") or [""])[0].strip()
@@ -13461,6 +14099,27 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             data = path.read_bytes()
         except OSError as exc:
             self._send_error_json(f"Cannot read changelog entry: {exc}", 500)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _send_written_book(self, name: str) -> None:
+        """Serve one HTML book written by /write_a_book."""
+        path = written_book_path(name)
+        if path is None or not path.is_file():
+            self._send_error_json("Written book not found", 404)
+            return
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            self._send_error_json(f"Cannot read written book: {exc}", 500)
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -14581,7 +15240,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     )
                     self._sse_text(
                         "log",
-                        "[article iterative: no new evidence found; using the "
+                        "[context gathering: no new evidence found; using the "
                         "normal narrow retrieval path]",
                     )
             if article_route.label == "narrow" and not article_route.iterative:
@@ -15508,6 +16167,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_benchmark(argument)
         elif name == "/deepresearch":
             self._command_deepresearch(argument)
+        elif name == "/write_a_book":
+            self._command_write_a_book(argument)
         else:
             self._sse_text(
                 "output",
@@ -15593,6 +16254,282 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         state.record_turn(topic, topic, report)
         if state.benchmark_mode:
             self._sse_text("log", chat.format_benchmark_line(state.latest_benchmark))
+
+    def _command_write_a_book(self, subject: str) -> None:
+        """Research a subject and write a chapter-by-chapter HTML book.
+
+        The keyword, outline, and chapter prompts all run on the local
+        book-writing model. Google News supplies only articles published in
+        the last two years; their full bodies become the evidence for the
+        chapters. The finished, self-contained HTML book is saved under
+        ./.chat/books and emitted as a `written_book` event with a browser URL.
+        """
+        subject = " ".join(subject.split()).strip()
+        if not subject:
+            self._sse_text(
+                "output",
+                "\nUsage: /write_a_book <subject>\n"
+                "Example: /write_a_book the future of open source AI\n",
+            )
+            return
+
+        started = time.monotonic()
+        self._sse_text(
+            "log",
+            f"[book: planning {subject!r} with {WRITE_A_BOOK_MODEL}]",
+        )
+        try:
+            keyword_reply = chat.generate_text(
+                WRITE_A_BOOK_KEYWORD_PROMPT.format(
+                    subject=subject,
+                    limit=WRITE_A_BOOK_KEYWORD_LIMIT,
+                ),
+                model=WRITE_A_BOOK_MODEL,
+                temperature=0.4,
+                num_predict=260,
+            )
+        except RuntimeError as exc:
+            self._sse_text(
+                "output",
+                f"\n/write_a_book: keyword planning failed: {exc}\n",
+            )
+            return
+        keywords = _book_keyword_list(keyword_reply, subject)
+        self._sse_text(
+            "log", "[book: search keywords: " + " | ".join(keywords) + "]"
+        )
+
+        try:
+            candidates = _book_search_candidates(
+                keywords,
+                WRITE_A_BOOK_SOURCE_LIMIT,
+                lambda text: self._sse_text("log", text),
+            )
+        except RuntimeError as exc:
+            self._sse_text(
+                "output", f"\n/write_a_book: recent-news search failed: {exc}\n"
+            )
+            return
+        if not candidates and subject.casefold() not in {
+            keyword.casefold() for keyword in keywords
+        }:
+            self._sse_text(
+                "log",
+                "[book: no usable keyword results; retrying with the subject]",
+            )
+            try:
+                candidates = _book_search_candidates(
+                    [subject],
+                    WRITE_A_BOOK_SOURCE_LIMIT,
+                    lambda text: self._sse_text("log", text),
+                )
+            except RuntimeError as exc:
+                self._sse_text(
+                    "log", f"[book: subject search failed: {exc}]"
+                )
+
+        if candidates:
+            self._sse_text(
+                "log",
+                f"[book: found {len(candidates)} recent article(s); reading "
+                "their full text]",
+            )
+        else:
+            self._sse_text(
+                "log",
+                "[book: no articles from the last 2 years were found; writing "
+                "from the model's general knowledge]",
+            )
+
+        sources: list[dict] = []
+        for index, item in enumerate(candidates, 1):
+            title = str(item.get("title") or "Untitled")
+            self._sse_text(
+                "log",
+                f"[book: reading source {index}/{len(candidates)}: {title}]",
+            )
+            source = _book_load_source(
+                item, lambda text: self._sse_text("log", text)
+            )
+            if source is not None:
+                sources.append(source)
+        if sources:
+            self._sse_text(
+                "log",
+                f"[book: learned {len(sources)} article(s) and "
+                f"{sum(len(source['paragraphs']) for source in sources)} "
+                "paragraph(s)]",
+            )
+        elif candidates:
+            self._sse_text(
+                "log",
+                "[book: no article body could be read; writing from the "
+                "model's general knowledge]",
+            )
+
+        digest = _book_source_digest(sources, WRITE_A_BOOK_DIGEST_CHARS)
+        if not digest:
+            digest = (
+                "No recent source text was available. Plan a useful general "
+                f"book about {subject} without inventing specific facts."
+            )
+        self._sse_text("log", "[book: planning the chapter outline]")
+        try:
+            outline_reply = chat.generate_text(
+                WRITE_A_BOOK_OUTLINE_PROMPT.format(
+                    subject=subject,
+                    digest=digest,
+                    min_chapters=WRITE_A_BOOK_MIN_CHAPTERS,
+                    max_chapters=WRITE_A_BOOK_CHAPTER_LIMIT,
+                ),
+                model=WRITE_A_BOOK_MODEL,
+                temperature=0.45,
+                num_predict=360,
+            )
+        except RuntimeError as exc:
+            self._sse_text(
+                "log", f"[book: outline planning failed ({exc}); using a "
+                "default outline]"
+            )
+            outline_reply = ""
+        chapter_titles = _book_chapter_titles(outline_reply, subject)
+        self._sse_text(
+            "log",
+            f"[book: outline has {len(chapter_titles)} chapter(s)]",
+        )
+
+        chapters: list[tuple[str, str]] = []
+        for index, chapter_title in enumerate(chapter_titles, 1):
+            self._sse_text(
+                "delta", f"\n\n## Chapter {index}: {chapter_title}\n\n"
+            )
+            if sources:
+                evidence = _book_chapter_evidence(
+                    sources,
+                    subject,
+                    chapter_title,
+                    WRITE_A_BOOK_EVIDENCE_CHARS,
+                )
+            else:
+                evidence = (
+                    "No recent source text was available. Use general "
+                    "knowledge, and avoid specific claims that cannot be "
+                    "verified."
+                )
+            prompt = WRITE_A_BOOK_CHAPTER_PROMPT.format(
+                subject=subject,
+                number=index,
+                title=chapter_title,
+                target_words=760,
+                max_words=WRITE_A_BOOK_CHAPTER_WORDS,
+                evidence=evidence,
+            )
+            try:
+                chapter_text = chat.stream_answer(
+                    prompt,
+                    model=WRITE_A_BOOK_MODEL,
+                    emit=lambda text: self._sse_text("delta", text),
+                )
+            except RuntimeError as exc:
+                self._sse_text(
+                    "log",
+                    f"[book: chapter {index} failed: {exc}]",
+                )
+                if not chapters:
+                    self._sse_text(
+                        "output",
+                        f"\n/write_a_book: could not write the book: {exc}\n",
+                    )
+                break
+            chapter_text = _book_strip_chapter_heading(
+                chapter_text, chapter_title
+            )
+            chapter_text = _book_limit_words(
+                chapter_text, WRITE_A_BOOK_CHAPTER_WORDS
+            )
+            if not chapter_text.strip():
+                self._sse_text(
+                    "log",
+                    f"[book: chapter {index} was empty; skipping it]",
+                )
+                continue
+            chapters.append((chapter_title, chapter_text))
+            self._sse_text(
+                "log",
+                f"[book: chapter {index}/{len(chapter_titles)} written "
+                f"({len(chapter_text.split()):,} words)]",
+            )
+
+        if not chapters:
+            self._sse_text(
+                "output", "\n/write_a_book: no chapter was produced.\n"
+            )
+            return
+
+        created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        book_html = _book_html_document(
+            subject, chapters, sources, created
+        )
+        filename = _book_filename(subject)
+        path = WRITE_A_BOOK_DIR / filename
+        try:
+            WRITE_A_BOOK_DIR.mkdir(parents=True, exist_ok=True)
+            path.write_text(book_html, encoding="utf-8")
+        except OSError as exc:
+            self._sse_text(
+                "output",
+                f"\n/write_a_book: could not save the book: {exc}\n",
+            )
+            return
+
+        total_words = sum(len(text.split()) for _title, text in chapters)
+        url = f"/api/book_file?name={quote(filename)}"
+        self._sse(
+            "written_book",
+            {
+                "title": subject,
+                "filename": filename,
+                "url": url,
+                "chapters": [
+                    {
+                        "title": title,
+                        "words": len(text.split()),
+                    }
+                    for title, text in chapters
+                ],
+                "words": total_words,
+                "sources": [
+                    {
+                        "title": source.get("title", ""),
+                        "link": source.get("link", ""),
+                    }
+                    for source in sources
+                ],
+                "created": created,
+            },
+        )
+        self._sse_text(
+            "output",
+            f"\nBook saved to {path}\n"
+            f"{len(chapters)} chapter(s), {total_words:,} words.\n",
+        )
+        state = self.state
+        state.latest_answer = (
+            f"Wrote the book {subject!r}: {len(chapters)} chapters, "
+            f"{total_words:,} words, saved to {path}."
+        )
+        state.latest_sources = []
+        state.latest_benchmark = {
+            "model": WRITE_A_BOOK_MODEL,
+            "trunks": len(sources),
+            "context_tokens": 0,
+            "total": time.monotonic() - started,
+            "book_words": total_words,
+        }
+        if state.benchmark_mode:
+            self._sse_text(
+                "log", chat.format_benchmark_line(state.latest_benchmark)
+            )
 
     def _command_refresh(self) -> None:
         state = self.state

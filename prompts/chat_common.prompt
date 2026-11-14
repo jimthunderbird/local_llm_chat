@@ -1,4 +1,10 @@
 task (completed) {
+  currently before an answer is created, we see something like:
+[youtube iterative: round 1/5, added 12 paragraph(s), evidence ~795 token(s)][youtube iterative: round 2/5, added 6 paragraph(s), evidence ~1,143 token(s)][youtube iterative: round 3/5, added 1 paragraph(s), evidence ~1,166 token(s)][youtube iterative: round 4/5, added 3 paragraph(s), evidence ~1,357 token(s)][youtube iterative: checker still wanted more after 5 round(s); using the 22 gathered paragraph(s)]
+  please change the wording, instead of saying "youtube iterative", just say "context gathering" 
+}
+
+task (completed) {
   bug:
   in the answers, i see something like:
   "One source (chunk 14) estimates roughly 115,000 books shipped from Japan, while another (chunk 7) describes the activity more generally without a specific number."

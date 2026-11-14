@@ -5995,6 +5995,7 @@ function makeEntry(kind, options = {}) {
     booksKeyword: "",
     booksHeading: "",
     booksError: "",
+    writtenBook: null,
     mathtutor: null,
     mathtutorState: null,
     newsEl: document.createElement("div"),
@@ -6100,6 +6101,9 @@ function makeEntry(kind, options = {}) {
   entry.booksEl = document.createElement("div");
   entry.booksEl.className = "book-results";
   entry.booksEl.hidden = true;
+  entry.writtenBookEl = document.createElement("div");
+  entry.writtenBookEl.className = "book-results";
+  entry.writtenBookEl.hidden = true;
   entry.mathtutorEl = document.createElement("div");
   entry.mathtutorEl.className = "math-tutor";
   entry.mathtutorEl.hidden = true;
@@ -6107,6 +6111,7 @@ function makeEntry(kind, options = {}) {
   entry.bodyEl.appendChild(entry.changelogEl);
   entry.bodyEl.appendChild(entry.videosEl);
   entry.bodyEl.appendChild(entry.booksEl);
+  entry.bodyEl.appendChild(entry.writtenBookEl);
   entry.bodyEl.appendChild(entry.mathtutorEl);
   entry.bodyEl.appendChild(entry.choicesEl);
   entry.errorEl.className = "error-text";
@@ -6211,6 +6216,7 @@ function renderEntry(entry) {
   renderChangelogList(entry);
   renderVideoResults(entry);
   renderBookResults(entry);
+  renderWrittenBook(entry);
   renderMathTutor(entry);
   for (const choice of entry.choices) {
     const button = document.createElement("button");
@@ -8816,6 +8822,65 @@ function renderBookResults(entry) {
     errorEl.textContent = entry.booksError;
     container.appendChild(errorEl);
   }
+}
+
+function renderWrittenBook(entry) {
+  const container = entry.writtenBookEl;
+  if (!container) return;
+  container.textContent = "";
+  const data = entry.writtenBook;
+  if (!data || !data.url) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+
+  const head = document.createElement("div");
+  head.className = "book-list-head";
+  const label = document.createElement("strong");
+  label.textContent = "Written book";
+  const note = document.createElement("span");
+  note.className = "book-list-note";
+  const chapters = Array.isArray(data.chapters) ? data.chapters : [];
+  note.textContent = `${chapters.length} chapter${chapters.length === 1 ? "" : "s"} · ${Number(data.words || 0).toLocaleString()} words · click to open in a new tab`;
+  head.appendChild(label);
+  head.appendChild(note);
+  container.appendChild(head);
+
+  const cards = document.createElement("div");
+  cards.className = "book-cards";
+  const card = document.createElement("a");
+  card.className = "book-card";
+  card.href = data.url;
+  card.target = "_blank";
+  card.rel = "noopener noreferrer";
+  card.title = `Open ${data.filename || "book"} in a new tab`;
+
+  const title = document.createElement("div");
+  title.className = "book-title";
+  title.textContent = String(data.title || data.filename || "Book");
+  card.appendChild(title);
+
+  const meta = document.createElement("div");
+  meta.className = "book-authors";
+  meta.textContent = `Generated ${data.created || "just now"}`;
+  card.appendChild(meta);
+
+  if (chapters.length) {
+    const description = document.createElement("div");
+    description.className = "book-description";
+    description.textContent = chapters
+      .map((chapter, index) => `Chapter ${index + 1}: ${chapter.title}`)
+      .join(" · ");
+    card.appendChild(description);
+  }
+
+  const action = document.createElement("span");
+  action.className = "book-action";
+  action.textContent = "Open book ↗";
+  card.appendChild(action);
+  cards.appendChild(card);
+  container.appendChild(cards);
 }
 
 async function loadMoreVideos(entry) {
@@ -13997,7 +14062,9 @@ function submitText(text, fromChoice = false) {
                       ? "Project Gutenberg"
                       : commandName === "openlibrary"
                         ? "Open Library"
-                        : commandName === "mathtutor"
+                        : commandName === "write_a_book"
+                          ? "Book Writer"
+                          : commandName === "mathtutor"
                           ? "Math Tutor"
                           : commandName === "changelog"
                             ? "Changelog"
@@ -14128,6 +14195,10 @@ function submitText(text, fromChoice = false) {
       entry.booksKeyword = String(data?.keyword || "").trim();
       entry.booksHeading = String(data?.heading || "").trim();
       entry.booksError = "";
+      scheduleRender(entry);
+    },
+    written_book: (data) => {
+      entry.writtenBook = data || null;
       scheduleRender(entry);
     },
     mathtutor: (data) => {
