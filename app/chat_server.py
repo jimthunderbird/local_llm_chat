@@ -403,8 +403,10 @@ WRITE_A_BOOK_MODEL = os.environ.get(
 )
 WRITE_A_BOOK_DIR = SCRIPT_DIR / ".chat" / "books"
 WRITE_A_BOOK_KEYWORD_LIMIT = 6
-WRITE_A_BOOK_SOURCE_LIMIT = 10
-WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD = 8
+# Matches {articles_to_learn} in prompts/write_a_book.prompt.
+WRITE_A_BOOK_SOURCE_LIMIT = 20
+# Fetch enough per query that de-duplication still leaves room for 20 sources.
+WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD = 10
 WRITE_A_BOOK_RESEARCH_YEARS = 2
 WRITE_A_BOOK_CHAPTER_LIMIT = 10
 WRITE_A_BOOK_MIN_CHAPTERS = 3

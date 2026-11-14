@@ -2,6 +2,12 @@ book_writing_llm: ollama local model ornith-1.5:35b
 book_directory: {diretory_of_this_prompt}/../.chat/books
 words_per_chapter: 800
 max_number_of_chapters: 10
+articles_to_learn: 20
+
+task (completed) {
+  reference task.write_a_book:
+  - for lists_of_knowledge, learn from /new search {keywords}, but only target on results that are from the pass 2 years only, only extract top {articles_to_learn} results
+}
 
 task (completed) {
   reference task.write_a_book:
