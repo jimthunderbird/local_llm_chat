@@ -4,6 +4,11 @@ words_per_chapter: 800
 max_number_of_chapters: 10
 articles_to_learn: 40
 
+task.load_a_book (completed) {
+  reference task.books_command:
+  - when clicking on each book url, open up a modal and show the book content, similar to opening up individual news search result
+}
+
 task.keywords (completed) {
   once we have the keywords, when searching like /news search, add plus sign between keywords:
   for example:
@@ -37,7 +42,7 @@ task.write_a_book (completed) {
   }
 }
 
-task (completed) {
+task.books_command (completed) {
   create a command: /books {
     - list all the books in {book_directory}
   }

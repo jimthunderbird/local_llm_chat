@@ -65,6 +65,11 @@ task (persistent) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
+task.php_fix (completed) {
+  bug:
+  PHP Warning: Undefined variable $feedPreview in /Users/jhuang/airesearch/local_llm_chat/news_fetch.php on line 4327
+}
+
 task (completed) {
   bug: in the article model, it should load the full article of https://folklore.org/Switcher.html
 }

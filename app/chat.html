@@ -8850,7 +8850,7 @@ function renderWrittenBook(entry) {
   const note = document.createElement("span");
   note.className = "book-list-note";
   const chapters = Array.isArray(data.chapters) ? data.chapters : [];
-  note.textContent = `${chapters.length} chapter${chapters.length === 1 ? "" : "s"} · ${Number(data.words || 0).toLocaleString()} words · click to open in a new tab`;
+  note.textContent = `${chapters.length} chapter${chapters.length === 1 ? "" : "s"} · ${Number(data.words || 0).toLocaleString()} words · click to read here`;
   head.appendChild(label);
   head.appendChild(note);
   container.appendChild(head);
@@ -8862,7 +8862,8 @@ function renderWrittenBook(entry) {
   card.href = data.url;
   card.target = "_blank";
   card.rel = "noopener noreferrer";
-  card.title = `Open ${data.filename || "book"} in a new tab`;
+  card.title = `Read ${data.filename || "book"} here`;
+  openWrittenBookReaderOnClick(card, data);
 
   const title = document.createElement("div");
   title.className = "book-title";
@@ -8885,10 +8886,151 @@ function renderWrittenBook(entry) {
 
   const action = document.createElement("span");
   action.className = "book-action";
-  action.textContent = "Open book ↗";
+  action.textContent = "Read book →";
   card.appendChild(action);
   cards.appendChild(card);
   container.appendChild(cards);
+}
+
+function writtenBookText(element) {
+  if (!element) return "";
+  // The generated chapter headings place the number in a span immediately
+  // followed by the title, so textContent would otherwise say "Chapter 1Why".
+  const clone = element.cloneNode(true);
+  for (const number of clone.querySelectorAll(".chapter-number")) {
+    number.textContent = `${number.textContent} `;
+  }
+  return String(clone.textContent || "").replace(/\s+/g, " ").trim();
+}
+
+/* Convert the self-contained HTML produced by /write_a_book into the same
+ * block model the news modal already renders. The book's own header, chapter
+ * headings, paragraphs, lists, and sources are kept in document order, while
+ * its navigation/table of contents is skipped because the modal has its own
+ * scrolling reader. */
+function writtenBookHtmlToBlocks(html) {
+  if (!html) return [];
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const root = doc.querySelector("main") || doc.body;
+  if (!root) return [];
+  const blocks = [];
+  for (const element of root.querySelectorAll("h1, h2, h3, h4, h5, h6, p, ul, ol")) {
+    if (element.closest("nav")) continue;
+    if (element.classList.contains("chapter-words")) continue;
+    if (/^H[1-6]$/.test(element.tagName)) {
+      const text = writtenBookText(element);
+      if (!text) continue;
+      const level = element.tagName === "H1" ? 2 : element.tagName === "H2" ? 3 : 4;
+      blocks.push({ type: "heading", text, level });
+    } else if (element.tagName === "P") {
+      const text = writtenBookText(element);
+      if (text) blocks.push({ type: "paragraph", text });
+    } else if (element.tagName === "UL" || element.tagName === "OL") {
+      // Only take the outer list; its items already include nested text.
+      if (element.parentElement?.closest("ul, ol")) continue;
+      const items = [];
+      for (const child of element.children) {
+        if (child.tagName !== "LI") continue;
+        const text = writtenBookText(child);
+        if (text) items.push(text);
+      }
+      if (items.length) {
+        blocks.push({ type: "list", items, ordered: element.tagName === "OL" });
+      }
+    }
+  }
+  return blocks;
+}
+
+function writtenBookBlocksText(blocks) {
+  const parts = [];
+  for (const block of Array.isArray(blocks) ? blocks : []) {
+    if (block?.type === "heading" || block?.type === "paragraph") {
+      if (block.text) parts.push(block.text);
+    } else if (block?.type === "list" && Array.isArray(block.items)) {
+      parts.push(...block.items);
+    }
+  }
+  return parts;
+}
+
+/* Clicking a book in /books or the /write_a_book result opens the saved HTML
+ * in the existing centered reader modal instead of a new tab. The modal's
+ * header keeps a link to the raw HTML for anyone who wants the full page. */
+function openWrittenBookReader(item) {
+  const url = String(item?.url || "").trim();
+  if (!url) return;
+  const title = String(item.title || item.name || item.filename || "Book");
+  const meta = item.modified
+    ? `Saved ${item.modified}`
+    : item.created
+      ? `Generated ${item.created}`
+      : "Written by /write_a_book";
+  const reader = {
+    title,
+    source: "Books",
+    section: meta,
+    link: url,
+    linkLabel: "Open book file ↗",
+    docs: true,
+    learnable: false,
+    complete: false,
+    articleFetched: true,
+    fullArticleLoaded: true,
+    summary: "",
+    paragraphs: [],
+    blocks: [],
+    questionBlocks: [],
+    answers: [],
+    images: [],
+    iframeUrl: "",
+    articlePartial: false,
+    articleLoading: true,
+    articleError: "",
+  };
+  openNewsModal(reader);
+  fetch(url, { cache: "no-store" })
+    .then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.text();
+    })
+    .then((html) => {
+      const blocks = writtenBookHtmlToBlocks(html);
+      if (!blocks.length) throw new Error("The book has no readable text.");
+      reader.blocks = blocks;
+      reader.paragraphs = writtenBookBlocksText(blocks);
+      reader.complete = true;
+      reader.articleLoading = false;
+    })
+    .catch((error) => {
+      reader.blocks = [];
+      reader.paragraphs = [];
+      reader.complete = true;
+      reader.articleLoading = false;
+      reader.articleError = error?.message || String(error);
+    })
+    .finally(() => {
+      if (newsItem !== reader) return;
+      renderNewsModal(reader);
+      renderNewsAction(reader);
+    });
+}
+
+function openWrittenBookReaderOnClick(card, item) {
+  card.addEventListener("click", (event) => {
+    if (
+      event.defaultPrevented
+      || event.button !== 0
+      || event.metaKey
+      || event.ctrlKey
+      || event.shiftKey
+      || event.altKey
+    ) return;
+    if (!String(item?.url || "").trim()) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openWrittenBookReader(item);
+  });
 }
 
 function formatBookLibrarySize(bytes) {
@@ -8948,7 +9090,7 @@ function renderBookLibrary(entry) {
   const note = document.createElement("span");
   note.className = "book-list-note";
   note.textContent = entry.bookLibraryDone
-    ? `${items.length} book${items.length === 1 ? "" : "s"} · click to open in a new tab`
+    ? `${items.length} book${items.length === 1 ? "" : "s"} · click to read here`
     : `${items.length} loaded…`;
   head.appendChild(label);
   head.appendChild(note);
@@ -8962,7 +9104,8 @@ function renderBookLibrary(entry) {
     card.href = item.url || "#";
     card.target = "_blank";
     card.rel = "noopener noreferrer";
-    card.title = `Open ${item.name || item.title} in a new tab`;
+    card.title = `Read ${item.name || item.title} here`;
+    openWrittenBookReaderOnClick(card, item);
 
     const title = document.createElement("div");
     title.className = "book-title";
@@ -8979,7 +9122,7 @@ function renderBookLibrary(entry) {
 
     const action = document.createElement("span");
     action.className = "book-action";
-    action.textContent = "Open book ↗";
+    action.textContent = "Read book →";
     card.appendChild(action);
     cards.appendChild(card);
   }
@@ -11606,9 +11749,10 @@ function renderNewsModal(item) {
   newsMetaEl.textContent = metaParts.join(" · ");
   if (item.link) {
     newsLinkEl.href = item.link;
-    newsLinkEl.textContent = item.docs
-      ? `Open on ${item.docsLabel || "MDN"} ↗`
-      : "Open article ↗";
+    newsLinkEl.textContent = item.linkLabel
+      || (item.docs
+        ? `Open on ${item.docsLabel || "MDN"} ↗`
+        : "Open article ↗");
     newsLinkEl.hidden = false;
   } else {
     newsLinkEl.removeAttribute("href");

@@ -4306,6 +4306,7 @@ function parseWpJsonStories(
         $excerptHtml = (string)($post['excerpt']['rendered'] ?? '');
         $excerpt = normalizeText(strip_tags($excerptHtml));
         $paragraphs = extractParagraphs($contentHtml, $excerpt);
+        $feedPreview = feedBodyIsPreview($paragraphs, $contentHtml . "\n" . $excerptHtml);
         $summary = makeSummary($excerpt !== '' ? $excerpt : ($paragraphs[0] ?? ''));
         $images = mergeImageUrls(
             wpFeaturedImageUrls($post, $link),
