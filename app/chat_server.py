@@ -6,7 +6,7 @@ Ollama streaming, transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /youtube, /news, /mdn, /stackoverflow,
 /reddit, /tablelog, /stock, /googlenews, /medium,
 /gutenberg, /openlibrary, /changelog, /wikivoyage, /map, /wiki,
-/wiki_article,
+/wiki_article, /deepresearch,
 /article, /dict, and /ask. The browser is a
 pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
 
@@ -159,6 +159,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import chat
+import deep_research
 import sqlite_bm25
 from paragraph_utils import split_paragraphs
 from doc_answer_cleanup import (
@@ -206,6 +207,7 @@ WEB_COMMANDS = {
     "/reddit": "search Reddit posts by keywords: /reddit <keywords>; also searches related subreddits; click a post to read it",
     "/tablelog": "japan food and restaurant guide for travelers — search Tabelog restaurant pages by keywords: /tablelog <keywords>",
     "/stock": "show a stock symbol profile, financial details, and related news articles: /stock <stock_symbol>",
+    "/deepresearch": "run a bounded multi-round research report on <topic>: /deepresearch <topic>",
 }
 
 # News sources accepted by /news and completed by news_fetch.php.
@@ -4358,6 +4360,7 @@ COMMAND_ARGUMENTS = {
     "/gutenberg",
     "/openlibrary",
     "/stackoverflow",
+    "/deepresearch",
 }
 
 # Subcommands grouped under /gutenberg and /openlibrary.
@@ -15171,6 +15174,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_sources()
         elif name == "/benchmark":
             self._command_benchmark(argument)
+        elif name == "/deepresearch":
+            self._command_deepresearch(argument)
         else:
             self._sse_text(
                 "output",
@@ -15199,6 +15204,63 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             ]
         )
         self._sse_text("output", "\n".join(lines))
+
+    def _command_deepresearch(self, topic: str) -> None:
+        """Run the bounded research loop and stream its process and report."""
+        topic = " ".join(topic.split())
+        if not topic:
+            self._sse_text(
+                "output",
+                "\nUsage: /deepresearch <topic>\n"
+                "Plans sub-questions, retrieves a diverse evidence ledger over "
+                "several rounds, then writes a cited report.\n",
+            )
+            return
+        state = self.state
+        scope = (
+            f"article {state.article_path!r}"
+            if state.article_path is not None
+            else (
+                f"transcript {state.transcript!r}"
+                if state.transcript is not None
+                else "global corpus"
+            )
+        )
+        self._sse_text(
+            "log",
+            f"[research] starting /deepresearch on {topic!r} over the {scope}",
+        )
+        if state.article_path is not None:
+            chunks = _iterative_paragraph_chunks(state.chunks)
+        else:
+            chunks = state.chunks
+        started = time.monotonic()
+        try:
+            report, sources, trace = deep_research.run_deep_research(
+                topic,
+                chunks,
+                log=lambda text: self._sse_text("log", text),
+                emit=lambda text: self._sse("delta", {"text": text}),
+                source_info=lambda chunk: (chunk_title(chunk), chunk_url(chunk)),
+            )
+        except (RuntimeError, ValueError) as exc:
+            self._sse("error", {"message": str(exc)})
+            return
+        state.latest_answer = report
+        state.latest_sources = sources
+        state.latest_benchmark = {
+            "model": chat.ANSWER_MODEL,
+            "deep_research": trace,
+            "trunks": len(sources),
+            "candidates": int(trace.get("evidence_count", 0)),
+            "context_tokens": 0,
+            "total": time.monotonic() - started,
+        }
+        annotations = build_answer_annotations(report, sources)
+        self._sse("annotations", {"items": annotations})
+        state.record_turn(topic, topic, report)
+        if state.benchmark_mode:
+            self._sse_text("log", chat.format_benchmark_line(state.latest_benchmark))
 
     def _command_refresh(self) -> None:
         state = self.state

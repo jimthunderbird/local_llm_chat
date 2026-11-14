@@ -1,0 +1,1136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deep research mode: beyond BM25 retrieval depth</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 76rem;
+    margin: 2rem auto;
+    padding: 0 1.25rem;
+    line-height: 1.62;
+    color: #1f2328;
+    background: #fff;
+  }
+  h1 { font-size: 1.7rem; line-height: 1.25; margin-bottom: .35rem; }
+  h2 { font-size: 1.22rem; margin-top: 2.4rem; border-bottom: 1px solid #d8dee4; padding-bottom: .3rem; }
+  h3 { font-size: 1.02rem; margin-top: 1.6rem; }
+  h4 { font-size: .96rem; margin-top: 1.2rem; }
+  code { background: #f2f4f7; padding: .08rem .3rem; border-radius: .25rem; font-size: .9em; }
+  pre { background: #f6f8fa; padding: .85rem 1rem; border-radius: .4rem; overflow-x: auto; line-height: 1.45; }
+  pre code { background: none; padding: 0; font-size: .86em; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .9rem; }
+  th, td { border: 1px solid #d0d7de; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #f2f4f7; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .verdict { border-left: 4px solid #1a7f37; background: #eef8f0; padding: .8rem 1rem; border-radius: .35rem; margin: 1rem 0; }
+  .warn { border-left: 4px solid #bf8700; background: #fff8e5; padding: .8rem 1rem; border-radius: .35rem; margin: 1rem 0; }
+  .danger { border-left: 4px solid #cf222e; background: #fff0f0; padding: .8rem 1rem; border-radius: .35rem; margin: 1rem 0; }
+  .note { border-left: 4px solid #0969da; background: #f0f6ff; padding: .8rem 1rem; border-radius: .35rem; margin: 1rem 0; }
+  ul, ol { padding-left: 1.5rem; }
+  li { margin: .32rem 0; }
+  .muted { color: #57606a; }
+  .small { font-size: .88rem; }
+  .toc { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: .4rem; padding: .8rem 1.1rem; }
+  .toc ol { margin: .2rem 0 .2rem 0; }
+  .phase {
+    border: 1px solid #d0d7de; border-radius: .45rem; padding: .7rem .9rem; margin: .5rem 0;
+    background: #fafbfc;
+  }
+  .phase b { color: #0969da; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: .75rem; }
+  .card { border: 1px solid #d0d7de; border-radius: .45rem; padding: .8rem .9rem; background: #fafbfc; }
+  .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #f2f4f7; border: 1px solid #d0d7de; border-bottom-width: 2px; border-radius: .3rem; padding: .05rem .3rem; font-size: .85em; }
+  .good { color: #1a7f37; font-weight: 600; }
+  .bad { color: #cf222e; font-weight: 600; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e6edf3; background: #0d1117; }
+    code, pre, th, .toc, .phase, .card { background: #161b22; }
+    th, td { border-color: #30363d; }
+    tr:nth-child(even) td { background: #11161c; }
+    h2 { border-color: #30363d; }
+    .verdict { background: #12261a; }
+    .warn { background: #2a2110; }
+    .danger { background: #2a1215; }
+    .note { background: #0d1f33; }
+    .toc, .phase, .card { border-color: #30363d; }
+    .kbd { background: #161b22; border-color: #30363d; }
+  }
+</style>
+</head>
+<body>
+<h1>Deep research mode: beyond BM25 retrieval depth</h1>
+<p class="muted">
+  Research report for <code>prompts/deep_research_mode.prompt</code>.
+  Measured on this machine on 2026-11-13 against the live global corpus.
+  Report file: <code>research/deep_research_mode.html</code>.
+</p>
+
+<div class="verdict">
+  <strong>Short answer: no, increasing BM25 depth is not the way to get deep research.</strong>
+  Depth is a <em>top-k</em> knob, not a research strategy. In this repo the default
+  <code>DEFAULT_DEPTH</code> is 12. Raising it to 50 or 100 does not make BM25 slower
+  in any meaningful way (warm queries stay around 10–20 ms), but it does make the
+  prompt much larger. The answer model runs with an 8,192-token context window, and
+  Ollama silently drops the <em>beginning</em> of an oversized prompt. That beginning
+  contains the answer instructions and the highest-ranked evidence. In a controlled
+  test, depth 100 produced a <span class="bad">worse</span> answer than depth 12 or 50
+  because the prompt was truncated to 4,098 evaluated tokens. Deep research needs
+  <strong>planning, sub-question retrieval, an evidence ledger, gap-driven rounds,
+  section-wise synthesis, and verification</strong> — not a larger single-shot context.
+</div>
+
+<div class="toc">
+<strong>Contents</strong>
+<ol>
+  <li><a href="#exec">Executive answer</a></li>
+  <li><a href="#what">What “deep research” actually means</a></li>
+  <li><a href="#current">The current pipeline, as measured</a></li>
+  <li><a href="#depth">Why “increase depth” is the wrong lever</a></li>
+  <li><a href="#design">A better approach: a bounded <code>/research</code> loop</a></li>
+  <li><a href="#example">Worked example: the Jensen Huang affairs question</a></li>
+  <li><a href="#eval">Evaluation plan</a></li>
+  <li><a href="#rollout">Rollout plan and immediate fixes</a></li>
+  <li><a href="#risks">Risks and guardrails</a></li>
+  <li><a href="#refs">References</a></li>
+  <li><a href="#appendix">Appendix: raw measurements and reproduction</a></li>
+</ol>
+</div>
+
+<h2 id="exec">1. Executive answer</h2>
+<p>
+  The question was: <em>“I would really like doing deep research of any topic …
+  I want to really achieve deep research result. Should I increase the depth of
+  the BM25 retrieval? Or do we have a better approach?”</em>
+</p>
+<p>
+  Increase depth only within a small, evidence-budgeted range. The better approach
+  is a <strong>deep-research loop</strong> that uses depth as one low-level tool:
+</p>
+<ol>
+  <li><strong>Plan</strong> the question into a small set of sub-questions and
+      state what kind of evidence would answer each one.</li>
+  <li><strong>Retrieve per sub-question</strong> with several targeted queries,
+      not one global top-100 query.</li>
+  <li><strong>Keep an evidence ledger</strong> with source id, title, URL, date,
+      excerpt, score, and which sub-question it supports.</li>
+  <li><strong>Check gaps and contradictions</strong> after each round, then
+      retrieve only for the missing pieces.</li>
+  <li><strong>Synthesize section by section</strong> from the ledger, keeping
+      every model call inside the 8k window.</li>
+  <li><strong>Verify claims and cite sources</strong>, and state explicitly what
+      the corpus does not establish.</li>
+</ol>
+<p>
+  For normal chat, keep <code>DEFAULT_DEPTH = 12</code>. For list/long-form
+  questions, 25–50 is usually enough. Do not use 100+ as a substitute for
+  research: it increases token count, redundancy, and truncation risk while
+  adding little new evidence.
+</p>
+
+<h2 id="what">2. What “deep research” actually means</h2>
+<p>
+  “Deep research” is not a synonym for “retrieve more chunks.” Across the 2025
+  literature and production systems, it is a multi-stage, iterative workflow.
+  The survey <em>Deep Research: A Survey of Autonomous Research Agents</em>
+  (Zhang et al., 2025) describes four core stages: <strong>planning</strong>,
+  <strong>question developing</strong>, <strong>web exploration</strong>, and
+  <strong>report generation</strong>. The systematic survey by Shi et al. (2025)
+  describes four components in the same spirit: <strong>query planning</strong>,
+  <strong>information acquisition</strong>, <strong>memory management</strong>,
+  and <strong>answer generation</strong>.
+</p>
+<p>
+  OpenAI’s Deep Research (Feb 2025) is described as a browsing-and-reasoning agent
+  that “finds, analyzes, and synthesizes hundreds of online sources to create a
+  comprehensive report,” takes 5–30 minutes, and cites specific passages. Anthropic’s
+  Research system (Jun 2025) uses an orchestrator-worker design: a lead agent plans,
+  spawns parallel subagents with separate context windows, and a citation agent
+  attaches claims to sources. Neither system is “BM25 with a larger <code>top_k</code>.”
+</p>
+
+<h3>2.1 The loop that makes research different from RAG</h3>
+<div class="phase"><b>Plan</b> → decompose the question into sub-goals; decide source types, effort, and stopping criteria.</div>
+<div class="phase"><b>Develop questions</b> → turn each sub-goal into several precise, diverse queries, including entity aliases, synonyms, dates, and counter-hypotheses.</div>
+<div class="phase"><b>Explore</b> → retrieve from the corpus (and optionally the web or official docs), filter, deduplicate, and record evidence.</div>
+<div class="phase"><b>Reflect</b> → which sub-questions are answered, partial, missing, or contradictory? What new query would close the gap?</div>
+<div class="phase"><b>Remember</b> → store findings in an external ledger so the plan and evidence survive context limits; do not rely on one prompt to hold everything.</div>
+<div class="phase"><b>Synthesize</b> → write a structured report section by section, with a citation contract.</div>
+<div class="phase"><b>Verify</b> → check each claim against its cited evidence; mark unsupported claims, conflicts, and unknowns.</div>
+
+<p>
+  The key idea is <strong>token scaling through iteration and decomposition</strong>,
+  not token stuffing. Anthropic reports that a multi-agent research system with a
+  lead agent and parallel subagents outperformed a single agent by 90.2% on their
+  internal research eval for breadth-first queries. They also report that token
+  usage alone explained 80% of performance variance on BrowseComp, and that
+  multi-agent systems use about 15× more tokens than chat. That is the trade:
+  spend more tokens across <em>focused</em> contexts, not more tokens in one
+  oversized context.
+</p>
+
+<h3>2.2 What it is not</h3>
+<ul>
+  <li>It is not “set <code>/depth 100</code>.” That only changes one BM25 slice.</li>
+  <li>It is not “stuff the whole corpus into the prompt.” The answer model has a
+      fixed 8,192-token window; oversized prompts are truncated.</li>
+  <li>It is not “let the model free-associate from memory.” A research report must
+      be grounded in an evidence ledger and citations.</li>
+  <li>It is not “always more sources.” Source quality, independence, recency, and
+      relevance matter more than raw count.</li>
+</ul>
+
+<h2 id="current">3. The current pipeline, as measured</h2>
+
+<h3>3.1 Corpus and index</h3>
+<table>
+  <thead><tr><th>Item</th><th>Value</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Global trunks</td><td class="num">30,041</td><td>627 video transcripts + 207 learned articles = 834 sources</td></tr>
+    <tr><td>Article cache size</td><td class="num">195 MB</td><td><code>.chat/articles_cache</code></td></tr>
+    <tr><td>SQLite FTS5 index</td><td class="num">57 MB</td><td><code>.chat/articles_cache/bm25_index_fts.db</code></td></tr>
+    <tr><td>Default answer depth</td><td class="num">12</td><td><code>chat.DEFAULT_DEPTH</code></td></tr>
+    <tr><td>Answer context window</td><td class="num">8,192</td><td><code>chat.ANSWER_NUM_CTX</code>, sent to Ollama as <code>num_ctx</code></td></tr>
+    <tr><td>Adaptive context budget</td><td class="num">4,096 / 6,144</td><td><code>MAX_CONTEXT_TOKENS</code>; list questions get <code>LIST_CONTEXT_TOKENS</code></td></tr>
+    <tr><td>Iterative evidence budget</td><td class="num">16,000</td><td><code>YOUTUBE_ITERATIVE_EVIDENCE_TOKENS</code> / <code>ARTICLE_ITERATIVE_EVIDENCE_TOKENS</code> — see §3.6</td></tr>
+  </tbody>
+</table>
+
+<h3>3.2 Retrieval path</h3>
+<p>
+  The normal browser-chat answer path is roughly:
+</p>
+<pre><code>question
+  → optional conversation rewrite
+  → optional query expansion (small model)
+  → BM25 over SQLite FTS5
+  → optional small-model relevance filter
+  → top-k chunks (the /depth value, or adaptive elbow)
+  → _youtube_iterative_evidence() for normal questions
+  → build_context() with &lt;chunk&gt; blocks
+  → build_prompt() from research/100_trunks_prompt.txt
+  → Ollama streaming answer (num_ctx = 8192)
+  → build_answer_annotations() for paragraph → source links</code></pre>
+<p>
+  In the server, the main entry points are <code>ChatRequestHandler._run_question()</code>,
+  <code>attempt()</code>, <code>chat.answer()</code>, <code>chat.top_chunks()</code>,
+  and <code>_youtube_iterative_evidence()</code>. The iterative loop already does
+  something research-like: it retrieves a few paragraphs, checks sufficiency with a
+  small model, and searches again with missing terms. It is a useful foundation.
+  It is not yet a full research agent: it has no explicit plan, no per-sub-question
+  ledger, no contradiction pass, and its evidence budget exceeds the answer window.
+</p>
+
+<h3>3.3 Measured depth scaling</h3>
+<p>
+  I loaded the live global corpus and called <code>chat.top_chunks()</code> with
+  <code>expansion=""</code> for seven questions at depths 12, 25, 50, 100, and 200.
+  The table below averages across those questions. “Context” is the estimated token
+  count of the resulting <code>build_context()</code> string.
+</p>
+<table>
+  <thead>
+    <tr><th>Depth</th><th class="num">Avg chunks</th><th class="num">Avg unique sources</th><th class="num">Avg context tokens</th><th class="num">Warm retrieval time</th><th class="num">Avg question-term coverage</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>12</td><td class="num">11.3</td><td class="num">4.7</td><td class="num">1,167</td><td class="num">~10–20 ms</td><td class="num">0.98</td></tr>
+    <tr><td>25</td><td class="num">19.6</td><td class="num">6.1</td><td class="num">1,922</td><td class="num">~10–20 ms</td><td class="num">0.98</td></tr>
+    <tr><td>50</td><td class="num">33.9</td><td class="num">8.4</td><td class="num">3,301</td><td class="num">~10–20 ms</td><td class="num">0.98</td></tr>
+    <tr><td>100</td><td class="num">53.4</td><td class="num">12.1</td><td class="num">5,488</td><td class="num">~10–20 ms</td><td class="num">0.98</td></tr>
+    <tr><td>200</td><td class="num">82.0</td><td class="num">17.3</td><td class="num">8,451</td><td class="num">~10–20 ms</td><td class="num">0.98</td></tr>
+  </tbody>
+</table>
+<p class="small muted">
+  Averages hide the important outliers. For “what are all levels of wagyu,” depth 12
+  used ~1,453 tokens, depth 50 ~5,922, depth 100 ~11,331, and depth 200 ~20,262.
+  For “list me all airports in japan,” depth 100 used ~10,033 tokens and depth 200
+  ~21,844. Warm BM25 itself stayed under 70 ms in every case; the first query paid a
+  one-time ~1.7 s index/database warm-up cost.
+</p>
+
+<div class="note">
+  <strong>Depth is cheap for BM25 and expensive for the answer model.</strong>
+  The SQLite FTS5 index returns a few hundred scored candidates quickly. The cost
+  is what happens next: more chunks mean a longer prompt, more prefill, more
+  redundancy, and a higher chance of crossing the 8,192-token window. Increasing
+  depth from 12 to 200 multiplied average context size by about 7× while adding
+  few genuinely new sources.
+</div>
+
+<h3>3.4 The context-window cliff</h3>
+<p>
+  The answer model is called with <code>num_ctx = 8192</code>. The prompt is built
+  as: instructions and rules first, then the <code>&lt;context&gt;</code> blocks,
+  then the target question at the end. When the prompt is too long, Ollama/llama.cpp
+  truncates it. Empirically, the truncation dropped the <em>beginning</em> of the
+  prompt — exactly where the instructions and the highest-ranked evidence live.
+</p>
+<p>
+  I tested this directly with the production answer model,
+  <code>ornith-1.5:35b</code>, at <code>num_ctx = 8192</code>:
+</p>
+<ol>
+  <li>Put a secret code at the beginning of a prompt, then ~12k estimated tokens of
+      harmless filler, then ask for the code.</li>
+  <li>Ollama reported <code>prompt_eval_count = 4098</code>, not ~12k. The model
+      answered: “I don't have access to any secret code.”</li>
+  <li>This proves a large prefix was dropped before inference. The same mechanics
+      apply to a long RAG prompt: instructions and the first (best) chunks can
+      disappear.</li>
+</ol>
+
+<h3>3.5 A controlled answer-quality experiment</h3>
+<p>
+  Question: <em>“what are all levels of wagyu”</em>. Same corpus, same model
+  (<code>ornith-1.5:35b</code>), same prompt template, only depth changed.
+</p>
+<table>
+  <thead>
+    <tr><th>Depth</th><th class="num">Estimated context</th><th class="num">Prompt tokens evaluated</th><th>Result</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>12</td>
+      <td class="num">1,476</td>
+      <td class="num">1,764</td>
+      <td><span class="good">Good.</span> Listed yield grades A/B/C, quality grades 1–5, combined A1–A5, BMS 1–12, and flagged the BMS discrepancy.</td>
+    </tr>
+    <tr>
+      <td>50</td>
+      <td class="num">6,150</td>
+      <td class="num">6,572</td>
+      <td><span class="good">Best.</span> Added B5/C5, USDA Select/Choice/Prime, brand-beef requirements, and kept the discrepancy note.</td>
+    </tr>
+    <tr>
+      <td>100</td>
+      <td class="num">11,495</td>
+      <td class="num">4,098</td>
+      <td><span class="bad">Worse.</span> Said there was “no single comprehensive list,” cited “chunks 75, 81, 89” (violating the no-chunk-citation rule), and lost the core A/B/C + 1–5 grading system.</td>
+    </tr>
+  </tbody>
+</table>
+<p>
+  This is the central empirical finding: <strong>depth 100 was worse than depth 12</strong>
+  because the prompt crossed the window and the front of the prompt was discarded.
+  Depth 50 was the sweet spot for this list question; depth 12 was already adequate
+  and much cheaper.
+</p>
+
+<h3>3.6 Entity focus can cap depth</h3>
+<p>
+  Depth is also not guaranteed to add anything. For the question
+  <em>“how many affairs jensen huang might actually have,”</em> depths 12, 25, 50,
+  100, and 200 all returned the same 10 chunks. The entity-focus and topic filters
+  in <code>top_chunks()</code> kept only the chunks that actually matched the named
+  entity; there were no additional positive matches to expose. Raising the limit
+  could not create evidence that the corpus did not contain. This is a feature, not
+  a bug — but it means “increase depth” can be a no-op on exactly the questions where
+  users expect it to help.
+</p>
+
+<h3>3.7 Current iterative budgets exceed the answer window</h3>
+<div class="danger">
+  <strong>Budget mismatch:</strong> <code>chat.ANSWER_NUM_CTX = 8192</code>, but
+  <code>YOUTUBE_ITERATIVE_EVIDENCE_TOKENS</code> and
+  <code>ARTICLE_ITERATIVE_EVIDENCE_TOKENS</code> are both <code>16000</code>.
+  The iterative loop can therefore gather roughly twice as much evidence as the
+  model can attend to in one call. Unless the prompt is split into sections or the
+  budget is reduced, the same truncation failure is possible even when the iterative
+  logic “found enough” evidence.
+</div>
+<p>
+  Recommended fix: either (a) cap each synthesis prompt at about
+  <code>8192 − 1024</code> output reserve <code>− 512</code> template/instructions
+  ≈ <strong>6,500 tokens</strong>, or (b) raise <code>num_ctx</code> to 16k/32k and
+  re-measure memory, prefill, and TTFT. Option (a) is cheaper and safer; option (b)
+  increases the KV-cache footprint and prefill cost. In either case, add a hard
+  assertion or log line when the prompt exceeds the budget, and trim the
+  <em>lowest-ranked</em> chunks rather than letting the runtime silently drop the
+  <em>highest-ranked</em> ones.
+</p>
+
+<h2 id="depth">4. Why “increase depth” is the wrong lever</h2>
+
+<h3>4.1 What depth buys</h3>
+<ul>
+  <li>More candidates for a single lexical query. This can help recall when the
+      query is broad and the relevant evidence is spread out.</li>
+  <li>A better chance that a specific fact appears somewhere in the prompt, if the
+      corpus contains it and BM25 ranks it above the cutoff.</li>
+  <li>More source diversity, up to the point where the per-source cap and
+      near-duplicate filter kick in.</li>
+</ul>
+
+<h3>4.2 What depth costs</h3>
+<ul>
+  <li><strong>Context growth is linear.</strong> 12 → 50 roughly tripled average
+      context; 12 → 200 roughly septupled it. The 8k window does not grow.</li>
+  <li><strong>Truncation risk becomes real.</strong> The wagyu depth-100 case
+      crossed the window and lost the instructions and best evidence. The answer
+      got worse, not better.</li>
+  <li><strong>Redundancy.</strong> At depth 200, wagyu used 23 unique sources for
+      200 chunks (~8.7 chunks per source); airports used 51 sources for 200 chunks.
+      Many chunks repeat the same point in different words.</li>
+  <li><strong>Relevance decay.</strong> Median BM25 scores fell steadily with depth:
+      for the jensen timeline question, median 31.9 at depth 12, 30.8 at 25, 29.2
+      at 50, 28.5 at 100, and the tail included weak matches. More depth means more
+      low-signal text competing for attention.</li>
+  <li><strong>Model attention limits.</strong> Even within a window, models use
+      middle context less reliably than the beginning and end (“lost in the middle”).
+      Stuffing more text into the middle is not the same as giving the model more
+      useful evidence.</li>
+  <li><strong>Cost and latency.</strong> BM25 is cheap, but prefill and generation
+      are not. A larger prompt costs more time and compute on every question, and
+      it makes caching less effective.</li>
+</ul>
+
+<h3>4.3 The right mental model</h3>
+<table>
+  <thead><tr><th>Knob</th><th>What it controls</th><th>Good use</th><th>Bad use</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>/depth</code></td>
+      <td>How many BM25 candidates one query returns</td>
+      <td>8–12 for direct facts; 25–50 for a broad list or a long-form request; always under the token budget</td>
+      <td>100–200 as a substitute for planning or multiple queries</td>
+    </tr>
+    <tr>
+      <td>Query expansion</td>
+      <td>Synonyms, aliases, acronyms, entity spellings</td>
+      <td>Improve recall for a known topic</td>
+      <td>Expect it to invent missing evidence</td>
+    </tr>
+    <tr>
+      <td>Iterative retrieval</td>
+      <td>Multiple focused rounds with a sufficiency check</td>
+      <td>Close a specific gap; cover a multi-part question</td>
+      <td>Loop forever; exceed the prompt budget</td>
+    </tr>
+    <tr>
+      <td>Planning / decomposition</td>
+      <td>Which sub-questions need evidence</td>
+      <td>Multi-hop, comparisons, timelines, “all X” questions</td>
+      <td>Decompose a simple one-fact question into ten agents</td>
+    </tr>
+    <tr>
+      <td>Evidence ledger</td>
+      <td>Durable, deduplicated, cited findings</td>
+      <td>Long reports and multi-round research</td>
+      <td>Keep everything only in one prompt</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="design">5. A better approach: a bounded <code>/research</code> loop</h2>
+<p>
+  The proposal below is designed for <em>this</em> codebase: SQLite FTS5 BM25,
+  a global corpus of learned articles and transcripts, a 1.7B helper model for
+  short structured calls, and <code>ornith-1.5:35b</code> for writing. It is
+  research-only here; no implementation is included.
+</p>
+
+<h3>5.1 Architecture</h3>
+<pre><code>                       ┌─────────────────────────────┐
+ user question ──────► │ 0. Intent &amp; scope classifier │
+                       │    (small model, strict JSON) │
+                       └──────────────┬──────────────┘
+                                      ▼
+                       ┌─────────────────────────────┐
+                       │ 1. Planner: 3–8 subquestions │
+                       │    + source types + budgets  │
+                       └──────────────┬──────────────┘
+                                      ▼
+             ┌─────────────────────────────────────────────┐
+             │ 2. Per-subquestion retrieval loop           │
+             │    query variants → BM25 → filter → dedupe  │
+             │    → evidence ledger (chunk + excerpt + URL)│
+             └──────────────┬──────────────────────────────┘
+                            ▼
+             ┌─────────────────────────────────────────────┐
+             │ 3. Gap / contradiction check                │
+             │    answered? partial? missing? conflicting? │
+             │    if gap and budget remains → new queries   │
+             └──────────────┬──────────────────────────────┘
+                            ▼
+             ┌─────────────────────────────────────────────┐
+             │ 4. Section-wise synthesis from the ledger   │
+             │    outline → section → citations → stream   │
+             └──────────────┬──────────────────────────────┘
+                            ▼
+             ┌─────────────────────────────────────────────┐
+             │ 5. Claim verification + uncertainty report  │
+             │    supported / contradicted / unsupported   │
+             └─────────────────────────────────────────────┘</code></pre>
+
+<h3>5.2 Phase 0 — intent and scope</h3>
+<p>
+  Classify the request before retrieving. The class determines the effort budget:
+</p>
+<table>
+  <thead><tr><th>Intent</th><th>Examples</th><th>Plan shape</th><th>Budget</th></tr></thead>
+  <tbody>
+    <tr><td>Direct fact</td><td>“what time does Nijo market open?”</td><td>1 sub-question, 1–2 queries</td><td>Depth 8–12, 1 round</td></tr>
+    <tr><td>Timeline / recency</td><td>“timeline of the Jensen Huang scandal”</td><td>3–5 time-bounded sub-questions</td><td>Depth 25–50, 2–3 rounds, newest-first</td></tr>
+    <tr><td>Comparison</td><td>“compare Dr. Knott and Dr. Pletcher”</td><td>One sub-question per entity + one comparison</td><td>Depth 12 per entity, 2 rounds</td></tr>
+    <tr><td>Enumeration</td><td>“list all airports in Japan”</td><td>Coverage-oriented sub-questions; dedupe entities</td><td>Depth 25–50 per region/category, 2–4 rounds</td></tr>
+    <tr><td>Open-ended / synthesis</td><td>“write a research report on X”</td><td>5–8 sub-questions, source-quality constraints</td><td>Depth 25–50, 3–4 rounds, section-wise output</td></tr>
+    <tr><td>Speculation / private facts</td><td>“how many affairs might Jensen Huang have?”</td><td>Separate “reported,” “confirmed,” “speculated,” “unknown”</td><td>Evidence-first, no invented count</td></tr>
+  </tbody>
+</table>
+<p>
+  The scope classifier should also decide whether the local corpus is the right
+  source. If the question is about live market data, a private person’s private
+  life, or a topic absent from the corpus, the correct output may be “the corpus
+  cannot establish this” plus a list of what <em>is</em> reported. That is a
+  successful research result, not a failure.
+</p>
+
+<h3>5.3 Phase 1 — plan and decompose</h3>
+<p>
+  Use the small helper model with a strict JSON schema. Keep the plan small:
+  <strong>3–8 sub-questions</strong> is enough for most tasks. Each sub-question
+  needs an id, text, type, priority, and the source types that could answer it.
+  A sample schema:
+</p>
+<pre><code>{
+  "question": "original question",
+  "intent": "timeline | comparison | enumeration | causal | open_ended | speculation",
+  "subquestions": [
+    {
+      "id": "q1",
+      "text": "What relationships/affairs have been publicly reported?",
+      "type": "fact",
+      "priority": 1,
+      "source_types": ["news", "corpus"],
+      "seed_queries": ["Jensen Huang affair", "Jensen Huang Alice Huang"]
+    }
+  ],
+  "required_source_types": ["news", "corpus"],
+  "stop_rules": {
+    "max_rounds": 3,
+    "max_evidence_tokens": 6000,
+    "max_unique_sources": 30
+  }
+}</code></pre>
+<p>
+  Useful model choices in this repo: <code>chat.chat_helper_model()</code> or
+  <code>chat.EXPANSION_MODEL</code> (the LFM 1.7B helper) for planning, gap checks,
+  and claim classification. Use <code>ornith-1.5:35b</code> only for the report
+  writer and, if needed, for complex contradiction adjudication.
+</p>
+
+<h3>5.4 Phase 2 — per-subquestion retrieval and the evidence ledger</h3>
+<p>
+  For each sub-question, generate several query variants:
+</p>
+<ul>
+  <li>the sub-question text itself;</li>
+  <li>entity aliases and acronym expansions (<code>chat.acronym_expansion</code>,
+      <code>chat.question_acronym_expansions</code>);</li>
+  <li>query expansion from the helper model (<code>chat.expand_query</code>);</li>
+  <li>for temporal questions, explicit dates/years and “latest” variants
+      (<code>chat.question_is_time_sensitive</code>, <code>chat.normalize_time_expressions</code>);</li>
+  <li>for comparisons, one query per entity plus a joint query;</li>
+  <li>for enumerations, category/region variants, then entity deduplication.</li>
+</ul>
+<p>
+  Run each variant with <code>chat.top_chunks(query, chunks, limit=8..12)</code>,
+  merge, filter with the existing small-model filter, and deduplicate by:
+</p>
+<ul>
+  <li>chunk key <code>(video_id, index)</code>;</li>
+  <li>near-duplicate text (Jaccard, reuse <code>NEAR_DUPLICATE_JACCARD</code>);</li>
+  <li>source cap per video/article (reuse <code>MAX_CHUNKS_PER_VIDEO</code>).</li>
+</ul>
+<p>
+  Store each evidence item in a ledger. A practical schema:
+</p>
+<pre><code>{
+  "evidence_id": "E07",
+  "chunk_key": "news_1098f902bbce314d.4",
+  "source_id": "news_1098f902bbce314d",
+  "title": "Jensen Huang resigns from Nvidia: Timeline ...",
+  "url": "https://...",
+  "published_at": "2026-11-11",
+  "text": "full paragraph text",
+  "excerpt": "the sentence(s) that matter",
+  "bm25_score": 51.16,
+  "subquestions": ["q1", "q2"],
+  "stance": "supports | contradicts | context",
+  "source_quality": "primary | major_outlet | aggregator | commentary",
+  "notes": "NYT report cites five former Nvidia staff; neither party acknowledged"
+}</code></pre>
+<p>
+  Do not keep only the raw paragraph. Extract the minimal claim-bearing excerpt and
+  keep the full text and URL for verification and citation. This is the “memory
+  management” component the surveys describe: consolidate, index, update, and
+  forget low-value evidence.
+</p>
+
+<h3>5.5 Phase 3 — gap-driven rounds</h3>
+<p>
+  After each round, ask the small model (or use deterministic checks first):
+</p>
+<ul>
+  <li>Which sub-questions are answered, partial, or unanswered?</li>
+  <li>Which named entities, dates, numbers, or comparisons are still missing?</li>
+  <li>Do any sources contradict each other on a material fact?</li>
+  <li>Is the new evidence actually new, or is it a paraphrase of what we already have?</li>
+</ul>
+<p>
+  Reuse the existing helpers:
+  <code>_article_sufficiency_check()</code>, <code>_missing_search_terms()</code>,
+  and <code>_evidence_covers_question()</code>. The last one is a cheap fast path:
+  if the evidence already contains every content word from the question, do not
+  spend a model call. Stop when:
+</p>
+<ul>
+  <li>all high-priority sub-questions are answered; or</li>
+  <li>two consecutive rounds add less than ~10% new evidence; or</li>
+  <li>the evidence token budget is reached; or</li>
+  <li>the user-specified time/latency budget is reached.</li>
+</ul>
+<p>
+  Do <em>not</em> keep looping just because depth is available. A good research
+  system stops with a clear “what remains unknown” section.
+</p>
+
+<h3>5.6 Phase 4 — section-wise synthesis</h3>
+<p>
+  Do not put the entire ledger into one 8k prompt. Instead:
+</p>
+<ol>
+  <li>Generate an outline from the plan and a compact index of evidence
+      (claim + source id only, not full text).</li>
+  <li>For each section, select the evidence that supports that section
+      (typically 3–8 evidence items, ~1,500–3,500 tokens).</li>
+  <li>Call the writer with a section-specific prompt, the selected evidence, the
+      citation contract, and a short summary of already-written sections.</li>
+  <li>Stream the section to the UI; keep the section text in the report ledger.</li>
+  <li>At the end, generate the introduction and conclusion from the section
+      summaries, not from re-reading all evidence.</li>
+</ol>
+<p>
+  This is the map-reduce pattern: multiple focused prompts beat one oversized
+  prompt. It also makes citations tractable: each section knows which evidence
+  ids it used.
+</p>
+
+<h3>5.7 Phase 5 — verification and uncertainty</h3>
+<p>
+  After drafting, split the report into atomic claims and check each claim against
+  its cited evidence:
+</p>
+<table>
+  <thead><tr><th>Verdict</th><th>Action</th></tr></thead>
+  <tbody>
+    <tr><td><span class="good">supported</span></td><td>Keep the claim and citation.</td></tr>
+    <tr><td><span class="bad">contradicted</span></td><td>Keep both sides if credible; add a “sources disagree” note; prefer the newer/higher-quality source only with an explicit rationale.</td></tr>
+    <tr><td><span class="warn">unsupported</span></td><td>Remove, soften, or move to “speculation/commentary.” Never present it as fact.</td></tr>
+    <tr><td>background</td><td>Keep only if it is clearly marked as context and not attributed to a source.</td></tr>
+  </tbody>
+</table>
+<p>
+  The final report should include a short <strong>“What the sources do not
+  establish”</strong> section. For the Jensen Huang question, that section is the
+  most important part of the answer: the corpus establishes two publicly reported
+  relationships, but not a verified total number of affairs.
+</p>
+
+<h3>5.8 Data model and on-disk layout</h3>
+<pre><code>.chat/research/&lt;YYYYmmdd-HHMMSS&gt;-&lt;slug&gt;/
+  plan.json        # question, intent, subquestions, budgets
+  evidence.jsonl   # one JSON object per evidence item, append-only
+  sections.jsonl   # outline + written sections + evidence ids used
+  report.md        # final report with citation markers
+  trace.json       # phase timings, token counts, stop reason, verification
+  sources.json     # deduplicated source table (title, URL, date, quality)</code></pre>
+<p>
+  Append-only evidence is important: a crash or context overflow should not lose
+  research progress. It also lets the UI show a “research trace” later.
+</p>
+
+<h3>5.9 Prompt contracts</h3>
+<p>
+  Every structured call needs a strict schema and a repair path. The repo already
+  has JSON helpers (<code>_lfm_request_json</code>, <code>_lfm_request_json_stream</code>,
+  <code>_lfm_parse_json_object</code>) that can be reused.
+</p>
+<p><strong>Planner contract (small model):</strong></p>
+<pre><code>Return JSON only:
+{
+  "intent": "fact | timeline | comparison | enumeration | causal | open_ended | speculation",
+  "subquestions": [
+    {"id":"q1","text":"...","type":"...","priority":1,
+     "source_types":["corpus"],"seed_queries":["..."]}
+  ],
+  "stop_rules": {"max_rounds":3,"max_evidence_tokens":6000,"max_unique_sources":30}
+}
+Rules:
+- 3 to 8 subquestions.
+- For speculation/private facts, include separate questions for
+  "reported", "confirmed", "speculated", and "unknown".
+- Do not answer the question in the plan.</code></pre>
+<p><strong>Gap-check contract (small model):</strong></p>
+<pre><code>Return JSON only:
+{
+  "subquestions": [
+    {"id":"q1","status":"answered | partial | unanswered",
+     "missing":"specific missing facts or empty",
+     "new_queries":["..."]}
+  ],
+  "contradictions": [
+    {"claim":"...","sources":["E07","E12"],"resolution_needed":true}
+  ],
+  "stop": false
+}
+Rules:
+- A subquestion is "answered" only if the evidence states the fact,
+  not merely mentions the topic.
+- New queries must target the missing fact, not repeat earlier queries.</code></pre>
+<p><strong>Writer contract (35B):</strong></p>
+<pre><code>Write the section "..." using ONLY the evidence below.
+- Cite every factual sentence with [E##].
+- Do not cite an evidence id that is not in the list.
+- If the evidence does not support a sentence, omit the sentence.
+- If sources disagree, say so explicitly and cite both.
+- End with a one-line confidence note if the evidence is partial.
+- Do not mention "chunk", "context", "provided documents", or internal ids.</code></pre>
+
+<h3>5.10 Budgets and stopping rules</h3>
+<table>
+  <thead><tr><th>Budget</th><th>Recommended starting value</th><th>Reason</th></tr></thead>
+  <tbody>
+    <tr><td>Sub-questions</td><td>3–8 (2–4 for comparisons, 5–8 for open-ended)</td><td>More than that usually duplicates work.</td></tr>
+    <tr><td>Rounds</td><td>2–4</td><td>Two rounds catch most gaps; more has diminishing returns.</td></tr>
+    <tr><td>Queries per sub-question</td><td>2–4</td><td>Original + expansion + entity/alias + date variant.</td></tr>
+    <tr><td>Evidence per sub-question</td><td>4–8 chunks</td><td>Enough to compare sources; not so many that the context is diluted.</td></tr>
+    <tr><td>Unique sources</td><td>≤ 30</td><td>Source diversity without explosion.</td></tr>
+    <tr><td>Per-synthesis prompt</td><td>≤ 6,000–6,500 estimated tokens</td><td>Leaves room for instructions and output inside 8,192.</td></tr>
+    <tr><td>Total research tokens</td><td>3–8× a normal chat answer</td><td>Research should cost more, but not 15× by default.</td></tr>
+    <tr><td>Wall clock</td><td>1–5 minutes for local corpus research</td><td>Longer than chat, shorter than a web deep-research system.</td></tr>
+  </tbody>
+</table>
+
+<h3>5.11 Integration points in this repo</h3>
+<table>
+  <thead><tr><th>Need</th><th>Existing code to reuse</th></tr></thead>
+  <tbody>
+    <tr><td>BM25 retrieval</td><td><code>chat.top_chunks()</code>, <code>chat.BM25Index</code>, <code>sqlite_bm25.SQLiteBM25</code></td></tr>
+    <tr><td>Query expansion and fuzzy terms</td><td><code>chat.expand_query()</code>, <code>chat.fuzzy_query_terms()</code>, <code>chat.acronym_expansion()</code></td></tr>
+    <tr><td>Entity focus</td><td><code>chat.fuzzy_entity_terms()</code>, <code>chat.entity_focus_terms()</code></td></tr>
+    <tr><td>Sufficiency and gaps</td><td><code>_article_sufficiency_check()</code>, <code>_missing_search_terms()</code>, <code>_evidence_covers_question()</code></td></tr>
+    <tr><td>Iterative rounds</td><td><code>_iterative_evidence()</code>, <code>_youtube_iterative_evidence()</code>, <code>_article_iterative_evidence()</code></td></tr>
+    <tr><td>Long-form writing</td><td><code>ArticleParagraphStream</code>, <code>article_format_instruction()</code>, <code>chat.build_prompt()</code></td></tr>
+    <tr><td>Source links</td><td><code>chunk_url()</code>, <code>chunk_title()</code>, <code>build_answer_annotations()</code></td></tr>
+    <tr><td>Streaming UI</td><td><code>_sse()</code>, <code>_sse_text()</code>, <code>_sse_answer_source()</code>, <code>_sse_doc_source()</code></td></tr>
+    <tr><td>Structured JSON</td><td><code>_lfm_request_json()</code>, <code>_lfm_request_json_stream()</code>, <code>_lfm_parse_json_object()</code></td></tr>
+    <tr><td>Command registration</td><td><code>WEB_COMMANDS</code>, <code>COMMAND_ARGUMENTS</code>, <code>ChatRequestHandler._run_command()</code></td></tr>
+    <tr><td>Optional web adapters</td><td><code>/news</code> + <code>news_fetch.php</code>, <code>/wiki_article</code>, <code>/mdn</code>, <code>run_golang_doc_search()</code>, <code>run_rust_doc_search()</code>, <code>run_php_doc_search()</code></td></tr>
+  </tbody>
+</table>
+
+<h3>5.12 UI and streaming</h3>
+<p>
+  A research run should be observable. Add SSE events and log lines such as:
+</p>
+<pre><code>[research] intent: speculation; 4 subquestions; budget 6,000 tokens
+[research] plan: q1 reported relationships; q2 confirmed vs alleged;
+                  q3 verified count; q4 speculation/commentary
+[research] round 1/3: 18 candidates → 9 evidence items, 2,410 tokens
+[research] round 2/3: gap q3 "verified count"; 4 new queries → 3 evidence items
+[research] stop: q3 unanswerable from corpus; evidence 12 items, 3,180 tokens
+[research] writing section 1/4 ...
+[research] verification: 14 supported, 1 contradicted, 2 unsupported
+[research] report ready: 12 sources, 2,980 words</code></pre>
+<p>
+  The final answer should keep the existing clickable source annotations and add a
+  source table and a collapsible research trace. The trace is not decoration: it
+  lets the user see why a claim is or is not supported.
+</p>
+
+<h2 id="example">6. Worked example: the Jensen Huang affairs question</h2>
+<p>
+  The example in the prompt is deliberately hard:
+  <em>“how many affairs jensen huang might actually have?”</em> It is partly a
+  factual question, partly a rumor question, and partly unanswerable from public
+  evidence. A single-shot RAG answer is likely to either invent a number, repeat
+  commentary as fact, or refuse. A research-mode answer can do better.
+</p>
+
+<h3>6.1 What the corpus actually contains</h3>
+<p>
+  The global corpus contains substantial reporting on the alleged affair scandal.
+  Representative evidence found by the measured retrieval:
+</p>
+<ul>
+  <li><strong>Alice Huang:</strong> multiple sources report an extramarital affair
+      and say Huang admitted infidelity in a November 8 message to employees
+      (Reuters, AP, CNBC and others). One source describes Alice Huang as a Chinese
+      national and Megaspeed executive; another says the two are not related.</li>
+  <li><strong>Kimberly Powell:</strong> The New York Times reported a second
+      extramarital relationship with Nvidia’s vice president of healthcare, citing
+      five people who had worked at Nvidia. One source notes that the second claim
+      “remains unproven” and that neither Huang nor Powell acknowledged it.</li>
+  <li><strong>“Two affairs”:</strong> several outlets describe “two extramarital
+      affairs” or “reports of two extramarital affairs.” This is a report count, not
+      a verified lifetime count.</li>
+  <li><strong>Speculation:</strong> commentary in the corpus says things like
+      “there would be at least two to five more women” and “I don't think we've seen
+      the last woman.” That is opinion/commentary, not evidence of a number.</li>
+</ul>
+
+<h3>6.2 What a single-shot depth-100 answer tends to do</h3>
+<p>
+  At depth 12–200 this question returned only 10 chunks, so depth did not add
+  evidence. The risk is not “too little context”; it is <em>epistemic</em>:
+  the model may merge admitted, reported, and speculated claims into one confident
+  number. A larger context would not fix that. In fact, the depth-100 wagyu
+  experiment shows that a larger context can make the model lose the instructions
+  and the best evidence.
+</p>
+
+<h3>6.3 A research-mode plan</h3>
+<pre><code>q1. Which relationships/affairs have been publicly reported by credible outlets?
+q2. Which claims are confirmed or admitted, and which are alleged/unproven?
+q3. Is there a verified count, and what do the company, court, or official
+    statements say?
+q4. Which claims are speculation or commentary rather than evidence?
+q5. What remains unknown or unverifiable from the available sources?</code></pre>
+
+<h3>6.4 What the final report should say</h3>
+<div class="verdict">
+  <strong>Answer:</strong> Public reporting names <strong>two</strong> relationships:
+  Alice Huang (an extramarital affair that Jensen Huang admitted) and Kimberly Powell
+  (a second relationship reported by <em>The New York Times</em>, which remains
+  unproven and was not acknowledged by either person). There is <strong>no verified
+  total number of affairs</strong>. Claims of “two to five more” women are commentary
+  and speculation, not evidence. The defensible statement is:
+  <em>“At least two have been publicly reported; only one has been admitted; the
+  actual number is unknown.”</em>
+</div>
+<p>
+  This answer is more useful than a fake exact number, and it is faithful to the
+  sources. It also demonstrates the research-mode contract: separate
+  <strong>reported</strong>, <strong>confirmed</strong>, <strong>alleged</strong>,
+  <strong>speculated</strong>, and <strong>unknown</strong>.
+</p>
+
+<h3>6.5 Why this beats “depth 100”</h3>
+<ul>
+  <li>Depth 100 would not retrieve more than the 10 entity-focused chunks.</li>
+  <li>If it did retrieve more, it would risk crossing the 8k window and dropping
+      the instructions and top evidence.</li>
+  <li>The research loop explicitly asks the questions that make the answer honest:
+      what is confirmed, what is alleged, what is speculation, and what is unknown.</li>
+  <li>The evidence ledger makes each sentence traceable to a source and a date.</li>
+</ul>
+
+<h2 id="eval">7. Evaluation plan</h2>
+
+<h3>7.1 A small, high-signal test suite</h3>
+<p>
+  Start with ~10–20 questions, as Anthropic recommends. Include at least one of each:
+</p>
+<table>
+  <thead><tr><th>Type</th><th>Example</th><th>What it tests</th></tr></thead>
+  <tbody>
+    <tr><td>Direct fact</td><td>“what time does Nijo market open?”</td><td>Precision, no over-answer</td></tr>
+    <tr><td>Timeline</td><td>“timeline of the Jensen Huang scandal”</td><td>Recency ordering, conflict handling</td></tr>
+    <tr><td>Comparison</td><td>“compare Dr. Knott and Dr. Pletcher”</td><td>Entity coverage, both sides</td></tr>
+    <tr><td>Enumeration</td><td>“list all airports in Japan” or “all levels of wagyu”</td><td>Coverage, deduplication, completeness</td></tr>
+    <tr><td>Open-ended</td><td>“write a report on X”</td><td>Structure, synthesis, citations</td></tr>
+    <tr><td>Unanswerable / private</td><td>“how many affairs does Jensen Huang have?”</td><td>Calibrated uncertainty, no invention</td></tr>
+    <tr><td>Contradictory sources</td><td>any claim with conflicting dates/numbers</td><td>Explicit conflict reporting</td></tr>
+    <tr><td>Recency</td><td>“what is the latest on X?”</td><td>Date filtering, newest-first</td></tr>
+  </tbody>
+</table>
+
+<h3>7.2 Metrics</h3>
+<table>
+  <thead><tr><th>Metric</th><th>Definition</th><th>Target</th></tr></thead>
+  <tbody>
+    <tr><td>Sub-question coverage</td><td>Fraction of high-priority sub-questions answered or explicitly marked unanswerable</td><td>≥ 0.9</td></tr>
+    <tr><td>Citation precision</td><td>Fraction of cited claims whose source actually supports them</td><td>≥ 0.95</td></tr>
+    <tr><td>Citation recall</td><td>Fraction of factual claims that have a citation</td><td>≥ 0.9</td></tr>
+    <tr><td>Unsupported claim rate</td><td>Claims removed or marked unsupported by verification</td><td>≤ 0.05</td></tr>
+    <tr><td>Contradiction recall</td><td>Known conflicts that the report explicitly mentions</td><td>≥ 0.8</td></tr>
+    <tr><td>Source diversity</td><td>Unique sources / evidence items</td><td>0.4–0.8 (not one source repeated)</td></tr>
+    <tr><td>Context safety</td><td>Fraction of model calls whose prompt stays under the budget</td><td>1.0</td></tr>
+    <tr><td>Cost</td><td>Tokens and wall time vs a normal chat answer</td><td>3–8×, not 15×</td></tr>
+  </tbody>
+</table>
+
+<h3>7.3 A/B protocol</h3>
+<p>
+  Compare three configurations on the same suite:
+</p>
+<ol>
+  <li><strong>A:</strong> single-shot depth 12 (current default).</li>
+  <li><strong>B:</strong> single-shot depth 50 or 100.</li>
+  <li><strong>C:</strong> proposed research loop.</li>
+</ol>
+<p>
+  Use a single LLM judge with a rubric (factual accuracy, citation accuracy,
+  completeness, source quality, uncertainty calibration), plus human review of
+  the unanswerable/private question. The wagyu case already shows the expected
+  result: B can be worse than A when it crosses the window; C should be better on
+  coverage and citations without stuffing the context.
+</p>
+
+<h2 id="rollout">8. Rollout plan and immediate fixes</h2>
+
+<h3>8.1 Phase 0 — make the current pipeline context-safe (hours)</h3>
+<ol>
+  <li>Add a prompt-budget check before <code>stream_answer()</code>:
+      <code>estimate_tokens(prompt) ≤ ANSWER_NUM_CTX − output_reserve</code>.
+      If it fails, drop the lowest-ranked context chunks until it fits and log the
+      drop. Never let the runtime silently truncate the <em>front</em>.</li>
+  <li>Reduce <code>YOUTUBE_ITERATIVE_EVIDENCE_TOKENS</code> and
+      <code>ARTICLE_ITERATIVE_EVIDENCE_TOKENS</code> from 16,000 to a window-safe
+      value (~6,000), or raise <code>num_ctx</code> and re-benchmark memory/TTFT.</li>
+  <li>Show a warning in the UI when estimated context exceeds ~80% of the window.</li>
+  <li>Keep <code>DEFAULT_DEPTH = 12</code>; use 25–50 only for list/long-form
+      questions.</li>
+  <li>Add a regression test for the wagyu depth-100 case: the answer must not
+      exceed the context budget and must not cite chunk ids.</li>
+</ol>
+
+<h3>8.2 Phase 1 — minimal <code>/research</code> (days)</h3>
+<ol>
+  <li>Add <code>/research &lt;question&gt;</code> to <code>WEB_COMMANDS</code> and
+      <code>COMMAND_ARGUMENTS</code>; stream phase logs and the final report.</li>
+  <li>Implement the planner (3–6 sub-questions), per-sub-question retrieval, and
+      an append-only evidence ledger.</li>
+  <li>Reuse the existing iterative sufficiency check for 2 rounds.</li>
+  <li>Write the report section by section from the ledger; cite evidence ids.</li>
+  <li>Persist <code>plan.json</code>, <code>evidence.jsonl</code>,
+      <code>report.md</code>, and <code>trace.json</code> under
+      <code>.chat/research/</code>.</li>
+</ol>
+
+<h3>8.3 Phase 2 — verification and contradictions (1–2 weeks)</h3>
+<ol>
+  <li>Atomic claim extraction and claim-level support/contradiction checks.</li>
+  <li>“Sources disagree” and “What the sources do not establish” sections.</li>
+  <li>Source-quality labels (primary record / major outlet / aggregator / commentary).</li>
+  <li>Newest-first ordering only when the question is time-sensitive; otherwise
+      relevance first.</li>
+</ol>
+
+<h3>8.4 Phase 3 — source adapters and UI (later)</h3>
+<ol>
+  <li>Optional adapters for <code>/news</code> + <code>news_fetch.php</code>,
+      Wikipedia, and official language docs when the local corpus is insufficient.</li>
+  <li>“Open trace” panel with plan, rounds, evidence, and verification.</li>
+  <li>Resumable research sessions and a “continue research” command.</li>
+  <li>Evaluation dashboard using the metrics in §7.</li>
+</ol>
+
+<h2 id="risks">9. Risks and guardrails</h2>
+<table>
+  <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>
+  <tbody>
+    <tr><td>Hallucinated facts in the report</td><td>Citation contract, claim verification, unsupported-claim removal, “unknowns” section.</td></tr>
+    <tr><td>Treating rumors/commentary as fact</td><td>Source-quality labels; separate reported/confirmed/alleged/speculated; never infer a private fact from commentary.</td></tr>
+    <tr><td>Context overflow / silent truncation</td><td>Hard per-call token budget; trim lowest-ranked chunks; section-wise synthesis; log violations.</td></tr>
+    <tr><td>Over-decomposition and cost blow-up</td><td>Cap sub-questions and rounds; stop when marginal new evidence is low; simple questions get a simple plan.</td></tr>
+    <tr><td>Duplicate evidence</td><td>Deduplicate by chunk key, text similarity, and source cap; track “already used” evidence ids.</td></tr>
+    <tr><td>Stale evidence</td><td>Use published dates; newest-first for time-sensitive questions; explicitly date every claim.</td></tr>
+    <tr><td>Source bias / SEO content farms</td><td>Prefer primary records and major outlets; label aggregators and commentary; require independent corroboration for key claims.</td></tr>
+    <tr><td>Privacy / sensitive personal questions</td><td>Report only what credible sources say; avoid speculation; state the limits; do not turn rumor into a count.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="refs">10. References</h2>
+<ol class="small">
+  <li>OpenAI. <em>Introducing deep research</em>. 2 Feb 2025.
+      <a href="https://openai.com/index/introducing-deep-research/">openai.com/index/introducing-deep-research</a>.
+      (Multi-step browsing/reasoning, citations, 5–30 minutes, stated limitations.)</li>
+  <li>Anthropic. <em>How we built our multi-agent research system</em>. 13 Jun 2025.
+      <a href="https://www.anthropic.com/engineering/multi-agent-research-system">anthropic.com/engineering/multi-agent-research-system</a>.
+      (Orchestrator-worker, parallel subagents, 90.2% internal-eval improvement,
+      ~15× token use vs chat, token usage explains 80% of BrowseComp variance.)</li>
+  <li>W. Zhang, X. Li, Y. Zhang, P. Jia, Y. Wang, H. Guo, Y. Liu, X. Zhao.
+      <em>Deep Research: A Survey of Autonomous Research Agents</em>.
+      arXiv:2508.12752, 2025.
+      <a href="https://arxiv.org/html/2508.12752v1">arxiv.org/html/2508.12752v1</a>.
+      (Planning, question developing, web exploration, report generation.)</li>
+  <li>Z. Shi, Y. Chen, H. Li, et al. <em>Deep Research: A Systematic Survey</em>.
+      arXiv:2512.02038, 2025.
+      <a href="https://arxiv.org/html/2512.02038v1">arxiv.org/html/2512.02038v1</a>.
+      (Query planning, information acquisition, memory management, answer generation;
+      three-stage roadmap from agentic search to AI scientist.)</li>
+  <li>Y. Huang, Y. Chen, H. Zhang, et al.
+      <em>Deep Research Agents: A Systematic Examination and Roadmap</em>.
+      arXiv:2506.18096, 2025.
+      <a href="https://arxiv.org/html/2506.18096">arxiv.org/html/2506.18096</a>.
+      (Static vs dynamic workflows; single- vs multi-agent; API vs browser retrieval;
+      tool use; benchmarks.)</li>
+  <li>Y. Xi, J. Lin, Y. Xiao, et al.
+      <em>A Survey of LLM-based Deep Search Agents: Paradigm, Optimization,
+      Evaluation, and Challenges</em>. arXiv:2508.05668, 2025.
+      <a href="https://arxiv.org/abs/2508.05668">arxiv.org/abs/2508.05668</a>.
+      (Parallel/sequential/hybrid search structures; test-time scaling; evaluation.)</li>
+  <li>A. Asai, Z. Wu, Y. Wang, A. Sil, H. Hajishirzi.
+      <em>Self-RAG: Learning to Retrieve, Generate, and Critique through
+      Self-Reflection</em>. ICLR 2024.</li>
+  <li>H. Trivedi, N. Balasubramanian, T. Khot, A. Sabharwal.
+      <em>Interleaving Retrieval with Chain-of-Thought Reasoning for
+      Knowledge-Intensive Multi-Step Questions</em> (IRCoT). EMNLP 2022.</li>
+  <li>S. Yao, J. Zhao, D. Yu, et al. <em>ReAct: Synergizing Reasoning and Acting
+      in Language Models</em>. ICLR 2023.</li>
+  <li>Y. Shao, Y. Jiang, T. A. Kanell, P. Xu, O. Khattab, M. S. Lam.
+      <em>Assisting in Writing Wikipedia-like Articles From Scratch with Large
+      Language Models</em> (STORM). NAACL 2024.</li>
+  <li>N. F. Liu, K. Lin, J. Hewitt, A. Paranjape, M. Bevilacqua, F. Petroni,
+      P. Liang. <em>Lost in the Middle: How Language Models Use Long Contexts</em>.
+      TACL 2024.</li>
+  <li>G. V. Cormack, C. L. A. Clarke, S. Buettcher.
+      <em>Reciprocal Rank Fusion Outperforms Condorcet and Individual Rank
+      Learning Methods</em>. SIGIR 2009.</li>
+  <li>Ollama API documentation, <code>/api/generate</code> and
+      <code>options.num_ctx</code>.
+      <a href="https://docs.ollama.com/api/generate">docs.ollama.com/api/generate</a>.</li>
+  <li>This repository: <code>chat.py</code> (retrieval, prompt, streaming),
+      <code>app/chat_server.py</code> (server orchestration, iterative evidence,
+      annotations), <code>sqlite_bm25.py</code> (SQLite FTS5 BM25 backend),
+      <code>research/100_trunks_prompt.txt</code> (answer template).</li>
+</ol>
+
+<h2 id="appendix">Appendix A: raw measurements and reproduction</h2>
+
+<h3>A.1 Depth-scaling measurements</h3>
+<table class="small">
+  <thead>
+    <tr><th>Question</th><th class="num">Depth</th><th class="num">Chunks</th><th class="num">Context tokens</th><th class="num">Unique sources</th><th class="num">New chunks vs previous depth</th><th class="num">Median score</th></tr>
+  </thead>
+  <tbody>
+    <tr><td rowspan="5">jensen affairs</td><td class="num">12</td><td class="num">10</td><td class="num">1,136</td><td class="num">5</td><td class="num">10</td><td class="num">24.27</td></tr>
+    <tr><td class="num">25</td><td class="num">10</td><td class="num">1,136</td><td class="num">5</td><td class="num">0</td><td class="num">24.27</td></tr>
+    <tr><td class="num">50</td><td class="num">10</td><td class="num">1,136</td><td class="num">5</td><td class="num">0</td><td class="num">24.27</td></tr>
+    <tr><td class="num">100</td><td class="num">10</td><td class="num">1,136</td><td class="num">5</td><td class="num">0</td><td class="num">24.27</td></tr>
+    <tr><td class="num">200</td><td class="num">10</td><td class="num">1,136</td><td class="num">5</td><td class="num">0</td><td class="num">24.27</td></tr>
+    <tr><td rowspan="5">jensen timeline</td><td class="num">12</td><td class="num">12</td><td class="num">725</td><td class="num">5</td><td class="num">12</td><td class="num">31.90</td></tr>
+    <tr><td class="num">25</td><td class="num">25</td><td class="num">1,219</td><td class="num">5</td><td class="num">13</td><td class="num">30.82</td></tr>
+    <tr><td class="num">50</td><td class="num">50</td><td class="num">2,512</td><td class="num">5</td><td class="num">25</td><td class="num">29.19</td></tr>
+    <tr><td class="num">100</td><td class="num">64</td><td class="num">4,109</td><td class="num">10</td><td class="num">14</td><td class="num">28.48</td></tr>
+    <tr><td class="num">200</td><td class="num">64</td><td class="num">4,109</td><td class="num">10</td><td class="num">0</td><td class="num">28.48</td></tr>
+    <tr><td rowspan="5">wagyu levels</td><td class="num">12</td><td class="num">12</td><td class="num">1,453</td><td class="num">4</td><td class="num">12</td><td class="num">43.78</td></tr>
+    <tr><td class="num">25</td><td class="num">25</td><td class="num">2,989</td><td class="num">6</td><td class="num">13</td><td class="num">37.42</td></tr>
+    <tr><td class="num">50</td><td class="num">50</td><td class="num">5,922</td><td class="num">9</td><td class="num">25</td><td class="num">28.93</td></tr>
+    <tr><td class="num">100</td><td class="num">100</td><td class="num">11,331</td><td class="num">13</td><td class="num">50</td><td class="num">24.85</td></tr>
+    <tr><td class="num">200</td><td class="num">200</td><td class="num">20,262</td><td class="num">23</td><td class="num">100</td><td class="num">19.53</td></tr>
+    <tr><td rowspan="5">airports in japan</td><td class="num">12</td><td class="num">12</td><td class="num">1,218</td><td class="num">6</td><td class="num">12</td><td class="num">20.13</td></tr>
+    <tr><td class="num">25</td><td class="num">25</td><td class="num">2,340</td><td class="num">7</td><td class="num">13</td><td class="num">18.89</td></tr>
+    <tr><td class="num">50</td><td class="num">50</td><td class="num">4,585</td><td class="num">12</td><td class="num">25</td><td class="num">17.56</td></tr>
+    <tr><td class="num">100</td><td class="num">100</td><td class="num">10,033</td><td class="num">25</td><td class="num">50</td><td class="num">16.52</td></tr>
+    <tr><td class="num">200</td><td class="num">200</td><td class="num">21,844</td><td class="num">51</td><td class="num">100</td><td class="num">14.86</td></tr>
+    <tr><td rowspan="5">compare two doctors</td><td class="num">12</td><td class="num">12</td><td class="num">723</td><td class="num">2</td><td class="num">12</td><td class="num">92.88</td></tr>
+    <tr><td class="num">25</td><td class="num">18</td><td class="num">1,436</td><td class="num">3</td><td class="num">6</td><td class="num">83.94</td></tr>
+    <tr><td class="num">50</td><td class="num">18</td><td class="num">1,436</td><td class="num">3</td><td class="num">0</td><td class="num">83.94</td></tr>
+    <tr><td class="num">100</td><td class="num">18</td><td class="num">1,436</td><td class="num">3</td><td class="num">0</td><td class="num">83.94</td></tr>
+    <tr><td class="num">200</td><td class="num">18</td><td class="num">1,436</td><td class="num">3</td><td class="num">0</td><td class="num">83.94</td></tr>
+    <tr><td rowspan="5">nijo market hours</td><td class="num">12</td><td class="num">9</td><td class="num">1,305</td><td class="num">4</td><td class="num">9</td><td class="num">30.32</td></tr>
+    <tr><td class="num">25</td><td class="num">9</td><td class="num">1,305</td><td class="num">4</td><td class="num">0</td><td class="num">30.32</td></tr>
+    <tr><td class="num">50</td><td class="num">9</td><td class="num">1,305</td><td class="num">4</td><td class="num">0</td><td class="num">30.32</td></tr>
+    <tr><td class="num">100</td><td class="num">9</td><td class="num">1,305</td><td class="num">4</td><td class="num">0</td><td class="num">30.32</td></tr>
+    <tr><td class="num">200</td><td class="num">9</td><td class="num">1,305</td><td class="num">4</td><td class="num">0</td><td class="num">30.32</td></tr>
+    <tr><td rowspan="5">rust ownership</td><td class="num">12</td><td class="num">12</td><td class="num">1,609</td><td class="num">7</td><td class="num">12</td><td class="num">20.47</td></tr>
+    <tr><td class="num">25</td><td class="num">25</td><td class="num">3,031</td><td class="num">13</td><td class="num">13</td><td class="num">17.63</td></tr>
+    <tr><td class="num">50</td><td class="num">50</td><td class="num">6,211</td><td class="num">21</td><td class="num">25</td><td class="num">14.49</td></tr>
+    <tr><td class="num">100</td><td class="num">73</td><td class="num">9,064</td><td class="num">25</td><td class="num">23</td><td class="num">13.86</td></tr>
+    <tr><td class="num">200</td><td class="num">73</td><td class="num">9,064</td><td class="num">25</td><td class="num">0</td><td class="num">13.86</td></tr>
+  </tbody>
+</table>
+<p class="small muted">
+  Context tokens are <code>chat.estimate_tokens(build_context(...))</code>, so they
+  are estimates, not the model tokenizer’s exact counts. Retrieval times are warm
+  runs after the first index access. The first run in a process paid ~1.7 s for
+  database/index warm-up.
+</p>
+
+<h3>A.2 Reproduction sketch</h3>
+<pre><code>cd /Users/jhuang/airesearch/local_llm_chat
+PYTHONPATH=. python3.14 - &lt;&lt;'PY'
+import statistics, chat
+
+chunks = chat.load_all_chunks()
+questions = [
+    "how many affairs jensen huang might actually have",
+    "give me a timeline of development on jensen huang's scandal",
+    "what are all levels of wagyu",
+    "list me all airports in japan",
+    "compare Dr. P. Daniel Knott, MD and Dr. Steven D. Pletcher, MD",
+    "what time does nijo market open",
+    "how does rust ownership work",
+]
+for question in questions:
+    for depth in (12, 25, 50, 100, 200):
+        results = chat.top_chunks(question, chunks, limit=depth)
+        context = chat.build_context([c for c, _ in results])
+        print(question, depth, len(results),
+              chat.estimate_tokens(context),
+              len({c.video_id for c, _ in results}))
+PY</code></pre>
+
+<h3>A.3 Truncation reproduction sketch</h3>
+<pre><code>import requests, chat
+
+model = "ornith-1.5:35b"
+filler = ("The quick brown fox jumps over the lazy dog. "
+          "This paragraph is harmless filler used to measure prompt "
+          "processing. It contains no question and no answer.\n")
+head = "IMPORTANT: The secret access code is BANANA-42. You must remember it.\n"
+tail = "\nQuestion: What is the secret access code? Reply with the code only.\n"
+reps = max(0, ((12000 - chat.estimate_tokens(head + tail)) * 4) // len(filler))
+prompt = head + filler * reps + tail
+
+response = requests.post(
+    "http://127.0.0.1:11434/api/generate",
+    json={
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "think": False,
+        "options": {"temperature": 0, "num_ctx": 8192, "num_predict": 12},
+    },
+    timeout=(10, 900),
+)
+data = response.json()
+print("estimated:", chat.estimate_tokens(prompt))
+print("evaluated:", data.get("prompt_eval_count"))
+print("answer:", data.get("response"))
+# Observed: estimated ~11,969; evaluated 4,098; the model did not know the code.</code></pre>
+
+<h3>A.4 Key source locations</h3>
+<table class="small">
+  <thead><tr><th>What</th><th>Where</th></tr></thead>
+  <tbody>
+    <tr><td>Default depth 12</td><td><code>chat.py</code>, <code>DEFAULT_DEPTH</code></td></tr>
+    <tr><td>8,192 context window</td><td><code>chat.py</code>, <code>ANSWER_NUM_CTX</code></td></tr>
+    <tr><td>BM25 top-k and filters</td><td><code>chat.py</code>, <code>top_chunks()</code></td></tr>
+    <tr><td>Prompt assembly</td><td><code>chat.py</code>, <code>build_prompt()</code>; <code>research/100_trunks_prompt.txt</code></td></tr>
+    <tr><td>Ollama <code>num_ctx</code></td><td><code>chat.py</code>, <code>stream_answer()</code></td></tr>
+    <tr><td>Iterative evidence loop</td><td><code>app/chat_server.py</code>, <code>_iterative_evidence()</code>, <code>_youtube_iterative_evidence()</code></td></tr>
+    <tr><td>Iterative budgets 16,000</td><td><code>app/chat_server.py</code>, <code>YOUTUBE_ITERATIVE_EVIDENCE_TOKENS</code>, <code>ARTICLE_ITERATIVE_EVIDENCE_TOKENS</code></td></tr>
+    <tr><td>Answer orchestration</td><td><code>app/chat_server.py</code>, <code>_run_question()</code>, <code>attempt()</code></td></tr>
+    <tr><td>Paragraph → source links</td><td><code>app/chat_server.py</code>, <code>build_answer_annotations()</code></td></tr>
+    <tr><td>Command registry</td><td><code>app/chat_server.py</code>, <code>WEB_COMMANDS</code>, <code>COMMAND_ARGUMENTS</code></td></tr>
+    <tr><td>SQLite FTS5 backend</td><td><code>sqlite_bm25.py</code>, <code>SQLiteBM25</code></td></tr>
+  </tbody>
+</table>
+
+<hr>
+<p class="small muted">
+  Bottom line: keep depth small and deliberate; make research deep by iterating
+  over sub-questions with a ledger and a citation-aware synthesis. The corpus is
+  large enough for that. The 8k window is the real constraint, and it rewards
+  better evidence, not more evidence.
+</p>
+</body>
+</html>

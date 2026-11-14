@@ -1,0 +1,15 @@
+research_doc: {directory_of_this_prompt}/../research/deep_research_mode
+research_llm: ollama local model ornith-1.5:35b
+
+task (completed) {
+  based on {research_doc}, create new command /deepresearch <topic>, show the research process and result in the chat  
+}
+
+task (completed) {
+  research only and save the result to {research_doc} {
+    I would really like doing deep research of any topic, for example:
+    how many affairs jensen huang might actually have?
+    I want to really achieve deep research result
+    should i increase the depth of the bm25 retrieval? or do we have better approach?
+  }
+}
