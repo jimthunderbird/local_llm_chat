@@ -72,6 +72,8 @@ Endpoints:
                                   comments for the /reddit detail modal
     GET  /api/stock_reddit       ?symbol=<ticker> fetch unique Reddit posts from
                                   r/stock and r/<ticker> for the /stock modal
+    GET  /api/map_geocode        ?q=<address>&limit=<n> address autocomplete
+                                  and coordinate lookup for /map's To location tab
     GET  /api/map_restaurants    ?lat=<latitude>&lon=<longitude> fetch nearby
                                   restaurants from the Overpass API for /map
     GET  /api/driving_instructions
@@ -2825,6 +2827,14 @@ def fetch_wikivoyage_article(url: str, title: str = "") -> dict:
 # contact URL is used because example.com addresses are rejected with HTTP 403.
 MAP_USER_AGENT = "local-llm-chat/1.0 (+https://github.com/)"
 NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
+# Address autocomplete for /map's "To location" tab. Nominatim asks clients to
+# cache results and to stay below roughly one request per second, so recent
+# prefixes are served from this small in-process cache.
+MAP_GEOCODE_CACHE_TTL_SECONDS = 600
+MAP_GEOCODE_CACHE_MAX_ITEMS = 256
+MAP_GEOCODE_LIMIT = 6
+MAP_GEOCODE_CACHE: dict[tuple[str, int], tuple[float, list[dict]]] = {}
+MAP_GEOCODE_CACHE_LOCK = threading.Lock()
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
 WIKIPEDIA_BASE_URL = "https://en.wikipedia.org"
 MAP_SEARCH_RADIUS_METERS = 10_000
@@ -2878,18 +2888,31 @@ def _map_distance(meters: object) -> str:
     return f"{meters / 1000:.1f} km"
 
 
-def geocode_location(location: str) -> dict:
-    """Resolve a place name to coordinates with OpenStreetMap Nominatim."""
+def geocode_locations(location: str, limit: int = MAP_GEOCODE_LIMIT) -> list[dict]:
+    """Resolve a place name to a list of OpenStreetMap Nominatim matches.
+
+    Nominatim is limited by its usage policy, so each normalized query/limit
+    pair is cached for a short time. A query with no matches returns an empty
+    list rather than an error so the autocomplete UI can simply show nothing.
+    """
     location = " ".join(str(location or "").split())
     if not location:
         raise RuntimeError("Missing location")
+    limit = max(1, min(int(limit), MAP_GEOCODE_LIMIT))
+    cache_key = (location.lower(), limit)
+    now = time.time()
+    with MAP_GEOCODE_CACHE_LOCK:
+        cached = MAP_GEOCODE_CACHE.get(cache_key)
+        if cached and now - cached[0] <= MAP_GEOCODE_CACHE_TTL_SECONDS:
+            return [dict(item) for item in cached[1]]
+
     try:
         response = requests.get(
             NOMINATIM_SEARCH_URL,
             params={
                 "q": location,
                 "format": "jsonv2",
-                "limit": 1,
+                "limit": limit,
                 "addressdetails": 1,
             },
             headers={
@@ -2905,30 +2928,55 @@ def geocode_location(location: str) -> dict:
         raise RuntimeError(f"OpenStreetMap geocoding failed: {exc}") from exc
 
     matches = data if isinstance(data, list) else []
-    match = matches[0] if matches and isinstance(matches[0], dict) else None
-    if match is None:
-        raise RuntimeError(f"No location matched {location!r}.")
-    try:
-        latitude = float(match.get("lat"))
-        longitude = float(match.get("lon"))
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f"OpenStreetMap returned invalid coordinates for {location!r}."
-        ) from exc
+    results: list[dict] = []
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        try:
+            latitude = float(match.get("lat"))
+            longitude = float(match.get("lon"))
+        except (TypeError, ValueError):
+            continue
+        display_name = _map_plain_text(match.get("display_name")) or location
+        address = match.get("address")
+        results.append(
+            {
+                "query": location,
+                "display_name": display_name,
+                "latitude": latitude,
+                "longitude": longitude,
+                "category": str(
+                    match.get("category") or match.get("class") or ""
+                ),
+                "type": str(match.get("type") or ""),
+                "osm_type": str(match.get("osm_type") or ""),
+                "osm_id": match.get("osm_id"),
+                "address": address if isinstance(address, dict) else {},
+            }
+        )
 
-    display_name = _map_plain_text(match.get("display_name")) or location
-    address = match.get("address")
-    return {
-        "query": location,
-        "display_name": display_name,
-        "latitude": latitude,
-        "longitude": longitude,
-        "category": str(match.get("category") or match.get("class") or ""),
-        "type": str(match.get("type") or ""),
-        "osm_type": str(match.get("osm_type") or ""),
-        "osm_id": match.get("osm_id"),
-        "address": address if isinstance(address, dict) else {},
-    }
+    with MAP_GEOCODE_CACHE_LOCK:
+        if len(MAP_GEOCODE_CACHE) >= MAP_GEOCODE_CACHE_MAX_ITEMS:
+            oldest = min(
+                MAP_GEOCODE_CACHE,
+                key=lambda key: MAP_GEOCODE_CACHE[key][0],
+            )
+            MAP_GEOCODE_CACHE.pop(oldest, None)
+        MAP_GEOCODE_CACHE[cache_key] = (now, [dict(item) for item in results])
+    return results
+
+
+def geocode_location(location: str) -> dict:
+    """Resolve a place name to coordinates with OpenStreetMap Nominatim."""
+    location = " ".join(str(location or "").split())
+    if not location:
+        raise RuntimeError("Missing location")
+    results = geocode_locations(location, 1)
+    if not results:
+        raise RuntimeError(f"No location matched {location!r}.")
+    result = results[0]
+    result["query"] = location
+    return result
 
 
 def _map_retry_delay(response: requests.Response, attempt: int) -> float:
@@ -13194,6 +13242,24 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"symbol": symbol, "items": items})
             return
+        if path == "/api/map_geocode":
+            params = parse_qs(parsed.query)
+            query = " ".join((params.get("q") or [""])[0].split())
+            if len(query) < 2:
+                self._send_json({"items": []})
+                return
+            raw_limit = (params.get("limit") or [""])[0]
+            try:
+                limit = int(float(raw_limit)) if raw_limit else MAP_GEOCODE_LIMIT
+            except (TypeError, ValueError):
+                limit = MAP_GEOCODE_LIMIT
+            try:
+                items = geocode_locations(query, limit)
+            except RuntimeError as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json({"items": items})
+            return
         if path == "/api/map_restaurants":
             params = parse_qs(parsed.query)
             try:
@@ -17104,6 +17170,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "tabs": [
                     {"id": "places", "label": "Nearby Places"},
                     {"id": "restaurants", "label": "Nearby Restaurants"},
+                    {"id": "to_location", "label": "To location"},
                 ],
                 "location": {
                     "display_name": geo["display_name"],

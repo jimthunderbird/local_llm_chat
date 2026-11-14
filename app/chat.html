@@ -1323,6 +1323,107 @@
     z-index: 0;
   }
   #driving-map .leaflet-container { background: #0f1821; }
+  /* /map "To location" tab: a destination autocomplete followed by an
+   * inline OSRM route and map. */
+  .map-to-location {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #0f1821;
+  }
+  .map-to-from {
+    color: var(--dim);
+    font-size: 12.5px;
+  }
+  .map-to-from strong { color: #e2edf7; font-weight: 600; }
+  .map-to-form {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .map-to-label {
+    flex: 0 0 auto;
+    padding-top: 7px;
+    color: var(--dim);
+    font-size: 12.5px;
+  }
+  .map-to-input-wrap { position: relative; flex: 1 1 260px; min-width: 0; }
+  .map-to-input {
+    width: 100%;
+    padding: 7px 9px;
+    color: var(--text);
+    background: #0b1118;
+    border: 1px solid #2d4d68;
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    outline: none;
+  }
+  .map-to-input:focus { border-color: #3d6b8f; }
+  .map-to-input::placeholder { color: var(--dim); }
+  .map-to-suggestions {
+    position: absolute;
+    top: calc(100% + 3px);
+    left: 0;
+    right: 0;
+    z-index: 20;
+    max-height: 220px;
+    overflow-y: auto;
+    background: #0d151e;
+    border: 1px solid #2d4d68;
+    border-radius: 6px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.55);
+  }
+  .map-to-suggestions[hidden] { display: none; }
+  .map-to-suggestion {
+    display: block;
+    width: 100%;
+    padding: 7px 9px;
+    border: 0;
+    border-top: 1px solid var(--border);
+    background: transparent;
+    color: #cfdae5;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.4;
+    text-align: left;
+    cursor: pointer;
+  }
+  .map-to-suggestion:first-child { border-top: 0; }
+  .map-to-suggestion:hover,
+  .map-to-suggestion.is-active { background: #172433; color: #e2edf7; }
+  .map-to-submit {
+    appearance: none;
+    flex: 0 0 auto;
+    padding: 7px 11px;
+    color: #d7ecff;
+    background: #172433;
+    border: 1px solid #2d4d68;
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .map-to-submit:hover { background: #20364a; border-color: #3d6b8f; }
+  .map-to-status { color: var(--dim); font-size: 12px; }
+  .map-to-status.is-error { color: var(--warn); }
+  .map-to-results { min-width: 0; }
+  .map-to-route-map {
+    height: 320px;
+    min-height: 220px;
+    margin-top: 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: #0f1821;
+    position: relative;
+    z-index: 0;
+  }
+  .map-to-route-map .leaflet-container { background: #0f1821; }
   .driving-map-note {
     color: var(--dim);
     font-size: 12px;
@@ -6310,6 +6411,12 @@ function addNewsEvent(entry, data) {
       ) {
         entry.mapRestaurants = { status: "idle", items: [], error: "" };
       }
+      if (
+        definitions.some((tab) => tab.id === "to_location")
+        && !entry.mapToLocation
+      ) {
+        ensureMapToLocationState(entry);
+      }
     }
     scheduleRender(entry);
     return;
@@ -6765,17 +6872,23 @@ function renderNewsTabs(container, entry, tabs, newsItems) {
       ? redditItems
       : tab.id === "restaurants"
         ? restaurantItems
-        : newsItems;
+        : tab.id === "to_location"
+          ? []
+          : newsItems;
     const tabState = tab.id === "reddit"
       ? entry.stockReddit
       : tab.id === "restaurants"
         ? entry.mapRestaurants
-        : null;
+        : tab.id === "to_location"
+          ? entry.mapToLocation
+          : null;
     const countEl = document.createElement("span");
     countEl.className = "news-tab-count";
-    countEl.textContent = tabState && tabState.status !== "ready"
+    countEl.textContent = tab.id === "to_location"
       ? ""
-      : String(tabItems.length);
+      : tabState && tabState.status !== "ready"
+        ? ""
+        : String(tabItems.length);
     button.appendChild(countEl);
     button.addEventListener("click", (event) => {
       event.preventDefault();
@@ -6836,6 +6949,14 @@ function appendNewsTabStatus(container, entry) {
 function renderNewsList(entry) {
   const container = entry.newsEl;
   if (!container) return;
+  if (entry.mapToLocation?.routeMap) {
+    try {
+      entry.mapToLocation.routeMap.remove();
+    } catch (_) {
+      // Leaflet may already have torn the map down with its container.
+    }
+    entry.mapToLocation.routeMap = null;
+  }
   container.textContent = "";
   const items = Array.isArray(entry.newsItems) ? entry.newsItems : [];
   const tabs = newsTabDefinitions(entry);
@@ -6856,7 +6977,9 @@ function renderNewsList(entry) {
     ? redditItems
     : activeTab === "restaurants"
       ? restaurantItems
-      : items;
+      : activeTab === "to_location"
+        ? []
+        : items;
   if (
     !visibleItems.length
     && !items.length
@@ -6890,7 +7013,9 @@ function renderNewsList(entry) {
     ? "Reddit"
     : activeTab === "restaurants"
       ? "Nearby Restaurants"
-      : (entry.newsSource || (groups.length === 1 ? groups[0].source : "News"));
+      : activeTab === "to_location"
+        ? "To location"
+        : (entry.newsSource || (groups.length === 1 ? groups[0].source : "News"));
   const note = document.createElement("span");
   note.className = "news-list-note";
   if (activeTab === "reddit") {
@@ -6911,6 +7036,8 @@ function renderNewsList(entry) {
       const count = visibleItems.length;
       note.textContent = `${count} ${count === 1 ? "restaurant" : "restaurants"}`;
     }
+  } else if (activeTab === "to_location") {
+    note.textContent = "address suggestions and driving route";
   } else {
     const storyWord = entry.newsDocs
       ? (visibleItems.length === 1 ? "result" : "results")
@@ -6943,6 +7070,11 @@ function renderNewsList(entry) {
       }
       appendMapRestaurantsStatus(container, entry);
     }
+  }
+
+  if (activeTab === "to_location") {
+    renderMapToLocationPanel(container, entry);
+    return;
   }
 
   const showSourceHeads = groups.length > 1;
@@ -7064,6 +7196,7 @@ function renderNewsList(entry) {
     && visibleItems.length
     && activeTab !== "reddit"
     && activeTab !== "restaurants"
+    && activeTab !== "to_location"
   ) {
     container.appendChild(newsPodcastAction(entry, visibleItems));
   }
@@ -7207,6 +7340,7 @@ let drivingGeneration = 0;
 let drivingActiveEntry = null;
 let drivingMap = null;
 const drivingCache = new Map();
+const MAP_GEOCODE_SUGGESTION_LIMIT = 6;
 
 function drivingCoordinate(value) {
   const number = Number(value);
@@ -7267,40 +7401,56 @@ function drivingStepPopup(step) {
   return content;
 }
 
-function appendDrivingMapNote(text) {
+function appendDrivingMapNoteTo(host, text) {
+  if (!host) return;
   const note = document.createElement("p");
   note.className = "driving-map-note";
   note.textContent = text;
-  drivingBodyEl.appendChild(note);
+  host.appendChild(note);
 }
 
-function renderDrivingMap(data, steps) {
-  clearDrivingMap();
-  if (!drivingBodyEl) return;
+function appendDrivingMapNote(text) {
+  appendDrivingMapNoteTo(drivingBodyEl, text);
+}
+
+function renderDrivingMap(data, steps, options = {}) {
+  const host = options.host || drivingBodyEl;
+  if (!host) return;
+  const setMap = typeof options.setMap === "function"
+    ? options.setMap
+    : (map) => { drivingMap = map; };
   if (!window.L || typeof window.L.map !== "function") {
-    appendDrivingMapNote("The route map could not load because Leaflet is unavailable.");
+    appendDrivingMapNoteTo(
+      host,
+      "The route map could not load because Leaflet is unavailable."
+    );
     return;
   }
   const rawGeometry = Array.isArray(data.geometry) ? data.geometry : [];
   const routeLatLngs = rawGeometry.map(drivingLonLatPair).filter(Boolean);
   if (routeLatLngs.length < 2) {
-    appendDrivingMapNote("No route geometry was returned for this drive.");
+    appendDrivingMapNoteTo(host, "No route geometry was returned for this drive.");
     return;
   }
 
   const container = document.createElement("div");
-  container.id = "driving-map";
+  if (options.containerClass) {
+    container.className = String(options.containerClass);
+  } else {
+    container.id = "driving-map";
+  }
   container.setAttribute("role", "img");
   container.setAttribute("aria-label", "Interactive map of the driving route");
-  drivingBodyEl.appendChild(container);
+  host.appendChild(container);
 
+  let map = null;
   try {
-    const map = window.L.map(container, {
+    map = window.L.map(container, {
       zoomControl: true,
       scrollWheelZoom: true,
       attributionControl: true,
     });
-    drivingMap = map;
+    setMap(map);
     window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution:
@@ -7348,19 +7498,37 @@ function renderDrivingMap(data, steps) {
       maxZoom: 17,
     });
     window.setTimeout(() => {
-      if (drivingMap === map) map.invalidateSize();
+      try {
+        map.invalidateSize();
+      } catch (_) {
+        // The tab may have been closed before the map finished laying out.
+      }
     }, 0);
   } catch (error) {
-    clearDrivingMap();
-    appendDrivingMapNote(
+    if (map) {
+      try {
+        map.remove();
+      } catch (_) {
+        // Ignore a half-initialized Leaflet map.
+      }
+    }
+    setMap(null);
+    appendDrivingMapNoteTo(
+      host,
       `The route map could not be drawn: ${error?.message || String(error)}`
     );
   }
 }
 
-function renderDrivingInstructions(item, data) {
-  clearDrivingMap();
-  drivingBodyEl.textContent = "";
+function renderDrivingInstructions(item, data, options = {}) {
+  const host = options.host || drivingBodyEl;
+  if (!host) return;
+  if (typeof options.clearMap === "function") {
+    options.clearMap();
+  } else if (!options.host) {
+    clearDrivingMap();
+  }
+  host.textContent = "";
   const summary = document.createElement("div");
   summary.className = "driving-summary";
   const distance = document.createElement("span");
@@ -7375,21 +7543,28 @@ function renderDrivingInstructions(item, data) {
   durationValue.textContent = data.duration_text || "—";
   duration.appendChild(durationValue);
   summary.appendChild(duration);
-  drivingBodyEl.appendChild(summary);
+  host.appendChild(summary);
 
-  const endpoints = document.createElement("div");
-  endpoints.className = "driving-endpoints";
-  const origin = drivingOriginLabel(drivingActiveEntry);
-  endpoints.textContent = origin
-    ? `From ${origin} to ${item.title || "destination"}`
-    : `To ${item.title || "destination"}`;
-  drivingBodyEl.appendChild(endpoints);
+  if (!options.hideEndpoints) {
+    const endpoints = document.createElement("div");
+    endpoints.className = "driving-endpoints";
+    const origin = options.originLabel !== undefined
+      ? options.originLabel
+      : drivingOriginLabel(drivingActiveEntry);
+    const destination = options.destinationLabel
+      || item?.title
+      || "destination";
+    endpoints.textContent = origin
+      ? `From ${origin} to ${destination}`
+      : `To ${destination}`;
+    host.appendChild(endpoints);
+  }
 
   const steps = Array.isArray(data.steps) ? data.steps : [];
   if (!steps.length) {
     const empty = document.createElement("p");
     empty.textContent = "No turn-by-turn steps were returned for this route.";
-    drivingBodyEl.appendChild(empty);
+    host.appendChild(empty);
   } else {
     const list = document.createElement("ol");
     list.className = "driving-steps";
@@ -7416,9 +7591,13 @@ function renderDrivingInstructions(item, data) {
       row.appendChild(main);
       list.appendChild(row);
     });
-    drivingBodyEl.appendChild(list);
+    host.appendChild(list);
   }
-  renderDrivingMap(data, steps);
+  renderDrivingMap(data, steps, {
+    host,
+    setMap: options.setMap,
+    containerClass: options.containerClass,
+  });
 }
 
 function drivingOriginLabel(entry) {
@@ -7491,6 +7670,378 @@ function openDrivingModal(entry, item) {
       }`;
       drivingBodyEl.appendChild(message);
     });
+}
+
+/* ------------------------------------------------------------------ *
+ *  /map "To location" tab (address autocomplete + inline OSRM route)
+ * ------------------------------------------------------------------ */
+let mapToLocationInputSeq = 0;
+
+function ensureMapToLocationState(entry) {
+  if (!entry.mapToLocation) {
+    entry.mapToLocation = {
+      query: "",
+      suggestions: [],
+      suggestError: "",
+      destination: null,
+      routeStatus: "idle",
+      routeError: "",
+      route: null,
+      routeMap: null,
+      suggestionRequestId: 0,
+      routeRequestId: 0,
+      suggestTimer: null,
+      activeSuggestion: -1,
+    };
+  }
+  return entry.mapToLocation;
+}
+
+function clearMapToLocationRoute(state) {
+  if (!state?.routeMap) return;
+  try {
+    state.routeMap.remove();
+  } catch (_) {
+    // Leaflet may already have removed the map with its container.
+  }
+  state.routeMap = null;
+}
+
+function renderMapToLocationPanel(container, entry) {
+  const state = ensureMapToLocationState(entry);
+  const location = entry.newsLocation || {};
+  const panel = document.createElement("div");
+  panel.className = "map-to-location";
+
+  const fromRow = document.createElement("div");
+  fromRow.className = "map-to-from";
+  fromRow.append("From ");
+  const fromName = document.createElement("strong");
+  fromName.textContent = String(
+    location.display_name || "the map location"
+  ).trim();
+  fromRow.appendChild(fromName);
+  panel.appendChild(fromRow);
+
+  const form = document.createElement("div");
+  form.className = "map-to-form";
+  const inputId = `map-to-input-${++mapToLocationInputSeq}`;
+  const label = document.createElement("label");
+  label.className = "map-to-label";
+  label.htmlFor = inputId;
+  label.textContent = "To";
+  const inputWrap = document.createElement("div");
+  inputWrap.className = "map-to-input-wrap";
+  const input = document.createElement("input");
+  input.id = inputId;
+  input.className = "map-to-input";
+  input.type = "text";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.placeholder = "Type a destination address";
+  input.value = state.query || "";
+  input.setAttribute("aria-autocomplete", "list");
+  input.setAttribute("aria-controls", `${inputId}-suggestions`);
+  const suggestionsEl = document.createElement("div");
+  suggestionsEl.className = "map-to-suggestions";
+  suggestionsEl.id = `${inputId}-suggestions`;
+  suggestionsEl.setAttribute("role", "listbox");
+  suggestionsEl.hidden = true;
+  inputWrap.appendChild(input);
+  inputWrap.appendChild(suggestionsEl);
+  const submit = document.createElement("button");
+  submit.type = "button";
+  submit.className = "map-to-submit";
+  submit.textContent = "Get route";
+  form.appendChild(label);
+  form.appendChild(inputWrap);
+  form.appendChild(submit);
+  panel.appendChild(form);
+
+  const statusEl = document.createElement("div");
+  statusEl.className = "map-to-status";
+  panel.appendChild(statusEl);
+  const resultsEl = document.createElement("div");
+  resultsEl.className = "map-to-results";
+  panel.appendChild(resultsEl);
+  container.appendChild(panel);
+
+  function setStatus(text, isError = false) {
+    statusEl.textContent = text || "";
+    statusEl.classList.toggle("is-error", Boolean(isError));
+  }
+
+  function renderSuggestions() {
+    suggestionsEl.textContent = "";
+    state.activeSuggestion = -1;
+    const items = Array.isArray(state.suggestions) ? state.suggestions : [];
+    suggestionsEl.hidden = !items.length;
+    items.forEach((destination, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "map-to-suggestion";
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", "false");
+      button.title = String(destination.display_name || "");
+      button.textContent = String(destination.display_name || "");
+      button.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        chooseDestination(destination);
+      });
+      suggestionsEl.appendChild(button);
+    });
+  }
+
+  function renderRoute(data) {
+    renderDrivingInstructions(null, data, {
+      host: resultsEl,
+      hideEndpoints: true,
+      clearMap: () => clearMapToLocationRoute(state),
+      setMap: (map) => { state.routeMap = map; },
+      containerClass: "map-to-route-map",
+    });
+  }
+
+  function loadRoute() {
+    const destination = state.destination;
+    const fromLat = drivingCoordinate(location.latitude);
+    const fromLon = drivingCoordinate(location.longitude);
+    const toLat = drivingCoordinate(destination?.latitude);
+    const toLon = drivingCoordinate(destination?.longitude);
+    if (
+      fromLat === null || fromLon === null
+      || toLat === null || toLon === null
+    ) {
+      state.routeStatus = "error";
+      state.routeError = "This destination has no coordinates for driving directions.";
+      state.route = null;
+      resultsEl.textContent = "";
+      setStatus(state.routeError, true);
+      return;
+    }
+
+    window.clearTimeout(state.suggestTimer);
+    state.suggestionRequestId += 1;
+    state.suggestions = [];
+    renderSuggestions();
+    clearMapToLocationRoute(state);
+    state.routeStatus = "loading";
+    state.routeError = "";
+    state.route = null;
+    resultsEl.textContent = "";
+    const loading = document.createElement("p");
+    loading.textContent = "Loading driving instructions from OSRM…";
+    resultsEl.appendChild(loading);
+    setStatus("");
+
+    const cacheKey = [fromLat, fromLon, toLat, toLon]
+      .map((value) => value.toFixed(5))
+      .join(",");
+    const cached = drivingCache.get(cacheKey);
+    if (cached) {
+      state.route = cached;
+      state.routeStatus = "ready";
+      renderRoute(cached);
+      return;
+    }
+
+    const requestId = ++state.routeRequestId;
+    const params = new URLSearchParams({
+      from_lat: String(fromLat),
+      from_lon: String(fromLon),
+      to_lat: String(toLat),
+      to_lon: String(toLon),
+    });
+    fetch(`/api/driving_instructions?${params.toString()}`, {
+      cache: "no-store",
+    })
+      .then((response) => response.json().then((data) => {
+        if (!response.ok) {
+          throw new Error(data?.error || `HTTP ${response.status}`);
+        }
+        return data;
+      }))
+      .then((data) => {
+        if (requestId !== state.routeRequestId) return;
+        drivingCache.set(cacheKey, data);
+        state.route = data;
+        state.routeStatus = "ready";
+        renderRoute(data);
+      })
+      .catch((error) => {
+        if (requestId !== state.routeRequestId) return;
+        state.routeStatus = "error";
+        state.routeError = `Could not load driving instructions: ${
+          error?.message || String(error)
+        }`;
+        state.route = null;
+        resultsEl.textContent = "";
+        const message = document.createElement("p");
+        message.className = "driving-error";
+        message.textContent = state.routeError;
+        resultsEl.appendChild(message);
+      });
+  }
+
+  function chooseDestination(destination) {
+    state.suggestionRequestId += 1;
+    window.clearTimeout(state.suggestTimer);
+    state.query = String(destination.display_name || "").trim();
+    state.destination = destination;
+    state.suggestions = [];
+    state.suggestError = "";
+    input.value = state.query;
+    input.focus();
+    renderSuggestions();
+    setStatus("");
+    loadRoute();
+  }
+
+  function lookupTypedDestination() {
+    const query = input.value.trim();
+    if (!query) {
+      setStatus("Type a destination address first.", true);
+      return;
+    }
+    const requestId = ++state.suggestionRequestId;
+    state.suggestions = [];
+    renderSuggestions();
+    setStatus(`Looking up ${query}…`);
+    const params = new URLSearchParams({ q: query, limit: "1" });
+    fetch(`/api/map_geocode?${params.toString()}`, { cache: "no-store" })
+      .then((response) => response.json().then((data) => {
+        if (!response.ok) {
+          throw new Error(data?.error || `HTTP ${response.status}`);
+        }
+        return data;
+      }))
+      .then((data) => {
+        if (requestId !== state.suggestionRequestId) return;
+        const destination = Array.isArray(data.items) ? data.items[0] : null;
+        if (!destination) {
+          setStatus(`No location matched ${query}.`, true);
+          return;
+        }
+        chooseDestination(destination);
+      })
+      .catch((error) => {
+        if (requestId !== state.suggestionRequestId) return;
+        setStatus(
+          `Could not look up ${query}: ${error?.message || String(error)}`,
+          true
+        );
+      });
+  }
+
+  input.addEventListener("input", () => {
+    const query = input.value;
+    state.query = query;
+    state.destination = null;
+    state.routeStatus = "idle";
+    state.routeError = "";
+    state.route = null;
+    state.routeRequestId += 1;
+    clearMapToLocationRoute(state);
+    resultsEl.textContent = "";
+    setStatus("");
+    window.clearTimeout(state.suggestTimer);
+    state.suggestions = [];
+    state.suggestError = "";
+    renderSuggestions();
+    const trimmed = query.trim();
+    if (trimmed.length < 3) return;
+    const requestId = ++state.suggestionRequestId;
+    state.suggestTimer = window.setTimeout(() => {
+      const params = new URLSearchParams({
+        q: trimmed,
+        limit: String(MAP_GEOCODE_SUGGESTION_LIMIT),
+      });
+      fetch(`/api/map_geocode?${params.toString()}`, { cache: "no-store" })
+        .then((response) => response.json().then((data) => {
+          if (!response.ok) {
+            throw new Error(data?.error || `HTTP ${response.status}`);
+          }
+          return data;
+        }))
+        .then((data) => {
+          if (requestId !== state.suggestionRequestId) return;
+          state.suggestions = Array.isArray(data.items) ? data.items : [];
+          renderSuggestions();
+        })
+        .catch((error) => {
+          if (requestId !== state.suggestionRequestId) return;
+          state.suggestions = [];
+          renderSuggestions();
+          setStatus(
+            `Address suggestions unavailable: ${error?.message || String(error)}`,
+            true
+          );
+        });
+    }, 400);
+  });
+
+  input.addEventListener("keydown", (event) => {
+    const buttons = Array.from(
+      suggestionsEl.querySelectorAll(".map-to-suggestion")
+    );
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (!buttons.length) return;
+      event.preventDefault();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      let next = state.activeSuggestion + delta;
+      if (next < 0) next = buttons.length - 1;
+      if (next >= buttons.length) next = 0;
+      state.activeSuggestion = next;
+      buttons.forEach((button, index) => {
+        button.classList.toggle("is-active", index === next);
+        button.setAttribute("aria-selected", index === next ? "true" : "false");
+      });
+      buttons[next].scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const selected = state.suggestions?.[state.activeSuggestion];
+      if (selected) {
+        chooseDestination(selected);
+      } else {
+        lookupTypedDestination();
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      state.suggestions = [];
+      renderSuggestions();
+      suggestionsEl.hidden = true;
+    }
+  });
+
+  input.addEventListener("blur", () => {
+    window.setTimeout(() => {
+      suggestionsEl.hidden = true;
+    }, 150);
+  });
+  input.addEventListener("focus", () => {
+    suggestionsEl.hidden = !(state.suggestions || []).length;
+  });
+  submit.addEventListener("click", (event) => {
+    event.preventDefault();
+    lookupTypedDestination();
+  });
+
+  renderSuggestions();
+  if (state.routeStatus === "ready" && state.route) {
+    renderRoute(state.route);
+  } else if (state.routeStatus === "loading") {
+    const loading = document.createElement("p");
+    loading.textContent = "Loading driving instructions from OSRM…";
+    resultsEl.appendChild(loading);
+  } else if (state.routeStatus === "error") {
+    const message = document.createElement("p");
+    message.className = "driving-error";
+    message.textContent = state.routeError;
+    resultsEl.appendChild(message);
+  }
 }
 
 function renderStockHoldings(container, entry) {

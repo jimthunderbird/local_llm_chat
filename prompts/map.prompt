@@ -7,6 +7,18 @@ knowledge {
   }
 }
 
+task.to_any_location (completed) {
+  in the tab group in the result, add a new tab "To location" {
+    - it should be after the tab "Nearby Restaurants"
+    - UI layout {
+      - From {<location> in bold font} 
+      - To <an auto hinting address completion textbox to allow me to type a target address>
+      - Driving instructions from <location> to <an auto hinting address completion textbox to allow me to type a target address>.address
+      - A map reflecting the driving instructions
+    }
+  }  
+}
+
 task (completed) {
   in the modal that shows the turn-by-turn driving instructions {
     under the instructions, draw the route polyline and place turn-by-turn markers on an interactive map using Leaflet (or MapLibre GL JS) paired with the geometry returned by OSRM
