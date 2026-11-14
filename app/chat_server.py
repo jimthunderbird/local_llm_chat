@@ -405,9 +405,9 @@ WRITE_A_BOOK_MODEL = os.environ.get(
 WRITE_A_BOOK_DIR = SCRIPT_DIR / ".chat" / "books"
 WRITE_A_BOOK_KEYWORD_LIMIT = 6
 # Matches {articles_to_learn} in prompts/write_a_book.prompt.
-WRITE_A_BOOK_SOURCE_LIMIT = 20
-# Fetch enough per query that de-duplication still leaves room for 20 sources.
-WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD = 10
+WRITE_A_BOOK_SOURCE_LIMIT = 40
+# Fetch enough per query that de-duplication still leaves room for 40 sources.
+WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD = 20
 WRITE_A_BOOK_RESEARCH_YEARS = 2
 WRITE_A_BOOK_CHAPTER_LIMIT = 10
 WRITE_A_BOOK_MIN_CHAPTERS = 3
@@ -8309,6 +8309,16 @@ def _book_clean_paragraphs(values) -> list[str]:
     return paragraphs
 
 
+def _book_plus_keywords(keywords: str) -> str:
+    """Join a keyword phrase with ``+`` for Google News search queries.
+
+    Matches task.keywords in prompts/write_a_book.prompt: the generated
+    keyword ``japan driving guide for beginner`` becomes
+    ``japan+driving+guide+for+beginner`` when passed to /news search.
+    """
+    return "+".join(str(keywords).split())
+
+
 def _book_search_candidates(
     keywords: list[str], limit: int, log: Callable[[str], None]
 ) -> list[dict]:
@@ -8325,7 +8335,10 @@ def _book_search_candidates(
         keyword = " ".join(str(keyword).split())
         if not keyword:
             continue
-        query = f"when:{WRITE_A_BOOK_RESEARCH_YEARS}y {keyword}"
+        query = (
+            f"when:{WRITE_A_BOOK_RESEARCH_YEARS}y "
+            f"{_book_plus_keywords(keyword)}"
+        )
         log(f"[book: searching recent articles for {keyword!r}]")
         command = [
             "php",
