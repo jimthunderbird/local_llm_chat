@@ -6,7 +6,7 @@ Ollama streaming, transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /youtube, /news, /mdn, /stackoverflow,
 /reddit, /tablelog, /stock, /googlenews, /medium,
 /gutenberg, /openlibrary, /changelog, /wikivoyage, /map, /wiki,
-/wiki_article, /deepresearch, /write_a_book,
+/wiki_article, /deepresearch, /write_a_book, /books,
 /article, /dict, and /ask. The browser is a
 pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
 
@@ -215,6 +215,7 @@ WEB_COMMANDS = {
     "/stock": "show a stock symbol profile, financial details, and related news articles: /stock <stock_symbol>",
     "/deepresearch": "run a bounded multi-round research report on <topic>: /deepresearch <topic>",
     "/write_a_book": "research the last 2 years and write a 3-10 chapter book (~800 words each) into .chat/books/: /write_a_book <subject>",
+    "/books": "list the books written by /write_a_book in .chat/books: /books [keyword]",
 }
 
 # News sources accepted by /news and completed by news_fetch.php.
@@ -493,6 +494,51 @@ def written_book_path(name: str) -> Path | None:
     except ValueError:
         return None
     return path
+
+
+def _book_title_from_html(path: Path) -> str:
+    """Read the <title> of a written book, falling back to its filename."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            head = handle.read(8192)
+    except OSError:
+        return ""
+    match = re.search(
+        r"<title[^>]*>(.*?)</title>", head, re.IGNORECASE | re.DOTALL
+    )
+    if match is None:
+        return ""
+    return html.unescape(re.sub(r"\s+", " ", match.group(1))).strip()
+
+
+def list_written_books() -> list[dict]:
+    """List the HTML books written by /write_a_book, newest first."""
+    if not WRITE_A_BOOK_DIR.is_dir():
+        return []
+    entries: list[dict] = []
+    for path in WRITE_A_BOOK_DIR.iterdir():
+        try:
+            if not path.is_file() or path.suffix.lower() != ".html":
+                continue
+            stat = path.stat()
+        except OSError:
+            continue
+        name = path.name
+        entries.append(
+            {
+                "id": name,
+                "name": name,
+                "title": _book_title_from_html(path) or path.stem,
+                "url": f"/api/book_file?name={quote(name)}",
+                "size": stat.st_size,
+                "mtime": stat.st_mtime,
+                "modified": time.strftime(
+                    "%Y-%m-%d %H:%M", time.localtime(stat.st_mtime)
+                ),
+            }
+        )
+    entries.sort(key=lambda item: item["mtime"], reverse=True)
+    return entries
 
 
 def _book_news_timestamp(value: str) -> float | None:
@@ -16171,6 +16217,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_deepresearch(argument)
         elif name == "/write_a_book":
             self._command_write_a_book(argument)
+        elif name == "/books":
+            self._command_books(argument)
         else:
             self._sse_text(
                 "output",
@@ -16531,6 +16579,65 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if state.benchmark_mode:
             self._sse_text(
                 "log", chat.format_benchmark_line(state.latest_benchmark)
+            )
+
+    def _command_books(self, argument: str) -> None:
+        """List every book written by /write_a_book in ./.chat/books.
+
+        An optional keyword filters the list by title or filename. Each item
+        is linked to /api/book_file so the browser can open and read the book
+        in a new tab.
+        """
+        keyword = " ".join(argument.split()).casefold()
+        entries = list_written_books()
+        if keyword:
+            entries = [
+                entry
+                for entry in entries
+                if keyword in entry["title"].casefold()
+                or keyword in entry["name"].casefold()
+            ]
+        self._sse(
+            "book_library",
+            {
+                "type": "start",
+                "source": "Books",
+                "directory": str(WRITE_A_BOOK_DIR),
+            },
+        )
+        for index, entry in enumerate(entries, 1):
+            self._sse(
+                "book_library",
+                {
+                    "type": "item",
+                    "index": index,
+                    "name": entry["name"],
+                    "title": entry["title"],
+                    "url": entry["url"],
+                    "size": entry["size"],
+                    "modified": entry["modified"],
+                },
+            )
+        self._sse(
+            "book_library",
+            {
+                "type": "done",
+                "count": len(entries),
+                "keyword": keyword,
+                "directory": str(WRITE_A_BOOK_DIR),
+            },
+        )
+        if not entries:
+            hint = (
+                f"No books matched {keyword!r}.\n"
+                if keyword
+                else "No books have been written yet.\n"
+            )
+            self._sse_text(
+                "output",
+                "\n"
+                + hint
+                + "Use /write_a_book <subject> to write one.\n",
             )
 
     def _command_refresh(self) -> None:

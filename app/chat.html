@@ -5995,6 +5995,9 @@ function makeEntry(kind, options = {}) {
     booksKeyword: "",
     booksHeading: "",
     booksError: "",
+    bookLibraryItems: [],
+    bookLibraryDirectory: "",
+    bookLibraryDone: false,
     writtenBook: null,
     mathtutor: null,
     mathtutorState: null,
@@ -6101,6 +6104,9 @@ function makeEntry(kind, options = {}) {
   entry.booksEl = document.createElement("div");
   entry.booksEl.className = "book-results";
   entry.booksEl.hidden = true;
+  entry.bookLibraryEl = document.createElement("div");
+  entry.bookLibraryEl.className = "book-results";
+  entry.bookLibraryEl.hidden = true;
   entry.writtenBookEl = document.createElement("div");
   entry.writtenBookEl.className = "book-results";
   entry.writtenBookEl.hidden = true;
@@ -6111,6 +6117,7 @@ function makeEntry(kind, options = {}) {
   entry.bodyEl.appendChild(entry.changelogEl);
   entry.bodyEl.appendChild(entry.videosEl);
   entry.bodyEl.appendChild(entry.booksEl);
+  entry.bodyEl.appendChild(entry.bookLibraryEl);
   entry.bodyEl.appendChild(entry.writtenBookEl);
   entry.bodyEl.appendChild(entry.mathtutorEl);
   entry.bodyEl.appendChild(entry.choicesEl);
@@ -6216,6 +6223,7 @@ function renderEntry(entry) {
   renderChangelogList(entry);
   renderVideoResults(entry);
   renderBookResults(entry);
+  renderBookLibrary(entry);
   renderWrittenBook(entry);
   renderMathTutor(entry);
   for (const choice of entry.choices) {
@@ -8880,6 +8888,101 @@ function renderWrittenBook(entry) {
   action.textContent = "Open book ↗";
   card.appendChild(action);
   cards.appendChild(card);
+  container.appendChild(cards);
+}
+
+function formatBookLibrarySize(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${value} B`;
+}
+
+function addBookLibraryEvent(entry, data) {
+  const type = String(data.type || "");
+  if (type === "start") {
+    entry.bookLibraryDirectory = String(data.directory || "");
+    scheduleRender(entry);
+    return;
+  }
+  if (type === "item") {
+    entry.bookLibraryItems.push({
+      index: Number(data.index) || entry.bookLibraryItems.length + 1,
+      name: String(data.name || ""),
+      title: String(data.title || data.name || "(untitled)"),
+      url: String(data.url || ""),
+      size: Number(data.size) || 0,
+      modified: String(data.modified || ""),
+    });
+    scheduleRender(entry);
+    return;
+  }
+  if (type === "done") {
+    entry.bookLibraryDone = true;
+    entry.thinking = false;
+    scheduleRender(entry);
+    return;
+  }
+  if (type === "error") {
+    addError(entry, data.message || "Could not list the books.");
+  }
+}
+
+function renderBookLibrary(entry) {
+  const container = entry.bookLibraryEl;
+  if (!container) return;
+  container.textContent = "";
+  const items = Array.isArray(entry.bookLibraryItems)
+    ? entry.bookLibraryItems
+    : [];
+  if (!items.length) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+
+  const head = document.createElement("div");
+  head.className = "book-list-head";
+  const label = document.createElement("strong");
+  label.textContent = "Books";
+  const note = document.createElement("span");
+  note.className = "book-list-note";
+  note.textContent = entry.bookLibraryDone
+    ? `${items.length} book${items.length === 1 ? "" : "s"} · click to open in a new tab`
+    : `${items.length} loaded…`;
+  head.appendChild(label);
+  head.appendChild(note);
+  container.appendChild(head);
+
+  const cards = document.createElement("div");
+  cards.className = "book-cards";
+  for (const item of items) {
+    const card = document.createElement("a");
+    card.className = "book-card";
+    card.href = item.url || "#";
+    card.target = "_blank";
+    card.rel = "noopener noreferrer";
+    card.title = `Open ${item.name || item.title} in a new tab`;
+
+    const title = document.createElement("div");
+    title.className = "book-title";
+    title.textContent = item.title;
+    card.appendChild(title);
+
+    const meta = document.createElement("div");
+    meta.className = "book-authors";
+    const metaParts = [];
+    if (item.modified) metaParts.push(`Saved ${item.modified}`);
+    metaParts.push(formatBookLibrarySize(item.size));
+    meta.textContent = metaParts.join(" · ");
+    card.appendChild(meta);
+
+    const action = document.createElement("span");
+    action.className = "book-action";
+    action.textContent = "Open book ↗";
+    card.appendChild(action);
+    cards.appendChild(card);
+  }
   container.appendChild(cards);
 }
 
@@ -14197,6 +14300,7 @@ function submitText(text, fromChoice = false) {
       entry.booksError = "";
       scheduleRender(entry);
     },
+    book_library: (data) => addBookLibraryEvent(entry, data || {}),
     written_book: (data) => {
       entry.writtenBook = data || null;
       scheduleRender(entry);

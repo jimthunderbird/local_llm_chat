@@ -25,3 +25,9 @@ task.write_a_book (completed) {
     save the book to {book_directory}/{subject}.html
   }
 }
+
+task (completed) {
+  create a command: /books {
+    - list all the books in {book_directory}
+  }
+}
