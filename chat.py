@@ -604,7 +604,7 @@ FALLBACK_PROMPT = """You are a precise, analytical retrieval-augmented assistant
 
 ### INSTRUCTIONS & CONSTRAINTS:
 1. Grounding: Rely ONLY on the information directly stated in the chunks below. Do not infer unstated facts or incorporate external knowledge.
-2. No Citations: Do not mention chunk IDs, chunk numbers, or the word "Chunk" anywhere in the answer. The numbered chunk blocks are internal retrieval metadata only.
+2. No Citations: Do not mention chunk IDs, chunk numbers, or the word "Chunk" anywhere in the answer. Never write parenthetical or bracketed references such as (chunk 14), [Chunk 11], "chunk 7", or "one source (chunk 2)". The numbered chunk blocks are internal retrieval metadata only; refer to the substance directly as if writing one coherent article.
 3. Conflict Resolution: If two chunks present conflicting figures or statements, highlight the discrepancy.
 4. Aggregations & Counts: If asked to count, list, or aggregate distinct entities across chunks, verify that duplicates or overlapping mentions are deduplicated before providing a final count.
 5. Missing Data: If the provided chunks do not contain sufficient evidence to answer the question, state: "The provided context does not contain sufficient information to answer this question."
@@ -699,7 +699,8 @@ user message contains evidence and a question. Use ONLY the evidence.
   answer that part; never refuse a partially answerable question.
 - Write the answer in your own words. Do not copy sentences from the evidence.
   Do not mention chunks, sources, titles, brackets, citations, "the provided
-  context", "the evidence", or "the documents".
+  context", "the evidence", or "the documents". Never write "(chunk N)",
+  "[Chunk N]", or any chunk number; state the facts directly.
 - Answer in the language of the question.
 - Follow the requested format and length. For lists, give every distinct item
   and deduplicate; if the question asks for "all" and the evidence lists only
@@ -3317,9 +3318,19 @@ def _clean_lfm_prose(answer: str) -> str:
     )[0]
     # Remove bracketed citation numbers such as [1], [2, 3], [1-4].
     answer = re.sub(r"\[\d+(?:\s*[-,]\s*\d+)*\]", "", answer)
-    # Remove "chunk 3" / "source 2" style references.
+    # Remove bracketed/parenthesized citation forms such as [Chunk 11] and
+    # (chunk 14), plus "chunk 3" / "source 2" style references. Removing the
+    # whole wrapper avoids leaving a stray "(  )" behind in the answer.
     answer = re.sub(
-        r"\b(?:chunk|source|note|document)\s*\d+\b",
+        r"[ \t]*[\[(]\s*(?:(?:see|in|from|source)\s+)?"
+        r"(?:chunk|source|note|document)\s*#?\s*\d+"
+        r"(?:\s*(?:,|&|and|[-–—])\s*\d+)*\s*[\])]",
+        "",
+        answer,
+        flags=re.IGNORECASE,
+    )
+    answer = re.sub(
+        r"\b(?:chunk|source|note|document)\s*#?\s*\d+\b",
         "",
         answer,
         flags=re.IGNORECASE,
@@ -4092,19 +4103,28 @@ def pop_translation_segment(buffer: str, final: bool = False) -> tuple[str, str]
 
 
 # Chunk ids are internal retrieval metadata. The prompt explicitly forbids
-# exposing them, and this filter removes citations such as [Chunk 11] or
-# [Chunk 11, 14] from the streamed answer as a safety net.
-CHUNK_CITATION_PATTERN = re.compile(
-    r"[ \t]*\[\s*chunk(?:s)?\s*#?\s*\d+"
-    r"(?:\s*(?:,|&|and|[-–—])\s*\d+)*\s*\]",
-    re.IGNORECASE,
+# exposing them, and this pattern removes every common citation form from the
+# streamed answer as a safety net: [Chunk 11], [Chunk 11, 14], (chunk 14),
+# "chunk 7", "chunks 2 and 5", "Chunk #3", and "see chunk 4". The word
+# "chunk" followed by a number is never ordinary prose, so matching it bare is
+# intentional; "a chunk of meat" has no number and is left untouched.
+_CHUNK_CITATION_CORE = (
+    r"chunks?(?:\s+(?:id|ids|number|numbers|no\.?))?"
+    r"\s*[:#]?\s*\d+"
+    r"(?:\s*(?:,|&|and|[-–—])\s*\d+)*"
 )
-CHUNK_CITATION_PARTIAL_PATTERN = re.compile(
-    r"^\[\s*(?:c(?:h(?:u(?:n(?:k(?:s)?)?)?)?)?"
-    r"(?:\s*#?\s*\d*(?:\s*(?:,|&|and|[-–—])\s*\d*)*)?)?\s*$",
+CHUNK_CITATION_PATTERN = re.compile(
+    rf"(?:[ \t]*(?:[\[(]\s*(?:(?:see|in|from|source)\s+)?"
+    rf"{_CHUNK_CITATION_CORE}\s*[\])]|\b{_CHUNK_CITATION_CORE}))",
     re.IGNORECASE,
 )
 CHUNK_CITATION_MAX_PENDING = 80
+# After a bare citation ending in a digit, these remainders could still become
+# another item in the same reference ("chunk 14" -> "chunk 14 and 7").
+_CHUNK_CITATION_CONTINUATION_PREFIX = re.compile(
+    r"(?i)^[ \t]*(?:,\s*|&\s*|a(?:n(?:d)?)?\s*|[-–—]\s*)?\d*"
+    r"(?:[ \t]*(?:,|&|and|[-–—])[ \t]*\d*)*$"
+)
 
 # The answer prompt asks for a direct answer only. Some models still append a
 # "Supporting Evidence" section out of habit, so remove that section both from
@@ -4119,8 +4139,88 @@ SUPPORTING_EVIDENCE_HEADING = "supporting evidence"
 
 
 def strip_chunk_citations(text: str) -> str:
-    """Remove internal chunk references like ``[Chunk 11]`` from text."""
+    """Remove internal chunk references from text.
+
+    Handles bracketed, parenthesized, and bare forms such as ``[Chunk 11]``,
+    ``(chunk 14)``, and ``chunk 7`` so an answer never reads like a montage of
+    numbered retrieval blocks.
+    """
     return CHUNK_CITATION_PATTERN.sub("", text)
+
+
+def _chunk_citation_suffix_is_prefix(rest: str) -> bool:
+    """Return True while ``rest`` could still become a citation continuation."""
+    rest = rest.lstrip(" \t")
+    for keyword in ("numbers", "number", "no.", "no", "ids", "id", "and"):
+        if keyword.startswith(rest.lower()):
+            return True
+        if rest.lower().startswith(keyword):
+            rest = rest[len(keyword) :].lstrip(" \t")
+            break
+    return bool(
+        re.fullmatch(
+            r"[:#]?[ \t]*\d*(?:[ \t]*(?:,|&|and|[-–—])[ \t]*\d*)*"
+            r"[ \t]*[\])]?",
+            rest,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _chunk_citation_could_continue(remainder: str, matched: str) -> bool:
+    """Return True while a complete bare citation may still grow."""
+    if not re.search(r"\d$", matched):
+        return False
+    return bool(_CHUNK_CITATION_CONTINUATION_PREFIX.fullmatch(remainder))
+
+
+def _could_be_chunk_citation_body(body: str) -> bool:
+    """Return True while ``body`` could still become a chunk citation."""
+    body = body.lstrip(" \t")
+    match = re.match(r"c(?:h(?:u(?:n(?:k(?:s)?)?)?)?)?", body, re.IGNORECASE)
+    if match is None:
+        return False
+    word = match.group(0).lower()
+    rest = body[match.end() :]
+    if word not in ("chunk", "chunks"):
+        # A partial word ("c", "chun") is only a candidate when nothing else
+        # has arrived yet; otherwise it is ordinary text such as "could".
+        return rest == ""
+    return _chunk_citation_suffix_is_prefix(rest)
+
+
+def _could_be_chunk_citation(text: str) -> bool:
+    """Return True while ``text`` could still become a chunk citation."""
+    stripped = text.lstrip(" \t")
+    if not stripped:
+        return False
+    opening = stripped[0]
+    if opening in "[(":
+        body = stripped[1:].lstrip(" \t")
+        if not body:
+            return True
+        low = body.lower()
+        for keyword in ("see ", "in ", "from ", "source "):
+            if keyword.startswith(low):
+                return True
+            if low.startswith(keyword):
+                body = body[len(keyword) :]
+                break
+        return _could_be_chunk_citation_body(body)
+    return _could_be_chunk_citation_body(stripped)
+
+
+def _find_chunk_citation_start(text: str) -> int:
+    """Return the leftmost index that could begin a chunk citation."""
+    for index, char in enumerate(text):
+        if char in "[(":
+            return index
+        if char in "cC" and (
+            index == 0
+            or not (text[index - 1].isalnum() or text[index - 1] == "_")
+        ):
+            return index
+    return -1
 
 
 def strip_supporting_evidence(text: str) -> str:
@@ -4192,7 +4292,14 @@ class SupportingEvidenceFilter:
 
 
 class ChunkCitationFilter:
-    """Streaming filter that removes chunk citations token by token."""
+    """Streaming filter that removes chunk citations token by token.
+
+    It deliberately backs up over the whitespace before a candidate reference
+    so deleting ``(chunk 14)`` from ``source (chunk 14) estimates`` leaves one
+    clean space instead of two. A candidate is held only while it can still
+    grow into a citation, so ordinary prose such as "a chunk of meat" streams
+    through unchanged.
+    """
 
     def __init__(self) -> None:
         self._pending = ""
@@ -4202,11 +4309,11 @@ class ChunkCitationFilter:
         self._pending += text
         output: list[str] = []
         while self._pending:
-            start = self._pending.find("[")
+            start = _find_chunk_citation_start(self._pending)
             if start < 0:
                 # Hold trailing horizontal whitespace until the next token. If
-                # a citation starts next, the space is dropped with it instead
-                # of being printed twice around the removed reference.
+                # a citation starts next, that space is removed with it rather
+                # than leaving a double space behind.
                 trimmed = self._pending.rstrip(" \t")
                 if trimmed != self._pending:
                     output.append(trimmed)
@@ -4216,34 +4323,44 @@ class ChunkCitationFilter:
                     self._pending = ""
                 break
 
-            before = self._pending[:start]
-            remainder = self._pending[start:]
-            match = CHUNK_CITATION_PATTERN.match(remainder)
+            # Keep the run of spaces/tabs before a candidate with the pending
+            # text so a removed citation takes its leading space with it.
+            whitespace = start
+            while whitespace > 0 and self._pending[whitespace - 1] in " \t":
+                whitespace -= 1
+            if whitespace > 0:
+                output.append(self._pending[:whitespace])
+                self._pending = self._pending[whitespace:]
+                continue
+
+            match = CHUNK_CITATION_PATTERN.match(self._pending)
             if match:
-                output.append(before.rstrip(" \t"))
-                self._pending = remainder[match.end() :]
+                remainder = self._pending[match.end() :]
+                if _chunk_citation_could_continue(
+                    remainder, match.group(0)
+                ):
+                    break
+                self._pending = remainder
                 continue
 
             if (
-                len(remainder) <= CHUNK_CITATION_MAX_PENDING
-                and CHUNK_CITATION_PARTIAL_PATTERN.match(remainder)
+                len(self._pending) <= CHUNK_CITATION_MAX_PENDING
+                and _could_be_chunk_citation(self._pending)
             ):
-                # Hold whitespace immediately before a possible citation so
-                # removing it does not leave a double space behind.
-                trimmed = before.rstrip(" \t")
-                output.append(trimmed)
-                self._pending = before[len(trimmed) :] + remainder
                 break
 
-            output.append(before)
-            output.append("[")
-            self._pending = remainder[1:]
+            output.append(self._pending[0])
+            self._pending = self._pending[1:]
         return "".join(output)
 
     def flush(self) -> str:
-        """Return any buffered text once the response is complete."""
+        """Return any buffered text once the response is complete.
+
+        A complete citation may still be pending because it ended in a digit
+        and could have grown into a multi-number reference; strip it now.
+        """
         pending, self._pending = self._pending, ""
-        return pending
+        return CHUNK_CITATION_PATTERN.sub("", pending)
 
 
 def stream_answer(

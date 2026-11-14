@@ -5230,7 +5230,8 @@ structure, or architecture. Answer as an experienced software engineer.
   (for example ```python).
 - Briefly explain the key idea, then the code, then any complexity or
   trade-offs that matter.
-- Do not invent citations or mention chunk IDs.
+- Do not invent citations or mention chunk IDs. Never write references such
+  as (chunk 14), [Chunk 11], or "chunk 7"; state the facts directly.
 
 """
 

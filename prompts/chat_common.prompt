@@ -1,5 +1,14 @@
 task (completed) {
   bug:
+  in the answers, i see something like:
+  "One source (chunk 14) estimates roughly 115,000 books shipped from Japan, while another (chunk 7) describes the activity more generally without a specific number."
+  please, do not mention any chunk infomation like (chunk 14)
+  the idea is to make the answer looks coherent and does not look like a collection from different trunks
+  please fix it in a systematic way
+}
+
+task (completed) {
+  bug:
   question: who is the new CEO of nvidia
   expect: it should say jensen huang is no longer the CEO
   actual: jensen huang is currently the CEO...
