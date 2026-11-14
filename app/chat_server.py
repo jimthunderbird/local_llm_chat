@@ -74,6 +74,10 @@ Endpoints:
                                   r/stock and r/<ticker> for the /stock modal
     GET  /api/map_restaurants    ?lat=<latitude>&lon=<longitude> fetch nearby
                                   restaurants from the Overpass API for /map
+    GET  /api/driving_instructions
+                                  ?from_lat=<lat>&from_lon=<lon>
+                                  &to_lat=<lat>&to_lon=<lon> driving route and
+                                  turn-by-turn steps from the OSRM demo server
     GET  /api/osm_restaurant     ?type=<node|way|relation>&id=<osm_id>
                                   fetch one restaurant's cuisine, address, and
                                   opening hours from the Overpass API for the
@@ -2844,6 +2848,14 @@ OSM_RESTAURANT_CACHE_MAX_ITEMS = 512
 OSM_RESTAURANT_TYPES = {"node", "way", "relation"}
 OSM_RESTAURANT_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 OSM_RESTAURANT_CACHE_LOCK = threading.Lock()
+# Driving instructions use the public OSRM demo server that the map examples
+# reference. Routes are cached briefly so reopening the same destination does
+# not hit the shared demo server again.
+OSRM_ROUTE_URL = "https://router.project-osrm.org/route/v1/driving/{coordinates}"
+DRIVING_CACHE_TTL_SECONDS = 3_600
+DRIVING_CACHE_MAX_ITEMS = 256
+DRIVING_CACHE: dict[tuple[float, float, float, float], tuple[float, dict]] = {}
+DRIVING_CACHE_LOCK = threading.Lock()
 YELP_SEARCH_URL = "https://api.yelp.com/v3/businesses/search"
 YELP_BUSINESS_URL = "https://api.yelp.com/v3/businesses/{business_id}"
 YELP_DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -3217,6 +3229,263 @@ def search_nearby_restaurants(
         )
     results.sort(key=lambda item: item["distance_m"])
     return results[: max(1, min(int(limit), 100))]
+
+
+def _format_route_distance(meters: object) -> str:
+    """Format an OSRM route distance for the driving-instructions modal."""
+    try:
+        value = float(meters)
+    except (TypeError, ValueError):
+        return ""
+    if value < 1000:
+        return f"{value:.0f} m"
+    return f"{value / 1000:.1f} km"
+
+
+def _format_route_duration(seconds: object) -> str:
+    """Format an OSRM duration as minutes, or hours and minutes."""
+    try:
+        value = max(0.0, float(seconds))
+    except (TypeError, ValueError):
+        return ""
+    minutes = max(1, int(round(value / 60.0)))
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, remainder = divmod(minutes, 60)
+    if not remainder:
+        return f"{hours} h"
+    return f"{hours} h {remainder} min"
+
+
+def _osrm_lonlat_pair(value: object) -> list[float] | None:
+    """Return a validated [longitude, latitude] pair from an OSRM geometry."""
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    try:
+        longitude = float(value[0])
+        latitude = float(value[1])
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(longitude) and math.isfinite(latitude)):
+        return None
+    if not (-180 <= longitude <= 180 and -90 <= latitude <= 90):
+        return None
+    return [round(longitude, 6), round(latitude, 6)]
+
+
+def _osrm_modifier_phrase(modifier: str) -> str:
+    """Make OSRM's turn modifiers read naturally."""
+    return {
+        "slight left": "slightly left",
+        "slight right": "slightly right",
+        "sharp left": "sharply left",
+        "sharp right": "sharply right",
+        "uturn": "U-turn",
+    }.get(modifier, modifier)
+
+
+def _osrm_step_instruction(step: dict) -> str:
+    """Turn one OSRM step into a readable driving instruction."""
+    maneuver = step.get("maneuver")
+    if not isinstance(maneuver, dict):
+        maneuver = {}
+    maneuver_type = str(maneuver.get("type") or "").strip().lower()
+    raw_modifier = str(maneuver.get("modifier") or "").strip().lower()
+    raw_modifier = raw_modifier.replace("_", " ")
+    modifier = _osrm_modifier_phrase(raw_modifier)
+    road = _map_plain_text(step.get("name")) or _map_plain_text(
+        step.get("ref")
+    )
+    road_suffix = f" onto {road}" if road else ""
+
+    if maneuver_type == "depart":
+        return f"Depart on {road}" if road else "Depart"
+    if maneuver_type == "arrive":
+        return "Arrive at your destination"
+    if raw_modifier == "uturn" and maneuver_type in {
+        "turn",
+        "continue",
+        "new name",
+        "end of road",
+    }:
+        return "Make a U-turn" + road_suffix
+    if maneuver_type in {"roundabout", "rotary", "roundabout turn"}:
+        exit_number = maneuver.get("exit")
+        text = "Enter the roundabout"
+        if exit_number not in (None, ""):
+            text += f" and take exit {exit_number}"
+        return text + road_suffix
+    if maneuver_type in {"exit roundabout", "exit rotary"}:
+        return "Exit the roundabout" + road_suffix
+    if maneuver_type == "end of road":
+        text = "At the end of the road"
+        if modifier:
+            text += f", turn {modifier}"
+        return text + road_suffix
+    if maneuver_type == "fork":
+        fork_modifier = {
+            "slightly left": "left",
+            "slightly right": "right",
+        }.get(modifier, modifier)
+        text = f"Keep {fork_modifier}" if fork_modifier else "Keep straight"
+        return text + road_suffix
+    if maneuver_type == "merge":
+        text = f"Merge {modifier}" if modifier else "Merge"
+        return text + road_suffix
+    if maneuver_type == "on ramp":
+        text = "Take the ramp"
+        if modifier:
+            text += f" {modifier}"
+        return text + road_suffix
+    if maneuver_type == "off ramp":
+        return "Take the exit" + road_suffix
+    if maneuver_type == "continue":
+        text = f"Continue {modifier}" if modifier else "Continue"
+        return text + road_suffix
+    if maneuver_type == "new name":
+        return ("Continue" + road_suffix) if road else "Continue"
+    if maneuver_type == "notification":
+        message = _map_plain_text(step.get("name"))
+        return message or "Continue"
+
+    text = maneuver_type.replace("_", " ").strip() or "Continue"
+    text = text[:1].upper() + text[1:]
+    if modifier:
+        text += f" {modifier}"
+    return text + road_suffix
+
+
+def fetch_driving_instructions(
+    from_latitude: float,
+    from_longitude: float,
+    to_latitude: float,
+    to_longitude: float,
+) -> dict:
+    """Return an OSRM driving route with turn-by-turn instructions.
+
+    The OSRM demo server is shared and rate-limited, so recent routes are
+    cached and callers make one request per destination click rather than
+    polling it in the UI.
+    """
+    coordinates = (from_latitude, from_longitude, to_latitude, to_longitude)
+    for value in coordinates:
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise ValueError("Invalid driving-route coordinates")
+    if not (-90 <= from_latitude <= 90 and -180 <= from_longitude <= 180):
+        raise ValueError("Invalid driving-route origin")
+    if not (-90 <= to_latitude <= 90 and -180 <= to_longitude <= 180):
+        raise ValueError("Invalid driving-route destination")
+
+    cache_key = tuple(round(float(value), 5) for value in coordinates)
+    now = time.time()
+    with DRIVING_CACHE_LOCK:
+        cached = DRIVING_CACHE.get(cache_key)
+        if cached and now - cached[0] <= DRIVING_CACHE_TTL_SECONDS:
+            return cached[1]
+
+    route_coordinates = (
+        f"{float(from_longitude):.6f},{float(from_latitude):.6f};"
+        f"{float(to_longitude):.6f},{float(to_latitude):.6f}"
+    )
+    try:
+        response = requests.get(
+            OSRM_ROUTE_URL.format(coordinates=route_coordinates),
+            params={
+                "overview": "full",
+                "geometries": "geojson",
+                "steps": "true",
+                "alternatives": "false",
+            },
+            headers={**chat.HTTP_HEADERS, "User-Agent": MAP_USER_AGENT},
+            timeout=(8, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"OSRM driving directions failed: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise RuntimeError("OSRM returned an unexpected response.")
+    if data.get("code") != "Ok":
+        message = _map_plain_text(data.get("message")) or data.get("code")
+        raise RuntimeError(f"OSRM could not find a driving route: {message}")
+    routes = data.get("routes")
+    if not isinstance(routes, list) or not routes:
+        raise RuntimeError("OSRM could not find a driving route.")
+
+    route = routes[0]
+    if not isinstance(route, dict):
+        raise RuntimeError("OSRM returned an unexpected route.")
+
+    steps: list[dict] = []
+    legs = route.get("legs")
+    if isinstance(legs, list):
+        for leg in legs:
+            if not isinstance(leg, dict):
+                continue
+            leg_steps = leg.get("steps")
+            if not isinstance(leg_steps, list):
+                continue
+            for step in leg_steps:
+                if not isinstance(step, dict):
+                    continue
+                distance = step.get("distance")
+                duration = step.get("duration")
+                maneuver = step.get("maneuver")
+                if not isinstance(maneuver, dict):
+                    maneuver = {}
+                step_data = {
+                    "instruction": _osrm_step_instruction(step),
+                    "distance_m": distance,
+                    "duration_s": duration,
+                    "distance_text": _format_route_distance(distance),
+                    "duration_text": _format_route_duration(duration),
+                    "maneuver": {
+                        "type": str(maneuver.get("type") or ""),
+                        "modifier": str(maneuver.get("modifier") or ""),
+                    },
+                }
+                location = _osrm_lonlat_pair(maneuver.get("location"))
+                if location is not None:
+                    step_data["location"] = {
+                        "longitude": location[0],
+                        "latitude": location[1],
+                    }
+                steps.append(step_data)
+
+    geometry: list[list[float]] = []
+    raw_geometry = route.get("geometry")
+    if isinstance(raw_geometry, dict):
+        raw_coordinates = raw_geometry.get("coordinates")
+        if isinstance(raw_coordinates, list):
+            for coordinate in raw_coordinates:
+                pair = _osrm_lonlat_pair(coordinate)
+                if pair is not None:
+                    geometry.append(pair)
+
+    result = {
+        "from": {
+            "latitude": float(from_latitude),
+            "longitude": float(from_longitude),
+        },
+        "to": {
+            "latitude": float(to_latitude),
+            "longitude": float(to_longitude),
+        },
+        "distance_m": route.get("distance"),
+        "duration_s": route.get("duration"),
+        "distance_text": _format_route_distance(route.get("distance")),
+        "duration_text": _format_route_duration(route.get("duration")),
+        "geometry": geometry,
+        "steps": steps,
+    }
+
+    with DRIVING_CACHE_LOCK:
+        if len(DRIVING_CACHE) >= DRIVING_CACHE_MAX_ITEMS:
+            oldest = min(DRIVING_CACHE, key=lambda key: DRIVING_CACHE[key][0])
+            DRIVING_CACHE.pop(oldest, None)
+        DRIVING_CACHE[cache_key] = (now, result)
+    return result
 
 
 def _osm_tag_text(tags: dict, *keys: str) -> str:
@@ -3703,6 +3972,16 @@ def search_map_places(location: str) -> tuple[dict, list[dict]]:
                 "images": [image_url] if image_url else [],
                 "distance": distance,
                 "coordinates": coordinates,
+                "latitude": (
+                    float(latitude)
+                    if isinstance(latitude, (int, float))
+                    else None
+                ),
+                "longitude": (
+                    float(longitude)
+                    if isinstance(longitude, (int, float))
+                    else None
+                ),
             }
         )
     return geo, results
@@ -12944,6 +13223,33 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"items": items})
             return
+        if path == "/api/driving_instructions":
+            params = parse_qs(parsed.query)
+            try:
+                from_latitude = float((params.get("from_lat") or [""])[0])
+                from_longitude = float((params.get("from_lon") or [""])[0])
+                to_latitude = float((params.get("to_lat") or [""])[0])
+                to_longitude = float((params.get("to_lon") or [""])[0])
+            except (TypeError, ValueError):
+                self._send_error_json(
+                    "Missing or invalid driving-route coordinates", 400
+                )
+                return
+            try:
+                result = fetch_driving_instructions(
+                    from_latitude,
+                    from_longitude,
+                    to_latitude,
+                    to_longitude,
+                )
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except RuntimeError as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json(result)
+            return
         if path == "/api/osm_restaurant":
             params = parse_qs(parsed.query)
             osm_type = (params.get("type") or [""])[0].strip().lower()
@@ -16819,6 +17125,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "section": result["section"],
                     "summary": result["summary"],
                     "images": result["images"],
+                    "latitude": result["latitude"],
+                    "longitude": result["longitude"],
                     "docs": True,
                     "docs_label": "Wikipedia",
                     "learnable": False,

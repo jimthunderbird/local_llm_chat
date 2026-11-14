@@ -4,6 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Personal Chatbot</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   :root {
     --bg: #0a0e13;
@@ -1210,6 +1212,150 @@
     user-select: none;
   }
   #stock-company-close:hover { color: var(--text); }
+  /* /map driving instructions: a car icon in each place/restaurant row
+   * opens this modal with the OSRM route and turn-by-turn steps. */
+  .drive-btn {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 24px;
+    height: 22px;
+    padding: 0;
+    color: #d7ecff;
+    background: #172433;
+    border: 1px solid #2d4d68;
+    border-radius: 5px;
+    cursor: pointer;
+  }
+  .drive-btn:hover {
+    background: #20364a;
+    border-color: #3d6b8f;
+  }
+  .drive-btn svg { display: block; width: 14px; height: 14px; }
+  .news-title-drive { margin-top: 1px; }
+  #driving-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 63;
+    background: rgba(2, 6, 10, .72);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  #driving-panel[hidden] { display: none; }
+  .driving-card {
+    width: min(680px, 100%);
+    max-height: 84vh;
+    display: flex;
+    flex-direction: column;
+    background: #0d151e;
+    border: 1px solid #2b4056;
+    border-radius: 10px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.7);
+    overflow: hidden;
+  }
+  .driving-body {
+    min-height: 0;
+    padding: 14px 18px 18px;
+    overflow-y: auto;
+    color: #cfdae5;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .driving-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    background: #0f1821;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .driving-summary strong { color: #e2edf7; }
+  .driving-endpoints {
+    color: var(--dim);
+    font-size: 12px;
+    margin-bottom: 10px;
+  }
+  .driving-steps { list-style: none; margin: 0; padding: 0; }
+  .driving-step {
+    display: flex;
+    gap: 10px;
+    padding: 8px 0;
+    border-top: 1px solid var(--border);
+  }
+  .driving-step:first-child { border-top: 0; }
+  .driving-step-index {
+    flex: 0 0 22px;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .driving-step-main { flex: 1; min-width: 0; }
+  .driving-step-text { color: #e2edf7; }
+  .driving-step-meta { color: var(--dim); font-size: 11.5px; margin-top: 2px; }
+  .driving-error { color: var(--warn); }
+  #driving-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+    user-select: none;
+  }
+  #driving-close:hover { color: var(--text); }
+  /* Interactive OSRM route map rendered below the turn-by-turn steps. */
+  #driving-map {
+    height: 320px;
+    min-height: 220px;
+    margin-top: 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: #0f1821;
+    position: relative;
+    z-index: 0;
+  }
+  #driving-map .leaflet-container { background: #0f1821; }
+  .driving-map-note {
+    color: var(--dim);
+    font-size: 12px;
+    margin-top: 8px;
+  }
+  .driving-map-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 2px solid #0d151e;
+    background: #79c0ff;
+    color: #08111a;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    box-shadow: 0 2px 8px rgba(0,0,0,.55);
+  }
+  .driving-map-icon.is-start { background: #7ee787; }
+  .driving-map-icon.is-finish { background: #ff7b72; }
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+    background: #0d151e;
+    color: var(--text);
+  }
+  .leaflet-popup-content {
+    margin: 10px 12px;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .leaflet-container a.leaflet-popup-close-button { color: var(--dim); }
   /* /stock keeps the profile card above a News/Reddit tab group. */
   .news-tabs {
     display: flex;
@@ -3268,6 +3414,20 @@
   </div>
 </div>
 
+<div id="driving-panel" hidden>
+  <div class="driving-card" role="dialog" aria-modal="true" aria-labelledby="driving-title">
+    <div class="news-head">
+      <div class="news-head-main">
+        <div id="driving-title" class="news-modal-title">Driving instructions</div>
+        <div id="driving-meta" class="news-modal-meta"></div>
+      </div>
+      <a id="driving-open" class="news-link" href="#" target="_blank" rel="noopener noreferrer">Open route ↗</a>
+      <button id="driving-close" type="button" title="Close (Esc)">×</button>
+    </div>
+    <div id="driving-body" class="driving-body"></div>
+  </div>
+</div>
+
 <div id="changelog-panel" hidden>
   <div class="changelog-card" role="dialog" aria-modal="true" aria-labelledby="changelog-title">
     <div class="news-head">
@@ -3502,6 +3662,12 @@ const stockCompanyMetaEl = $("#stock-company-meta");
 const stockCompanyLinkEl = $("#stock-company-link");
 const stockCompanyBodyEl = $("#stock-company-body");
 const stockCompanyCloseEl = $("#stock-company-close");
+const drivingPanelEl = $("#driving-panel");
+const drivingTitleEl = $("#driving-title");
+const drivingMetaEl = $("#driving-meta");
+const drivingOpenEl = $("#driving-open");
+const drivingBodyEl = $("#driving-body");
+const drivingCloseEl = $("#driving-close");
 const newsTitleEl = $("#news-title");
 const newsMetaEl = $("#news-meta");
 const newsPrevEl = $("#news-prev");
@@ -6047,12 +6213,14 @@ function makeNewsItem(entry, data) {
       ? Number(data.distance_m)
       : null,
     yelp: Boolean(data.yelp),
-    latitude: Number.isFinite(Number(data.latitude))
-      ? Number(data.latitude)
-      : null,
-    longitude: Number.isFinite(Number(data.longitude))
-      ? Number(data.longitude)
-      : null,
+    latitude: data.latitude === null || data.latitude === undefined
+      || data.latitude === ""
+      ? null
+      : (Number.isFinite(Number(data.latitude)) ? Number(data.latitude) : null),
+    longitude: data.longitude === null || data.longitude === undefined
+      || data.longitude === ""
+      ? null
+      : (Number.isFinite(Number(data.longitude)) ? Number(data.longitude) : null),
     yelpStatus: "idle",
     yelpDetails: null,
     yelpError: "",
@@ -6833,6 +7001,35 @@ function renderNewsList(entry) {
         toggleNewsTitleTranslation(entry, item);
       });
       titleRow.appendChild(titleTranslate);
+      if (
+        entry.newsLocation
+        && drivingCoordinate(item.latitude) !== null
+        && drivingCoordinate(item.longitude) !== null
+      ) {
+        const driveButton = document.createElement("button");
+        driveButton.type = "button";
+        driveButton.className = "drive-btn news-title-drive";
+        driveButton.title = `Driving instructions to ${item.title || "this place"}`;
+        driveButton.setAttribute(
+          "aria-label",
+          `Driving instructions to ${item.title || "this place"}`
+        );
+        driveButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">'
+          + '<path d="M4 16.5 5.6 9.6A2 2 0 0 1 7.55 8h8.9a2 2 0 0 1 1.95 1.6L20 16.5" '
+          + 'fill="none" stroke="currentColor" stroke-width="1.6" '
+          + 'stroke-linecap="round" stroke-linejoin="round"/>'
+          + '<path d="M4 16.5h16M6.5 16.5v2a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1v-2'
+          + 'm16 0v2a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1v-2" fill="none" '
+          + 'stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>'
+          + '<circle cx="8" cy="13.5" r="1" fill="currentColor"/>'
+          + '<circle cx="16" cy="13.5" r="1" fill="currentColor"/></svg>';
+        driveButton.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          openDrivingModal(entry, item);
+        });
+        titleRow.appendChild(driveButton);
+      }
       main.appendChild(titleRow);
       renderNewsTitleTranslation(entry, item, main);
 
@@ -7001,6 +7198,299 @@ async function openStockCompanyModal(symbol) {
     }`;
     stockCompanyBodyEl.appendChild(message);
   }
+}
+
+/* ------------------------------------------------------------------ *
+ *  /map driving instructions (OSRM)
+ * ------------------------------------------------------------------ */
+let drivingGeneration = 0;
+let drivingActiveEntry = null;
+let drivingMap = null;
+const drivingCache = new Map();
+
+function drivingCoordinate(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function drivingLonLatPair(value) {
+  if (!Array.isArray(value) || value.length < 2) return null;
+  const longitude = Number(value[0]);
+  const latitude = Number(value[1]);
+  if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return null;
+  if (longitude < -180 || longitude > 180 || latitude < -90 || latitude > 90) {
+    return null;
+  }
+  return [latitude, longitude];
+}
+
+function drivingStepLatLng(step) {
+  const location = step?.location;
+  if (!location || typeof location !== "object") return null;
+  return drivingLonLatPair([location.longitude, location.latitude]);
+}
+
+function clearDrivingMap() {
+  if (!drivingMap) return;
+  drivingMap.remove();
+  drivingMap = null;
+}
+
+function closeDrivingModal() {
+  drivingGeneration += 1;
+  clearDrivingMap();
+  if (!drivingPanelEl) return;
+  drivingPanelEl.hidden = true;
+  drivingBodyEl.textContent = "";
+  drivingOpenEl.hidden = true;
+  drivingActiveEntry = null;
+}
+
+function osmDirectionsUrl(fromLat, fromLon, toLat, toLon) {
+  const route = `${fromLat},${fromLon};${toLat},${toLon}`;
+  return "https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route="
+    + encodeURIComponent(route);
+}
+
+function drivingStepPopup(step) {
+  const content = document.createElement("div");
+  const text = document.createElement("div");
+  text.textContent = String(step.instruction || "Continue");
+  content.appendChild(text);
+  const metaParts = [step.distance_text, step.duration_text].filter(Boolean);
+  if (metaParts.length) {
+    const meta = document.createElement("div");
+    meta.className = "driving-step-meta";
+    meta.textContent = metaParts.join(" · ");
+    content.appendChild(meta);
+  }
+  return content;
+}
+
+function appendDrivingMapNote(text) {
+  const note = document.createElement("p");
+  note.className = "driving-map-note";
+  note.textContent = text;
+  drivingBodyEl.appendChild(note);
+}
+
+function renderDrivingMap(data, steps) {
+  clearDrivingMap();
+  if (!drivingBodyEl) return;
+  if (!window.L || typeof window.L.map !== "function") {
+    appendDrivingMapNote("The route map could not load because Leaflet is unavailable.");
+    return;
+  }
+  const rawGeometry = Array.isArray(data.geometry) ? data.geometry : [];
+  const routeLatLngs = rawGeometry.map(drivingLonLatPair).filter(Boolean);
+  if (routeLatLngs.length < 2) {
+    appendDrivingMapNote("No route geometry was returned for this drive.");
+    return;
+  }
+
+  const container = document.createElement("div");
+  container.id = "driving-map";
+  container.setAttribute("role", "img");
+  container.setAttribute("aria-label", "Interactive map of the driving route");
+  drivingBodyEl.appendChild(container);
+
+  try {
+    const map = window.L.map(container, {
+      zoomControl: true,
+      scrollWheelZoom: true,
+      attributionControl: true,
+    });
+    drivingMap = map;
+    window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    }).addTo(map);
+
+    // A dark casing under the bright route keeps the line legible on map tiles.
+    window.L.polyline(routeLatLngs, {
+      color: "#0b1118",
+      weight: 9,
+      opacity: 0.85,
+      lineCap: "round",
+      lineJoin: "round",
+    }).addTo(map);
+    window.L.polyline(routeLatLngs, {
+      color: "#79c0ff",
+      weight: 5,
+      opacity: 0.95,
+      lineCap: "round",
+      lineJoin: "round",
+    }).addTo(map);
+
+    steps.forEach((step, index) => {
+      const latlng = drivingStepLatLng(step);
+      if (!latlng) return;
+      const classes = ["driving-map-icon"];
+      if (index === 0) classes.push("is-start");
+      if (index === steps.length - 1) classes.push("is-finish");
+      const marker = window.L.marker(latlng, {
+        icon: window.L.divIcon({
+          className: classes.join(" "),
+          html: String(index + 1),
+          iconSize: [24, 24],
+          iconAnchor: [12, 12],
+          popupAnchor: [0, -14],
+        }),
+        title: String(step.instruction || `Step ${index + 1}`),
+      });
+      marker.bindPopup(drivingStepPopup(step));
+      marker.addTo(map);
+    });
+
+    map.fitBounds(window.L.latLngBounds(routeLatLngs), {
+      padding: [28, 28],
+      maxZoom: 17,
+    });
+    window.setTimeout(() => {
+      if (drivingMap === map) map.invalidateSize();
+    }, 0);
+  } catch (error) {
+    clearDrivingMap();
+    appendDrivingMapNote(
+      `The route map could not be drawn: ${error?.message || String(error)}`
+    );
+  }
+}
+
+function renderDrivingInstructions(item, data) {
+  clearDrivingMap();
+  drivingBodyEl.textContent = "";
+  const summary = document.createElement("div");
+  summary.className = "driving-summary";
+  const distance = document.createElement("span");
+  distance.append("Distance: ");
+  const distanceValue = document.createElement("strong");
+  distanceValue.textContent = data.distance_text || "—";
+  distance.appendChild(distanceValue);
+  summary.appendChild(distance);
+  const duration = document.createElement("span");
+  duration.append("Drive time: ");
+  const durationValue = document.createElement("strong");
+  durationValue.textContent = data.duration_text || "—";
+  duration.appendChild(durationValue);
+  summary.appendChild(duration);
+  drivingBodyEl.appendChild(summary);
+
+  const endpoints = document.createElement("div");
+  endpoints.className = "driving-endpoints";
+  const origin = drivingOriginLabel(drivingActiveEntry);
+  endpoints.textContent = origin
+    ? `From ${origin} to ${item.title || "destination"}`
+    : `To ${item.title || "destination"}`;
+  drivingBodyEl.appendChild(endpoints);
+
+  const steps = Array.isArray(data.steps) ? data.steps : [];
+  if (!steps.length) {
+    const empty = document.createElement("p");
+    empty.textContent = "No turn-by-turn steps were returned for this route.";
+    drivingBodyEl.appendChild(empty);
+  } else {
+    const list = document.createElement("ol");
+    list.className = "driving-steps";
+    steps.forEach((step, index) => {
+      const row = document.createElement("li");
+      row.className = "driving-step";
+      const number = document.createElement("span");
+      number.className = "driving-step-index";
+      number.textContent = `${index + 1}.`;
+      const main = document.createElement("div");
+      main.className = "driving-step-main";
+      const text = document.createElement("div");
+      text.className = "driving-step-text";
+      text.textContent = String(step.instruction || "Continue");
+      main.appendChild(text);
+      const metaParts = [step.distance_text, step.duration_text].filter(Boolean);
+      if (metaParts.length) {
+        const meta = document.createElement("div");
+        meta.className = "driving-step-meta";
+        meta.textContent = metaParts.join(" · ");
+        main.appendChild(meta);
+      }
+      row.appendChild(number);
+      row.appendChild(main);
+      list.appendChild(row);
+    });
+    drivingBodyEl.appendChild(list);
+  }
+  renderDrivingMap(data, steps);
+}
+
+function drivingOriginLabel(entry) {
+  const location = entry?.newsLocation;
+  if (!location) return "";
+  return String(location.display_name || "the map location").trim();
+}
+
+function openDrivingModal(entry, item) {
+  if (!drivingPanelEl) return;
+  const location = entry?.newsLocation;
+  const fromLat = drivingCoordinate(location?.latitude);
+  const fromLon = drivingCoordinate(location?.longitude);
+  const toLat = drivingCoordinate(item?.latitude);
+  const toLon = drivingCoordinate(item?.longitude);
+  if (
+    fromLat === null || fromLon === null
+    || toLat === null || toLon === null
+  ) {
+    toast("This place has no coordinates for driving directions.");
+    return;
+  }
+
+  const generation = ++drivingGeneration;
+  drivingActiveEntry = entry;
+  drivingTitleEl.textContent = `Driving to ${item.title || "destination"}`;
+  drivingMetaEl.textContent = "Powered by the OSRM demo server";
+  drivingBodyEl.textContent = "";
+  const loading = document.createElement("p");
+  loading.textContent = "Loading driving instructions from OSRM…";
+  drivingBodyEl.appendChild(loading);
+  drivingOpenEl.href = osmDirectionsUrl(fromLat, fromLon, toLat, toLon);
+  drivingOpenEl.hidden = false;
+  drivingPanelEl.hidden = false;
+
+  const cacheKey = [fromLat, fromLon, toLat, toLon]
+    .map((value) => value.toFixed(5))
+    .join(",");
+  const cached = drivingCache.get(cacheKey);
+  if (cached) {
+    renderDrivingInstructions(item, cached);
+    return;
+  }
+
+  const params = new URLSearchParams({
+    from_lat: String(fromLat),
+    from_lon: String(fromLon),
+    to_lat: String(toLat),
+    to_lon: String(toLon),
+  });
+  fetch(`/api/driving_instructions?${params.toString()}`, { cache: "no-store" })
+    .then((response) => response.json().then((data) => {
+      if (!response.ok) {
+        throw new Error(data?.error || `HTTP ${response.status}`);
+      }
+      return data;
+    }))
+    .then((data) => {
+      if (generation !== drivingGeneration) return;
+      drivingCache.set(cacheKey, data);
+      renderDrivingInstructions(item, data);
+    })
+    .catch((error) => {
+      if (generation !== drivingGeneration) return;
+      drivingBodyEl.textContent = "";
+      const message = document.createElement("p");
+      message.className = "driving-error";
+      message.textContent = `Could not load driving instructions: ${
+        error?.message || String(error)
+      }`;
+      drivingBodyEl.appendChild(message);
+    });
 }
 
 function renderStockHoldings(container, entry) {
@@ -10503,6 +10993,7 @@ function renderNewsModal(item) {
   renderNewsTranslation();
   renderOsmDetails(item);
   renderYelpDetails(item);
+  renderMapPlaceLocation(item);
   renderMapVideos(item);
   renderNewsPodcast(item);
   syncNewsTtsButton();
@@ -10948,6 +11439,63 @@ function appendOsmRestaurantMap(section, item, latitude, longitude) {
     block.appendChild(empty);
   }
   section.appendChild(block);
+}
+
+function renderMapPlaceLocation(item) {
+  // Each /map Wikipedia result is a place rather than a restaurant, so it has
+  // no OSM/Yelp detail lookup. Give its modal the same OpenStreetMap view the
+  // restaurant modal uses: one marked pin for the place itself, placed before
+  // the related YouTube video list.
+  if (!item?.map || item.osm) return;
+  const latitude = Number(item.latitude);
+  const longitude = Number(item.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+
+  const section = document.createElement("section");
+  section.className = "map-yelp map-osm map-place-location";
+  const head = document.createElement("div");
+  head.className = "map-yelp-head";
+  const label = document.createElement("span");
+  label.textContent = "OpenStreetMap";
+  const note = document.createElement("span");
+  note.className = "map-yelp-note";
+  note.textContent = String(
+    item.coordinates || `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`
+  );
+  head.appendChild(label);
+  head.appendChild(note);
+  section.appendChild(head);
+
+  const delta = 0.003;
+  const bbox = [
+    longitude - delta,
+    latitude - delta,
+    longitude + delta,
+    latitude + delta,
+  ].map((value) => value.toFixed(6)).join("%2C");
+  const marker = `${latitude.toFixed(6)}%2C${longitude.toFixed(6)}`;
+  const frame = document.createElement("iframe");
+  frame.className = "map-osm-frame";
+  frame.loading = "lazy";
+  frame.referrerPolicy = "no-referrer";
+  frame.title = `${item.title || "Place"} location on OpenStreetMap`;
+  frame.src = `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${marker}`;
+  section.appendChild(frame);
+
+  const mapLink = document.createElement("a");
+  mapLink.className = "news-link map-osm-map-link";
+  mapLink.href = `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}#map=17/${latitude}/${longitude}`;
+  mapLink.target = "_blank";
+  mapLink.rel = "noopener noreferrer";
+  mapLink.textContent = "Open larger map ↗";
+  section.appendChild(mapLink);
+
+  const attribution = document.createElement("div");
+  attribution.className = "map-yelp-note";
+  attribution.textContent = "© OpenStreetMap contributors";
+  section.appendChild(attribution);
+
+  newsBodyEl.appendChild(section);
 }
 
 function renderOsmDetails(item) {
@@ -12115,6 +12663,14 @@ stockCompanyCloseEl.addEventListener("click", (event) => {
   event.preventDefault();
   event.stopPropagation();
   closeStockCompanyModal();
+});
+drivingPanelEl.addEventListener("click", (event) => {
+  if (event.target === drivingPanelEl) closeDrivingModal();
+});
+drivingCloseEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  closeDrivingModal();
 });
 changelogPanelEl.addEventListener("click", (event) => {
   if (event.target === changelogPanelEl) closeChangelogModal();
@@ -13665,6 +14221,12 @@ function handleKeyDown(event) {
     return;
   }
 
+  if (!drivingPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeDrivingModal();
+    return;
+  }
+
   if (!newsPanelEl.hidden && key === "Escape") {
     event.preventDefault();
     closeNewsModal();
@@ -14089,6 +14651,11 @@ document.addEventListener("keydown", (event) => {
   if (!stockCompanyPanelEl.hidden && key === "Escape") {
     event.preventDefault();
     closeStockCompanyModal();
+    return;
+  }
+  if (!drivingPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeDrivingModal();
     return;
   }
   if (!newsPanelEl.hidden && key === "Escape") {

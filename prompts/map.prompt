@@ -7,6 +7,30 @@ knowledge {
   }
 }
 
+task (completed) {
+  in the modal that shows the turn-by-turn driving instructions {
+    under the instructions, draw the route polyline and place turn-by-turn markers on an interactive map using Leaflet (or MapLibre GL JS) paired with the geometry returned by OSRM
+  }
+}
+
+task (completed) {
+  in the popup modal for each nearby place: {
+    before the youtube video list, add a map similar to the map in the restaurant
+  }
+}
+
+task.driving_instructions (completed) {
+  for each {entry} of the nearby places and nearby restaurants {
+    add an icon for driving instructions, when clicking on the icon {
+      open up a modal:
+      - learn example { curl "http://router.project-osrm.org/route/v1/driving/-122.4194,37.7749;-122.4089,37.7855?overview=false&steps=true"
+      }, based on the the geolocation info of <location> and the {entry}, show the driving instruction from <location> to <entry>
+    }
+  }
+
+  when doing testing, test the http://router.project-osrm.org/route/v1/driving endpoint only once, do not cause ip blocking
+}
+
 task.more_geolocation_details_on_restaurants (completed) {
   - please also add the latitude and longtitude of the restaurant  
 }
