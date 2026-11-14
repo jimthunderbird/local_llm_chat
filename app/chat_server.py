@@ -33,13 +33,11 @@ Endpoints:
                                   PNG/JPEG/WebP/GIF and answers visually.
                                   Answers include a per-paragraph
                                   source-video annotation event. A question that
-                                  names Rust, Go, or PHP uses the official
-                                  documentation for that language; a code question
-                                  consults the documentation first, before any
-                                  local code generation. A language-feature
-                                  explanation instead combines related official
-                                  documentation excerpts with the retrieved
-                                  transcript trunks. A "source" event says
+                                  asks for Rust, Go, or PHP code uses the
+                                  official documentation for that language and
+                                  consults it before any local code generation.
+                                  Explanatory language questions do not load
+                                  language documentation. A "source" event says
                                   whether the currently streaming answer is
                                   coming from the local Ollama model or the
                                   official docs. /news streams "news" events
@@ -5288,11 +5286,12 @@ LANGUAGE_CODE_FENCES = {
 }
 
 # The programming_docs_map from ./prompts/programming.prompt. When a question
-# is about a programming language or one of its features, the server loads
-# related excerpts from that language's official documentation in addition to
-# the transcript trunk context. Every entry names the documentation script
-# whose cached index and chunker are reused, the reference URL to cite, and
-# the local knowledge-note directory that supplements the docs.
+# asks for code in a documentation-backed language, the answer path loads that
+# language's official documentation before any local code generation. Questions
+# that only discuss a language or feature do not load these documents. Every
+# entry names the documentation script whose cached index and chunker are
+# reused, the reference URL to cite, and the local knowledge-note directory
+# that supplements the docs.
 PROGRAMMING_DOCS_MAP = {
     GO_LANGUAGE: {
         "reference": "https://go.dev/doc/",
@@ -5810,8 +5809,8 @@ def programming_feature_question(question: str) -> bool:
 
     This is broader than coding-mode detection: a question such as "how does
     ownership work?" asks about a Rust feature without requesting code. It is
-    used only to decide whether a previously mentioned language should still
-    supply its official documentation context.
+    used only to decide whether a follow-up should keep the previous language
+    for model/fence selection; it never causes documentation to be loaded.
     """
     text = " ".join(str(question or "").split())
     if not text:
@@ -14702,33 +14701,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._sse("meta", state.snapshot())
         code_language = detected_language
 
-        # A question about a programming language or one of its features gets
-        # related official-documentation excerpts next to the transcript
-        # context. This uses the programming_docs_map and the documentation
-        # index that the per-language search script already cached, so no
-        # second crawler or extra model call is needed.
-        programming_docs_prefix = ""
-        programming_docs_stats: dict = {}
-        if not article_mode and not explicit_code_request(retrieval_question):
-            docs_language = programming_docs_language(
-                retrieval_question, code_language
-            )
-            if docs_language:
-                (
-                    programming_docs_prefix,
-                    programming_docs_stats,
-                ) = programming_docs_context(
-                    docs_language, retrieval_question
-                )
-                if programming_docs_prefix:
-                    self._sse_text(
-                        "log",
-                        "[programming docs: loaded "
-                        f"{programming_docs_stats['excerpts']} related "
-                        f"{docs_language} excerpt(s) from "
-                        f"{PROGRAMMING_DOCS_MAP[docs_language]['source_label']} "
-                        "in addition to the transcript context]",
-                    )
         golang_package_docs = (
             not article_mode
             and code_language == GO_LANGUAGE
@@ -14763,15 +14735,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         )
         if (
             coding_mode
-            and programming_docs_prefix
             and programming_explanation_question(retrieval_question)
             and not explicit_code_request(retrieval_question)
         ):
             # "What is ownership in Rust?" is an explanation, not a request
-            # for a program. Keep the official documentation excerpts, but
-            # answer from the normal prompt so the retrieved trunk context is
-            # used alongside the docs instead of taking the docs-first
-            # code-generation path.
+            # for a program. Keep the answer in the normal prompt path; no
+            # official documentation is loaded unless code is requested.
             coding_mode = False
             documentation_code = False
             golang_package_docs = False
@@ -14780,9 +14749,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             php_symbol_docs = False
             self._sse_text(
                 "log",
-                "[programming question: explanation detected; combining the "
-                "official documentation excerpts with the transcript "
-                "context instead of generating code]",
+                "[programming question: explanation detected; no language "
+                "documentation is loaded because no code was requested]",
             )
         # Go, Rust, and PHP answer with the dedicated programming model for
         # both chat and code generation.
@@ -14878,11 +14846,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     else language_coding_directive(code_language)
                 )
             )
-            if programming_docs_prefix:
-                # Keep the coding-mode rules first (they are the highest
-                # priority), then add the documentation reference next to the
-                # retrieved transcript context.
-                prompt_prefix = prompt_prefix + programming_docs_prefix
             if (
                 chat.question_is_time_sensitive(retrieval_question)
                 and not article_mode
@@ -15062,10 +15025,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
             if prepare_stats is not None and prepare_stats.get("added"):
                 attempt_stats["article_expansion"] = dict(prepare_stats)
-            if programming_docs_stats:
-                attempt_stats["programming_docs"] = dict(
-                    programming_docs_stats
-                )
             return response, sources or [], attempt_stats, None
 
         scope_label = (
@@ -15079,7 +15038,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         )
         documentation_language = (
             None
-            if article_mode
+            if article_mode or not coding_mode
             else (
                 code_language
                 if language_uses_official_docs(code_language)

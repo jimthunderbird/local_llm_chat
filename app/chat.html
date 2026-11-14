@@ -3384,7 +3384,6 @@
       <span class="status-item"><strong>trunks</strong> <span id="status-chunks">…</span></span>
       <span class="status-item"><strong>context</strong> <span id="status-conversation">0 turns</span></span>
       <span class="status-item"><strong>model</strong> <span id="status-model">…</span></span>
-      <span class="status-item"><strong>lang</strong> <span id="status-code-language">auto</span></span>
       <span class="status-item"><strong>source</strong> <span id="status-answer-source">—</span></span>
       <span class="status-item"><strong>mode</strong> <span id="status-mode">INSERT</span></span>
       <span class="grow"></span>
@@ -13520,14 +13519,6 @@ function applyState(state, loadHistory = false) {
   const statusModelEl = $("#status-model");
   statusModelEl.textContent = displayModelName(state.models?.chat);
   statusModelEl.title = "";
-  const codeLanguageEl = $("#status-code-language");
-  if (codeLanguageEl) {
-    const language = state.code_language || "";
-    codeLanguageEl.textContent = language || "auto";
-    codeLanguageEl.title = language
-      ? `Code generated for the current question is ${language}`
-      : "The coding model chooses the language";
-  }
   const modelLabel = displayModelName(state.models?.chat);
   $("#top-tagline").textContent = state.article
     ? `article ${state.article_title || state.article} · ${state.chunks ?? "?"} paragraphs · ${modelLabel} · /help`
@@ -14041,11 +14032,6 @@ function submitText(text, fromChoice = false) {
             ? `${data.label}: ${data.model}${data.think ? " (thinking)" : ""}`
             : ""
         );
-      }
-      if (data?.language) {
-        const languageEl = $("#status-code-language");
-        languageEl.textContent = data.language;
-        languageEl.title = `Code for this answer is generated in ${data.language}`;
       }
     },
     log: (data) => {

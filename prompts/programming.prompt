@@ -4,6 +4,11 @@ programming_docs_map {
   }
 }
 
+task.no_more_language switching (completed) {
+  please remove lang auto in the status bar
+  analyze the <question>, only when the <question> is about generating code of {programming_docs_map.<programming_language>}, we then load the documents of programming_docs_map.<programming_language> into the context, if we do not need to generate the code, do not load the documents
+}
+
 task (completed) {
   if a <question> is about a programming language or its feature, reference {programming_docs_map}, load the related documents from the documents for the language in addition to the context from the trunks
 }
