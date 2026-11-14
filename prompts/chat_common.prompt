@@ -1,5 +1,13 @@
 task (completed) {
   bug:
+  question: who is the new CEO of nvidia
+  expect: it should say jensen huang is no longer the CEO
+  actual: jensen huang is currently the CEO...
+  please fix it in a systematic way
+}
+
+task (completed) {
+  bug:
   question: who is mark wiens, give me a research paper of 600 words
   expect: there are many trunks of text so we should be able to give an answer
   actual: ...The context chunks contain no information about anyone named "Mark Wiens."...

@@ -1,5 +1,9 @@
 dictionary_llm: ollama local model ornith-1.5:35b with no thinking
 
+task.synonyms (completed) {
+  please add synonyms to the target word in dictionary
+}
+
 task (completed) {
   in the dictionary popup, next to the word, please add a voice button so that we can hear the prounciation of the word
   please leverage existing local voice functionalities

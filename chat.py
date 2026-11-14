@@ -951,12 +951,13 @@ DICT_PROMPT = """You are an English Dictionary, you are given a context <context
 Base on <context>, show me the following only, DO NOT show me the quote!:
 1. The meaning of {word}
 2. The word's IPA (International Phonetic Alphabet)
-3. Contextural Meaning of {word}
+3. Synonyms of {word}
+4. Contextural Meaning of {word}
 """
 
-# The word-click dictionary popup shows only these four labelled fields.
+# The word-click dictionary popup shows only these five labelled fields.
 DICT_POPUP_PROMPT = """You are an English Dictionary. For the word or phrase
-"{word}", answer with exactly these four labelled fields, in this order, and
+"{word}", answer with exactly these five labelled fields, in this order, and
 nothing else:
 
 Word: {word}
@@ -964,6 +965,9 @@ Word: {word}
 IPA: <International Phonetic Alphabet transcription, or — if unknown>
 
 Part of Speech: <part of speech, or — if unknown>
+
+Synonyms: <three to five common synonyms or closely related words for
+"{word}", comma-separated, or — if none>
 
 Contextual Meaning: <one or two sentences giving the meaning of "{word}"
 and explaining what it means in the surrounding context>
@@ -973,8 +977,8 @@ Rules:
 - Do not add a title, preamble, conclusion, notes, or any other section.
 - Do not include a Quote section or quote the surrounding text.
 - Do not wrap the labels in markdown or add bullets.
-- Keep the whole answer under 100 words.
-- If "{word}" is not a valid English word or phrase, keep the four fields
+- Keep the whole answer under 120 words.
+- If "{word}" is not a valid English word or phrase, keep the five fields
   and say so in Contextual Meaning.
 
 <context>
@@ -1249,6 +1253,23 @@ TEMPORAL_QUERY_FILLER_PATTERN = re.compile(
     r"the|any)\b",
     re.IGNORECASE,
 )
+# "New"/"next" are only discarded from a role question. Removing them from
+# every temporal query would turn "what is New York" into the single term
+# "york", so the generic filler above deliberately leaves them alone.
+TEMPORAL_ROLE_FILLER_PATTERN = re.compile(
+    r"\b(?:new|newly|next)\b", re.IGNORECASE
+)
+# "Who is the new CEO?" asks about the current holder of a role even though it
+# contains none of the usual status words. Match "new"/"next" only when they
+# modify a leadership role so ordinary questions such as "new books" or place
+# names such as "New York" are not treated as current-status questions.
+TEMPORAL_ROLE_QUESTION_PATTERN = re.compile(
+    r"\b(?:new|next|interim|acting|newly\s+(?:appointed|named|elected|hired))"
+    r"\s+(?:ceo|cfo|coo|cto|cio|president|prime\s+minister|"
+    r"chair(?:man|woman|person)?|leader|head|director|chief|owner|"
+    r"manager|coach|spokesperson|governor|mayor)\b",
+    re.IGNORECASE,
+)
 # Within the relevant BM25 pool, dated evidence is ordered newest first. The
 # ratio prevents a barely-related fresh article from displacing the actual
 # subject of the question.
@@ -1257,12 +1278,20 @@ TEMPORAL_RELEVANCE_RATIO = 0.6
 
 def question_is_time_sensitive(question: str) -> bool:
     """Return True for questions about the current or latest state of affairs."""
-    return bool(question and TEMPORAL_QUESTION_PATTERN.search(question))
+    if not question:
+        return False
+    return bool(
+        TEMPORAL_QUESTION_PATTERN.search(question)
+        or TEMPORAL_ROLE_QUESTION_PATTERN.search(question)
+    )
 
 
 def strip_temporal_filler(question: str) -> str:
     """Remove time/status framing words so BM25 focuses on the entity."""
-    cleaned = " ".join(TEMPORAL_QUERY_FILLER_PATTERN.sub(" ", question).split())
+    cleaned = TEMPORAL_QUERY_FILLER_PATTERN.sub(" ", question)
+    if TEMPORAL_ROLE_QUESTION_PATTERN.search(question):
+        cleaned = TEMPORAL_ROLE_FILLER_PATTERN.sub(" ", cleaned)
+    cleaned = " ".join(cleaned.split())
     return cleaned or question.strip()
 
 

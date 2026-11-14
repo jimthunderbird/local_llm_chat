@@ -15384,7 +15384,7 @@ outputEl.addEventListener("click", (event) => {
 /* ------------------------------------------------------------------ *
  *  Dictionary popup formatting
  *
- *  The popup must show exactly four labelled sections, in this order,
+ *  The popup must show exactly five labelled sections, in this order,
  *  with a blank line between each of them. Quote is deliberately not
  *  shown; if the model still emits one, its section is discarded. Models
  *  occasionally wrap a label in markdown or add a short preamble, so
@@ -15395,6 +15395,7 @@ const DICTIONARY_SECTION_LABELS = [
   "Word",
   "IPA",
   "Part of Speech",
+  "Synonyms",
   "Contextual Meaning",
 ];
 const DICTIONARY_IGNORED_LABELS = ["Quote"];
@@ -15408,7 +15409,7 @@ function parseDictionarySectionLine(line) {
   value = value.replace(/^#{1,6}\s*/, "");
   value = value.replace(/^[-*+]\s+/, "");
   value = value.replace(/\*\*|__/g, "");
-  const match = /^(Word|IPA|Part of Speech|Quote|Contextual Meaning)\s*[:\-–—]\s*(.*)$/i.exec(
+  const match = /^(Word|IPA|Part of Speech|Synonyms|Quote|Contextual Meaning)\s*[:\-–—]\s*(.*)$/i.exec(
     value
   );
   if (!match) return null;
