@@ -533,7 +533,9 @@ WRITE_A_BOOK_MODEL = os.environ.get(
     "OLLAMA_BOOK_MODEL", chat.ANSWER_MODEL
 )
 WRITE_A_BOOK_DIR = SCRIPT_DIR / ".chat" / "books"
-WRITE_A_BOOK_KEYWORD_LIMIT = 6
+# task.more_horizontal_exploration in prompts/write_a_book.prompt asks for
+# ten distinct research questions instead of six.
+WRITE_A_BOOK_KEYWORD_LIMIT = 10
 # The three questions asked by task.ask_question_before_writing_book in
 # prompts/write_a_book.prompt, and the bounds used when a caller passes them
 # as --words / --chapters / --articles options.
@@ -544,6 +546,11 @@ WRITE_A_BOOK_MAX_ARTICLES = 100
 # requested number of sources.
 WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD = 20
 WRITE_A_BOOK_RESEARCH_YEARS = 2
+# task.do_not_include_2024 in prompts/write_a_book.prompt: only 2025 and 2026
+# material should be used, even though a rolling two-year window still reaches
+# back into 2024. Any older year written into a generated query is rewritten to
+# this year.
+WRITE_A_BOOK_RESEARCH_START_YEAR = 2025
 WRITE_A_BOOK_CHAPTER_LIMIT = 60
 WRITE_A_BOOK_MIN_CHAPTERS = 3
 WRITE_A_BOOK_CHAPTER_WORDS = 800
@@ -569,6 +576,8 @@ Rules:
 - Return one search query per line.
 - Do not number the lines, add bullets, or write commentary.
 - Keep every query under 100 characters.
+- Do not include the year 2024 or any older year in a query. If a year makes
+  the query more specific, use 2025 or 2026.
 """
 WRITE_A_BOOK_OUTLINE_PROMPT = """You are the editor of a researched
 non-fiction book.
@@ -741,6 +750,25 @@ def _parse_book_model_lines(raw: str, limit: int) -> list[str]:
     return lines
 
 
+_WRITE_A_BOOK_OLD_YEAR_RE = re.compile(
+    r"\b(?:19\d{2}|20(?:0\d|1\d|2[0-4]))\b"
+)
+
+
+def _book_recent_keyword(keyword: str) -> str:
+    """Keep a generated research query focused on 2025/2026.
+
+    Matches task.do_not_include_2024 in prompts/write_a_book.prompt: the
+    keyword model sometimes appends an old year such as ``2024``. Rewriting
+    that year keeps the Google News query current instead of searching for
+    stale, year-specific material.
+    """
+    current = _WRITE_A_BOOK_OLD_YEAR_RE.sub(
+        str(WRITE_A_BOOK_RESEARCH_START_YEAR), str(keyword)
+    )
+    return " ".join(current.split())
+
+
 def _book_keyword_list(raw: str, subject: str) -> list[str]:
     """Turn the keyword-model reply into a bounded, deduplicated list."""
     keywords = _parse_book_model_lines(raw, WRITE_A_BOOK_KEYWORD_LIMIT)
@@ -752,7 +780,15 @@ def _book_keyword_list(raw: str, subject: str) -> list[str]:
         ]
         if len(split) > 1:
             keywords = split[:WRITE_A_BOOK_KEYWORD_LIMIT]
-    return keywords or [subject]
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for keyword in keywords:
+        keyword = _book_recent_keyword(keyword)
+        key = keyword.casefold()
+        if keyword and key not in seen:
+            seen.add(key)
+            normalized.append(keyword)
+    return normalized or [subject]
 
 
 def _book_chapter_titles(
@@ -8679,9 +8715,9 @@ def _book_search_candidates(
     script = SCRIPT_DIR / "news_fetch.php"
     if not script.exists():
         raise RuntimeError("missing news_fetch.php")
-    cutoff = time.time() - (
-        WRITE_A_BOOK_RESEARCH_YEARS * 365.25 * 24 * 60 * 60
-    )
+    cutoff = datetime(
+        WRITE_A_BOOK_RESEARCH_START_YEAR, 1, 1, tzinfo=timezone.utc
+    ).timestamp()
     selected: list[dict] = []
     seen: set[str] = set()
     for keyword in keywords[:WRITE_A_BOOK_KEYWORD_LIMIT]:

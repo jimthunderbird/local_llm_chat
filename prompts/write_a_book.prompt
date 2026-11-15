@@ -4,6 +4,17 @@ words_per_chapter: 800
 max_number_of_chapters: 60
 articles_to_learn: 100
 
+task.more_horizontal_exploration (completed) {
+  currently, it seems like when planning to write a book, it will come up with 6 different questions to search for the articles, please come with up 10 different quetions to search instead
+}
+
+task.do_not_include_2024 (completed) {
+  when searching online articles, often times, i found that we tries to search year 2024 topics:
+  for example:
+  - Prompting techniques for large language models 2024
+  please DO NOT do that, we should focus on year 2025 and year 2026
+}
+
 task (completed) {
   update {words_per_chapter}
   update {max_number_of_chapters}
