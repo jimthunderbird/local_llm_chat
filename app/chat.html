@@ -23,6 +23,9 @@
     --error: #ff7b72;
     --selection: #264f78;
     --mono: "SFMono-Regular", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    /* Shared type size for result titles (/news results and the
+       /dictionary_history word list) so both lists read identically. */
+    --news-result-font-size: 13px;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -1110,6 +1113,24 @@
     letter-spacing: 0;
     text-transform: none;
   }
+  /* /dictionary_history word list. */
+  .dictionary-history-word {
+    color: var(--accent-2);
+    font-size: var(--news-result-font-size);
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 3px;
+  }
+  .dictionary-history-field {
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+  .dictionary-history-field strong {
+    color: var(--accent);
+    font-weight: 700;
+  }
   .news-description {
     color: #cfdae5;
     font-size: 12px;
@@ -1553,7 +1574,7 @@
   .news-title {
     display: inline-block;
     color: var(--accent-2);
-    font-size: 13px;
+    font-size: var(--news-result-font-size);
     line-height: 1.4;
     text-decoration: none;
     word-break: break-word;
@@ -6106,6 +6127,7 @@ function makeEntry(kind, options = {}) {
     changelogSource: "",
     changelogDirectory: "",
     changelogDone: false,
+    dictionaryHistoryItems: [],
     videos: [],
     videosKeyword: "",
     videosHeading: "",
@@ -6127,6 +6149,7 @@ function makeEntry(kind, options = {}) {
     mathtutorState: null,
     newsEl: document.createElement("div"),
     changelogEl: document.createElement("div"),
+    dictionaryHistoryEl: document.createElement("div"),
     el: document.createElement("div"),
     logsEl: document.createElement("div"),
     outputEl: document.createElement("pre"),
@@ -6222,6 +6245,8 @@ function makeEntry(kind, options = {}) {
   entry.newsEl.className = "news-list";
   entry.changelogEl.className = "news-list";
   entry.changelogEl.hidden = true;
+  entry.dictionaryHistoryEl.className = "news-list dictionary-history";
+  entry.dictionaryHistoryEl.hidden = true;
   entry.videosEl = document.createElement("div");
   entry.videosEl.className = "video-results";
   entry.videosEl.hidden = true;
@@ -6239,6 +6264,7 @@ function makeEntry(kind, options = {}) {
   entry.mathtutorEl.hidden = true;
   entry.bodyEl.appendChild(entry.newsEl);
   entry.bodyEl.appendChild(entry.changelogEl);
+  entry.bodyEl.appendChild(entry.dictionaryHistoryEl);
   entry.bodyEl.appendChild(entry.videosEl);
   entry.bodyEl.appendChild(entry.booksEl);
   entry.bodyEl.appendChild(entry.bookLibraryEl);
@@ -6349,6 +6375,7 @@ function renderEntry(entry) {
   entry.choicesEl.textContent = "";
   renderNewsList(entry);
   renderChangelogList(entry);
+  renderDictionaryHistoryList(entry);
   renderVideoResults(entry);
   renderBookResults(entry);
   renderBookLibrary(entry);
@@ -6699,6 +6726,81 @@ function renderChangelogList(entry) {
       event.stopPropagation();
       openChangelogModal(item);
     });
+    list.appendChild(li);
+  }
+  container.appendChild(list);
+}
+
+function renderDictionaryHistoryList(entry) {
+  const container = entry.dictionaryHistoryEl;
+  if (!container) return;
+  container.textContent = "";
+  // Every word in the history list is a /dict lookup target, exactly like
+  // the words in a chat answer. The clicked word's saved context becomes the
+  // contextual-meaning context for the new lookup.
+  container.onclick = (event) => {
+    const wordEl = event.target.closest(".word");
+    if (!wordEl) return;
+    const itemEl = wordEl.closest(".dictionary-history-item");
+    if (!itemEl) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openDictionaryPopup(
+      wordEl.dataset.word || wordEl.textContent,
+      String(itemEl._dictionaryHistoryItem?.context || ""),
+      wordEl
+    );
+  };
+  const items = Array.isArray(entry.dictionaryHistoryItems)
+    ? entry.dictionaryHistoryItems
+    : [];
+  if (!items.length) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+
+  const head = document.createElement("div");
+  head.className = "news-list-head";
+  const label = document.createElement("span");
+  label.textContent = "Dictionary history";
+  const note = document.createElement("span");
+  note.className = "news-list-note";
+  note.textContent = `${items.length} word${items.length === 1 ? "" : "s"}`;
+  head.appendChild(label);
+  head.appendChild(note);
+  container.appendChild(head);
+
+  const list = document.createElement("ol");
+  list.className = "news-list-items";
+  for (const item of items) {
+    const li = document.createElement("li");
+    li.className = "news-item dictionary-history-item";
+    li._dictionaryHistoryItem = item;
+
+    const main = document.createElement("div");
+    main.className = "news-item-main";
+
+    const wordEl = document.createElement("div");
+    wordEl.className = "dictionary-history-word";
+    wordEl.appendChild(wordNodes(String(item.word || ""), true));
+    main.appendChild(wordEl);
+
+    for (const [field, name] of [
+      ["meaning", "meaning"],
+      ["context", "context"],
+    ]) {
+      const fieldEl = document.createElement("div");
+      fieldEl.className = "dictionary-history-field";
+      const fieldLabel = document.createElement("strong");
+      fieldLabel.textContent = `${name}:`;
+      fieldEl.appendChild(fieldLabel);
+      fieldEl.appendChild(document.createTextNode(" "));
+      fieldEl.appendChild(wordNodes(String(item[field] || ""), true));
+      main.appendChild(fieldEl);
+    }
+
+    li.appendChild(main);
     list.appendChild(li);
   }
   container.appendChild(list);
@@ -14555,6 +14657,12 @@ function submitText(text, fromChoice = false) {
     output: (data) => addOutput(entry, data.text || ""),
     news: (data) => addNewsEvent(entry, data || {}),
     changelog: (data) => addChangelogEvent(entry, data || {}),
+    dictionary_history: (data) => {
+      entry.dictionaryHistoryItems = Array.isArray(data?.items)
+        ? data.items
+        : [];
+      scheduleRender(entry);
+    },
     videos: (data) => {
       entry.videos = normalizeVideoItems(data?.items);
       entry.videosKeyword = String(data?.keyword || "").trim();

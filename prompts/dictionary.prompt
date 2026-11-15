@@ -2,6 +2,23 @@ dictionary_llm: ollama local model ornith-1.5:35b with no thinking
 
 dictionary_history_directory: {directory_of_this_prompt}/../.chat/dictionary_history
 
+task.dictionary_history_list_ui.font (completed) {
+  refer to {task.dictionary_history_list_ui.dictionary_searchable}:
+  - make each word's font size the same as the news search result
+}
+
+task.dictionary_history_list_ui.dictionary_searchable (completed) {
+  refer to {task.dictionary_history_list_ui.dictionary_searchable}:
+  - make each word also dictionary searchable in UI
+}
+
+task.dictionary_history_list_ui (completed) {
+  after typing /dictionary_history, for each {word}, present:
+  - {word} in bold font
+  - meaning (in bold font): the {word}'s meaning
+  - context (in bold font): the {word}'s context
+}
+
 task.dictionary_history (completed) {
   - for each dictionary inquery, add or update an entry in {directory_of_this_prompt}/../.chat/dictionary_history/<word>.json, it should contain [
     {

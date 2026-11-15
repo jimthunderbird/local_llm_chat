@@ -19253,8 +19253,29 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         self._stream_dictionary(word, self.state.latest_answer)
 
     def _command_dictionary_history(self) -> None:
-        report = chat.dictionary_history_report()
-        self._sse_text("output", "\n" + report + "\n")
+        entries = chat.dictionary_history_entries()
+        if not entries:
+            self._sse_text(
+                "output",
+                "\nNo dictionary history yet. Look up a word with /dict first.\n",
+            )
+            return
+        self._sse(
+            "dictionary_history",
+            {
+                "items": [
+                    {
+                        "word": entry["word"],
+                        "meaning": " ".join(entry["meaning"].split()),
+                        "context": " ".join(entry["context"].split()),
+                        "timestamp": datetime.fromtimestamp(
+                            entry["mtime"]
+                        ).strftime("%Y-%m-%d %H:%M"),
+                    }
+                    for entry in entries
+                ]
+            },
+        )
 
     def _command_sources(self) -> None:
         sources = self.state.latest_sources
