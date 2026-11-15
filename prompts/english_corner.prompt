@@ -1,0 +1,56 @@
+/**
+ * this is for the english corner, where we use llm to help learn english
+ */
+
+corpus {
+  10k_english_words: https://raw.githubusercontent.com/first20hours/google-10000-english/refs/heads/master/google-10000-english-usa.txt
+  20k_english_words: https://raw.githubusercontent.com/david47k/top-english-wordlists/refs/heads/master/top_english_words_mixed_20000.txt
+  30k_english_words: https://raw.githubusercontent.com/arstgit/high-frequency-vocabulary/refs/heads/master/30k.txt
+  50k_english_words: https://raw.githubusercontent.com/david47k/top-english-wordlists/refs/heads/master/top_english_words_mixed_50000.txt
+}
+
+project_directory: {directory_of_this_prompt}/..
+main_script_directory: {directory_of_this_prompt}/../englishcorner/scripts
+main_corpus_directory: {directory_of_this_prompt}/../englishcorner/corpus
+
+task.find_article_words_in_corpus.refactor (completed) {
+ in {main_script_directory}/find_article_words_in_corpus.py {
+   DO NOT use {main_script_directory}/check_words_in_both_texts.py anymore
+   SIMPLY follow the logic of:
+   example: 10k..20k - corpus words that are (OUTSIDE the INTERSECT of the words in {corpus.10k_english_words} and the words in {corpus.20k_english_words}) AND INSIDE the words of {article_url}
+ }
+}
+
+task.find_article_words_in_corpus.diff_options (completed) {
+  in {main_script_directory}/find_article_words_in_corpus.py {
+    add params.corpus.<start_offset>..<end_offset> {
+      example: 10k..20k - corpus words that are (OUTSIDE the INTERSECT of the words in {corpus.10k_english_words} and the words in {corpus.20k_english_words}) AND INSIDE the words of {article_url}
+    }
+  }
+}
+
+task (completed) {
+  create {main_script_directory}/check_words_in_both_texts.py {
+    - it should accept the following params {
+      input_content: a peice of text content
+      corpus_words: corpus words separated by space
+    }
+    - use an optimized in-memory algorithm to return the unique words that appears in both {params.input_content and params.corpus_words} 
+  }
+
+  create {main_script_directory}/find_article_words_in_corpus.py {
+    - it should accept the following parames {
+      article_url: the article's url
+      corpus: can be the following options {
+        10k: corresponds to {corpus.10k_english_words} 
+        20k: corresponds to {corpus.20k_english_words} 
+      }
+    }
+
+    - if parmas.corpus does not exists in {main_corpus_directory}, download the corresponding corpus to {main_corpus_directory}  
+
+    - article_content: use {project_directory}/news_fetch.php --article {params.article_url} to return the content
+    - corpus_content: get the content of {params.corpus}
+    - use {main_script_directory}/check_words_in_both_texts.py {article_content} {corpus_content} to return list of words that appears in both {article_content} and {corpus_content} 
+  }
+}
