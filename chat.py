@@ -71,6 +71,9 @@ Commands:
                        local Ollama model, plus an explanation of its use and
                        meaning in the latest answer (when the word appears
                        there).
+    /dictionary_history
+                       Show the 300 most recently looked-up dictionary words,
+                       newest first, with their contextual meanings.
     /depth <n|auto>    Set the number of top BM25 matching trunks (default: 20),
                        or use adaptive retrieval (score elbow + token budget).
     /status            Show the current chat status (scope, loaded chunks,
@@ -1187,6 +1190,7 @@ COMMANDS = {
     "/wiki": "answer narrow fact questions from Wikipedia article excerpts, else show entity summaries",
     "/wiki_article": "print the full Wikipedia article for each main entity of <question>",
     "/dict": "show English dictionary definitions for <word> (local Ollama) and explain its use and meaning in the latest answer",
+    "/dictionary_history": "show the 300 most recently looked-up words and their contextual meanings",
     "/depth": "set the number of top matching trunks used as context (or 'auto')",
     "/status": "show the current chat status",
     "/sources": "show the source list for the latest answer",
@@ -5875,6 +5879,123 @@ def dictionary_surrounding_context(
     return f"{prefix}{snippet}{suffix}".strip()
 
 
+DICTIONARY_HISTORY_DIR = SCRIPT_DIR / ".chat" / "dictionary_history"
+DICTIONARY_HISTORY_LIMIT = 300
+_DICTIONARY_HISTORY_LOCK = threading.Lock()
+
+
+def dictionary_history_path(word: str) -> Path:
+    """Return the JSON history path for one looked-up word."""
+    clean = re.sub(r"[^A-Za-z0-9._' -]+", "_", (word or "").strip())
+    clean = clean.strip(" ._-") or "word"
+    return DICTIONARY_HISTORY_DIR / f"{clean[:120]}.json"
+
+
+def dictionary_contextual_meaning(answer: str) -> str:
+    """Extract the Contextual Meaning field from a dictionary answer."""
+    text = (answer or "").strip()
+    if not text:
+        return ""
+    match = re.search(
+        r"(?ims)^\s*[*#>\-\s]*Contextual\s+Meaning\s*:?\s*\**\s*(.+)\Z",
+        text,
+    )
+    if match is not None:
+        return match.group(1).strip()
+    return text
+
+
+def record_dictionary_history(
+    word: str, context: str, answer: str
+) -> Path | None:
+    """Add or update this word's contextual meaning in .chat/dictionary_history."""
+    word = (word or "").strip()
+    meaning = dictionary_contextual_meaning(answer)
+    if not word or not meaning:
+        return None
+    context = " ".join((context or "").split())
+
+    path = dictionary_history_path(word)
+    with _DICTIONARY_HISTORY_LOCK:
+        entries: list[dict] = []
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                loaded = []
+            if isinstance(loaded, list):
+                entries = [item for item in loaded if isinstance(item, dict)]
+
+        for entry in entries:
+            if str(entry.get("context", "")) == context:
+                entry["meaning"] = meaning
+                break
+        else:
+            entries.append({"context": context, "meaning": meaning})
+
+        DICTIONARY_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(".json.tmp")
+        temp_path.write_text(
+            json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temp_path.replace(path)
+    return path
+
+
+def dictionary_history_entries(limit: int = DICTIONARY_HISTORY_LIMIT) -> list[dict]:
+    """Return the most recently updated word histories, newest first."""
+    if not DICTIONARY_HISTORY_DIR.is_dir():
+        return []
+    files: list[tuple[float, Path]] = []
+    for path in DICTIONARY_HISTORY_DIR.glob("*.json"):
+        try:
+            files.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    files.sort(key=lambda item: item[0], reverse=True)
+
+    entries: list[dict] = []
+    for mtime, path in files[: max(0, limit)]:
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            loaded = []
+        latest = loaded[-1] if isinstance(loaded, list) and loaded else {}
+        if not isinstance(latest, dict):
+            latest = {}
+        entries.append(
+            {
+                "word": path.stem,
+                "mtime": mtime,
+                "context": str(latest.get("context", "")),
+                "meaning": str(latest.get("meaning", "")),
+            }
+        )
+    return entries
+
+
+def dictionary_history_report(limit: int = DICTIONARY_HISTORY_LIMIT) -> str:
+    """Format the dictionary history command output."""
+    entries = dictionary_history_entries(limit)
+    if not entries:
+        return "No dictionary history yet. Look up a word with /dict first."
+    lines = [
+        f"Dictionary history ({len(entries)} word(s), newest first):"
+    ]
+    for index, entry in enumerate(entries, start=1):
+        stamp = datetime.fromtimestamp(entry["mtime"]).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        lines.append(f"  {index:>3}. {entry['word']}  ({stamp})")
+        meaning = " ".join(entry["meaning"].split())
+        if meaning:
+            if len(meaning) > 160:
+                meaning = meaning[:157].rstrip() + "..."
+            lines.append(f"       {meaning}")
+    return "\n".join(lines)
+
+
 def lookup_dictionary(word: str, latest_answer: str | None = None) -> None:
     """Print an English dictionary entry for ``word`` from a local model.
 
@@ -5893,10 +6014,21 @@ def lookup_dictionary(word: str, latest_answer: str | None = None) -> None:
         word=word,
         context=context or "(no surrounding context available)",
     )
+    chunks: list[str] = []
+
+    def emit(text: str) -> None:
+        chunks.append(text)
+        print(text, end="", flush=True)
+
     try:
-        stream_answer(prompt, model=DICT_MODEL)
+        answer = stream_answer(prompt, model=DICT_MODEL, emit=emit)
     except RuntimeError as exc:
         print(f"Dictionary lookup failed: {exc}", file=sys.stderr)
+        return
+    try:
+        record_dictionary_history(word, context, answer or "".join(chunks))
+    except OSError as exc:
+        print(f"Could not save dictionary history: {exc}", file=sys.stderr)
 
 
 def show_latest_answer_usage(word: str, latest_answer: str | None) -> None:
@@ -7066,6 +7198,8 @@ def main() -> None:
                     latest_sources = []
             elif name == "/dict":
                 lookup_dictionary(argument, latest_answer)
+            elif name == "/dictionary_history":
+                print(dictionary_history_report())
             elif name == "/status":
                 print(
                     chat_status_report(

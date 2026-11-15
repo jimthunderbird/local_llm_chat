@@ -7,7 +7,7 @@ Ollama streaming, transcript/article scoping, history, /memory,
 /reddit, /tablelog, /stock, /googlenews, /medium,
 /gutenberg, /openlibrary, /changelog, /wikivoyage, /map, /wiki,
 /wiki_article, /deepresearch, /write_a_book, /books,
-/article, /dict, and /ask. The browser is a
+/article, /dict, /dictionary_history, and /ask. The browser is a
 pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
 
 Every question searches the one global trunk corpus. Tags are no longer a
@@ -16339,6 +16339,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_mathtutor(argument)
         elif name == "/dict":
             self._command_dict(argument)
+        elif name == "/dictionary_history":
+            self._command_dictionary_history()
         elif name == "/settings":
             self._command_settings(argument)
         elif name in {"/settins", "/setting"}:
@@ -19250,6 +19252,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return
         self._stream_dictionary(word, self.state.latest_answer)
 
+    def _command_dictionary_history(self) -> None:
+        report = chat.dictionary_history_report()
+        self._sse_text("output", "\n" + report + "\n")
+
     def _command_sources(self) -> None:
         sources = self.state.latest_sources
         if not sources:
@@ -20078,11 +20084,26 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             context=(context or "(no previous answer available)"),
         )
         try:
-            chat.stream_answer(
+            chunks: list[str] = []
+
+            def emit(text: str) -> None:
+                chunks.append(text)
+                self._sse("delta", {"text": text})
+
+            answer = chat.stream_answer(
                 prompt,
                 model=chat.DICT_MODEL,
-                emit=lambda text: self._sse("delta", {"text": text}),
+                emit=emit,
             )
+            try:
+                chat.record_dictionary_history(
+                    word, context, answer or "".join(chunks)
+                )
+            except OSError as exc:
+                self._sse(
+                    "log",
+                    f"[dictionary] could not save history: {exc}",
+                )
         except RuntimeError as exc:
             self._sse("error", {"message": f"Dictionary lookup failed: {exc}"})
 

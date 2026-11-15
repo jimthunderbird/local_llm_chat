@@ -1,5 +1,19 @@
 dictionary_llm: ollama local model ornith-1.5:35b with no thinking
 
+dictionary_history_directory: {directory_of_this_prompt}/../.chat/dictionary_history
+
+task.dictionary_history (completed) {
+  - for each dictionary inquery, add or update an entry in {directory_of_this_prompt}/../.chat/dictionary_history/<word>.json, it should contain [
+    {
+      context: <20 words before the word> <word> <20 words after the word>
+      meaning: <the word's meaning in this context> 
+    }
+  ]
+  - create a command: /dictionary_history {
+    it will show the top 300 words history by doing find {dictionary_history_directory} -type f -name "*.json" -exec stat -f "%m %N" {} + | sort -rn | cut -d' ' -f2- | head -n 300
+  }
+}
+
 task.synonyms (completed) {
   please add synonyms to the target word in dictionary
 }
