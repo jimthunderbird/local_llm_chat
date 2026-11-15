@@ -4,6 +4,11 @@ words_per_chapter: 800
 max_number_of_chapters: 60
 articles_to_learn: 100
 
+task.evenly_distributed_horizontal_search (completed) {
+  for all questions we come up when planning to write a book:
+  make sure the search results are evenly reflecting every single one of the question
+}
+
 task.more_horizontal_exploration (completed) {
   currently, it seems like when planning to write a book, it will come up with 6 different questions to search for the articles, please come with up 10 different quetions to search instead
 }

@@ -310,7 +310,7 @@ WEB_COMMANDS = {
     "/changelog": "list completed-task summaries from .logs (newest first); click one to read it",
     "/stackoverflow": "search Stack Overflow: /stackoverflow tag <tag> or /stackoverflow search <keywords>",
     "/reddit": "search Reddit posts by keywords: /reddit <keywords>; also searches related subreddits; click a post to read it",
-    "/tablelog": "japan food and restaurant guide for travelers — search Tabelog restaurant pages by keywords: /tablelog <keywords>",
+    "/tablelog": "japan food and restaurant guide for travelers - search Tabelog restaurant pages by keywords: /tablelog <keywords>",
     "/stock": "show a stock symbol profile, financial details, and related news articles: /stock <stock_symbol>",
     "/deepresearch": "run a bounded multi-round research report on <topic>: /deepresearch <topic>",
     "/write_a_book": "ask for chapter, word, and article options, then research recent news and write a book into .chat/books/: /write_a_book [<subject>]",
@@ -1689,7 +1689,7 @@ def _stock_summary_text(value: str, limit: int = 900) -> str:
     boundary = max(cut.rfind(". "), cut.rfind("; "))
     if boundary >= limit // 2:
         cut = cut[: boundary + 1]
-    return cut.rstrip() + " …"
+    return cut.rstrip() + " ..."
 
 
 def _stock_cache_key(symbol: str) -> str:
@@ -3215,7 +3215,7 @@ def search_wikivoyage_destinations(
 
         card_summary = description
         if extract and extract != description:
-            card_summary = f"{description} — {extract}" if description else extract
+            card_summary = f"{description} - {extract}" if description else extract
 
         thumbnail = page.get("thumbnail") or summary.get("thumbnail") or {}
         image_url = ""
@@ -3648,7 +3648,7 @@ def _wikivoyage_article_blocks(document: str, *, html_document: bool = False) ->
                 ]
                 cells = [cell for cell in cells if cell]
                 if cells:
-                    rows.append(" — ".join(cells))
+                    rows.append(" - ".join(cells))
             if rows:
                 blocks.append(
                     {"type": "list", "ordered": False, "items": rows}
@@ -4725,7 +4725,7 @@ def _yelp_hours(hours: object) -> tuple[list[str], bool | None]:
             start = _yelp_clock(entry.get("start"))
             end = _yelp_clock(entry.get("end"))
             if start and end:
-                lines.append(f"{YELP_DAY_NAMES[day]} {start}–{end}")
+                lines.append(f"{YELP_DAY_NAMES[day]} {start}-{end}")
     return lines, is_open_now
 
 
@@ -5664,7 +5664,7 @@ GUTENBERG_NEWS_BOOK_LINK_RE = re.compile(
     re.IGNORECASE,
 )
 GUTENBERG_NEWS_TITLE_SUFFIX_RE = re.compile(
-    r"\s*[-–—|]\s*Project Gutenberg\s*$", re.IGNORECASE
+    r"\s*[---|]\s*Project Gutenberg\s*$", re.IGNORECASE
 )
 GUTENBERG_NEWS_BY_RE = re.compile(
     r"^(?P<title>.+)\s+by\s+(?P<authors>.+)$", re.IGNORECASE
@@ -5734,7 +5734,7 @@ MAX_TRANSLATION_CHARS = 200_000
 TRANSLATION_PARAGRAPH_PATTERN = re.compile(r"\n[ \t]*\n+")
 TRANSLATION_LABEL_PATTERN = re.compile(
     r"^(?:\*\*)?(?:translation|english|simplified chinese|中文|简体中文)"
-    r"(?:\*\*)?\s*[:：]\s*",
+    r"(?:\*\*)?\s*[::]\s*",
     re.IGNORECASE,
 )
 
@@ -6011,7 +6011,7 @@ def image_conversation_context(conversation: list[dict]) -> str:
         if answer:
             compact = re.sub(r"\s+", " ", answer)
             if len(compact) > 700:
-                compact = compact[:700].rsplit(" ", 1)[0] + " …"
+                compact = compact[:700].rsplit(" ", 1)[0] + " ..."
             lines.append(f"Assistant: {compact}")
     text = "\n".join(lines) or "(no previous turns)"
     if len(text) > MAX_IMAGE_CONTEXT_CHARS:
@@ -8384,7 +8384,7 @@ def question_relates_to_conversation(question: str, turns: list[dict]) -> bool:
 
 def is_unrelated_response(response: str) -> bool:
     """Return True when the conversation model flags a new topic."""
-    text = chat.THINK_PATTERN.sub("", response).strip().strip('"\'`“”')
+    text = chat.THINK_PATTERN.sub("", response).strip().strip('"\'`""')
     normalized = re.sub(r"[^a-z]+", " ", text.lower()).strip()
     return bool(normalized) and normalized.split()[0] == CONVERSATION_UNRELATED
 
@@ -8438,16 +8438,16 @@ def clean_standalone_question(response: str) -> str | None:
     """Extract one clean standalone question from a model response."""
     text = chat.THINK_PATTERN.sub("", response).strip()
     text = re.sub(
-        r"^(?:standalone|rewritten|search|new)\s+question\s*[:：]\s*",
+        r"^(?:standalone|rewritten|search|new)\s+question\s*[::]\s*",
         "",
         text,
         flags=re.IGNORECASE,
     )
-    text = re.sub(r"^(?:question|q)\s*[:：]\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(?:question|q)\s*[::]\s*", "", text, flags=re.IGNORECASE)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return None
-    text = " ".join(lines[0].split()).strip('"\'`“”')
+    text = " ".join(lines[0].split()).strip('"\'`""')
     if not text or text.lower() in {"none", "n/a", "unchanged"}:
         return None
     if len(text) > 600:
@@ -8711,19 +8711,40 @@ def _book_plus_keywords(keywords: str) -> str:
 def _book_search_candidates(
     keywords: list[str], limit: int, log: Callable[[str], None]
 ) -> list[dict]:
-    """Search recent Google News stories for the book's keyword list."""
+    """Search recent Google News stories for the book's keyword list.
+
+    Matches task.evenly_distributed_horizontal_search in
+    prompts/write_a_book.prompt: each planning question must be represented
+    in the research material. Results are therefore collected into one bucket
+    per keyword and then taken round-robin across the buckets, so a single
+    prolific query cannot fill the article budget on its own and starve the
+    other questions.
+    """
     script = SCRIPT_DIR / "news_fetch.php"
     if not script.exists():
         raise RuntimeError("missing news_fetch.php")
+    limit = max(0, int(limit))
+    if limit <= 0:
+        return []
+
+    unique_keywords: list[str] = []
+    seen_keywords: set[str] = set()
+    for keyword in keywords:
+        keyword = " ".join(str(keyword).split())
+        if keyword and keyword.casefold() not in seen_keywords:
+            seen_keywords.add(keyword.casefold())
+            unique_keywords.append(keyword)
+        if len(unique_keywords) >= WRITE_A_BOOK_KEYWORD_LIMIT:
+            break
+
     cutoff = datetime(
         WRITE_A_BOOK_RESEARCH_START_YEAR, 1, 1, tzinfo=timezone.utc
     ).timestamp()
-    selected: list[dict] = []
+    # One bucket per planning question; articles are de-duplicated across
+    # buckets so a story matching several questions is only counted once.
+    buckets: list[list[dict]] = []
     seen: set[str] = set()
-    for keyword in keywords[:WRITE_A_BOOK_KEYWORD_LIMIT]:
-        keyword = " ".join(str(keyword).split())
-        if not keyword:
-            continue
+    for keyword in unique_keywords:
         query = (
             f"when:{WRITE_A_BOOK_RESEARCH_YEARS}y "
             f"{_book_plus_keywords(keyword)}"
@@ -8752,6 +8773,7 @@ def _book_search_candidates(
         except (OSError, subprocess.SubprocessError) as exc:
             log(f"[book: search failed for {keyword!r}: {exc}]")
             continue
+        bucket: list[dict] = []
         for item in _read_news_ndjson(result.stdout):
             title = " ".join(str(item.get("title") or "").split())
             link = str(item.get("link") or "").strip()
@@ -8764,7 +8786,7 @@ def _book_search_candidates(
             if published_ts is not None and published_ts < cutoff:
                 continue
             seen.add(key)
-            selected.append(
+            bucket.append(
                 {
                     "title": title,
                     "link": link,
@@ -8777,8 +8799,33 @@ def _book_search_candidates(
                     ),
                 }
             )
+            if len(bucket) >= WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD:
+                break
+        buckets.append(bucket)
+
+    # Round-robin across the question buckets. Every pass takes at most one
+    # article per question, so the final list stays balanced even when some
+    # questions have far more results than others.
+    selected: list[dict] = []
+    cursors = [0] * len(buckets)
+    while len(selected) < limit:
+        progressed = False
+        for index, bucket in enumerate(buckets):
+            if cursors[index] >= len(bucket):
+                continue
+            selected.append(bucket[cursors[index]])
+            cursors[index] += 1
+            progressed = True
             if len(selected) >= limit:
-                return selected
+                break
+        if not progressed:
+            break
+    if len(buckets) > 1 and selected:
+        log(
+            "[book: evenly distributed "
+            f"{len(selected)} article(s) across {len(buckets)} "
+            "planning question(s)]"
+        )
     return selected
 
 
@@ -12480,7 +12527,7 @@ def _openlibrary_plain_text(value: object, limit: int = 0) -> str:
     text = " ".join(text.split())
     if limit > 0 and len(text) > limit:
         shortened = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:-")
-        text = (shortened or text[:limit].rstrip()) + "…"
+        text = (shortened or text[:limit].rstrip()) + "..."
     return text
 
 
@@ -16561,7 +16608,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
                 heading = str(section.get("heading", "")) if section else ""
                 item["title"] = (
-                    f"{title} — {heading}" if heading else title
+                    f"{title} - {heading}" if heading else title
                 )
         self._sse("annotations", {"items": annotations})
         state.record_turn(question, retrieval_question, response)
