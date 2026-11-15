@@ -3817,16 +3817,32 @@
         <input id="book-options-subject" name="subject" type="text" autocomplete="off" placeholder="e.g. the future of open source AI" required>
       </div>
       <div class="book-options-field">
+        <label for="book-options-model">Book-writing model</label>
+        <input id="book-options-model" name="model" type="text" autocomplete="off" spellcheck="false" value="ornith-1.5:35b">
+      </div>
+      <div class="book-options-field">
+        <label for="book-options-directory">Book directory</label>
+        <input id="book-options-directory" name="directory" type="text" autocomplete="off" spellcheck="false" value=".chat/books">
+      </div>
+      <div class="book-options-field">
         <label for="book-options-words">Words per chapter <span class="book-options-default">default 800</span></label>
-        <input id="book-options-words" name="words" type="number" min="100" max="5000" step="50" value="800" required>
+        <input id="book-options-words" name="words" type="number" min="100" step="50" value="800" required>
       </div>
       <div class="book-options-field">
         <label for="book-options-chapters">Number of chapters <span class="book-options-default">default 60</span></label>
-        <input id="book-options-chapters" name="chapters" type="number" min="3" max="60" step="1" value="60" required>
+        <input id="book-options-chapters" name="chapters" type="number" min="3" step="1" value="60" required>
       </div>
       <div class="book-options-field">
         <label for="book-options-articles">Articles to learn <span class="book-options-default">default 100</span></label>
-        <input id="book-options-articles" name="articles" type="number" min="0" max="100" step="1" value="100" required>
+        <input id="book-options-articles" name="articles" type="number" min="0" step="1" value="100" required>
+      </div>
+      <div class="book-options-field">
+        <label for="book-options-sub-questions">Sub-questions when planning <span class="book-options-default">default 10</span></label>
+        <input id="book-options-sub-questions" name="sub-questions" type="number" min="1" step="1" value="10" required>
+      </div>
+      <div class="book-options-field">
+        <label for="book-options-sub-question-articles">Articles per sub-question <span class="book-options-default">default 10</span></label>
+        <input id="book-options-sub-question-articles" name="sub-question-articles" type="number" min="1" step="1" value="10" required>
       </div>
       <div class="book-options-actions">
         <button id="book-options-cancel" type="button">Cancel</button>
@@ -4011,9 +4027,13 @@ const learnMessageEl = $("#learn-message");
 const bookOptionsPanelEl = $("#book-options-panel");
 const bookOptionsFormEl = $("#book-options-form");
 const bookOptionsSubjectEl = $("#book-options-subject");
+const bookOptionsModelEl = $("#book-options-model");
+const bookOptionsDirectoryEl = $("#book-options-directory");
 const bookOptionsWordsEl = $("#book-options-words");
 const bookOptionsChaptersEl = $("#book-options-chapters");
 const bookOptionsArticlesEl = $("#book-options-articles");
+const bookOptionsSubQuestionsEl = $("#book-options-sub-questions");
+const bookOptionsSubQuestionArticlesEl = $("#book-options-sub-question-articles");
 const lineHelpPanel = $("#line-help-panel");
 const lineHelpTitleEl = $("#line-help-title");
 const lineHelpLangEl = $("#line-help-lang");
@@ -9944,23 +9964,45 @@ learnPanelEl.addEventListener("click", (event) => {
  *  /write_a_book options
  *
  *  task.ask_question_before_writing_book asks for words per chapter, the
- *  number of chapters, and how many recent articles to learn. The answers
+ *  number of chapters, and how many recent articles to learn.
+ *  task.expose_settings_in_form exposes every write_a_book setting here as
+ *  well: the book-writing model, the book directory, the number of planning
+ *  sub-questions, and the per-sub-question article limit. None of these
+ *  settings has a maximum; only minima keep the book coherent. The answers
  *  become command-line options so the server can use them directly.
  * ------------------------------------------------------------------ */
-const BOOK_OPTION_DEFAULTS = { words: 800, chapters: 60, articles: 100 };
+const BOOK_OPTION_DEFAULTS = {
+  model: "ornith-1.5:35b",
+  directory: ".chat/books",
+  words: 800,
+  chapters: 60,
+  articles: 100,
+  subQuestions: 10,
+  subQuestionArticles: 10,
+};
 
-function clampBookOption(value, min, max, fallback) {
+function bookOptionInteger(value, min, fallback) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(max, Math.max(min, parsed));
+  return Math.max(min, parsed);
+}
+
+function quoteBookOption(value) {
+  const text = String(value ?? "");
+  return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 function openBookOptions(subject = "") {
   if (!bookOptionsPanelEl) return;
   bookOptionsSubjectEl.value = String(subject || "").trim();
+  bookOptionsModelEl.value = BOOK_OPTION_DEFAULTS.model;
+  bookOptionsDirectoryEl.value = BOOK_OPTION_DEFAULTS.directory;
   bookOptionsWordsEl.value = BOOK_OPTION_DEFAULTS.words;
   bookOptionsChaptersEl.value = BOOK_OPTION_DEFAULTS.chapters;
   bookOptionsArticlesEl.value = BOOK_OPTION_DEFAULTS.articles;
+  bookOptionsSubQuestionsEl.value = BOOK_OPTION_DEFAULTS.subQuestions;
+  bookOptionsSubQuestionArticlesEl.value =
+    BOOK_OPTION_DEFAULTS.subQuestionArticles;
   bookOptionsPanelEl.hidden = false;
   window.setTimeout(() => bookOptionsSubjectEl.focus(), 0);
 }
@@ -9977,19 +10019,35 @@ function submitBookOptions() {
     bookOptionsSubjectEl.focus();
     return;
   }
-  const words = clampBookOption(
-    bookOptionsWordsEl.value, 100, 5000, BOOK_OPTION_DEFAULTS.words
+  const model = bookOptionsModelEl.value.trim()
+    || BOOK_OPTION_DEFAULTS.model;
+  const directory = bookOptionsDirectoryEl.value.trim()
+    || BOOK_OPTION_DEFAULTS.directory;
+  const words = bookOptionInteger(
+    bookOptionsWordsEl.value, 100, BOOK_OPTION_DEFAULTS.words
   );
-  const chapters = clampBookOption(
-    bookOptionsChaptersEl.value, 3, 60, BOOK_OPTION_DEFAULTS.chapters
+  const chapters = bookOptionInteger(
+    bookOptionsChaptersEl.value, 3, BOOK_OPTION_DEFAULTS.chapters
   );
-  const articles = clampBookOption(
-    bookOptionsArticlesEl.value, 0, 100, BOOK_OPTION_DEFAULTS.articles
+  const articles = bookOptionInteger(
+    bookOptionsArticlesEl.value, 0, BOOK_OPTION_DEFAULTS.articles
+  );
+  const subQuestions = bookOptionInteger(
+    bookOptionsSubQuestionsEl.value, 1,
+    BOOK_OPTION_DEFAULTS.subQuestions
+  );
+  const subQuestionArticles = bookOptionInteger(
+    bookOptionsSubQuestionArticlesEl.value, 1,
+    BOOK_OPTION_DEFAULTS.subQuestionArticles
   );
   closeBookOptions({ focusInput: false });
   submitText(
-    `/write_a_book ${subject} --words ${words} --chapters ${chapters} `
-    + `--articles ${articles}`
+    `/write_a_book ${quoteBookOption(subject)}`
+    + ` --model ${quoteBookOption(model)}`
+    + ` --directory ${quoteBookOption(directory)}`
+    + ` --words ${words} --chapters ${chapters} --articles ${articles}`
+    + ` --sub-questions ${subQuestions}`
+    + ` --sub-question-articles ${subQuestionArticles}`
   );
 }
 
@@ -14705,12 +14763,12 @@ function submitText(text, fromChoice = false) {
     return;
   }
   // Ask the /write_a_book questions before sending anything to the server.
-  // The final submit includes --words/--chapters/--articles, so it does not
-  // come back through this branch.
+  // The final submit includes every book setting, so it does not come back
+  // through this branch.
   if (
     !fromChoice
     && /^\/write_a_book(?:\s|$)/i.test(question)
-    && !/--(?:words|words-per-chapter|chapters|articles)(?:=|\s+)\d+/i.test(question)
+    && !/--(?:words|words-per-chapter|chapters|articles|sub-questions|sub-question-articles|model|book-model|directory|book-directory)(?:=|\s+)/i.test(question)
   ) {
     openBookOptions(question.replace(/^\/write_a_book\b/i, "").trim());
     inputEl.value = "";

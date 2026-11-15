@@ -1,8 +1,24 @@
-book_writing_llm: ollama local model ornith-1.5:35b
-book_directory: {diretory_of_this_prompt}/../.chat/books
-words_per_chapter: 800
-max_number_of_chapters: 60
-articles_to_learn: 100
+settings {
+  book_writing_llm: ollama local model ornith-1.5:35b
+  book_directory: {directory_of_this_prompt}/../.chat/books
+  words_per_chapter: 400
+  number_of_chapters: 15
+  sub_questions_to_ask_when_planning: 10
+  sub_questions_article_search_limit: 10
+}
+
+task.expose_settings_in_form (completed) {
+  - update {settings}:
+  - after tying /write_a_book, expose all {settings} options to the form and allow me to customize them, there will be no maximum of each setting options
+}
+
+task.refactor (completed) {
+  - update {settings}
+  - when planning, think about {settings.sub_questions_to_ask_when_planning}, for each sub_question:
+    - articles: search {settings.sub_questions_article_search_limit} articles equally
+    - add {articles} to the book writing references
+  - when writing the book, think about all of the {articles} are related, discover ideas by connecting them with creative thinking
+}
 
 task.evenly_distributed_horizontal_search (completed) {
   for all questions we come up when planning to write a book:
@@ -29,9 +45,9 @@ task (completed) {
 task.ask_question_before_writing_book (completed) {
   after typing /write_a_book:
   - ask me the following question:
-    - words per chapter (default {words_per_chapter})
-    - number of chapter (default {max_number_of_chapters})
-    - articles to learn (default {articles_to_learn})
+  - words per chapter (default {words_per_chapter})
+  - number of chapter (default {max_number_of_chapters})
+  - articles to learn (default {articles_to_learn})
 }
 
 task.load_a_book (completed) {

@@ -133,6 +133,7 @@ import math
 import os
 import re
 import selectors
+import shlex
 import shutil
 import signal
 import subprocess
@@ -313,7 +314,7 @@ WEB_COMMANDS = {
     "/tablelog": "japan food and restaurant guide for travelers - search Tabelog restaurant pages by keywords: /tablelog <keywords>",
     "/stock": "show a stock symbol profile, financial details, and related news articles: /stock <stock_symbol>",
     "/deepresearch": "run a bounded multi-round research report on <topic>: /deepresearch <topic>",
-    "/write_a_book": "ask for chapter, word, and article options, then research recent news and write a book into .chat/books/: /write_a_book [<subject>]",
+    "/write_a_book": "ask for every book setting (model, directory, words, chapters, articles, sub-questions, articles per sub-question), then research recent news and write a book: /write_a_book [<subject>]",
     "/books": "list the books written by /write_a_book in .chat/books: /books [keyword]",
     "/settings": "set English Corner options: /settings english_words_to_learn <range> (3k, 5k, 10k, 20k, 30k, 50k, 100k, or a range such as 10k..50k; default 10k..50k; off disables highlighting)",
 }
@@ -534,17 +535,26 @@ WRITE_A_BOOK_MODEL = os.environ.get(
 )
 WRITE_A_BOOK_DIR = SCRIPT_DIR / ".chat" / "books"
 # task.more_horizontal_exploration in prompts/write_a_book.prompt asks for
-# ten distinct research questions instead of six.
-WRITE_A_BOOK_KEYWORD_LIMIT = 10
-# The three questions asked by task.ask_question_before_writing_book in
-# prompts/write_a_book.prompt, and the bounds used when a caller passes them
-# as --words / --chapters / --articles options.
+# ten distinct research questions instead of six. task.refactor asks each of
+# those questions to contribute an equal share of the research references.
+WRITE_A_BOOK_SUB_QUESTION_LIMIT = 10
+WRITE_A_BOOK_SUB_QUESTION_ARTICLE_LIMIT = 10
+WRITE_A_BOOK_KEYWORD_LIMIT = WRITE_A_BOOK_SUB_QUESTION_LIMIT
+# The settings asked by task.ask_question_before_writing_book and
+# task.expose_settings_in_form in prompts/write_a_book.prompt. Every one of
+# them is exposed in the /write_a_book form. The minima keep the book
+# coherent; there is deliberately no maximum, so the caller controls the
+# words, chapters, sources, and research breadth.
 WRITE_A_BOOK_SOURCE_LIMIT = 100
 WRITE_A_BOOK_MIN_ARTICLES = 0
-WRITE_A_BOOK_MAX_ARTICLES = 100
-# Fetch enough per query that de-duplication still leaves room for the
-# requested number of sources.
-WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD = 20
+# Fetch the per-question article budget directly; every planning question is
+# searched independently and then sampled round-robin so one prolific query
+# cannot dominate the book's references.
+WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD = (
+    WRITE_A_BOOK_SUB_QUESTION_ARTICLE_LIMIT
+)
+WRITE_A_BOOK_MIN_SUB_QUESTIONS = 1
+WRITE_A_BOOK_MIN_SUB_QUESTION_ARTICLES = 1
 WRITE_A_BOOK_RESEARCH_YEARS = 2
 # task.do_not_include_2024 in prompts/write_a_book.prompt: only 2025 and 2026
 # material should be used, even though a rolling two-year window still reaches
@@ -555,22 +565,47 @@ WRITE_A_BOOK_CHAPTER_LIMIT = 60
 WRITE_A_BOOK_MIN_CHAPTERS = 3
 WRITE_A_BOOK_CHAPTER_WORDS = 800
 WRITE_A_BOOK_MIN_CHAPTER_WORDS = 100
-WRITE_A_BOOK_MAX_CHAPTER_WORDS = 5_000
 WRITE_A_BOOK_EVIDENCE_CHARS = 12_000
 WRITE_A_BOOK_DIGEST_CHARS = 8_000
-_WRITE_A_BOOK_OPTION_RE = re.compile(
-    r"(?:^|\s)--(?P<name>words|words-per-chapter|chapters|articles)"
-    r"(?:=|\s+)(?P<value>\d+)\b",
-    re.IGNORECASE,
-)
+WRITE_A_BOOK_REFERENCE_MAP_CHARS = 6_000
+
+
+class WriteABookOptions(NamedTuple):
+    """All customizable /write_a_book settings after argument parsing."""
+
+    subject: str
+    words_per_chapter: int
+    chapter_count: int
+    articles_to_learn: int
+    sub_question_count: int
+    sub_question_article_limit: int
+    model: str
+    directory: Path
+
+
+_WRITE_A_BOOK_NUMERIC_OPTIONS = {
+    "words": "words",
+    "words-per-chapter": "words",
+    "chapters": "chapters",
+    "articles": "articles",
+    "sub-questions": "sub_questions",
+    "sub-question-articles": "sub_question_articles",
+    "sub-questions-article-limit": "sub_question_articles",
+}
+_WRITE_A_BOOK_STRING_OPTIONS = {
+    "model": "model",
+    "book-model": "model",
+    "directory": "directory",
+    "book-directory": "directory",
+}
 WRITE_A_BOOK_KEYWORD_PROMPT = """You are a research librarian planning a
 book about the following subject:
 
 {subject}
 
-Produce up to {limit} web-search queries that would find recent, factual
-articles useful for writing this book. Cover the main angles, not just
-synonyms of the subject.
+Produce exactly {limit} web-search queries that would find recent, factual
+articles useful for writing this book. Each query is one sub-question the
+book should answer. Cover the main angles, not just synonyms of the subject.
 
 Rules:
 - Return one search query per line.
@@ -607,12 +642,21 @@ Use the research excerpts below as the factual basis. You may explain and
 synthesize them, but do not invent names, numbers, dates, or events that are
 not supported by the excerpts. Write for a general, curious reader.
 
+All of the excerpts and the numbered references below belong to one connected
+research corpus. Do not treat them as unrelated documents: look for links
+between different sources, combine complementary facts, notice tensions, and
+use creative synthesis to develop ideas that no single source states on its
+own. Clearly mark interpretation or speculation as such.
+
 Rules:
 - Return only the chapter prose. Do not write a chapter title, heading,
   preface, summary of this prompt, notes, or a source list.
 - Use flowing paragraphs, not bullet lists unless a list is genuinely clearer.
 - Aim for about {target_words} words. The chapter must never exceed
   {max_words} words.
+
+All research references:
+{references}
 
 Research excerpts:
 {evidence}
@@ -628,8 +672,20 @@ def _book_filename(subject: str) -> str:
     return f"{name or 'book'}.html"
 
 
-def written_book_path(name: str) -> Path | None:
-    """Resolve a book filename inside ./.chat/books without allowing traversal."""
+def _resolve_book_directory(directory: str | Path | None = None) -> Path:
+    """Resolve a book directory, defaulting to ./.chat/books."""
+    if directory in (None, ""):
+        return WRITE_A_BOOK_DIR
+    path = Path(os.path.expanduser(str(directory)))
+    if not path.is_absolute():
+        path = SCRIPT_DIR / path
+    return path.resolve()
+
+
+def written_book_path(
+    name: str, directory: str | Path | None = None
+) -> Path | None:
+    """Resolve a book filename inside a book directory without traversal."""
     name = str(name or "").strip()
     if (
         not name
@@ -639,9 +695,10 @@ def written_book_path(name: str) -> Path | None:
         or not name.lower().endswith(".html")
     ):
         return None
-    path = (WRITE_A_BOOK_DIR / name).resolve()
+    book_dir = _resolve_book_directory(directory)
+    path = (book_dir / name).resolve()
     try:
-        path.relative_to(WRITE_A_BOOK_DIR.resolve())
+        path.relative_to(book_dir)
     except ValueError:
         return None
     return path
@@ -662,12 +719,13 @@ def _book_title_from_html(path: Path) -> str:
     return html.unescape(re.sub(r"\s+", " ", match.group(1))).strip()
 
 
-def list_written_books() -> list[dict]:
+def list_written_books(directory: str | Path | None = None) -> list[dict]:
     """List the HTML books written by /write_a_book, newest first."""
-    if not WRITE_A_BOOK_DIR.is_dir():
+    book_dir = _resolve_book_directory(directory)
+    if not book_dir.is_dir():
         return []
     entries: list[dict] = []
-    for path in WRITE_A_BOOK_DIR.iterdir():
+    for path in book_dir.iterdir():
         try:
             if not path.is_file() or path.suffix.lower() != ".html":
                 continue
@@ -769,9 +827,12 @@ def _book_recent_keyword(keyword: str) -> str:
     return " ".join(current.split())
 
 
-def _book_keyword_list(raw: str, subject: str) -> list[str]:
+def _book_keyword_list(
+    raw: str, subject: str, limit: int = WRITE_A_BOOK_KEYWORD_LIMIT
+) -> list[str]:
     """Turn the keyword-model reply into a bounded, deduplicated list."""
-    keywords = _parse_book_model_lines(raw, WRITE_A_BOOK_KEYWORD_LIMIT)
+    limit = max(1, int(limit))
+    keywords = _parse_book_model_lines(raw, limit)
     if len(keywords) == 1 and "," in keywords[0]:
         split = [
             part.strip(" \t\"'`")
@@ -779,7 +840,7 @@ def _book_keyword_list(raw: str, subject: str) -> list[str]:
             if part.strip(" \t\"'`")
         ]
         if len(split) > 1:
-            keywords = split[:WRITE_A_BOOK_KEYWORD_LIMIT]
+            keywords = split[:limit]
     normalized: list[str] = []
     seen: set[str] = set()
     for keyword in keywords:
@@ -797,10 +858,7 @@ def _book_chapter_titles(
     chapters: int = WRITE_A_BOOK_CHAPTER_LIMIT,
 ) -> list[str]:
     """Return exactly ``chapters`` usable titles, with a stable fallback."""
-    chapters = max(
-        WRITE_A_BOOK_MIN_CHAPTERS,
-        min(WRITE_A_BOOK_CHAPTER_LIMIT, int(chapters)),
-    )
+    chapters = max(WRITE_A_BOOK_MIN_CHAPTERS, int(chapters))
     titles = _parse_book_model_lines(raw, chapters)
     cleaned: list[str] = []
     for title in titles:
@@ -827,46 +885,86 @@ def _book_chapter_titles(
     return cleaned[:chapters]
 
 
-def _parse_write_a_book_options(argument: str) -> tuple[str, int, int, int]:
-    """Split ``<subject> [--words N --chapters N --articles N]``.
+def _parse_write_a_book_options(argument: str) -> WriteABookOptions:
+    """Split ``<subject> [--setting VALUE ...]`` into book settings.
 
-    The values come from the questions asked by
-    task.ask_question_before_writing_book. Missing or out-of-range values fall
-    back to the documented defaults rather than failing the command.
+    Every option exposed by task.expose_settings_in_form in
+    prompts/write_a_book.prompt is accepted. Numeric settings are clamped
+    only at their minimum; there is no maximum, so the caller can request any
+    number of words, chapters, articles, or planning questions. Options may be
+    written as ``--name value`` or ``--name=value``; values containing spaces
+    can be quoted.
     """
-    text = " ".join(str(argument or "").split())
+    try:
+        tokens = shlex.split(str(argument or ""))
+    except ValueError:
+        tokens = str(argument or "").split()
     values = {
         "words": WRITE_A_BOOK_CHAPTER_WORDS,
         "chapters": WRITE_A_BOOK_CHAPTER_LIMIT,
         "articles": WRITE_A_BOOK_SOURCE_LIMIT,
+        "sub_questions": WRITE_A_BOOK_SUB_QUESTION_LIMIT,
+        "sub_question_articles": WRITE_A_BOOK_SUB_QUESTION_ARTICLE_LIMIT,
     }
+    model = WRITE_A_BOOK_MODEL
+    directory = ""
+    subject_tokens: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        name = ""
+        inline_value: str | None = None
+        if token.startswith("--"):
+            name = token[2:]
+            if "=" in name:
+                name, inline_value = name.split("=", 1)
+            name = name.strip().lower()
+        if name in _WRITE_A_BOOK_NUMERIC_OPTIONS or name in (
+            _WRITE_A_BOOK_STRING_OPTIONS
+        ):
+            if inline_value is None:
+                index += 1
+                if index >= len(tokens):
+                    break
+                inline_value = tokens[index]
+            if name in _WRITE_A_BOOK_NUMERIC_OPTIONS:
+                key = _WRITE_A_BOOK_NUMERIC_OPTIONS[name]
+                try:
+                    values[key] = int(inline_value)
+                except (TypeError, ValueError):
+                    pass
+            else:
+                key = _WRITE_A_BOOK_STRING_OPTIONS[name]
+                if key == "model":
+                    model = str(inline_value).strip() or model
+                else:
+                    directory = str(inline_value).strip()
+            index += 1
+            continue
+        subject_tokens.append(token)
+        index += 1
 
-    def replace(match: re.Match[str]) -> str:
-        name = match.group("name").lower()
-        key = "words" if name.startswith("word") else name
-        try:
-            values[key] = int(match.group("value"))
-        except ValueError:
-            pass
-        return " "
-
-    subject = _WRITE_A_BOOK_OPTION_RE.sub(replace, text)
-    subject = " ".join(subject.split()).strip()
-    if len(subject) >= 2 and subject[0] == subject[-1] and subject[0] in "\"'":
-        subject = subject[1:-1].strip()
-    words = max(
-        WRITE_A_BOOK_MIN_CHAPTER_WORDS,
-        min(WRITE_A_BOOK_MAX_CHAPTER_WORDS, values["words"]),
+    subject = " ".join(subject_tokens).strip()
+    words = max(WRITE_A_BOOK_MIN_CHAPTER_WORDS, values["words"])
+    chapters = max(WRITE_A_BOOK_MIN_CHAPTERS, values["chapters"])
+    articles = max(WRITE_A_BOOK_MIN_ARTICLES, values["articles"])
+    sub_questions = max(
+        WRITE_A_BOOK_MIN_SUB_QUESTIONS, values["sub_questions"]
     )
-    chapters = max(
-        WRITE_A_BOOK_MIN_CHAPTERS,
-        min(WRITE_A_BOOK_CHAPTER_LIMIT, values["chapters"]),
+    sub_question_articles = max(
+        WRITE_A_BOOK_MIN_SUB_QUESTION_ARTICLES,
+        values["sub_question_articles"],
     )
-    articles = max(
-        WRITE_A_BOOK_MIN_ARTICLES,
-        min(WRITE_A_BOOK_MAX_ARTICLES, values["articles"]),
+    return WriteABookOptions(
+        subject=subject,
+        words_per_chapter=words,
+        chapter_count=chapters,
+        articles_to_learn=articles,
+        sub_question_count=sub_questions,
+        sub_question_article_limit=sub_question_articles,
+        model=model,
+        directory=_resolve_book_directory(directory),
     )
-    return subject, words, chapters, articles
 
 
 def _book_search_tokens(text: str) -> list[str]:
@@ -901,6 +999,36 @@ def _book_source_digest(sources: list[dict], max_chars: int) -> str:
         if summary:
             line += f": {summary[:520]}"
         if used + len(line) > max_chars and parts:
+            break
+        parts.append(line)
+        used += len(line) + 1
+    return "\n".join(parts)
+
+
+def _book_reference_map(sources: list[dict], max_chars: int) -> str:
+    """List every research reference for cross-source creative synthesis.
+
+    Matches the final point of task.refactor in prompts/write_a_book.prompt:
+    a chapter should consider all of the learned articles as one connected
+    corpus, so the model gets a numbered map of every reference in addition
+    to the excerpts selected for the chapter.
+    """
+    parts: list[str] = []
+    used = 0
+    for index, source in enumerate(sources, 1):
+        title = " ".join(str(source.get("title") or "Untitled").split())
+        summary = " ".join(str(source.get("summary") or "").split())
+        if not summary:
+            paragraphs = source.get("paragraphs") or []
+            if paragraphs:
+                summary = " ".join(str(paragraphs[0]).split())
+        line = f"[{index}] {title}"
+        if summary:
+            line += f" — {summary[:240]}"
+        if used + len(line) > max_chars and parts:
+            parts.append(
+                f"[... {len(sources) - index + 1} more reference(s)]"
+            )
             break
         parts.append(line)
         used += len(line) + 1
@@ -8721,21 +8849,28 @@ def _book_plus_keywords(keywords: str) -> str:
 
 
 def _book_search_candidates(
-    keywords: list[str], limit: int, log: Callable[[str], None]
+    keywords: list[str],
+    limit: int,
+    log: Callable[[str], None],
+    *,
+    keyword_limit: int = WRITE_A_BOOK_KEYWORD_LIMIT,
+    per_question_limit: int = WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD,
 ) -> list[dict]:
     """Search recent Google News stories for the book's keyword list.
 
-    Matches task.evenly_distributed_horizontal_search in
-    prompts/write_a_book.prompt: each planning question must be represented
-    in the research material. Results are therefore collected into one bucket
-    per keyword and then taken round-robin across the buckets, so a single
-    prolific query cannot fill the article budget on its own and starve the
-    other questions.
+    Matches task.evenly_distributed_horizontal_search and task.refactor in
+    prompts/write_a_book.prompt: each planning question must contribute an
+    equal share of the research material. Results are therefore collected
+    into one bucket per keyword and then taken round-robin across the buckets
+    with a per-question quota, so a single prolific query cannot fill the
+    article budget on its own and starve the other questions.
     """
     script = SCRIPT_DIR / "news_fetch.php"
     if not script.exists():
         raise RuntimeError("missing news_fetch.php")
     limit = max(0, int(limit))
+    keyword_limit = max(1, int(keyword_limit))
+    per_question_limit = max(1, int(per_question_limit))
     if limit <= 0:
         return []
 
@@ -8746,16 +8881,18 @@ def _book_search_candidates(
         if keyword and keyword.casefold() not in seen_keywords:
             seen_keywords.add(keyword.casefold())
             unique_keywords.append(keyword)
-        if len(unique_keywords) >= WRITE_A_BOOK_KEYWORD_LIMIT:
+        if len(unique_keywords) >= keyword_limit:
             break
 
     cutoff = datetime(
         WRITE_A_BOOK_RESEARCH_START_YEAR, 1, 1, tzinfo=timezone.utc
     ).timestamp()
-    # One bucket per planning question; articles are de-duplicated across
-    # buckets so a story matching several questions is only counted once.
+    # One bucket per planning question. Duplicates inside a bucket are
+    # removed, but the same story may appear in several buckets: it can be a
+    # valid result for more than one question, and keeping it in each bucket
+    # lets the even-distribution pass assign it fairly. Duplicates are removed
+    # again when the final list is selected.
     buckets: list[list[dict]] = []
-    seen: set[str] = set()
     for keyword in unique_keywords:
         query = (
             f"when:{WRITE_A_BOOK_RESEARCH_YEARS}y "
@@ -8772,7 +8909,7 @@ def _book_search_candidates(
             "--search",
             query,
             "--limit",
-            str(WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD),
+            str(per_question_limit),
         ]
         try:
             result = subprocess.run(
@@ -8786,18 +8923,19 @@ def _book_search_candidates(
             log(f"[book: search failed for {keyword!r}: {exc}]")
             continue
         bucket: list[dict] = []
+        bucket_seen: set[str] = set()
         for item in _read_news_ndjson(result.stdout):
             title = " ".join(str(item.get("title") or "").split())
             link = str(item.get("link") or "").strip()
             key = (link or title).casefold()
-            if not title or not key or key in seen:
+            if not title or not key or key in bucket_seen:
                 continue
             published_ts = _book_news_timestamp(
                 str(item.get("published") or "")
             )
             if published_ts is not None and published_ts < cutoff:
                 continue
-            seen.add(key)
+            bucket_seen.add(key)
             bucket.append(
                 {
                     "title": title,
@@ -8811,32 +8949,68 @@ def _book_search_candidates(
                     ),
                 }
             )
-            if len(bucket) >= WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD:
+            if len(bucket) >= per_question_limit:
                 break
         buckets.append(bucket)
 
     # Round-robin across the question buckets. Every pass takes at most one
-    # article per question, so the final list stays balanced even when some
-    # questions have far more results than others.
+    # article per question and no question may exceed its quota, so the final
+    # list reflects every sub-question equally even when some questions have
+    # far more results than others.
+    quota = 0
+    if buckets:
+        quota = min(
+            per_question_limit,
+            max(1, math.ceil(limit / len(buckets))),
+        )
     selected: list[dict] = []
+    selected_keys: set[str] = set()
     cursors = [0] * len(buckets)
-    while len(selected) < limit:
+    contributed = [0] * len(buckets)
+
+    def take_one_pass(per_question_cap: int | None) -> bool:
         progressed = False
         for index, bucket in enumerate(buckets):
-            if cursors[index] >= len(bucket):
-                continue
-            selected.append(bucket[cursors[index]])
-            cursors[index] += 1
-            progressed = True
             if len(selected) >= limit:
                 break
-        if not progressed:
-            break
+            if (
+                per_question_cap is not None
+                and contributed[index] >= per_question_cap
+            ):
+                continue
+            while cursors[index] < len(bucket):
+                item = bucket[cursors[index]]
+                cursors[index] += 1
+                key = (
+                    str(item.get("link") or item.get("title") or "")
+                    .casefold()
+                )
+                if not key or key in selected_keys:
+                    continue
+                selected_keys.add(key)
+                selected.append(item)
+                contributed[index] += 1
+                progressed = True
+                break
+        return progressed
+
+    # First honor the equal per-question quota, then let any question with
+    # spare articles fill a budget left unused by questions with too few
+    # results.
+    while len(selected) < limit and take_one_pass(quota):
+        pass
+    while len(selected) < limit and take_one_pass(None):
+        pass
     if len(buckets) > 1 and selected:
         log(
             "[book: evenly distributed "
             f"{len(selected)} article(s) across {len(buckets)} "
-            "planning question(s)]"
+            f"planning question(s), up to {quota} each]"
+        )
+        log(
+            "[book: articles per planning question: "
+            + ", ".join(str(count) for count in contributed)
+            + "]"
         )
     return selected
 
@@ -14595,7 +14769,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/book_file":
             params = parse_qs(parsed.query)
             name = (params.get("name") or [""])[0]
-            self._send_written_book(name)
+            directory = (params.get("dir") or [""])[0]
+            self._send_written_book(name, directory)
             return
         if path == "/api/wiki":
             params = parse_qs(parsed.query)
@@ -14653,9 +14828,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    def _send_written_book(self, name: str) -> None:
+    def _send_written_book(
+        self, name: str, directory: str | None = None
+    ) -> None:
         """Serve one HTML book written by /write_a_book."""
-        path = written_book_path(name)
+        path = written_book_path(name, directory)
         if path is None or not path.is_file():
             self._send_error_json("Written book not found", 404)
             return
@@ -16819,16 +16996,24 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         chapters. The finished, self-contained HTML book is saved under
         ./.chat/books and emitted as a `written_book` event with a browser URL.
         """
-        subject, words_per_chapter, chapter_count, articles_to_learn = (
-            _parse_write_a_book_options(subject)
-        )
+        options = _parse_write_a_book_options(subject)
+        subject = options.subject
+        words_per_chapter = options.words_per_chapter
+        chapter_count = options.chapter_count
+        articles_to_learn = options.articles_to_learn
+        book_model = options.model
+        book_directory = options.directory
         if not subject:
             self._sse_text(
                 "output",
                 "\nUsage: /write_a_book <subject> [--words N] [--chapters N] "
-                "[--articles N]\n"
+                "[--articles N] [--sub-questions N] "
+                "[--sub-question-articles N] [--model MODEL] "
+                "[--directory DIR]\n"
                 "Defaults: 800 words per chapter, 60 chapters, 100 recent "
-                "articles.\n"
+                "articles, 10 planning sub-questions, 10 articles per "
+                "sub-question, the configured book model, and .chat/books.\n"
+                "Every setting has no maximum.\n"
                 "Example: /write_a_book the future of open source AI\n",
             )
             return
@@ -16836,17 +17021,20 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         started = time.monotonic()
         self._sse_text(
             "log",
-            f"[book: planning {subject!r} with {WRITE_A_BOOK_MODEL} "
+            f"[book: planning {subject!r} with {book_model} "
             f"({chapter_count} chapter(s), about {words_per_chapter} words "
-            f"each, learn from {articles_to_learn} article(s))]",
+            f"each, learn from {articles_to_learn} article(s) across "
+            f"up to {options.sub_question_count} sub-question(s), "
+            f"up to {options.sub_question_article_limit} article(s) per "
+            f"sub-question; saving to {book_directory})]",
         )
         try:
             keyword_reply = chat.generate_text(
                 WRITE_A_BOOK_KEYWORD_PROMPT.format(
                     subject=subject,
-                    limit=WRITE_A_BOOK_KEYWORD_LIMIT,
+                    limit=options.sub_question_count,
                 ),
-                model=WRITE_A_BOOK_MODEL,
+                model=book_model,
                 temperature=0.4,
                 num_predict=260,
             )
@@ -16856,7 +17044,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 f"\n/write_a_book: keyword planning failed: {exc}\n",
             )
             return
-        keywords = _book_keyword_list(keyword_reply, subject)
+        keywords = _book_keyword_list(
+            keyword_reply, subject, options.sub_question_count
+        )
         self._sse_text(
             "log", "[book: search keywords: " + " | ".join(keywords) + "]"
         )
@@ -16873,6 +17063,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     keywords,
                     articles_to_learn,
                     lambda text: self._sse_text("log", text),
+                    keyword_limit=options.sub_question_count,
+                    per_question_limit=(
+                        options.sub_question_article_limit
+                    ),
                 )
             except RuntimeError as exc:
                 self._sse_text(
@@ -16893,6 +17087,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         [subject],
                         articles_to_learn,
                         lambda text: self._sse_text("log", text),
+                        keyword_limit=1,
+                        per_question_limit=(
+                            options.sub_question_article_limit
+                        ),
                     )
                 except RuntimeError as exc:
                     self._sse_text(
@@ -16952,7 +17150,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     digest=digest,
                     chapters=chapter_count,
                 ),
-                model=WRITE_A_BOOK_MODEL,
+                model=book_model,
                 temperature=0.45,
                 num_predict=360,
             )
@@ -16971,6 +17169,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         )
 
         chapters: list[tuple[str, str]] = []
+        reference_map = _book_reference_map(
+            sources, WRITE_A_BOOK_REFERENCE_MAP_CHARS
+        )
         for index, chapter_title in enumerate(chapter_titles, 1):
             self._sse_text(
                 "delta", f"\n\n## Chapter {index}: {chapter_title}\n\n"
@@ -16988,18 +17189,22 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "knowledge, and avoid specific claims that cannot be "
                     "verified."
                 )
+                reference_map = (
+                    "No numbered research references were available."
+                )
             prompt = WRITE_A_BOOK_CHAPTER_PROMPT.format(
                 subject=subject,
                 number=index,
                 title=chapter_title,
                 target_words=max(80, int(words_per_chapter * 0.95)),
                 max_words=words_per_chapter,
+                references=reference_map,
                 evidence=evidence,
             )
             try:
                 chapter_text = chat.stream_answer(
                     prompt,
-                    model=WRITE_A_BOOK_MODEL,
+                    model=book_model,
                     emit=lambda text: self._sse_text("delta", text),
                 )
             except RuntimeError as exc:
@@ -17043,9 +17248,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             subject, chapters, sources, created
         )
         filename = _book_filename(subject)
-        path = WRITE_A_BOOK_DIR / filename
+        path = book_directory / filename
         try:
-            WRITE_A_BOOK_DIR.mkdir(parents=True, exist_ok=True)
+            book_directory.mkdir(parents=True, exist_ok=True)
             path.write_text(book_html, encoding="utf-8")
         except OSError as exc:
             self._sse_text(
@@ -17056,12 +17261,16 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         total_words = sum(len(text.split()) for _title, text in chapters)
         url = f"/api/book_file?name={quote(filename)}"
+        if book_directory != _resolve_book_directory():
+            url += f"&dir={quote(str(book_directory))}"
         self._sse(
             "written_book",
             {
                 "title": subject,
                 "filename": filename,
                 "url": url,
+                "directory": str(book_directory),
+                "model": book_model,
                 "chapters": [
                     {
                         "title": title,
@@ -17092,7 +17301,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         )
         state.latest_sources = []
         state.latest_benchmark = {
-            "model": WRITE_A_BOOK_MODEL,
+            "model": book_model,
             "trunks": len(sources),
             "context_tokens": 0,
             "total": time.monotonic() - started,
