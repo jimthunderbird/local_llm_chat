@@ -20,6 +20,9 @@ Usage:
 Endpoints:
     GET  /                       app/chat.html
     GET  /api/state              current chat state + command list + history
+    GET  /api/english_words      ?range=<10k|20k|30k|50k|100k|range> the
+                                  English Corner vocabulary used to highlight
+                                  words in article readers
     GET  /api/autocomplete       ?kind=commands|transcripts|paths|
                                   stackoverflow_subcommands&q=...
     GET  /api/wiki?word=...      JSON Wikipedia summary
@@ -191,6 +194,101 @@ CHANGELOG_TIMESTAMP_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})\.summary\.html$"
 )
 
+# English Corner: /settings english_words_to_learn <range> selects the
+# frequency band whose words are highlighted in news and article readers. The
+# band names and range syntax come from the English Corner word finder, so the
+# UI and the CLI accept exactly the same options. The setting is small and
+# global to the server, so it is stored next to the other .chat state.
+ENGLISH_CORNER_SETTINGS_FILE = SCRIPT_DIR / ".chat" / "english_corner_settings.json"
+ENGLISH_CORNER_WORD_FINDER = (
+    SCRIPT_DIR / "englishcorner" / "scripts" / "find_article_words_in_corpus.py"
+)
+ENGLISH_CORNER_DEFAULT_RANGE = "10k..50k"
+ENGLISH_CORNER_DISABLED_VALUES = {"", "off", "none", "disabled"}
+_ENGLISH_CORNER_SETTINGS_LOCK = threading.Lock()
+_ENGLISH_CORNER_SETTINGS: dict[str, str] | None = None
+_ENGLISH_CORNER_MODULE = None
+
+
+def _load_english_corner_settings() -> dict[str, str]:
+    """Read the persisted English Corner settings once per process."""
+    global _ENGLISH_CORNER_SETTINGS
+    with _ENGLISH_CORNER_SETTINGS_LOCK:
+        if _ENGLISH_CORNER_SETTINGS is not None:
+            return dict(_ENGLISH_CORNER_SETTINGS)
+        settings: dict[str, str] = {}
+        try:
+            raw = json.loads(
+                ENGLISH_CORNER_SETTINGS_FILE.read_text(encoding="utf-8")
+            )
+            if isinstance(raw, dict):
+                settings = {
+                    str(key): str(value)
+                    for key, value in raw.items()
+                    if isinstance(value, (str, int, float))
+                }
+        except (OSError, ValueError, json.JSONDecodeError):
+            settings = {}
+        _ENGLISH_CORNER_SETTINGS = settings
+        return dict(settings)
+
+
+def _save_english_corner_settings(settings: dict[str, str]) -> None:
+    """Persist English Corner settings atomically inside ./.chat."""
+    global _ENGLISH_CORNER_SETTINGS
+    with _ENGLISH_CORNER_SETTINGS_LOCK:
+        _ENGLISH_CORNER_SETTINGS = dict(settings)
+        try:
+            ENGLISH_CORNER_SETTINGS_FILE.parent.mkdir(
+                parents=True, exist_ok=True
+            )
+            temporary = ENGLISH_CORNER_SETTINGS_FILE.with_name(
+                ENGLISH_CORNER_SETTINGS_FILE.name + ".tmp"
+            )
+            temporary.write_text(
+                json.dumps(settings, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(ENGLISH_CORNER_SETTINGS_FILE)
+        except OSError:
+            # Highlighting still works for this process; only persistence
+            # across restarts is lost.
+            pass
+
+
+def _english_corner_word_finder():
+    """Import the English Corner word finder without installing a package."""
+    global _ENGLISH_CORNER_MODULE
+    if _ENGLISH_CORNER_MODULE is None:
+        if not ENGLISH_CORNER_WORD_FINDER.is_file():
+            raise RuntimeError(
+                f"missing English Corner word finder: {ENGLISH_CORNER_WORD_FINDER}"
+            )
+        spec = importlib.util.spec_from_file_location(
+            "english_corner_word_finder", ENGLISH_CORNER_WORD_FINDER
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError("could not load the English Corner word finder")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _ENGLISH_CORNER_MODULE = module
+    return _ENGLISH_CORNER_MODULE
+
+
+@lru_cache(maxsize=8)
+def english_corner_vocabulary(spec: str) -> tuple[tuple[str, ...], str]:
+    """Resolve a corpus name/range to a sorted vocabulary and label.
+
+    Raises ``ValueError`` for an unknown corpus or malformed range, matching
+    the CLI's error messages. Results are cached because the same browser
+    session repeatedly asks for the currently selected setting.
+    """
+    normalized = " ".join(str(spec or "").split()).lower()
+    if normalized in ENGLISH_CORNER_DISABLED_VALUES:
+        return (), ""
+    vocabulary, label = _english_corner_word_finder().resolve_corpus(normalized)
+    return tuple(sorted(vocabulary)), label
+
 WEB_COMMANDS = {
     **chat.COMMANDS,
     "/help": "show commands and keyboard shortcuts",
@@ -216,6 +314,7 @@ WEB_COMMANDS = {
     "/deepresearch": "run a bounded multi-round research report on <topic>: /deepresearch <topic>",
     "/write_a_book": "research the last 2 years and write a 3-10 chapter book (~800 words each) into .chat/books/: /write_a_book <subject>",
     "/books": "list the books written by /write_a_book in .chat/books: /books [keyword]",
+    "/settings": "set English Corner options: /settings english_words_to_learn <range> (3k, 5k, 10k, 20k, 30k, 50k, 100k, or a range such as 10k..50k; default 10k..50k; off disables highlighting)",
 }
 
 # News sources accepted by /news and completed by news_fetch.php.
@@ -5209,6 +5308,7 @@ COMMAND_ARGUMENTS = {
     "/stackoverflow",
     "/deepresearch",
     "/write_a_book",
+    "/settings",
 }
 
 # Subcommands grouped under /gutenberg and /openlibrary.
@@ -13000,6 +13100,19 @@ class ChatState:
         self.benchmark_mode = False
         self.conversation: list[dict] = []
         self.conversation_revision = 0
+        # English Corner: corpus band highlighted in article readers. Shared
+        # through .chat/english_corner_settings.json so a server restart keeps
+        # the learner's chosen difficulty band. When the setting has never
+        # been written, highlighting starts at the documented default band;
+        # an explicitly saved empty value/"off" keeps it disabled.
+        saved_english_range = _load_english_corner_settings().get(
+            "english_words_to_learn"
+        )
+        if saved_english_range is None:
+            self.english_words_to_learn = ENGLISH_CORNER_DEFAULT_RANGE
+        else:
+            self.english_words_to_learn = str(saved_english_range).strip()
+        self.english_words_label = ""
         chat.HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
         chat.HISTORY_FILE.touch(exist_ok=True)
         if chunks is None:
@@ -13164,6 +13277,8 @@ class ChatState:
                 "dict": chat.DICT_MODEL,
             },
             "benchmark_mode": self.benchmark_mode,
+            "english_words_to_learn": self.english_words_to_learn,
+            "english_words_label": self.english_words_label,
             "has_answer": self.latest_answer is not None,
             "source_count": len(self.latest_sources),
             "history_count": len(self.history),
@@ -13828,6 +13943,25 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/state":
             with self.state.lock:
                 self._send_json(self.state.snapshot(include_history=True))
+            return
+        if path == "/api/english_words":
+            params = parse_qs(parsed.query)
+            spec = " ".join((params.get("range") or [""])[0].split())
+            if not spec:
+                spec = self.state.english_words_to_learn
+            try:
+                words, label = english_corner_vocabulary(spec)
+            except (ValueError, RuntimeError, OSError) as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            self._send_json(
+                {
+                    "range": spec,
+                    "label": label,
+                    "count": len(words),
+                    "words": list(words),
+                }
+            )
             return
         if path == "/api/video_learn_status":
             params = parse_qs(parsed.query)
@@ -16205,6 +16339,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_mathtutor(argument)
         elif name == "/dict":
             self._command_dict(argument)
+        elif name == "/settings":
+            self._command_settings(argument)
+        elif name in {"/settins", "/setting"}:
+            # Tolerate the original misspelling used when this command was
+            # requested; /settings is the documented spelling.
+            self._command_settings(argument)
         elif name == "/depth":
             self._command_depth(argument)
         elif name == "/status":
@@ -19220,6 +19360,93 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         self._sse_text(
             "output",
             f"\nRetrieval depth: top {new_depth} BM25 matching trunk(s).\n",
+        )
+        self._sse("meta", state.snapshot())
+
+    def _command_settings(self, argument: str) -> None:
+        """Get or set English Corner article highlighting options."""
+        state = self.state
+        parts = argument.split(None, 1)
+        if not parts:
+            current = state.english_words_to_learn or "off"
+            label = state.english_words_label
+            if (
+                current
+                and current.lower() not in ENGLISH_CORNER_DISABLED_VALUES
+                and not label
+            ):
+                try:
+                    _vocabulary, label = english_corner_vocabulary(current)
+                    state.english_words_label = label
+                except (ValueError, RuntimeError, OSError):
+                    label = ""
+            self._sse_text(
+                "output",
+                "\nEnglish Corner settings:\n"
+                f"  english_words_to_learn = {current}"
+                + (f" ({label})" if label else "")
+                + "\n\nUsage: /settings english_words_to_learn <range>\n"
+                "  <range> is 3k, 5k, 10k, 20k, 30k, 50k, 100k, or a range\n"
+                "  such as 3k..50k / 20k..30k / 30k..50k. The default is "
+                f"{ENGLISH_CORNER_DEFAULT_RANGE}.\n"
+                "  Use 'off' to stop highlighting.\n",
+            )
+            return
+
+        key = parts[0].strip().lower().replace("-", "_")
+        if key != "english_words_to_learn":
+            self._sse_text(
+                "output",
+                f"\nUnknown setting: {parts[0]!r}. "
+                "The only setting is english_words_to_learn.\n",
+            )
+            return
+
+        spec = " ".join(parts[1].split()) if len(parts) > 1 else ""
+        if not spec:
+            spec = ENGLISH_CORNER_DEFAULT_RANGE
+        normalized = spec.strip().lower()
+
+        if normalized in ENGLISH_CORNER_DISABLED_VALUES:
+            state.english_words_to_learn = ""
+            state.english_words_label = ""
+            settings = _load_english_corner_settings()
+            settings["english_words_to_learn"] = ""
+            _save_english_corner_settings(settings)
+            self._sse_text(
+                "output",
+                "\nEnglish Corner highlighting: off.\n",
+            )
+            self._sse("meta", state.snapshot())
+            return
+
+        try:
+            vocabulary, label = english_corner_vocabulary(normalized)
+        except (ValueError, RuntimeError, OSError) as exc:
+            self._sse_text(
+                "output",
+                f"\nCould not set english_words_to_learn: {exc}\n"
+                "Use a corpus name (3k, 5k, 10k, 20k, 30k, 50k, 100k) "
+                "or a range such as 3k..50k.\n",
+            )
+            return
+        if not vocabulary:
+            self._sse_text(
+                "output",
+                "\nThat range contains no words.\n",
+            )
+            return
+
+        state.english_words_to_learn = normalized
+        state.english_words_label = label
+        settings = _load_english_corner_settings()
+        settings["english_words_to_learn"] = normalized
+        _save_english_corner_settings(settings)
+        self._sse_text(
+            "output",
+            "\nEnglish Corner highlighting: on.\n"
+            f"  {label}\n"
+            f"  {len(vocabulary):,} words will be highlighted in articles.\n",
         )
         self._sse("meta", state.snapshot())
 

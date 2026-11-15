@@ -3,6 +3,8 @@
  */
 
 corpus {
+  3k_english_words: https://raw.githubusercontent.com/tgmgroup/Word-List-from-Oxford-Longman-5000/refs/heads/master/Oxford%203000.txt
+  5k_english_words: https://raw.githubusercontent.com/tgmgroup/Word-List-from-Oxford-Longman-5000/refs/heads/master/Oxford%205000.txt
   10k_english_words: https://raw.githubusercontent.com/first20hours/google-10000-english/refs/heads/master/google-10000-english-usa.txt
   20k_english_words: https://raw.githubusercontent.com/david47k/top-english-wordlists/refs/heads/master/top_english_words_mixed_20000.txt
   30k_english_words: https://raw.githubusercontent.com/arstgit/high-frequency-vocabulary/refs/heads/master/30k.txt
@@ -10,9 +12,33 @@ corpus {
   100k_english_words: https://raw.githubusercontent.com/david47k/top-english-wordlists/master/top_english_words_lower_100000.txt
 }
 
+context.english_words_to_learn
+
 project_directory: {directory_of_this_prompt}/..
 main_script_directory: {directory_of_this_prompt}/../englishcorner/scripts
 main_corpus_directory: {directory_of_this_prompt}/../englishcorner/corpus
+
+task (completed) {
+  set default <range> to 10k..50k
+}
+
+task (completed) {
+  learn from task.find_article_words_in_corpus.support_100k, add support for {corpus.3k_english_words} and {corpus.5k_english_words}
+  set default <range> to 3k..50k
+}
+
+task (completed) {
+  in task.find_article_words_in_corpus, set default <range> to 10k..100k
+  please also highlight the words in the answer that falls within the <range> 
+}
+
+task.settings.english_words_to_highlight (completed) {
+  create command /settings english_words_to_learn <range> {
+    support all opions in task.find_article_words_in_corpus, default <range> is 30k..100k
+  }
+
+  then in all articles ui popup modal, highlight the words with light yellow that show up in {task.find_article_words_in_corpus} with <range> so that I can learn the more difficult words of the English Language
+}
 
 task.find_article_words_in_corpus.support_100k (completed) {
   in {main_script_directory}/find_article_words_in_corpus.py {
@@ -21,11 +47,11 @@ task.find_article_words_in_corpus.support_100k (completed) {
 }
 
 task.find_article_words_in_corpus.refactor (completed) {
- in {main_script_directory}/find_article_words_in_corpus.py {
-   DO NOT use {main_script_directory}/check_words_in_both_texts.py anymore
-   SIMPLY follow the logic of:
-   example: 10k..20k - corpus words that are (OUTSIDE the INTERSECT of the words in {corpus.10k_english_words} and the words in {corpus.20k_english_words}) AND INSIDE the words of {article_url}
- }
+  in {main_script_directory}/find_article_words_in_corpus.py {
+    DO NOT use {main_script_directory}/check_words_in_both_texts.py anymore
+    SIMPLY follow the logic of:
+    example: 10k..20k - corpus words that are (OUTSIDE the INTERSECT of the words in {corpus.10k_english_words} and the words in {corpus.20k_english_words}) AND INSIDE the words of {article_url}
+  }
 }
 
 task.find_article_words_in_corpus.diff_options (completed) {

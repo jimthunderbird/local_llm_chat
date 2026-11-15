@@ -612,6 +612,20 @@
     outline: 1px solid rgba(121, 192, 255, .32);
   }
 
+  /* English Corner: words in the selected frequency band are highlighted
+     with a light-yellow marker in article readers so the reader can learn
+     them in context without losing the surrounding text. */
+  .word.english-learning {
+    color: #fff7b0;
+    background: rgba(255, 235, 106, .22);
+    box-shadow: inset 0 -1px 0 rgba(255, 224, 70, .72);
+  }
+  .word.english-learning:hover {
+    background: rgba(255, 235, 106, .42);
+    color: #fffde0;
+    outline-color: rgba(255, 235, 106, .70);
+  }
+
   .output-pre {
     margin: 0;
     color: #c3d2df;
@@ -3935,6 +3949,110 @@ let toastTimer = null;
 let clipboard = "";
 let typeaheadTimer = null;
 
+// English Corner word highlighting. The server stores the selected corpus
+// band; this client keeps the resolved vocabulary and marks matching words in
+// news/article readers. The set is fetched once per selected range.
+const englishCorner = {
+  range: "",
+  label: "",
+  words: new Set(),
+  loadedRange: "",
+  failedRange: "",
+  loading: false,
+  error: "",
+  requestId: 0,
+};
+
+function normalizeEnglishCornerWord(word) {
+  return String(word || "").replace(/\u2019/g, "'").toLowerCase();
+}
+
+function englishCornerActiveRange() {
+  const range = String(appState?.english_words_to_learn || "").trim();
+  return range && range === englishCorner.range ? range : "";
+}
+
+function isEnglishCornerWord(word) {
+  if (!englishCornerActiveRange() || !englishCorner.words.size) return false;
+  return englishCorner.words.has(normalizeEnglishCornerWord(word));
+}
+
+function refreshArticleHighlights() {
+  // The selected band can change while readers are open. Repaint the article
+  // modal and any chat answers already on screen so they use the new set.
+  if (newsItem) renderNewsModal(newsItem);
+  for (const el of outputEl.querySelectorAll(".entry")) {
+    const entry = el._chatEntry;
+    if (entry) renderEntry(entry);
+  }
+}
+
+function syncEnglishCornerVocabulary(state) {
+  const range = String(state?.english_words_to_learn || "").trim();
+  if (!range) {
+    if (englishCorner.range || englishCorner.loading) {
+      englishCorner.requestId += 1;
+      englishCorner.range = "";
+      englishCorner.label = "";
+      englishCorner.words = new Set();
+      englishCorner.loadedRange = "";
+      englishCorner.failedRange = "";
+      englishCorner.loading = false;
+      englishCorner.error = "";
+      refreshArticleHighlights();
+    }
+    return;
+  }
+  if (
+    englishCorner.range === range
+    && (
+      englishCorner.loading
+      || englishCorner.loadedRange === range
+      || englishCorner.failedRange === range
+    )
+  ) {
+    return;
+  }
+
+  const requestId = ++englishCorner.requestId;
+  englishCorner.range = range;
+  englishCorner.label = "";
+  englishCorner.words = new Set();
+  englishCorner.loadedRange = "";
+  englishCorner.failedRange = "";
+  englishCorner.loading = true;
+  englishCorner.error = "";
+  refreshArticleHighlights();
+
+  fetch(`/api/english_words?range=${encodeURIComponent(range)}`, { cache: "no-store" })
+    .then((response) => response.json().then((data) => {
+      if (!response.ok) {
+        throw new Error(data?.error || `HTTP ${response.status}`);
+      }
+      return data;
+    }))
+    .then((data) => {
+      if (requestId !== englishCorner.requestId) return;
+      const words = Array.isArray(data?.words) ? data.words : [];
+      englishCorner.words = new Set(
+        words.map(normalizeEnglishCornerWord).filter(Boolean)
+      );
+      englishCorner.label = String(data?.label || "");
+      englishCorner.loadedRange = range;
+      refreshArticleHighlights();
+    })
+    .catch((error) => {
+      if (requestId !== englishCorner.requestId) return;
+      englishCorner.failedRange = range;
+      englishCorner.error = error?.message || String(error);
+      refreshArticleHighlights();
+    })
+    .finally(() => {
+      if (requestId !== englishCorner.requestId) return;
+      englishCorner.loading = false;
+    });
+}
+
 const vim = {
   mode: "insert",       // insert | normal | visual | visual-line
   anchor: null,
@@ -4986,7 +5104,7 @@ function readDisplayMathBlock(lines, start) {
   return null;
 }
 
-function wordNodes(text, clickable) {
+function wordNodes(text, clickable, highlight = false) {
   const frag = document.createDocumentFragment();
   if (!clickable) {
     frag.appendChild(document.createTextNode(text));
@@ -5003,6 +5121,9 @@ function wordNodes(text, clickable) {
     span.className = "word";
     span.dataset.word = match[0];
     span.textContent = match[0];
+    if (highlight && isEnglishCornerWord(match[0])) {
+      span.classList.add("english-learning");
+    }
     frag.appendChild(span);
     last = match.index + match[0].length;
   }
@@ -5012,10 +5133,10 @@ function wordNodes(text, clickable) {
   return frag;
 }
 
-function appendAutoLink(parent, raw, clickable) {
+function appendAutoLink(parent, raw, clickable, highlight = false) {
   const { url, trailing } = splitUrlToken(raw);
   if (!url) {
-    parent.appendChild(wordNodes(raw, clickable));
+    parent.appendChild(wordNodes(raw, clickable, highlight));
     return;
   }
   const link = document.createElement("a");
@@ -5027,16 +5148,16 @@ function appendAutoLink(parent, raw, clickable) {
   // Do not let the word-click dictionary handler swallow URL clicks.
   link.addEventListener("click", (event) => event.stopPropagation());
   parent.appendChild(link);
-  if (trailing) parent.appendChild(wordNodes(trailing, clickable));
+  if (trailing) parent.appendChild(wordNodes(trailing, clickable, highlight));
 }
 
-function appendInline(parent, text, clickable) {
+function appendInline(parent, text, clickable, highlight = false) {
   const inlineRe = /(`[^`\n]+`|\$\$?[^$\n]+\$\$?|\\\(.+?\\\)|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|_[^_\n]+_|\[[^\]\n]+\]\([^)\s]+\)|\b(?:https?:\/\/|www\.)[^\s<>"'`]+)/g;
   let last = 0;
   let match;
   while ((match = inlineRe.exec(text)) !== null) {
     if (match.index > last) {
-      parent.appendChild(wordNodes(text.slice(last, match.index), clickable));
+      parent.appendChild(wordNodes(text.slice(last, match.index), clickable, highlight));
     }
     const token = match[0];
     if (token.startsWith("`")) {
@@ -5051,11 +5172,11 @@ function appendInline(parent, text, clickable) {
       if (looksLikeMath(body)) {
         parent.appendChild(makeMathElement(body, false));
       } else {
-        parent.appendChild(wordNodes(token, clickable));
+        parent.appendChild(wordNodes(token, clickable, highlight));
       }
     } else if (token.startsWith("**") || token.startsWith("__")) {
       const strong = document.createElement("strong");
-      appendInline(strong, token.slice(2, -2), clickable);
+      appendInline(strong, token.slice(2, -2), clickable, highlight);
       parent.appendChild(strong);
     } else if (token.startsWith("[")) {
       const parsed = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token);
@@ -5069,20 +5190,20 @@ function appendInline(parent, text, clickable) {
           link.textContent = parsed[1];
           parent.appendChild(link);
         } else {
-          parent.appendChild(wordNodes(token, clickable));
+          parent.appendChild(wordNodes(token, clickable, highlight));
         }
       }
     } else if (/^(?:https?:\/\/|www\.)/i.test(token)) {
-      appendAutoLink(parent, token, clickable);
+      appendAutoLink(parent, token, clickable, highlight);
     } else {
       const em = document.createElement("em");
-      appendInline(em, token.slice(1, -1), clickable);
+      appendInline(em, token.slice(1, -1), clickable, highlight);
       parent.appendChild(em);
     }
     last = match.index + token.length;
   }
   if (last < text.length) {
-    parent.appendChild(wordNodes(text.slice(last), clickable));
+    parent.appendChild(wordNodes(text.slice(last), clickable, highlight));
   }
 }
 
@@ -5644,6 +5765,9 @@ function makeLineHelpButton(codeLines, lineIndex, language) {
 
 function renderMarkdown(text, clickable = true, annotations = null, options = null) {
   const lineHelpEnabled = Boolean(options && options.lineHelp);
+  // English Corner: assistant answers mark words inside the learner's selected
+  // frequency band, matching the highlighting used by article readers.
+  const highlightWords = Boolean(options && options.highlight);
   const container = document.createDocumentFragment();
   const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
   const annotationsByIndex = new Map();
@@ -5669,7 +5793,7 @@ function renderMarkdown(text, clickable = true, annotations = null, options = nu
   const flushParagraph = (paragraphLines) => {
     if (!paragraphLines.length) return;
     const p = document.createElement("p");
-    appendInline(p, paragraphLines.join(" "), clickable);
+    appendInline(p, paragraphLines.join(" "), clickable, highlightWords);
     annotate(p);
     container.appendChild(p);
   };
@@ -5777,7 +5901,7 @@ function renderMarkdown(text, clickable = true, annotations = null, options = nu
     if (heading) {
       const level = heading[1].length;
       const el = document.createElement(`h${level}`);
-      appendInline(el, heading[2], clickable);
+      appendInline(el, heading[2], clickable, highlightWords);
       annotate(el);
       container.appendChild(el);
       i += 1;
@@ -5794,7 +5918,7 @@ function renderMarkdown(text, clickable = true, annotations = null, options = nu
       const quote = document.createElement("blockquote");
       quoteLines.forEach((ql, idx) => {
         if (idx) quote.appendChild(document.createElement("br"));
-        appendInline(quote, ql, clickable);
+        appendInline(quote, ql, clickable, highlightWords);
       });
       annotate(quote);
       container.appendChild(quote);
@@ -5810,7 +5934,7 @@ function renderMarkdown(text, clickable = true, annotations = null, options = nu
         const itemMatch = /^\s*([-*+]|\d+[.)])\s+(.*)$/.exec(lines[i]);
         if (!itemMatch || /^\d/.test(itemMatch[1]) !== ordered) break;
         const li = document.createElement("li");
-        appendInline(li, itemMatch[2], clickable);
+        appendInline(li, itemMatch[2], clickable, highlightWords);
         annotate(li);
         list.appendChild(li);
         i += 1;
@@ -6196,17 +6320,21 @@ function renderEntry(entry) {
 
   entry.markdownEl.textContent = "";
   if (entry.text) {
+    const markdownOptions = entry.kind === "assistant"
+      ? { highlight: true }
+      : null;
+    if (
+      markdownOptions
+      && isDocumentationLanguage(appState?.code_language)
+    ) {
+      markdownOptions.lineHelp = true;
+      markdownOptions.language = appState.code_language;
+    }
     const frag = renderMarkdown(
       entry.text,
       entry.clickable,
       entry.annotations,
-      isDocumentationLanguage(appState?.code_language) &&
-      entry.kind === "assistant"
-        ? {
-            lineHelp: true,
-            language: appState.code_language,
-          }
-        : null
+      markdownOptions
     );
     entry.markdownEl.appendChild(frag);
     if (!entry.complete) {
@@ -9586,7 +9714,9 @@ function scheduleVideoSummaryRender() {
 function renderVideoSummary() {
   videoSummaryContentEl.textContent = "";
   if (videoSummaryText) {
-    videoSummaryContentEl.appendChild(renderMarkdown(videoSummaryText, true));
+    videoSummaryContentEl.appendChild(
+      renderMarkdown(videoSummaryText, true, null, { highlight: true })
+    );
   }
   videoSummaryLoadingEl.hidden = !videoSummaryBusy;
   videoSummaryErrorEl.textContent = videoSummaryError;
@@ -9764,9 +9894,10 @@ function videoChatRenderMessage(message) {
   if (message.text) {
     const body = document.createElement("div");
     body.className = "markdown";
-    // Match the main chat: every word in an answer is a /dict lookup target.
+    // Match the main chat: every word in an answer is a /dict lookup target
+    // and words inside the English Corner band are highlighted.
     body.dataset.clickable = "true";
-    body.appendChild(renderMarkdown(message.text, true));
+    body.appendChild(renderMarkdown(message.text, true, null, { highlight: true }));
     message.el.appendChild(body);
   }
   if (message.thinking && !message.text && !message.error) {
@@ -10438,7 +10569,7 @@ function gutenbergRenderMessage(message) {
     const body = document.createElement("div");
     body.className = "markdown";
     body.dataset.clickable = "true";
-    body.appendChild(renderMarkdown(message.text, true));
+    body.appendChild(renderMarkdown(message.text, true, null, { highlight: true }));
     message.el.appendChild(body);
   }
   if (message.thinking && !message.text && !message.error) {
@@ -10743,7 +10874,7 @@ function appendNewsParagraph(text, className, target) {
   if (className) p.className = className;
   // Word spans keep every news word clickable for the /dict popup, exactly
   // like the words in a chat answer.
-  p.appendChild(wordNodes(String(text || ""), true));
+  p.appendChild(wordNodes(String(text || ""), true, true));
   (target || newsBodyEl).appendChild(p);
 }
 
@@ -11612,7 +11743,7 @@ function appendNewsHeading(text, level, target) {
   const depth = Math.min(6, Math.max(2, Number(level) || 2));
   const heading = document.createElement(`h${depth}`);
   heading.className = "news-heading";
-  heading.appendChild(wordNodes(value, true));
+  heading.appendChild(wordNodes(value, true, true));
   (target || newsBodyEl).appendChild(heading);
 }
 
@@ -11625,7 +11756,7 @@ function appendNewsList(items, ordered, target) {
     const text = String(value || "").trim();
     if (!text) continue;
     const item = document.createElement("li");
-    item.appendChild(wordNodes(text, true));
+    item.appendChild(wordNodes(text, true, true));
     list.appendChild(item);
     added += 1;
   }
@@ -11673,7 +11804,7 @@ function appendNewsFigure(block, target) {
   const caption = String(block?.caption || "").trim();
   if (caption) {
     const figcaption = document.createElement("figcaption");
-    figcaption.appendChild(wordNodes(caption, true));
+    figcaption.appendChild(wordNodes(caption, true, true));
     figure.appendChild(figcaption);
   }
   (target || newsBodyEl).appendChild(figure);
@@ -11739,7 +11870,7 @@ function renderNewsModal(item) {
   newsTitleEl.textContent = "";
   // Title words are dictionary-searchable too, just like the story body.
   newsTitleEl.appendChild(
-    wordNodes(item.title || "News", true)
+    wordNodes(item.title || "News", true, true)
   );
   const metaParts = [];
   for (const part of [item.source, item.section]) {
@@ -13314,7 +13445,7 @@ function newsChatRenderMessage(message) {
     const body = document.createElement("div");
     body.className = "markdown";
     body.dataset.clickable = "true";
-    body.appendChild(renderMarkdown(message.text, true));
+    body.appendChild(renderMarkdown(message.text, true, null, { highlight: true }));
     message.el.appendChild(body);
   }
   if (message.thinking && !message.text && !message.error) {
@@ -13836,6 +13967,7 @@ function applyState(state, loadHistory = false) {
     ? `article ${state.article_title || state.article} · ${state.chunks ?? "?"} paragraphs · ${modelLabel} · /help`
     : `global corpus · ${state.chunks ?? "?"} trunks · ${modelLabel} · /help`;
   updateModeUI();
+  syncEnglishCornerVocabulary(state);
   if (helpPanel.hidden === false) renderHelp();
 }
 
