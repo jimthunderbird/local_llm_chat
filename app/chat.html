@@ -3833,10 +3833,6 @@
         <input id="book-options-chapters" name="chapters" type="number" min="3" step="1" value="60" required>
       </div>
       <div class="book-options-field">
-        <label for="book-options-articles">Articles to learn <span class="book-options-default">default 100</span></label>
-        <input id="book-options-articles" name="articles" type="number" min="0" step="1" value="100" required>
-      </div>
-      <div class="book-options-field">
         <label for="book-options-sub-questions">Sub-questions when planning <span class="book-options-default">default 10</span></label>
         <input id="book-options-sub-questions" name="sub-questions" type="number" min="1" step="1" value="10" required>
       </div>
@@ -4031,7 +4027,6 @@ const bookOptionsModelEl = $("#book-options-model");
 const bookOptionsDirectoryEl = $("#book-options-directory");
 const bookOptionsWordsEl = $("#book-options-words");
 const bookOptionsChaptersEl = $("#book-options-chapters");
-const bookOptionsArticlesEl = $("#book-options-articles");
 const bookOptionsSubQuestionsEl = $("#book-options-sub-questions");
 const bookOptionsSubQuestionArticlesEl = $("#book-options-sub-question-articles");
 const lineHelpPanel = $("#line-help-panel");
@@ -9964,10 +9959,11 @@ learnPanelEl.addEventListener("click", (event) => {
  *  /write_a_book options
  *
  *  task.ask_question_before_writing_book asks for words per chapter, the
- *  number of chapters, and how many recent articles to learn.
+ *  number of chapters, the number of planning sub-questions, and the
+ *  per-sub-question article limit. Research breadth is derived from the two
+ *  planning settings; there is no separate articles-to-learn budget.
  *  task.expose_settings_in_form exposes every write_a_book setting here as
- *  well: the book-writing model, the book directory, the number of planning
- *  sub-questions, and the per-sub-question article limit. None of these
+ *  well: the book-writing model and the book directory. None of these
  *  settings has a maximum; only minima keep the book coherent. The answers
  *  become command-line options so the server can use them directly.
  * ------------------------------------------------------------------ */
@@ -9976,7 +9972,6 @@ const BOOK_OPTION_DEFAULTS = {
   directory: ".chat/books",
   words: 800,
   chapters: 60,
-  articles: 100,
   subQuestions: 10,
   subQuestionArticles: 10,
 };
@@ -9999,7 +9994,6 @@ function openBookOptions(subject = "") {
   bookOptionsDirectoryEl.value = BOOK_OPTION_DEFAULTS.directory;
   bookOptionsWordsEl.value = BOOK_OPTION_DEFAULTS.words;
   bookOptionsChaptersEl.value = BOOK_OPTION_DEFAULTS.chapters;
-  bookOptionsArticlesEl.value = BOOK_OPTION_DEFAULTS.articles;
   bookOptionsSubQuestionsEl.value = BOOK_OPTION_DEFAULTS.subQuestions;
   bookOptionsSubQuestionArticlesEl.value =
     BOOK_OPTION_DEFAULTS.subQuestionArticles;
@@ -10029,9 +10023,6 @@ function submitBookOptions() {
   const chapters = bookOptionInteger(
     bookOptionsChaptersEl.value, 3, BOOK_OPTION_DEFAULTS.chapters
   );
-  const articles = bookOptionInteger(
-    bookOptionsArticlesEl.value, 0, BOOK_OPTION_DEFAULTS.articles
-  );
   const subQuestions = bookOptionInteger(
     bookOptionsSubQuestionsEl.value, 1,
     BOOK_OPTION_DEFAULTS.subQuestions
@@ -10045,7 +10036,7 @@ function submitBookOptions() {
     `/write_a_book ${quoteBookOption(subject)}`
     + ` --model ${quoteBookOption(model)}`
     + ` --directory ${quoteBookOption(directory)}`
-    + ` --words ${words} --chapters ${chapters} --articles ${articles}`
+    + ` --words ${words} --chapters ${chapters}`
     + ` --sub-questions ${subQuestions}`
     + ` --sub-question-articles ${subQuestionArticles}`
   );
@@ -14768,7 +14759,7 @@ function submitText(text, fromChoice = false) {
   if (
     !fromChoice
     && /^\/write_a_book(?:\s|$)/i.test(question)
-    && !/--(?:words|words-per-chapter|chapters|articles|sub-questions|sub-question-articles|model|book-model|directory|book-directory)(?:=|\s+)/i.test(question)
+    && !/--(?:words|words-per-chapter|chapters|sub-questions|sub-question-articles|model|book-model|directory|book-directory)(?:=|\s+)/i.test(question)
   ) {
     openBookOptions(question.replace(/^\/write_a_book\b/i, "").trim());
     inputEl.value = "";

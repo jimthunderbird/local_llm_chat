@@ -314,7 +314,7 @@ WEB_COMMANDS = {
     "/tablelog": "japan food and restaurant guide for travelers - search Tabelog restaurant pages by keywords: /tablelog <keywords>",
     "/stock": "show a stock symbol profile, financial details, and related news articles: /stock <stock_symbol>",
     "/deepresearch": "run a bounded multi-round research report on <topic>: /deepresearch <topic>",
-    "/write_a_book": "ask for every book setting (model, directory, words, chapters, articles, sub-questions, articles per sub-question), then research recent news and write a book: /write_a_book [<subject>]",
+    "/write_a_book": "ask for every book setting (model, directory, words, chapters, sub-questions, articles per sub-question), then research recent news and write a book: /write_a_book [<subject>]",
     "/books": "list the books written by /write_a_book in .chat/books: /books [keyword]",
     "/settings": "set English Corner options: /settings english_words_to_learn <range> (3k, 5k, 10k, 20k, 30k, 50k, 100k, or a range such as 10k..50k; default 10k..50k; off disables highlighting)",
 }
@@ -544,9 +544,7 @@ WRITE_A_BOOK_KEYWORD_LIMIT = WRITE_A_BOOK_SUB_QUESTION_LIMIT
 # task.expose_settings_in_form in prompts/write_a_book.prompt. Every one of
 # them is exposed in the /write_a_book form. The minima keep the book
 # coherent; there is deliberately no maximum, so the caller controls the
-# words, chapters, sources, and research breadth.
-WRITE_A_BOOK_SOURCE_LIMIT = 100
-WRITE_A_BOOK_MIN_ARTICLES = 0
+# words, chapters, and research breadth.
 # Fetch the per-question article budget directly; every planning question is
 # searched independently and then sampled round-robin so one prolific query
 # cannot dominate the book's references.
@@ -576,7 +574,6 @@ class WriteABookOptions(NamedTuple):
     subject: str
     words_per_chapter: int
     chapter_count: int
-    articles_to_learn: int
     sub_question_count: int
     sub_question_article_limit: int
     model: str
@@ -587,7 +584,6 @@ _WRITE_A_BOOK_NUMERIC_OPTIONS = {
     "words": "words",
     "words-per-chapter": "words",
     "chapters": "chapters",
-    "articles": "articles",
     "sub-questions": "sub_questions",
     "sub-question-articles": "sub_question_articles",
     "sub-questions-article-limit": "sub_question_articles",
@@ -598,6 +594,11 @@ _WRITE_A_BOOK_STRING_OPTIONS = {
     "directory": "directory",
     "book-directory": "directory",
 }
+# task.remove.articles_to_learn: the separate articles-to-learn budget was
+# removed in favor of the two planning settings. Accept the old flag silently
+# so an existing command line cannot accidentally turn its value into part of
+# the book subject.
+_WRITE_A_BOOK_IGNORED_OPTIONS = {"articles", "articles-to-learn"}
 WRITE_A_BOOK_KEYWORD_PROMPT = """You are a research librarian planning a
 book about the following subject:
 
@@ -891,7 +892,7 @@ def _parse_write_a_book_options(argument: str) -> WriteABookOptions:
     Every option exposed by task.expose_settings_in_form in
     prompts/write_a_book.prompt is accepted. Numeric settings are clamped
     only at their minimum; there is no maximum, so the caller can request any
-    number of words, chapters, articles, or planning questions. Options may be
+    number of words, chapters, or planning questions. Options may be
     written as ``--name value`` or ``--name=value``; values containing spaces
     can be quoted.
     """
@@ -902,7 +903,6 @@ def _parse_write_a_book_options(argument: str) -> WriteABookOptions:
     values = {
         "words": WRITE_A_BOOK_CHAPTER_WORDS,
         "chapters": WRITE_A_BOOK_CHAPTER_LIMIT,
-        "articles": WRITE_A_BOOK_SOURCE_LIMIT,
         "sub_questions": WRITE_A_BOOK_SUB_QUESTION_LIMIT,
         "sub_question_articles": WRITE_A_BOOK_SUB_QUESTION_ARTICLE_LIMIT,
     }
@@ -919,6 +919,11 @@ def _parse_write_a_book_options(argument: str) -> WriteABookOptions:
             if "=" in name:
                 name, inline_value = name.split("=", 1)
             name = name.strip().lower()
+        if name in _WRITE_A_BOOK_IGNORED_OPTIONS:
+            if inline_value is None:
+                index += 1
+            index += 1
+            continue
         if name in _WRITE_A_BOOK_NUMERIC_OPTIONS or name in (
             _WRITE_A_BOOK_STRING_OPTIONS
         ):
@@ -947,7 +952,6 @@ def _parse_write_a_book_options(argument: str) -> WriteABookOptions:
     subject = " ".join(subject_tokens).strip()
     words = max(WRITE_A_BOOK_MIN_CHAPTER_WORDS, values["words"])
     chapters = max(WRITE_A_BOOK_MIN_CHAPTERS, values["chapters"])
-    articles = max(WRITE_A_BOOK_MIN_ARTICLES, values["articles"])
     sub_questions = max(
         WRITE_A_BOOK_MIN_SUB_QUESTIONS, values["sub_questions"]
     )
@@ -959,7 +963,6 @@ def _parse_write_a_book_options(argument: str) -> WriteABookOptions:
         subject=subject,
         words_per_chapter=words,
         chapter_count=chapters,
-        articles_to_learn=articles,
         sub_question_count=sub_questions,
         sub_question_article_limit=sub_question_articles,
         model=model,
@@ -17000,19 +17003,25 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         subject = options.subject
         words_per_chapter = options.words_per_chapter
         chapter_count = options.chapter_count
-        articles_to_learn = options.articles_to_learn
+        # Research breadth now comes solely from the planning settings: every
+        # sub-question contributes up to its own article limit. There is no
+        # separate articles-to-learn budget any more.
+        research_budget = (
+            options.sub_question_count
+            * options.sub_question_article_limit
+        )
         book_model = options.model
         book_directory = options.directory
         if not subject:
             self._sse_text(
                 "output",
                 "\nUsage: /write_a_book <subject> [--words N] [--chapters N] "
-                "[--articles N] [--sub-questions N] "
+                "[--sub-questions N] "
                 "[--sub-question-articles N] [--model MODEL] "
                 "[--directory DIR]\n"
-                "Defaults: 800 words per chapter, 60 chapters, 100 recent "
-                "articles, 10 planning sub-questions, 10 articles per "
-                "sub-question, the configured book model, and .chat/books.\n"
+                "Defaults: 800 words per chapter, 60 chapters, 10 planning "
+                "sub-questions, 10 articles per sub-question, the configured "
+                "book model, and .chat/books.\n"
                 "Every setting has no maximum.\n"
                 "Example: /write_a_book the future of open source AI\n",
             )
@@ -17023,7 +17032,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             "log",
             f"[book: planning {subject!r} with {book_model} "
             f"({chapter_count} chapter(s), about {words_per_chapter} words "
-            f"each, learn from {articles_to_learn} article(s) across "
+            f"each, learn up to {research_budget} article(s) across "
             f"up to {options.sub_question_count} sub-question(s), "
             f"up to {options.sub_question_article_limit} article(s) per "
             f"sub-question; saving to {book_directory})]",
@@ -17052,50 +17061,44 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         )
 
         candidates: list[dict] = []
-        if articles_to_learn <= 0:
+        try:
+            candidates = _book_search_candidates(
+                keywords,
+                research_budget,
+                lambda text: self._sse_text("log", text),
+                keyword_limit=options.sub_question_count,
+                per_question_limit=(
+                    options.sub_question_article_limit
+                ),
+            )
+        except RuntimeError as exc:
+            self._sse_text(
+                "output",
+                f"\n/write_a_book: recent-news search failed: {exc}\n",
+            )
+            return
+        if not candidates and subject.casefold() not in {
+            keyword.casefold() for keyword in keywords
+        }:
             self._sse_text(
                 "log",
-                "[book: articles to learn is 0; skipping recent-news research]",
+                "[book: no usable keyword results; retrying with the "
+                "subject]",
             )
-        else:
             try:
                 candidates = _book_search_candidates(
-                    keywords,
-                    articles_to_learn,
+                    [subject],
+                    research_budget,
                     lambda text: self._sse_text("log", text),
-                    keyword_limit=options.sub_question_count,
+                    keyword_limit=1,
                     per_question_limit=(
                         options.sub_question_article_limit
                     ),
                 )
             except RuntimeError as exc:
                 self._sse_text(
-                    "output",
-                    f"\n/write_a_book: recent-news search failed: {exc}\n",
+                    "log", f"[book: subject search failed: {exc}]"
                 )
-                return
-            if not candidates and subject.casefold() not in {
-                keyword.casefold() for keyword in keywords
-            }:
-                self._sse_text(
-                    "log",
-                    "[book: no usable keyword results; retrying with the "
-                    "subject]",
-                )
-                try:
-                    candidates = _book_search_candidates(
-                        [subject],
-                        articles_to_learn,
-                        lambda text: self._sse_text("log", text),
-                        keyword_limit=1,
-                        per_question_limit=(
-                            options.sub_question_article_limit
-                        ),
-                    )
-                except RuntimeError as exc:
-                    self._sse_text(
-                        "log", f"[book: subject search failed: {exc}]"
-                    )
 
         if candidates:
             self._sse_text(

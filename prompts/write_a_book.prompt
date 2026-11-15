@@ -7,6 +7,11 @@ settings {
   sub_questions_article_search_limit: 10
 }
 
+task.remove.articles_to_learn (completed) {
+  remove the usage of articles_to_learn in the settings form
+  we will no longer use settings.articles_to_learn, instead, we just rely on settings.sub_questions_to_ask_when_planning and settins.sub_questions_article_search_limit 
+}
+
 task.expose_settings_in_form (completed) {
   - update {settings}:
   - after tying /write_a_book, expose all {settings} options to the form and allow me to customize them, there will be no maximum of each setting options
