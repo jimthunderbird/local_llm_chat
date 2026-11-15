@@ -2,9 +2,23 @@ dictionary_llm: ollama local model ornith-1.5:35b with no thinking
 
 dictionary_history_directory: {directory_of_this_prompt}/../.chat/dictionary_history
 
+task.colins_cobuild_style_explanation (completed) {
+  currently, the dictionary popup looks like:
+  Contextual Meaning: <word> means that ...
+  - please remove the "<word> means that" wording
+  - please simulate colin's cobuild dictionary explanation style, the definitions are restricted to a carefully curated set of roughly 2,500 of the most common and simple English words
+  - UI format {
+    - Word: <word>
+    - IPA: <IPA>
+    - Part of Speech: <PART OF SPEECH>
+    - Meaning: <DEFINITION using roughly 2500 most common and simple english words>
+    - Context: <The Context>
+  }
+}
+
 task.dictionary_history_list_ui.font (completed) {
   refer to {task.dictionary_history_list_ui.dictionary_searchable}:
-  - make each word's font size the same as the news search result
+  - make the meaning and context word font size as the word font size
 }
 
 task.dictionary_history_list_ui.dictionary_searchable (completed) {

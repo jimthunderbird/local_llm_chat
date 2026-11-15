@@ -130,17 +130,18 @@ except ImportError as exc:  # pragma: no cover - dependency guard
         "python3 -m pip install --user prompt_toolkit"
     )
 
-# The server uses ornith-1.5:35b to write answers, tutor math, and generate code.
-# The small LFM3-aura-grounded artifact remains the helper model for query
-# expansion, candidate filtering, conversation rewriting, translation, and
-# dictionary lookups, so Ollama keeps a cheap model for those short calls.
-# Override each artifact with OLLAMA_LFM_MODEL / OLLAMA_ANSWER_MODEL.
+# The server uses ornith-1.5:35b to write answers, tutor math, generate code,
+# and look up dictionary entries. The small LFM3-aura-grounded artifact remains
+# the helper model for query expansion, candidate filtering, conversation
+# rewriting, and translation, so Ollama keeps a cheap model for those frequent
+# short calls. Override each artifact with OLLAMA_LFM_MODEL /
+# OLLAMA_ANSWER_MODEL.
 LFM_MODEL = os.environ.get(
     "OLLAMA_LFM_MODEL", "milodule3/LFM3-1.7B-aura-grounded:latest"
 )
-# The answer writer, the math tutor, and code generation use the larger
-# ornith-1.5:35b model. The small LFM3 artifact stays the helper model (query
-# expansion, candidate filtering, conversation, translation, dictionary) so
+# The answer writer, the math tutor, code generation, and dictionary lookup
+# use the larger ornith-1.5:35b model. The small LFM3 artifact stays the helper
+# model (query expansion, candidate filtering, conversation, translation) so
 # those frequent short calls remain cheap.
 ANSWER_MODEL = os.environ.get("OLLAMA_ANSWER_MODEL", "ornith-1.5:35b")
 EXPANSION_MODEL = LFM_MODEL
@@ -167,8 +168,10 @@ TRANSLATION_MODEL = LFM_MODEL
 CHINESE_TRANSLATION_MODEL = os.environ.get(
     "OLLAMA_CHINESE_TRANSLATION_MODEL", "qwen3:8b"
 )
-# Local model used by /dict to generate definitions.
-DICT_MODEL = LFM_MODEL
+# Local model used by /dict to generate definitions. The dictionary prompt
+# declares ornith-1.5:35b with thinking disabled; stream_answer defaults to
+# think=False, and both dictionary call sites pass it explicitly.
+DICT_MODEL = ANSWER_MODEL
 FALLBACK_TOP_N = 8
 # Default number of top BM25 trunk matches used as context. `/depth <n>`
 # changes it; `/depth auto` switches to adaptive retrieval (depth=None).
@@ -951,18 +954,16 @@ The word "{word}" appears in that answer. Explain how it is used there
 that specific context. Quote the relevant phrase or sentence, then give the
 contextual meaning. Keep the explanation concise."""
 
-DICT_PROMPT = """You are an English Dictionary, you are given a context <context>{context}</context>
-Base on <context>, show me the following only, DO NOT show me the quote!:
-1. The meaning of {word}
-2. The word's IPA (International Phonetic Alphabet)
-3. Synonyms of {word}
-4. Contextural Meaning of {word}
-"""
+DICT_PROMPT = """You are an English dictionary that explains words in the style of
+the Collins COBUILD dictionary. Use only simple, common English words (roughly
+the 2,500 most frequent English words) in the Meaning field. Write the
+Meaning as a complete, natural definition (for example, "A ... is ...",
+"If you ...", or "Someone who ... is ..."), not a synonym list. Do not start
+the definition with "{word} means that" or any similar lead-in; state the
+meaning directly.
 
-# The word-click dictionary popup shows only these five labelled fields.
-DICT_POPUP_PROMPT = """You are an English Dictionary. For the word or phrase
-"{word}", answer with exactly these five labelled fields, in this order, and
-nothing else:
+For the word or phrase "{word}", show exactly these five labelled fields, in
+this order, and nothing else:
 
 Word: {word}
 
@@ -970,24 +971,27 @@ IPA: <International Phonetic Alphabet transcription, or — if unknown>
 
 Part of Speech: <part of speech, or — if unknown>
 
-Synonyms: <three to five common synonyms or closely related words for
-"{word}", comma-separated, or — if none>
+Meaning: <the COBUILD-style definition of "{word}" using simple, common words>
 
-Contextual Meaning: <one or two sentences giving the meaning of "{word}"
-and explaining what it means in the surrounding context>
+Context: <the short surrounding text from <context> that shows "{word}" in
+use, copied without quotation marks, or — if there is no context>
 
 Rules:
 - Separate each section from the next with exactly one blank line.
-- Do not add a title, preamble, conclusion, notes, or any other section.
-- Do not include a Quote section or quote the surrounding text.
+- Do not add a title, preamble, conclusion, notes, synonyms, or any other
+  section.
+- Do not include a separate Quote section.
 - Do not wrap the labels in markdown or add bullets.
 - Keep the whole answer under 120 words.
 - If "{word}" is not a valid English word or phrase, keep the five fields
-  and say so in Contextual Meaning.
+  and say so in Meaning.
 
 <context>
 {context}
 </context>"""
+
+# The word-click dictionary popup shows exactly these five labelled fields.
+DICT_POPUP_PROMPT = DICT_PROMPT
 
 QUESTION_TRANSLATION_PROMPT = """Translate the following Simplified Chinese question into natural English.
 Preserve names, titles, technical terms, and the intent of the question exactly.
@@ -5892,17 +5896,43 @@ def dictionary_history_path(word: str) -> Path:
 
 
 def dictionary_contextual_meaning(answer: str) -> str:
-    """Extract the Contextual Meaning field from a dictionary answer."""
+    """Extract the Meaning field from a dictionary answer.
+
+    Older saved answers used the label "Contextual Meaning"; accept it as a
+    fallback so existing dictionary history keeps working. Collection stops at
+    the next labelled field (for example "Context:") so the history entry
+    contains only the definition.
+    """
     text = (answer or "").strip()
     if not text:
         return ""
-    match = re.search(
-        r"(?ims)^\s*[*#>\-\s]*Contextual\s+Meaning\s*:?\s*\**\s*(.+)\Z",
-        text,
+    label_re = re.compile(
+        r"(?i)^(Word|IPA|Part of Speech|Meaning|Context|Contextual Meaning|"
+        r"Contextural Meaning|Synonyms|Quote)\s*[:\-–—]\s*(.*)$"
     )
-    if match is not None:
-        return match.group(1).strip()
-    return text
+    meaning_labels = {"meaning", "contextual meaning", "contextural meaning"}
+    collecting = False
+    parts: list[str] = []
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        value = line.strip()
+        cleaned = re.sub(r"^[*#>\-\s]+", "", value)
+        cleaned = re.sub(r"\*\*|__", "", cleaned)
+        match = label_re.match(cleaned)
+        if match is not None:
+            label = match.group(1).lower()
+            if label in meaning_labels:
+                collecting = True
+                content = match.group(2).strip()
+                if content:
+                    parts.append(content)
+                continue
+            if collecting:
+                break
+            continue
+        if collecting and value:
+            parts.append(value)
+    meaning = " ".join(" ".join(parts).split())
+    return meaning or text
 
 
 def record_dictionary_history(
@@ -6021,7 +6051,9 @@ def lookup_dictionary(word: str, latest_answer: str | None = None) -> None:
         print(text, end="", flush=True)
 
     try:
-        answer = stream_answer(prompt, model=DICT_MODEL, emit=emit)
+        answer = stream_answer(
+            prompt, model=DICT_MODEL, emit=emit, think=False
+        )
     except RuntimeError as exc:
         print(f"Dictionary lookup failed: {exc}", file=sys.stderr)
         return

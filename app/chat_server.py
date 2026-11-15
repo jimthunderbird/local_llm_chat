@@ -3,8 +3,8 @@
 
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, transcript/article scoping, history, /memory,
-/status, /sources, /benchmark, /youtube, /news, /mdn, /stackoverflow,
-/reddit, /tablelog, /stock, /googlenews, /medium,
+/status, /sources, /benchmark, /youtube, /news, /mdn, /britanica,
+/stackoverflow, /reddit, /tablelog, /stock, /googlenews, /medium,
 /gutenberg, /openlibrary, /changelog, /wikivoyage, /map, /wiki,
 /wiki_article, /deepresearch, /write_a_book, /books,
 /article, /dict, /dictionary_history, and /ask. The browser is a
@@ -296,6 +296,7 @@ WEB_COMMANDS = {
     "learn_topic <topic> | learn_playlist <playlist> | search <keyword> | bookmark list",
     "/news": "list the latest news from wsj, cnn, cbslite, nprtext, yahoo_finance, medium, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count]); /news search <keywords> [website] searches Google News, optionally only that website",
     "/mdn": "search MDN Web Docs by keywords: /mdn <keywords>",
+    "/britanica": "search Encyclopædia Britannica by keywords: /britanica <keywords>",
     "/googlenews": "search Google News for the latest stories: /googlenews <keywords>",
     "/howstuffworks": "search HowStuffWorks articles by keywords: /howstuffworks <keywords>",
     "/wikivoyage": "search Wikivoyage destinations by keywords: /wikivoyage <keywords>",
@@ -399,6 +400,36 @@ MDN_DOCS_BASE_URL = "https://developer.mozilla.org"
 MDN_LOCALE = "en-US"
 MDN_RESULT_LIMIT = 10
 MDN_HIGHLIGHT_LIMIT = 3
+
+# /britanica searches Encyclopædia Britannica's encyclopedia and renders the
+# top matches as a /news-style result list. The canonical search page on
+# www.britannica.com is protected by a Cloudflare challenge for non-browser
+# clients, so it is requested first and school.eb.com (Britannica's school
+# portal, backed by the same article database) is used as the reader fallback.
+BRITANNICA_SEARCH_URL = "https://www.britannica.com/search"
+BRITANNICA_SCHOOL_SEARCH_URL = "https://school.eb.com/search"
+BRITANNICA_BASE_URL = "https://www.britannica.com"
+BRITANNICA_SCHOOL_BASE_URL = "https://school.eb.com"
+BRITANNICA_RESULT_LIMIT = 5
+BRITANNICA_SOURCE_LABEL = "Encyclopædia Britannica"
+BRITANNICA_HEADERS = {
+    **chat.HTTP_HEADERS,
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+_BRITANNICA_ARTICLE_RE = re.compile(r"/article/([^/]+)/(\d+)")
+_BRITANNICA_BLOCKED_MARKERS = (
+    "just a moment...",
+    "challenge-platform",
+    "cf-chl-",
+)
 
 # /stock resolves a ticker through CNBC's public quote service and enriches it
 # with Nasdaq's company profile/financial statements and a Wikipedia summary.
@@ -1364,6 +1395,161 @@ def search_mdn_docs(keyword: str, limit: int = MDN_RESULT_LIMIT) -> list[dict]:
             }
         )
     return results
+
+
+def _britannica_clean_text(value: object) -> str:
+    """Collapse markup and whitespace in one Britannica search field."""
+    text = html.unescape(re.sub(r"<[^>]*>", " ", str(value or "")))
+    text = " ".join(text.split())
+    return re.sub(r"\s+([,.;:!?])", r"\1", text).strip()
+
+
+def _britannica_summary(value: object) -> str:
+    """Render a Britannica search snippet without its leading match label."""
+    text = _britannica_clean_text(value)
+    if "|" in text:
+        label, snippet = text.split("|", 1)
+        if len(label.split()) <= 8:
+            text = snippet.strip()
+    return text
+
+
+class _BritannicaSearchHTMLParser(HTMLParser):
+    """Collect article links and summaries from a Britannica search page."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.entries: list[dict[str, str]] = []
+        self._title_parts: list[str] | None = None
+        self._summary_parts: list[str] | None = None
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        attributes = {
+            name.lower(): value or "" for name, value in attrs
+        }
+        classes = attributes.get("class", "").split()
+        if tag == "a" and "primary-article-link" in classes:
+            self._title_parts = []
+            self.entries.append(
+                {
+                    "href": attributes.get("href", "").strip(),
+                    "title": "",
+                    "summary": "",
+                }
+            )
+        elif tag == "p" and "h6" in classes:
+            self._summary_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._title_parts is not None:
+            self._title_parts.append(data)
+        elif self._summary_parts is not None:
+            self._summary_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._title_parts is not None:
+            if self.entries:
+                self.entries[-1]["title"] = _britannica_clean_text(
+                    " ".join(self._title_parts)
+                )
+            self._title_parts = None
+        elif tag == "p" and self._summary_parts is not None:
+            summary = _britannica_summary(" ".join(self._summary_parts))
+            if self.entries and not self.entries[-1]["summary"]:
+                self.entries[-1]["summary"] = summary
+            self._summary_parts = None
+
+
+def _britannica_absolute_url(base_url: str, href: str) -> str:
+    """Resolve a search result href against its Britannica portal."""
+    if href.startswith(("http://", "https://")):
+        return href
+    return base_url.rstrip("/") + "/" + href.lstrip("/")
+
+
+def _britannica_results(
+    entries: list[dict[str, str]], base_url: str, limit: int
+) -> list[dict]:
+    """Deduplicate Britannica entries by article id and keep the top results."""
+    results: list[dict] = []
+    index_by_key: dict[str, int] = {}
+    for entry in entries:
+        href = str(entry.get("href") or "").strip()
+        match = _BRITANNICA_ARTICLE_RE.search(href)
+        if match is None:
+            continue
+        key = match.group(2)
+        title = _britannica_clean_text(entry.get("title"))
+        if not title:
+            title = match.group(1).replace("-", " ")
+        summary = _britannica_summary(entry.get("summary"))
+        if key not in index_by_key:
+            index_by_key[key] = len(results)
+            results.append(
+                {
+                    "title": title,
+                    "link": _britannica_absolute_url(base_url, href),
+                    "summary": summary,
+                }
+            )
+            continue
+        # A top-level result can be followed by section matches for the same
+        # article. Borrow the first section snippet when the article itself
+        # has no snippet, so every card carries useful text.
+        current = results[index_by_key[key]]
+        if not current["summary"] and summary:
+            current["summary"] = summary
+    return results[: max(1, int(limit))]
+
+
+def search_britannica_articles(
+    keyword: str, limit: int = BRITANNICA_RESULT_LIMIT
+) -> list[dict]:
+    """Search Britannica and return normalized article result cards."""
+    keyword = " ".join(str(keyword or "").split())
+    if not keyword:
+        return []
+
+    failures: list[str] = []
+    endpoints = (
+        (BRITANNICA_SEARCH_URL, BRITANNICA_BASE_URL),
+        (BRITANNICA_SCHOOL_SEARCH_URL, BRITANNICA_SCHOOL_BASE_URL),
+    )
+    for search_url, base_url in endpoints:
+        host = urlparse(search_url).netloc or search_url
+        try:
+            response = requests.get(
+                search_url,
+                params={"query": keyword},
+                headers=BRITANNICA_HEADERS,
+                timeout=(10, 30),
+            )
+            response.raise_for_status()
+            page = response.text
+        except requests.RequestException as exc:
+            failures.append(f"{host}: {exc}")
+            continue
+
+        lowered = page.casefold()
+        if any(marker in lowered for marker in _BRITANNICA_BLOCKED_MARKERS):
+            failures.append(f"{host}: blocked by a bot challenge")
+            continue
+
+        parser = _BritannicaSearchHTMLParser()
+        try:
+            parser.feed(page)
+        except Exception as exc:  # HTMLParser is lenient; keep the fallback.
+            failures.append(f"{host}: {exc}")
+            continue
+        results = _britannica_results(parser.entries, base_url, limit)
+        if results:
+            return results
+        failures.append(f"{host}: no matching article results")
+
+    detail = "; ".join(failures) or "no search endpoint responded"
+    raise RuntimeError(f"Britannica search failed: {detail}")
 
 
 def _stock_value(value) -> str:
@@ -5298,6 +5484,7 @@ COMMAND_ARGUMENTS = {
     "/benchmark",
     "/news",
     "/mdn",
+    "/britanica",
     "/googlenews",
     "/howstuffworks",
     "/tablelog",
@@ -16305,6 +16492,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_reddit(argument)
         elif name == "/mdn":
             self._command_mdn(argument)
+        elif name in {"/britanica", "/britannica"}:
+            self._command_britanica(argument)
         elif name == "/stackoverflow":
             self._command_stackoverflow(argument)
         elif name == "/googlenews":
@@ -18115,6 +18304,78 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if not results:
             self._sse_text(
                 "output", f"\n/mdn: no documentation matched {keyword!r}.\n"
+            )
+
+    def _command_britanica(self, argument: str) -> None:
+        """Search Encyclopædia Britannica and stream the top five matches.
+
+        Usage: /britanica <keyword>
+        The canonical Britannica search page supplies article titles, links,
+        and snippets. Because that page is bot-challenged for non-browser
+        clients, the same query transparently falls back to the Britannica
+        school search portal. The browser reuses the /news story-list and
+        detail modal, so a result can be translated, read aloud, or opened on
+        Britannica.
+        """
+        keyword = " ".join(argument.split())
+        if not keyword:
+            self._sse_text(
+                "output",
+                "\nUsage: /britanica <keyword>\n"
+                "Example: /britanica black holes\n"
+                "Example: /britanica Carl Barks\n",
+            )
+            return
+
+        self._sse_text(
+            "log", f"[britanica: searching britannica.com for {keyword!r}]"
+        )
+        try:
+            results = search_britannica_articles(keyword)
+        except RuntimeError as exc:
+            self._sse_text("error", f"\n/britanica: {exc}\n")
+            return
+
+        self._sse(
+            "news",
+            {
+                "type": "start",
+                "source": BRITANNICA_SOURCE_LABEL,
+                "feed": BRITANNICA_SEARCH_URL,
+                "sources": [BRITANNICA_SOURCE_LABEL],
+                "docs": True,
+                "docs_label": "Britannica",
+            },
+        )
+        for index, result in enumerate(results, 1):
+            self._sse(
+                "news",
+                {
+                    "type": "item",
+                    "index": index,
+                    "title": result["title"],
+                    "link": result["link"],
+                    "source": BRITANNICA_SOURCE_LABEL,
+                    "summary": result["summary"],
+                    "docs": True,
+                    "docs_label": "Britannica",
+                },
+            )
+            if result["summary"]:
+                self._sse(
+                    "news",
+                    {
+                        "type": "paragraph",
+                        "index": index,
+                        "text": result["summary"],
+                    },
+                )
+            self._sse("news", {"type": "item_end", "index": index})
+        self._sse("news", {"type": "done"})
+        if not results:
+            self._sse_text(
+                "output",
+                f"\n/britanica: no results matched {keyword!r}.\n",
             )
 
     def _command_stackoverflow(self, argument: str) -> None:
@@ -20096,9 +20357,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 pass
 
     def _stream_dictionary(self, word: str, latest_answer: str | None) -> None:
-        # The popup shows exactly: word, IPA, part of speech, and the
-        # contextual meaning. Keep the prompt and the streamed output limited
-        # to those fields (no quote, model banner, or follow-up usage section).
+        # The popup shows exactly: word, IPA, part of speech, a COBUILD-style
+        # meaning, and the surrounding context. Keep the prompt and the
+        # streamed output limited to those fields (no synonyms, quote,
+        # model banner, or follow-up usage section).
         context = chat.dictionary_surrounding_context(word, latest_answer)
         prompt = chat.DICT_POPUP_PROMPT.format(
             word=word,
@@ -20115,6 +20377,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 prompt,
                 model=chat.DICT_MODEL,
                 emit=emit,
+                think=False,
             )
             try:
                 chat.record_dictionary_history(

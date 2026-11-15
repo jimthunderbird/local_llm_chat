@@ -1123,7 +1123,7 @@
   }
   .dictionary-history-field {
     color: var(--text);
-    font-size: 12px;
+    font-size: var(--news-result-font-size);
     line-height: 1.5;
     overflow-wrap: anywhere;
   }
@@ -14498,13 +14498,14 @@ function submitText(text, fromChoice = false) {
   const commandArgs = question.startsWith("/")
     ? question.slice(1).split(/\s+/).slice(1)
     : [];
-  // /news search, /mdn, /wikivoyage, /map, /reddit, /tablelog, /stock, and
-  // /changelog stream their result lists; anchor each list at the top so new
-  // results do not drag the viewport down.
+  // /news search, /mdn, /britanica, /wikivoyage, /map, /reddit, /tablelog,
+  // /stock, and /changelog stream their result lists; anchor each list at the
+  // top so new results do not drag the viewport down.
   const pinsNewsSearch = (
     commandName === "news"
       && String(commandArgs[0] || "").toLowerCase() === "search"
-  ) || commandName === "mdn" || commandName === "wikivoyage"
+  ) || commandName === "mdn" || commandName === "britanica"
+    || commandName === "britannica" || commandName === "wikivoyage"
     || commandName === "map" || commandName === "reddit"
     || commandName === "tablelog" || commandName === "stock"
     || commandName === "changelog";
@@ -14525,6 +14526,8 @@ function submitText(text, fromChoice = false) {
           ? "News"
           : commandName === "mdn"
           ? "MDN Web Docs"
+          : (commandName === "britanica" || commandName === "britannica")
+            ? "Britannica"
           : commandName === "wikivoyage"
             ? "Wikivoyage"
             : commandName === "map"
@@ -15944,23 +15947,30 @@ outputEl.addEventListener("click", (event) => {
  *  Dictionary popup formatting
  *
  *  The popup must show exactly five labelled sections, in this order,
- *  with a blank line between each of them. Quote is deliberately not
- *  shown; if the model still emits one, its section is discarded. Models
- *  occasionally wrap a label in markdown or add a short preamble, so
- *  normalise the streamed text instead of relying on the model's formatting
- *  alone.
+ *  with a blank line between each of them. The old Quote and Synonyms
+ *  sections are deliberately not shown; if the model still emits one, it is
+ *  discarded. Models occasionally wrap a label in markdown or add a short
+ *  preamble, so normalise the streamed text instead of relying on the
+ *  model's formatting alone.
  * ------------------------------------------------------------------ */
 const DICTIONARY_SECTION_LABELS = [
   "Word",
   "IPA",
   "Part of Speech",
-  "Synonyms",
-  "Contextual Meaning",
+  "Meaning",
+  "Context",
 ];
-const DICTIONARY_IGNORED_LABELS = ["Quote"];
+const DICTIONARY_IGNORED_LABELS = ["Synonyms", "Quote"];
+// Older answers used "Contextual Meaning". Accept that label for compatibility
+// and render it in the current "Context" slot.
+const DICTIONARY_LABEL_ALIASES = {
+  "contextual meaning": "Context",
+  "contextural meaning": "Context",
+};
 const DICTIONARY_ALL_LABELS = [
   ...DICTIONARY_SECTION_LABELS,
   ...DICTIONARY_IGNORED_LABELS,
+  ...Object.keys(DICTIONARY_LABEL_ALIASES),
 ];
 
 function parseDictionarySectionLine(line) {
@@ -15968,15 +15978,16 @@ function parseDictionarySectionLine(line) {
   value = value.replace(/^#{1,6}\s*/, "");
   value = value.replace(/^[-*+]\s+/, "");
   value = value.replace(/\*\*|__/g, "");
-  const match = /^(Word|IPA|Part of Speech|Synonyms|Quote|Contextual Meaning)\s*[:\-–—]\s*(.*)$/i.exec(
+  const match = /^(Word|IPA|Part of Speech|Meaning|Context|Synonyms|Quote|Contextual Meaning|Contextural Meaning)\s*[:\-–—]\s*(.*)$/i.exec(
     value
   );
   if (!match) return null;
   const wanted = match[1].toLowerCase();
-  const label = DICTIONARY_ALL_LABELS.find(
+  const canonical = DICTIONARY_ALL_LABELS.find(
     (candidate) => candidate.toLowerCase() === wanted
   );
-  if (!label) return null;
+  if (!canonical) return null;
+  const label = DICTIONARY_LABEL_ALIASES[wanted] || canonical;
   return { label, content: match[2].trim() };
 }
 
@@ -15989,7 +16000,21 @@ function isPartialDictionaryLabel(line) {
   );
 }
 
-function formatDictionarySections(text) {
+function cleanDictionaryMeaning(value, word) {
+  let text = String(value || "").trim();
+  const target = String(word || "").trim();
+  if (!text || !target) return text;
+  const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Remove the old "<word> means that ..." lead-in while preserving the
+  // actual definition after it.
+  const lead = new RegExp(
+    `^[\\s"'“”‘’]*(?:the\\s+(?:word|term)\\s+)?${escaped}[\\s"'“”‘’]*(?:means(?:\\s+that)?|is\\s+defined\\s+as|refers\\s+to)\\s*[:,-]?\\s*`,
+    "i"
+  );
+  return text.replace(lead, "").trim();
+}
+
+function formatDictionarySections(text, word = "") {
   const raw = String(text || "");
   const lines = raw.replace(/\r\n?/g, "\n").split("\n");
   const sections = new Map();
@@ -16018,11 +16043,14 @@ function formatDictionarySections(text) {
   const formatted = DICTIONARY_SECTION_LABELS
     .filter((label) => sections.has(label))
     .map((label) => {
-      const content = sections
+      let content = sections
         .get(label)
         .join(" ")
         .replace(/\s+/g, " ")
         .trim();
+      if (label === "Meaning") {
+        content = cleanDictionaryMeaning(content, word);
+      }
       return `${label}: ${content || "—"}`;
     });
 
@@ -16249,7 +16277,7 @@ function renderDictionaryEntry(entry) {
   // Every displayed word can itself be looked up, including words in the
   // streamed definition, so reading a definition can branch into new ones.
   popupContentEl.appendChild(
-    renderMarkdown(formatDictionarySections(entry.buffer), true)
+    renderMarkdown(formatDictionarySections(entry.buffer, entry.word), true)
   );
   // Make the looked-up word stand out in the definition itself, not just in
   // the popup title.

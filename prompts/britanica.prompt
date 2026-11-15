@@ -1,0 +1,6 @@
+task (completed) {
+  create command /britanica <keyword> {
+    get results from https://www.britannica.com/search?query=<keyword>
+    show top 5 results
+  }
+}
