@@ -305,7 +305,7 @@ WEB_COMMANDS = {
     "/ai_news_podcast": "show the top five stories from the last 12 hours and create a two-voice AI news podcast",
     "/gutenberg": "search Project Gutenberg books: /gutenberg search <keywords>; click a book to read it and ask questions",
     "/openlibrary": "search inside Open Library books: /openlibrary search <keywords>",
-    "/article": "use one local article file as context; iterative evidence is the default (--simple disables it)",
+    "/article": "open an article URL in the reader popup or use a local article file as context (/article <url|path>; --simple disables the local-file evidence loop)",
     "/mathtutor": "upload Microsoft Word test papers and practice similar math problems with detailed answers",
     "/changelog": "list completed-task summaries from .logs (newest first); click one to read it",
     "/stackoverflow": "search Stack Overflow: /stackoverflow tag <tag> or /stackoverflow search <keywords>",
@@ -8637,9 +8637,21 @@ def fetch_news_article(url: str, title: str = "") -> dict:
     ]
     return {
         "link": str(payload.get("link") or url).strip(),
+        "title": str(payload.get("title") or "").strip(),
         "paragraphs": paragraphs,
         "images": images,
     }
+
+
+def _article_title_from_url(url: str) -> str:
+    """Return a readable fallback headline from an article URL."""
+    parsed = urlparse(str(url or "").strip())
+    slug = unquote(parsed.path.rstrip("/").rsplit("/", 1)[-1])
+    slug = re.sub(r"\.(?:html?|php|aspx?)$", "", slug, flags=re.IGNORECASE)
+    slug = re.sub(r"[-_+]+", " ", slug).strip()
+    if not slug:
+        return parsed.netloc or "Article"
+    return slug[:1].upper() + slug[1:]
 
 
 def _read_news_ndjson(output: str) -> list[dict]:
@@ -19563,7 +19575,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self.state.latest_sources = []
 
     def _command_article(self, argument: str) -> None:
-        """Use one local article file as the complete context for the chat."""
+        """Open an article URL in the /news reader or scope the chat to a file.
+
+        A URL uses the same reader popup as clicking a /news result. A local
+        path keeps the original section-aware /article retrieval scope.
+        """
         state = self.state
         raw_path = argument.strip()
         simple = bool(
@@ -19578,10 +19594,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if not raw_path:
             self._sse_text(
                 "output",
-                "\nUsage: /article [--simple] <path_to_an_article>\n"
-                "The file becomes the only context; follow-up questions keep "
-                "the article scope until /youtube transcript is used.\n"
-                "The capped multi-round evidence loop is enabled by default "
+                "\nUsage: /article <article_url_or_local_path> [--simple]\n"
+                "An http(s) URL opens the same article popup as a /news "
+                "result, with Learn and Chat available.\n"
+                "A local file becomes the only context for follow-up "
+                "questions until /youtube transcript is used; the capped "
+                "multi-round evidence loop is enabled by default "
                 "(--simple or --fast disables it).\n",
             )
             return
@@ -19591,6 +19609,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             and raw_path[0] in {"'", '"'}
         ):
             raw_path = raw_path[1:-1]
+        if re.match(r"^https?://", raw_path, re.IGNORECASE):
+            self._open_article_url(raw_path)
+            return
         path = Path(raw_path).expanduser()
         if not path.is_absolute():
             path = SCRIPT_DIR / path
@@ -19637,6 +19658,64 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             ),
         )
         self._sse("meta", state.snapshot())
+
+    def _open_article_url(self, url: str) -> None:
+        """Populate the /news reader modal for an arbitrary article URL."""
+        self._sse_text("log", f"[article: loading {url}]")
+        try:
+            article = fetch_news_article(url)
+        except (
+            ValueError,
+            OSError,
+            subprocess.SubprocessError,
+            RuntimeError,
+        ) as exc:
+            self._sse_text("error", f"\n/article: {exc}\n")
+            return
+        paragraphs = [
+            str(text).strip()
+            for text in (article.get("paragraphs") or [])
+            if str(text).strip()
+        ]
+        if not paragraphs:
+            self._sse_text(
+                "output",
+                "\n/article: the page did not contain readable article text.\n",
+            )
+            return
+        images = [
+            str(image).strip()
+            for image in (article.get("images") or [])
+            if str(image).strip()
+        ]
+        link = str(article.get("link") or url).strip()
+        parsed = urlparse(link)
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        title = str(article.get("title") or "").strip()
+        if not title:
+            title = _article_title_from_url(link)
+        item = {
+            "title": title,
+            "link": link,
+            "source": host or "Article",
+            "section": "",
+            "published": "",
+            "summary": "",
+            "paragraphs": paragraphs,
+            "images": images,
+            "complete": True,
+            "learnable": True,
+            "learn_noun": "article",
+        }
+        try:
+            news_id = news_id_for_item(item)
+        except ValueError:
+            news_id = ""
+        item["news_id"] = news_id
+        item["learned"] = bool(news_id and news_is_learned(news_id))
+        self._sse("article", {"item": item})
 
     def _command_mathtutor(self, argument: str) -> None:
         """Open the Word-test-paper tutor, resuming the latest session."""

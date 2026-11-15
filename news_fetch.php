@@ -3721,6 +3721,7 @@ function enrichStoryContent(
         $page = $pages[$index] ?? null;
         $entry = [
             'link' => $finalLink,
+            'title' => $storyTitle,
             'paragraphs' => [],
             'image' => '',
             'full_article' => $forceFullArticle,
@@ -3744,6 +3745,11 @@ function enrichStoryContent(
             $pageTitle = extractArticleTitleFromHtml($page['body']);
             if ($pageTitle !== '') {
                 $storyTitle = $pageTitle;
+                // The CLI --article form has no headline. Keep the page's own
+                // title so the detail modal can show it instead of a URL slug.
+                if (trim((string)($stories[$index]['title'] ?? '')) === '') {
+                    $stories[$index]['title'] = normalizeText($pageTitle);
+                }
             }
         }
 
@@ -3895,6 +3901,10 @@ function enrichStoryContent(
             );
         }
 
+        // Keep the page headline for detail requests that started without
+        // one (news_fetch.php --article <url>). The list feed still uses its
+        // own title, but a cached body can now reopen with the real headline.
+        $entry['title'] = trim((string)$storyTitle);
         $cache[$originalLink] = $entry;
         if (isset($stories[$index])) {
             applyArticleContent($stories[$index], $entry);
@@ -3912,7 +3922,7 @@ function enrichStoryContent(
  * a burst of requests), so a detail request ignores cached empty bodies and
  * tries again. Good cached bodies are still reused.
  *
- * @return array{link:string, paragraphs:list<string>, images:list<string>}
+ * @return array{link:string, title:string, paragraphs:list<string>, images:list<string>}
  */
 function fetchArticleByUrl(string $url, string $title = ''): array
 {
@@ -3930,6 +3940,15 @@ function fetchArticleByUrl(string $url, string $title = ''): array
     ];
     $stories = enrichStoryContent([$story], 'article', true);
     $story = $stories[0] ?? $story;
+    if (trim((string)($story['title'] ?? '')) === '') {
+        // A cached body already carries the page headline; reuse it so the
+        // popup does not fall back to a URL slug on a second open.
+        $cache = loadArticleCache();
+        $cached = $cache[$url] ?? null;
+        if (is_array($cached)) {
+            $story['title'] = trim((string)($cached['title'] ?? ''));
+        }
+    }
     $paragraphs = [];
     foreach (($story['paragraphs'] ?? []) as $paragraph) {
         $text = trim((string)$paragraph);
@@ -3939,6 +3958,7 @@ function fetchArticleByUrl(string $url, string $title = ''): array
     }
     return [
         'link' => trim((string)($story['link'] ?? $url)),
+        'title' => trim((string)($story['title'] ?? '')),
         'paragraphs' => $paragraphs,
         'images' => array_values(($story['images'] ?? [])),
     ];

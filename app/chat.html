@@ -14899,6 +14899,19 @@ function submitText(text, fromChoice = false) {
       scheduleRender(entry);
     },
     output: (data) => addOutput(entry, data.text || ""),
+    article: (data) => {
+      // /article <url> opens the same reader modal as clicking a /news
+      // result, including Learn and Chat about the article.
+      const itemData = data?.item;
+      if (!itemData) return;
+      const articleItem = makeNewsItem(
+        { newsItems: [], newsSource: "Article" },
+        itemData
+      );
+      articleItem.articleFetched = true;
+      articleItem.fullArticleLoaded = true;
+      openNewsModal(articleItem);
+    },
     news: (data) => addNewsEvent(entry, data || {}),
     changelog: (data) => addChangelogEvent(entry, data || {}),
     dictionary_history: (data) => {
@@ -15186,7 +15199,13 @@ function completionContext() {
     );
     start = firstSpace + 1 + lastSeparator + 1;
   }
-  else if (name === "/article") kind = "paths";
+  else if (name === "/article") {
+    // A URL opens the reader popup; only a local path needs filesystem
+    // completion.
+    const args = value.slice(firstSpace + 1, caret);
+    if (/^https?:\/\//i.test(args)) return null;
+    kind = "paths";
+  }
   else return null;
   return {
     kind,

@@ -1,3 +1,9 @@
+task.refactor_article_command (completed) {
+  refactor /article command:
+  - when typing /article <url_of_the_article>
+  - pop up the article modal, since behavior as clicking on a news entry in the result of the /news search <keywords>
+}
+
 task (completed) {
   bug:
   in the article modal, this article is not loading the full content:
