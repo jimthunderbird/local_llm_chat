@@ -9,22 +9,24 @@ Usage
     python find_article_words_in_corpus.py <article_url> --corpus 10k..10.5k
     python find_article_words_in_corpus.py <article_url> --corpus 10k..10.05k
     python find_article_words_in_corpus.py <article_url> --corpus 40k..50k
+    python find_article_words_in_corpus.py <article_url> --corpus 50k..100k
+    python find_article_words_in_corpus.py <article_url> --corpus 100k
 
 The article body is fetched with ``news_fetch.php --article <url>``.  The
 selected corpus is downloaded into ``englishcorner/corpus`` on first use.  The
 article words and the selected corpus vocabulary are intersected directly in
 this script; ``check_words_in_both_texts.py`` is not used.
 
-A corpus may be a plain name (``10k``, ``20k``, ``30k``, ``50k``) or a
-range such as ``10k..20k``, ``10k..10.5k``, ``10k..10.05k`` or
-``40k..50k``.  A range selects the words that are outside the intersection
-of the two boundary corpora: words present in the ``top <end>`` list or the
-``top <start>`` list, but not in both.  For example, ``10k..20k`` means the
-words that occur in the 10k or 20k list but are not shared by both lists.
-The article intersection is then applied to that vocabulary.  Named corpora
-are used directly for the well-known offsets (10k, 20k, 30k, 50k); other
-offsets such as 10.5k use the first N words of the smallest corpus that
-covers them.
+A corpus may be a plain name (``10k``, ``20k``, ``30k``, ``50k``, ``100k``)
+or a range such as ``10k..20k``, ``10k..10.5k``, ``10k..10.05k``,
+``40k..50k`` or ``50k..100k``.  A range selects the words that are outside
+the intersection of the two boundary corpora: words present in the
+``top <end>`` list or the ``top <start>`` list, but not in both.  For
+example, ``10k..20k`` means the words that occur in the 10k or 20k list but
+are not shared by both lists.  The article intersection is then applied to
+that vocabulary.  Named corpora are used directly for the well-known offsets
+(10k, 20k, 30k, 50k, 100k); other offsets such as 10.5k use the first N words
+of the smallest corpus that covers them.
 """
 
 from __future__ import annotations
@@ -85,6 +87,14 @@ CORPORA: dict[str, dict[str, object]] = {
         ),
         "filename": "50k_english_words.txt",
         "size": 50_000,
+    },
+    "100k": {
+        "url": (
+            "https://raw.githubusercontent.com/david47k/top-english-wordlists/"
+            "master/top_english_words_lower_100000.txt"
+        ),
+        "filename": "100k_english_words.txt",
+        "size": 100_000,
     },
 }
 
@@ -180,7 +190,8 @@ def _base_corpus_for_end(end: int) -> str:
 def _top_words(offset: int) -> list[str]:
     """Return the words belonging to the "top <offset>" word list.
 
-    Named corpora are used for the offsets they define (10k, 20k, 30k, 50k).
+    Named corpora are used for the offsets they define (10k, 20k, 30k, 50k,
+    100k).
     Any other offset is the prefix of the smallest corpus that covers it.
     """
     for name, entry in CORPORA.items():
@@ -364,18 +375,20 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         help=(
             "Corpus to use (also accepted with --corpus): 10k, 20k, 30k, "
-            "50k, or a range such as 10k..20k / 20k..30k / 30k..50k. A "
-            "range selects words outside the intersection of the two "
-            "boundary corpora (in one list but not both). Default: 10k."
+            "50k, 100k, or a range such as 10k..20k / 20k..30k / "
+            "30k..50k / 50k..100k. A range selects words outside the "
+            "intersection of the two boundary corpora (in one list but not "
+            "both). Default: 10k."
         ),
     )
     parser.add_argument(
         "--corpus",
         help=(
-            "Corpus to use: 10k, 20k, 30k, 50k, or a range such as "
-            "10k..20k / 20k..30k / 30k..50k. A range selects words "
-            "outside the intersection of the two boundary corpora: words "
-            "in the end list or the start list, but not both. Default: 10k."
+            "Corpus to use: 10k, 20k, 30k, 50k, 100k, or a range such "
+            "as 10k..20k / 20k..30k / 30k..50k / 50k..100k. A range "
+            "selects words outside the intersection of the two boundary "
+            "corpora: words in the end list or the start list, but not "
+            "both. Default: 10k."
         ),
     )
     parser.add_argument(

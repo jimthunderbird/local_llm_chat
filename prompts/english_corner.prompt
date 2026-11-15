@@ -7,11 +7,18 @@ corpus {
   20k_english_words: https://raw.githubusercontent.com/david47k/top-english-wordlists/refs/heads/master/top_english_words_mixed_20000.txt
   30k_english_words: https://raw.githubusercontent.com/arstgit/high-frequency-vocabulary/refs/heads/master/30k.txt
   50k_english_words: https://raw.githubusercontent.com/david47k/top-english-wordlists/refs/heads/master/top_english_words_mixed_50000.txt
+  100k_english_words: https://raw.githubusercontent.com/david47k/top-english-wordlists/master/top_english_words_lower_100000.txt
 }
 
 project_directory: {directory_of_this_prompt}/..
 main_script_directory: {directory_of_this_prompt}/../englishcorner/scripts
 main_corpus_directory: {directory_of_this_prompt}/../englishcorner/corpus
+
+task.find_article_words_in_corpus.support_100k (completed) {
+  in {main_script_directory}/find_article_words_in_corpus.py {
+    please support {corpus.100k_english_words}
+  }
+}
 
 task.find_article_words_in_corpus.refactor (completed) {
  in {main_script_directory}/find_article_words_in_corpus.py {
