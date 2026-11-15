@@ -1,8 +1,22 @@
 book_writing_llm: ollama local model ornith-1.5:35b
 book_directory: {diretory_of_this_prompt}/../.chat/books
 words_per_chapter: 800
-max_number_of_chapters: 10
-articles_to_learn: 40
+max_number_of_chapters: 60
+articles_to_learn: 100
+
+task (completed) {
+  update {words_per_chapter}
+  update {max_number_of_chapters}
+  update {articles_to_learn}
+}
+
+task.ask_question_before_writing_book (completed) {
+  after typing /write_a_book:
+  - ask me the following question:
+    - words per chapter (default {words_per_chapter})
+    - number of chapter (default {max_number_of_chapters})
+    - articles to learn (default {articles_to_learn})
+}
 
 task.load_a_book (completed) {
   reference task.books_command:

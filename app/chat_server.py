@@ -313,7 +313,7 @@ WEB_COMMANDS = {
     "/tablelog": "japan food and restaurant guide for travelers — search Tabelog restaurant pages by keywords: /tablelog <keywords>",
     "/stock": "show a stock symbol profile, financial details, and related news articles: /stock <stock_symbol>",
     "/deepresearch": "run a bounded multi-round research report on <topic>: /deepresearch <topic>",
-    "/write_a_book": "research the last 2 years and write a 3-10 chapter book (~800 words each) into .chat/books/: /write_a_book <subject>",
+    "/write_a_book": "ask for chapter, word, and article options, then research recent news and write a book into .chat/books/: /write_a_book [<subject>]",
     "/books": "list the books written by /write_a_book in .chat/books: /books [keyword]",
     "/settings": "set English Corner options: /settings english_words_to_learn <range> (3k, 5k, 10k, 20k, 30k, 50k, 100k, or a range such as 10k..50k; default 10k..50k; off disables highlighting)",
 }
@@ -534,16 +534,28 @@ WRITE_A_BOOK_MODEL = os.environ.get(
 )
 WRITE_A_BOOK_DIR = SCRIPT_DIR / ".chat" / "books"
 WRITE_A_BOOK_KEYWORD_LIMIT = 6
-# Matches {articles_to_learn} in prompts/write_a_book.prompt.
-WRITE_A_BOOK_SOURCE_LIMIT = 40
-# Fetch enough per query that de-duplication still leaves room for 40 sources.
+# The three questions asked by task.ask_question_before_writing_book in
+# prompts/write_a_book.prompt, and the bounds used when a caller passes them
+# as --words / --chapters / --articles options.
+WRITE_A_BOOK_SOURCE_LIMIT = 100
+WRITE_A_BOOK_MIN_ARTICLES = 0
+WRITE_A_BOOK_MAX_ARTICLES = 100
+# Fetch enough per query that de-duplication still leaves room for the
+# requested number of sources.
 WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD = 20
 WRITE_A_BOOK_RESEARCH_YEARS = 2
-WRITE_A_BOOK_CHAPTER_LIMIT = 10
+WRITE_A_BOOK_CHAPTER_LIMIT = 60
 WRITE_A_BOOK_MIN_CHAPTERS = 3
 WRITE_A_BOOK_CHAPTER_WORDS = 800
+WRITE_A_BOOK_MIN_CHAPTER_WORDS = 100
+WRITE_A_BOOK_MAX_CHAPTER_WORDS = 5_000
 WRITE_A_BOOK_EVIDENCE_CHARS = 12_000
 WRITE_A_BOOK_DIGEST_CHARS = 8_000
+_WRITE_A_BOOK_OPTION_RE = re.compile(
+    r"(?:^|\s)--(?P<name>words|words-per-chapter|chapters|articles)"
+    r"(?:=|\s+)(?P<value>\d+)\b",
+    re.IGNORECASE,
+)
 WRITE_A_BOOK_KEYWORD_PROMPT = """You are a research librarian planning a
 book about the following subject:
 
@@ -566,12 +578,12 @@ Book subject: {subject}
 Recent research material:
 {digest}
 
-Design a focused book with {min_chapters} to {max_chapters} chapters. Each
-chapter should cover a distinct, useful part of the subject and should be
-supported by the research material above.
+Design a focused book with exactly {chapters} chapters. Each chapter should
+cover a distinct, useful part of the subject and should be supported by the
+research material above.
 
 Rules:
-- Return one chapter title per line.
+- Return exactly {chapters} chapter titles, one per line.
 - Do not number the lines, add bullets, or write commentary.
 - Do not include a preface, table of contents, or sources chapter.
 - Keep every title under 90 characters.
@@ -743,9 +755,17 @@ def _book_keyword_list(raw: str, subject: str) -> list[str]:
     return keywords or [subject]
 
 
-def _book_chapter_titles(raw: str, subject: str) -> list[str]:
-    """Return a usable chapter outline, with a stable fallback."""
-    titles = _parse_book_model_lines(raw, WRITE_A_BOOK_CHAPTER_LIMIT)
+def _book_chapter_titles(
+    raw: str,
+    subject: str,
+    chapters: int = WRITE_A_BOOK_CHAPTER_LIMIT,
+) -> list[str]:
+    """Return exactly ``chapters`` usable titles, with a stable fallback."""
+    chapters = max(
+        WRITE_A_BOOK_MIN_CHAPTERS,
+        min(WRITE_A_BOOK_CHAPTER_LIMIT, int(chapters)),
+    )
+    titles = _parse_book_model_lines(raw, chapters)
     cleaned: list[str] = []
     for title in titles:
         title = re.sub(
@@ -761,10 +781,56 @@ def _book_chapter_titles(raw: str, subject: str) -> list[str]:
             "People and Institutions",
             "Practical Implications",
             "Challenges and Debates",
+            "Case Studies",
             "What Comes Next",
+            "Further Perspectives",
             "Conclusion",
         ]
-    return cleaned[:WRITE_A_BOOK_CHAPTER_LIMIT]
+    while len(cleaned) < chapters:
+        cleaned.append(f"Further Perspectives {len(cleaned) + 1}")
+    return cleaned[:chapters]
+
+
+def _parse_write_a_book_options(argument: str) -> tuple[str, int, int, int]:
+    """Split ``<subject> [--words N --chapters N --articles N]``.
+
+    The values come from the questions asked by
+    task.ask_question_before_writing_book. Missing or out-of-range values fall
+    back to the documented defaults rather than failing the command.
+    """
+    text = " ".join(str(argument or "").split())
+    values = {
+        "words": WRITE_A_BOOK_CHAPTER_WORDS,
+        "chapters": WRITE_A_BOOK_CHAPTER_LIMIT,
+        "articles": WRITE_A_BOOK_SOURCE_LIMIT,
+    }
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group("name").lower()
+        key = "words" if name.startswith("word") else name
+        try:
+            values[key] = int(match.group("value"))
+        except ValueError:
+            pass
+        return " "
+
+    subject = _WRITE_A_BOOK_OPTION_RE.sub(replace, text)
+    subject = " ".join(subject.split()).strip()
+    if len(subject) >= 2 and subject[0] == subject[-1] and subject[0] in "\"'":
+        subject = subject[1:-1].strip()
+    words = max(
+        WRITE_A_BOOK_MIN_CHAPTER_WORDS,
+        min(WRITE_A_BOOK_MAX_CHAPTER_WORDS, values["words"]),
+    )
+    chapters = max(
+        WRITE_A_BOOK_MIN_CHAPTERS,
+        min(WRITE_A_BOOK_CHAPTER_LIMIT, values["chapters"]),
+    )
+    articles = max(
+        WRITE_A_BOOK_MIN_ARTICLES,
+        min(WRITE_A_BOOK_MAX_ARTICLES, values["articles"]),
+    )
+    return subject, words, chapters, articles
 
 
 def _book_search_tokens(text: str) -> list[str]:
@@ -16658,11 +16724,16 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         chapters. The finished, self-contained HTML book is saved under
         ./.chat/books and emitted as a `written_book` event with a browser URL.
         """
-        subject = " ".join(subject.split()).strip()
+        subject, words_per_chapter, chapter_count, articles_to_learn = (
+            _parse_write_a_book_options(subject)
+        )
         if not subject:
             self._sse_text(
                 "output",
-                "\nUsage: /write_a_book <subject>\n"
+                "\nUsage: /write_a_book <subject> [--words N] [--chapters N] "
+                "[--articles N]\n"
+                "Defaults: 800 words per chapter, 60 chapters, 100 recent "
+                "articles.\n"
                 "Example: /write_a_book the future of open source AI\n",
             )
             return
@@ -16670,7 +16741,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         started = time.monotonic()
         self._sse_text(
             "log",
-            f"[book: planning {subject!r} with {WRITE_A_BOOK_MODEL}]",
+            f"[book: planning {subject!r} with {WRITE_A_BOOK_MODEL} "
+            f"({chapter_count} chapter(s), about {words_per_chapter} words "
+            f"each, learn from {articles_to_learn} article(s))]",
         )
         try:
             keyword_reply = chat.generate_text(
@@ -16693,34 +16766,43 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             "log", "[book: search keywords: " + " | ".join(keywords) + "]"
         )
 
-        try:
-            candidates = _book_search_candidates(
-                keywords,
-                WRITE_A_BOOK_SOURCE_LIMIT,
-                lambda text: self._sse_text("log", text),
-            )
-        except RuntimeError as exc:
-            self._sse_text(
-                "output", f"\n/write_a_book: recent-news search failed: {exc}\n"
-            )
-            return
-        if not candidates and subject.casefold() not in {
-            keyword.casefold() for keyword in keywords
-        }:
+        candidates: list[dict] = []
+        if articles_to_learn <= 0:
             self._sse_text(
                 "log",
-                "[book: no usable keyword results; retrying with the subject]",
+                "[book: articles to learn is 0; skipping recent-news research]",
             )
+        else:
             try:
                 candidates = _book_search_candidates(
-                    [subject],
-                    WRITE_A_BOOK_SOURCE_LIMIT,
+                    keywords,
+                    articles_to_learn,
                     lambda text: self._sse_text("log", text),
                 )
             except RuntimeError as exc:
                 self._sse_text(
-                    "log", f"[book: subject search failed: {exc}]"
+                    "output",
+                    f"\n/write_a_book: recent-news search failed: {exc}\n",
                 )
+                return
+            if not candidates and subject.casefold() not in {
+                keyword.casefold() for keyword in keywords
+            }:
+                self._sse_text(
+                    "log",
+                    "[book: no usable keyword results; retrying with the "
+                    "subject]",
+                )
+                try:
+                    candidates = _book_search_candidates(
+                        [subject],
+                        articles_to_learn,
+                        lambda text: self._sse_text("log", text),
+                    )
+                except RuntimeError as exc:
+                    self._sse_text(
+                        "log", f"[book: subject search failed: {exc}]"
+                    )
 
         if candidates:
             self._sse_text(
@@ -16773,8 +16855,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 WRITE_A_BOOK_OUTLINE_PROMPT.format(
                     subject=subject,
                     digest=digest,
-                    min_chapters=WRITE_A_BOOK_MIN_CHAPTERS,
-                    max_chapters=WRITE_A_BOOK_CHAPTER_LIMIT,
+                    chapters=chapter_count,
                 ),
                 model=WRITE_A_BOOK_MODEL,
                 temperature=0.45,
@@ -16786,7 +16867,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "default outline]"
             )
             outline_reply = ""
-        chapter_titles = _book_chapter_titles(outline_reply, subject)
+        chapter_titles = _book_chapter_titles(
+            outline_reply, subject, chapter_count
+        )
         self._sse_text(
             "log",
             f"[book: outline has {len(chapter_titles)} chapter(s)]",
@@ -16814,8 +16897,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 subject=subject,
                 number=index,
                 title=chapter_title,
-                target_words=760,
-                max_words=WRITE_A_BOOK_CHAPTER_WORDS,
+                target_words=max(80, int(words_per_chapter * 0.95)),
+                max_words=words_per_chapter,
                 evidence=evidence,
             )
             try:
@@ -16839,7 +16922,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 chapter_text, chapter_title
             )
             chapter_text = _book_limit_words(
-                chapter_text, WRITE_A_BOOK_CHAPTER_WORDS
+                chapter_text, words_per_chapter
             )
             if not chapter_text.strip():
                 self._sse_text(
