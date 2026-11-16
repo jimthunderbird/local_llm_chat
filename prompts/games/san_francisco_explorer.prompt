@@ -1,6 +1,53 @@
 youtube_video_search_prefix: San Francisco
 
 game_data_file: {diretory_of_this_prompt}/../../.chat/games/san_francisco_explorer.json
+exploration_bounds: south=32.5343, west=-124.4096, north=42.0095, east=-114.1308
+
+task.set_current_location_with_auto_hinting_dropdown (completed) {
+  in the main exporer map, right above the map, add a component <Current Location Setup> {
+    UI {
+      <label: Set Current Location> <Address Auto Hinting Dropdown with addresses in California>
+    }
+    <Address Auto Hinting Dropdown with addresses in California>.when_selected {
+      set the current address to the selected address 
+      reflect the current address in the map
+    }
+  }
+}
+
+task.allow_traveling_to_entire_california (completed) {
+  currently looks like we I can not travel outside of san francico in the main explore map
+  please make it so that I can keep exploring neighbor places in the entire California boundary
+}
+
+task.bug.regression.nearby_places (completed) {
+  bug:
+  the following is not working now:
+  - show nearby places around the new current location in the main explore map
+}
+
+task.local_news (completed) {
+  in the place modal:
+  after the youtube videos list:
+  - add a new section "Local News" {
+    - place_name_string: use OpenStreetMap’s Nominatim service to get the place name based on the place's coordinates
+    - use google news rss api to get list of news based on {place_name_stringn}
+  }
+}
+
+task.place_wiki_and_website_fetching (completed) {
+  in the place modal:
+  - present a "From Wikipedia" section {
+    try to search wikipedia based on the place's geolocation and get the wikipedia information:
+  }
+  - if a place has an associated website, present a "From Website" {
+    use python trafilatura to get the information from the website
+  }
+}
+
+task.fix_map_in_place_modal (completed) {
+  in the place modal, the open street map for the place should be just a static image, do not let user scroll on that map  
+}
 
 task.set_arbitrary_starting_point (completed) {
   in the main explorer map, righ clicking on a location should show a menu item:

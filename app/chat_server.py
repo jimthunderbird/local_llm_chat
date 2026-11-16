@@ -77,13 +77,24 @@ Endpoints:
                                   r/stock and r/<ticker> for the /stock modal
     GET  /api/map_geocode        ?q=<address>&limit=<n> address autocomplete
                                   and coordinate lookup for /map's To location tab
+                                  optional viewbox=<west>,<south>,<east>,<north>,
+                                  bounded=1, and countrycodes=<cc[,cc]>
+    GET  /api/game_geocode       ?game=<game_name>&q=<address>&limit=<n>
+                                  address autocomplete constrained to one
+                                  game's exploration boundary for the /game
+                                  Set Current Location dropdown
     GET  /api/map_restaurants    ?lat=<latitude>&lon=<longitude> fetch nearby
                                   restaurants from the Overpass API for /map
     GET  /api/game_nearby        ?lat=<latitude>&lon=<longitude> fetch nearby
                                   attractions for the /game explorer modal
     GET  /api/game_place         ?url=<osm_url>&name=<name> fetch one explorer
-                                  marker's tags and Wikipedia extract for its
+                                  marker's tags, geolocated Wikipedia extract, and
+                                  trafilatura-extracted website text for its
                                   right-click place modal
+    GET  /api/game_place_news    ?lat=<latitude>&lon=<longitude> reverse-geocode
+                                  the place name with Nominatim and list its
+                                  recent Google News stories for the explorer
+                                  place modal's Local News section
     POST /api/game_current_location
                                   {"game":..., "latitude":..., "longitude":...}
                                   persist the explorer's chosen starting point
@@ -170,6 +181,15 @@ try:
     import requests
 except ImportError as exc:  # pragma: no cover - dependency guard
     sys.exit(f"Missing dependency: {exc.name}. Install with: pip install requests")
+
+# Place modals use trafilatura to turn a place's linked website into readable
+# paragraphs. It is optional so the rest of the server still starts when the
+# package has not been installed yet; only the "From Website" section is then
+# shown with an explanatory error.
+try:
+    import trafilatura
+except ImportError:  # pragma: no cover - optional dependency
+    trafilatura = None
 
 # The server lives in ./app, while chat.py and its data directories live in the
 # repository root. Resolve both and make the root importable when run as a script.
@@ -3953,6 +3973,27 @@ GAME_PLACE_CACHE_TTL_SECONDS = 3_600
 GAME_PLACE_CACHE_MAX_ITEMS = 512
 GAME_PLACE_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 GAME_PLACE_CACHE_LOCK = threading.Lock()
+# A place's linked website is extracted with trafilatura and cached separately
+# from the OSM/Wikipedia payload. The modal asks for both pieces together, but
+# keeping this cache independent lets a transient website failure be retried
+# without discarding the Wikipedia details.
+GAME_WEBSITE_CACHE_TTL_SECONDS = 3_600
+GAME_WEBSITE_CACHE_MAX_ITEMS = 256
+GAME_WEBSITE_MAX_BYTES = 5 * 1024 * 1024
+GAME_WEBSITE_MAX_PARAGRAPHS = 12
+GAME_WEBSITE_MAX_CHARS = 6_000
+GAME_WEBSITE_CACHE: dict[str, tuple[float, dict]] = {}
+GAME_WEBSITE_CACHE_LOCK = threading.Lock()
+# The explorer place modal also lists recent local news. The place name comes
+# from Nominatim reverse geocoding, and the stories come from Google News
+# through news_fetch.php, exactly like /news search. Both lookups are cached per
+# coordinate so reopening a marker does not repeat them.
+GAME_NEWS_LIMIT = 5
+GAME_NEWS_CACHE_TTL_SECONDS = 900
+GAME_NEWS_CACHE_MAX_ITEMS = 256
+GAME_NEWS_CACHE: dict[tuple[float, float, int], tuple[float, dict]] = {}
+GAME_NEWS_CACHE_LOCK = threading.Lock()
+NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
 
 
 def _map_plain_text(value: object) -> str:
@@ -3972,33 +4013,114 @@ def _map_distance(meters: object) -> str:
     return f"{meters / 1000:.1f} km"
 
 
-def geocode_locations(location: str, limit: int = MAP_GEOCODE_LIMIT) -> list[dict]:
+def _geocode_viewbox(value: object) -> tuple[float, float, float, float] | None:
+    """Normalize a Nominatim viewbox into (west, south, east, north).
+
+    Callers may pass either a string such as ``-124.4,32.5,-114.1,42.0`` or a
+    sequence of four numbers. Nominatim accepts any two opposite corners, so
+    the coordinates are reordered here rather than requiring one exact order.
+    """
+    if isinstance(value, str):
+        parts = [part for part in re.split(r"[,\s]+", value.strip()) if part]
+    elif isinstance(value, (list, tuple)):
+        parts = list(value)
+    else:
+        return None
+    if len(parts) != 4:
+        return None
+    try:
+        first_lon, first_lat, second_lon, second_lat = (
+            float(part) for part in parts
+        )
+    except (TypeError, ValueError):
+        return None
+    west = min(first_lon, second_lon)
+    east = max(first_lon, second_lon)
+    south = min(first_lat, second_lat)
+    north = max(first_lat, second_lat)
+    if not (
+        -180 <= west < east <= 180
+        and -90 <= south < north <= 90
+    ):
+        return None
+    return (west, south, east, north)
+
+
+def _geocode_countrycodes(value: object) -> str:
+    """Normalize a comma-separated list of ISO country codes for Nominatim."""
+    if not value:
+        return ""
+    if isinstance(value, str):
+        parts = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        parts = [str(part) for part in value]
+    else:
+        return ""
+    codes = [
+        part.strip().lower()
+        for part in parts
+        if re.fullmatch(r"[A-Za-z]{2}", part.strip())
+    ]
+    return ",".join(codes)
+
+
+def geocode_locations(
+    location: str,
+    limit: int = MAP_GEOCODE_LIMIT,
+    *,
+    viewbox: object = None,
+    bounded: bool = False,
+    countrycodes: object = None,
+) -> list[dict]:
     """Resolve a place name to a list of OpenStreetMap Nominatim matches.
 
     Nominatim is limited by its usage policy, so each normalized query/limit
     pair is cached for a short time. A query with no matches returns an empty
     list rather than an error so the autocomplete UI can simply show nothing.
+
+    ``viewbox`` (west, south, east, north) and ``countrycodes`` narrow address
+    suggestions. When ``bounded`` is true Nominatim only returns results from
+    inside the viewbox, which lets the /game explorer restrict its address
+    dropdown to the game's exploration area.
     """
     location = " ".join(str(location or "").split())
     if not location:
         raise RuntimeError("Missing location")
     limit = max(1, min(int(limit), MAP_GEOCODE_LIMIT))
-    cache_key = (location.lower(), limit)
+    normalized_viewbox = _geocode_viewbox(viewbox)
+    normalized_countries = _geocode_countrycodes(countrycodes)
+    normalized_bounded = bool(bounded and normalized_viewbox)
+    cache_key = (
+        location.lower(),
+        limit,
+        normalized_viewbox,
+        normalized_bounded,
+        normalized_countries,
+    )
     now = time.time()
     with MAP_GEOCODE_CACHE_LOCK:
         cached = MAP_GEOCODE_CACHE.get(cache_key)
         if cached and now - cached[0] <= MAP_GEOCODE_CACHE_TTL_SECONDS:
             return [dict(item) for item in cached[1]]
 
+    params: dict[str, object] = {
+        "q": location,
+        "format": "jsonv2",
+        "limit": limit,
+        "addressdetails": 1,
+    }
+    if normalized_viewbox:
+        west, south, east, north = normalized_viewbox
+        params["viewbox"] = f"{west},{south},{east},{north}"
+    if normalized_bounded:
+        params["bounded"] = 1
+    if normalized_countries:
+        params["countrycodes"] = normalized_countries
+
     try:
         response = requests.get(
             NOMINATIM_SEARCH_URL,
-            params={
-                "q": location,
-                "format": "jsonv2",
-                "limit": limit,
-                "addressdetails": 1,
-            },
+            params=params,
             headers={
                 **chat.HTTP_HEADERS,
                 "User-Agent": MAP_USER_AGENT,
@@ -5140,6 +5262,7 @@ def list_game_prompts() -> list[dict]:
             "title": str(meta.get("title") or name.replace("_", " ").title()),
             "playable": name in GAME_START_LOCATIONS,
             "youtube_video_search_prefix": _game_prompt_video_prefix(path),
+            "bounds": _game_prompt_exploration_bounds(path),
         }
     for name, meta in GAME_START_LOCATIONS.items():
         games.setdefault(
@@ -5151,6 +5274,7 @@ def list_game_prompts() -> list[dict]:
                 ),
                 "playable": True,
                 "youtube_video_search_prefix": "",
+                "bounds": meta.get("bounds"),
             },
         )
     return [games[name] for name in sorted(games)]
@@ -5168,6 +5292,46 @@ def _game_prompt_video_prefix(path: Path) -> str:
         re.MULTILINE,
     )
     return match.group(1).strip() if match else ""
+
+
+def _game_prompt_exploration_bounds(path: Path) -> dict | None:
+    """Read an optional geographic boundary from a game prompt.
+
+    A line such as ``exploration_bounds: south=32.5, west=-124.4,
+    north=42.0, east=-114.1`` lets one game cover a whole state while the
+    explorer still refuses to save a current location outside that area. The
+    parser is deliberately small so prompts stay readable and no map service
+    is required just to start a game.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(
+        r"^\s*exploration_bounds\s*:\s*(.+?)\s*$", text, re.MULTILINE
+    )
+    if not match:
+        return None
+    values: dict[str, float] = {}
+    for part in match.group(1).split(","):
+        key, separator, raw = part.partition("=")
+        if not separator:
+            return None
+        key = key.strip().lower()
+        if key not in {"south", "west", "north", "east"}:
+            return None
+        try:
+            values[key] = float(raw.strip())
+        except ValueError:
+            return None
+    if set(values) != {"south", "west", "north", "east"}:
+        return None
+    if not (
+        -90 <= values["south"] < values["north"] <= 90
+        and -180 <= values["west"] < values["east"] <= 180
+    ):
+        return None
+    return values
 
 
 def _game_prompt_data_file(path: Path) -> Path:
@@ -5252,6 +5416,20 @@ def save_game_data(game_name: str, data: dict) -> None:
             raise
 
 
+def _game_bounds_contain(bounds: object, latitude: float, longitude: float) -> bool:
+    """Return whether a coordinate is inside a prompt's exploration bounds."""
+    if not isinstance(bounds, dict):
+        return True
+    try:
+        south = float(bounds["south"])
+        west = float(bounds["west"])
+        north = float(bounds["north"])
+        east = float(bounds["east"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    return south <= latitude <= north and west <= longitude <= east
+
+
 def _valid_game_coordinates(latitude: object, longitude: object) -> bool:
     """Return whether two values are an in-range latitude/longitude pair."""
     return (
@@ -5321,7 +5499,7 @@ def search_game_places(
     the explorer modal. If Overpass is unavailable, the Wikipedia GeoSearch
     fallback still gives the game useful places to walk between.
     """
-    radius = max(100, min(int(radius_meters), 3_000))
+    radius = max(100, min(int(radius_meters), 15_000))
     limit = max(1, min(int(limit), 30))
     query = (
         "[out:json][timeout:25];\n"
@@ -5719,6 +5897,203 @@ def _game_image_url(tags: dict) -> str:
     return ""
 
 
+GAME_WEBSITE_BOILERPLATE_RE = re.compile(
+    r"^(?:your cart|sign up|subscribe|newsletter|loading\b|cookies?\b|"
+    r"accept (?:all|cookies)|all rights reserved|taxes and shipping|"
+    r"browse our (?:entire|full) inventory|all available works|"
+    r"available works|privacy policy|terms of service)\b",
+    re.IGNORECASE,
+)
+
+
+def _game_text_paragraphs(text: str) -> list[str]:
+    """Split Wikipedia/trafilatura plain text into clean paragraphs."""
+    paragraphs: list[str] = []
+    seen: set[str] = set()
+    for chunk in re.split(r"\n\s*\n|\n", str(text or "")):
+        paragraph = " ".join(html.unescape(chunk).split())
+        if len(paragraph) < 12:
+            continue
+        if GAME_WEBSITE_BOILERPLATE_RE.match(paragraph):
+            continue
+        folded = paragraph.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        paragraphs.append(paragraph)
+    return paragraphs
+
+
+def fetch_game_place_website(url: str) -> dict:
+    """Extract readable information from a place's linked website.
+
+    The OSM ``website``/``contact:website`` tag is often the most useful
+    description of a small gallery, shop, or venue that has no Wikipedia
+    article. trafilatura removes navigation and boilerplate and returns the
+    main article text plus its metadata. The result is cached by URL for an
+    hour so reopening the same place modal does not re-download the site.
+    """
+    url = str(url or "").strip()
+    result = {
+        "url": url,
+        "link": url,
+        "title": "",
+        "site": "",
+        "paragraphs": [],
+        "image": "",
+        "error": "",
+    }
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        result["error"] = "The place's website address is not a valid HTTP URL."
+        return result
+
+    now = time.monotonic()
+    with GAME_WEBSITE_CACHE_LOCK:
+        cached = GAME_WEBSITE_CACHE.get(url)
+        if cached and now - cached[0] <= GAME_WEBSITE_CACHE_TTL_SECONDS:
+            return cached[1]
+
+    if trafilatura is None:
+        result["error"] = (
+            "The Python trafilatura package is not installed, so the "
+            "place's website could not be read."
+        )
+        return result
+
+    try:
+        with requests.get(
+            url,
+            headers={
+                **chat.HTTP_HEADERS,
+                "User-Agent": MAP_USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml",
+            },
+            timeout=(8, 20),
+            stream=True,
+            allow_redirects=True,
+        ) as response:
+            response.raise_for_status()
+            content_type = str(
+                response.headers.get("Content-Type") or ""
+            ).split(";", 1)[0].strip().lower()
+            if content_type and not (
+                content_type.startswith("text/")
+                or content_type in {"application/xhtml+xml", "application/xml"}
+            ):
+                result["error"] = (
+                    "The place's website did not return an HTML page."
+                )
+                return result
+            final_url = str(response.url or url).strip()
+            chunks: list[bytes] = []
+            remaining = GAME_WEBSITE_MAX_BYTES
+            for chunk in response.iter_content(chunk_size=65_536):
+                if not chunk or remaining <= 0:
+                    continue
+                piece = chunk[:remaining]
+                chunks.append(piece)
+                remaining -= len(piece)
+            raw = b"".join(chunks)
+            encoding = response.encoding or "utf-8"
+    except requests.RequestException as exc:
+        result["error"] = f"Could not load the place's website: {exc}"
+        return result
+
+    try:
+        html_text = raw.decode(encoding, errors="replace")
+    except LookupError:
+        html_text = raw.decode("utf-8", errors="replace")
+
+    metadata: dict = {}
+    last_extraction_error: Exception | None = None
+    for extraction_options in (
+        {"favor_precision": True},
+        {},
+        {"favor_recall": True},
+    ):
+        try:
+            extracted = trafilatura.extract(
+                html_text,
+                url=final_url,
+                output_format="json",
+                with_metadata=True,
+                include_comments=False,
+                include_tables=False,
+                **extraction_options,
+            )
+        except Exception as exc:  # trafilatura can raise parser-specific errors
+            last_extraction_error = exc
+            continue
+        if not extracted:
+            continue
+        try:
+            decoded = json.loads(extracted)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(decoded, dict):
+            continue
+        if not metadata:
+            metadata = decoded
+        if str(decoded.get("text") or "").strip():
+            metadata = decoded
+            break
+    if not metadata and last_extraction_error is not None:
+        result["error"] = (
+            "Could not extract readable text from the place's website: "
+            f"{last_extraction_error}"
+        )
+        return result
+
+    text = str(metadata.get("text") or "")
+    excerpt = _map_plain_text(
+        metadata.get("excerpt") or metadata.get("description") or ""
+    )
+    paragraphs = _game_text_paragraphs(text)
+    if excerpt and not any(
+        excerpt.casefold() in paragraph.casefold()
+        or paragraph.casefold() in excerpt.casefold()
+        for paragraph in paragraphs
+    ):
+        paragraphs.insert(0, excerpt)
+
+    limited: list[str] = []
+    budget = GAME_WEBSITE_MAX_CHARS
+    for paragraph in paragraphs:
+        if budget <= 0 or len(limited) >= GAME_WEBSITE_MAX_PARAGRAPHS:
+            break
+        if len(paragraph) > budget:
+            paragraph = paragraph[:budget].rsplit(" ", 1)[0].rstrip() + "…"
+        limited.append(paragraph)
+        budget -= len(paragraph)
+
+    link = str(metadata.get("source") or final_url).strip()
+    if not re.match(r"^https?://", link, re.IGNORECASE):
+        link = final_url
+    result.update(
+        {
+            "link": link,
+            "title": _map_plain_text(metadata.get("title") or ""),
+            "site": _map_plain_text(
+                metadata.get("sitename")
+                or metadata.get("source-hostname")
+                or ""
+            ),
+            "paragraphs": limited,
+            "image": str(metadata.get("image") or "").strip(),
+            "error": "" if limited else (
+                "No readable text could be extracted from the place's website."
+            ),
+        }
+    )
+    if limited:
+        with GAME_WEBSITE_CACHE_LOCK:
+            if len(GAME_WEBSITE_CACHE) >= GAME_WEBSITE_CACHE_MAX_ITEMS:
+                GAME_WEBSITE_CACHE.pop(next(iter(GAME_WEBSITE_CACHE)), None)
+            GAME_WEBSITE_CACHE[url] = (now, result)
+    return result
+
+
 def fetch_game_place_details(
     osm_type: str = "",
     osm_id: str | int = "",
@@ -5732,9 +6107,11 @@ def fetch_game_place_details(
     The right-click handler already knows the marker's OSM identity and link,
     so the exact OSM object is queried for its tags. When the object carries a
     ``wikipedia`` tag (or its link is a Wikipedia URL), that page's lead
-    extract and image are added too. The result deliberately reuses the /map
-    card shape: a summary, paragraphs, images, coordinates, and ``map: true``
-    so the shared modal draws the OpenStreetMap embed and related content.
+    extract and image are added too. The same tags supply a ``website`` URL,
+    whose readable text is extracted with trafilatura for the modal's "From
+    Website" section. The result deliberately reuses the /map card shape: a
+    summary, paragraphs, images, coordinates, and ``map: true`` so the shared
+    modal draws the OpenStreetMap embed and related content.
     """
     osm_type = str(osm_type or "").strip().lower()
     identifier = str(osm_id or "").strip()
@@ -5868,17 +6245,30 @@ def fetch_game_place_details(
             }
             break
     extract = str(wiki.get("extract") or "").strip()
+    wiki_paragraphs = _game_text_paragraphs(extract)
     wiki_description = str(wiki.get("description") or "").strip()
-    if not wiki_description:
-        wiki_description = description or category
+    wiki_title = str(wiki.get("title") or "").strip()
+    wiki_link = str(wiki.get("link") or "").strip()
+    summary_description = wiki_description or description or category
+    wikipedia = {}
+    if extract or wiki_description or wiki_link:
+        wikipedia = {
+            "title": wiki_title or title,
+            "description": wiki_description,
+            "link": wiki_link,
+            "paragraphs": wiki_paragraphs,
+            "image": str(wiki.get("image") or "").strip(),
+        }
+    website_info = fetch_game_place_website(website) if website else {}
 
+    # Wikipedia and website text are rendered as their own labelled sections,
+    # so the generic paragraph list only carries the OSM facts. This avoids
+    # showing the same extract twice in the place modal.
     paragraphs: list[str] = []
-    if extract:
-        paragraphs.append(extract)
     detail_parts: list[str] = []
     if category and category != "Place":
         detail_parts.append(f"Type: {category}")
-    if description and description not in extract:
+    if description and description not in (extract, wiki_description):
         detail_parts.append(f"About: {description}")
     if address:
         detail_parts.append(f"Address: {address}")
@@ -5886,8 +6276,6 @@ def fetch_game_place_details(
         detail_parts.append(f"Opening hours: {opening_hours}")
     if phone:
         detail_parts.append(f"Phone: {phone}")
-    if website:
-        detail_parts.append(f"Website: {website}")
     if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
         detail_parts.append(
             f"Coordinates: {float(latitude):.6g}, {float(longitude):.6g}"
@@ -5914,8 +6302,10 @@ def fetch_game_place_details(
         "link": detail_link,
         "source": "OpenStreetMap" if found else "Wikipedia",
         "section": category if category != "Place" else "Place",
-        "summary": wiki_description or description or category,
+        "summary": summary_description,
         "paragraphs": paragraphs,
+        "wikipedia": wikipedia,
+        "website": website_info,
         "images": images,
         "latitude": (
             float(latitude) if isinstance(latitude, (int, float)) else None
@@ -5938,11 +6328,196 @@ def fetch_game_place_details(
         "osm_id": int(identifier) if found else None,
         "found": found or bool(extract),
     }
-    if cache_key is not None:
+    # A website failure is not cached with the place, so reopening the modal
+    # can retry the site even while the Overpass/Wikipedia details stay valid.
+    if cache_key is not None and not website_info.get("error"):
         with GAME_PLACE_CACHE_LOCK:
             if len(GAME_PLACE_CACHE) >= GAME_PLACE_CACHE_MAX_ITEMS:
                 GAME_PLACE_CACHE.pop(next(iter(GAME_PLACE_CACHE)), None)
             GAME_PLACE_CACHE[cache_key] = (now, result)
+    return result
+
+
+def _game_reverse_place_name(data: dict) -> str:
+    """Build a concise search phrase from a Nominatim reverse response."""
+    address = data.get("address")
+    address = address if isinstance(address, dict) else {}
+
+    primary = str(data.get("name") or "").strip()
+    if not primary:
+        for key in (
+            "amenity",
+            "tourism",
+            "shop",
+            "leisure",
+            "building",
+            "road",
+            "neighbourhood",
+            "suburb",
+            "city",
+            "town",
+            "village",
+        ):
+            primary = str(address.get(key) or "").strip()
+            if primary:
+                break
+    if not primary:
+        display_name = str(data.get("display_name") or "").strip()
+        primary = display_name.split(",", 1)[0].strip()
+    if not primary:
+        return ""
+
+    locality = ""
+    for key in (
+        "city",
+        "town",
+        "village",
+        "municipality",
+        "suburb",
+        "neighbourhood",
+        "county",
+    ):
+        locality = str(address.get(key) or "").strip()
+        if locality:
+            break
+
+    if locality:
+        primary_key = primary.casefold()
+        locality_key = locality.casefold()
+        if locality_key not in primary_key and primary_key not in locality_key:
+            return f"{primary}, {locality}"
+    return primary
+
+
+def reverse_game_place_name(latitude: float, longitude: float) -> str:
+    """Return the place name Nominatim assigns to a coordinate."""
+    try:
+        response = requests.get(
+            NOMINATIM_REVERSE_URL,
+            params={
+                "lat": f"{float(latitude):.6f}",
+                "lon": f"{float(longitude):.6f}",
+                "format": "jsonv2",
+                "zoom": 18,
+                "addressdetails": 1,
+            },
+            headers={
+                **chat.HTTP_HEADERS,
+                "User-Agent": MAP_USER_AGENT,
+                "Accept-Language": "en",
+            },
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(
+            f"OpenStreetMap reverse geocoding failed: {exc}"
+        ) from exc
+    if not isinstance(data, dict) or data.get("error"):
+        raise RuntimeError(
+            "OpenStreetMap could not name the place at these coordinates."
+        )
+    place_name = _game_reverse_place_name(data)
+    if not place_name:
+        raise RuntimeError(
+            "OpenStreetMap could not name the place at these coordinates."
+        )
+    return place_name
+
+
+def search_game_place_news(
+    latitude: float, longitude: float, limit: int = GAME_NEWS_LIMIT
+) -> dict:
+    """List recent Google News stories for the place at one coordinate.
+
+    The explorer prompt asks for a Local News section: the place name is
+    resolved from OpenStreetMap's Nominatim reverse endpoint, then Google News
+    is searched through news_fetch.php's dynamic googlenews source. The list is
+    lazy, so each story's full body still loads only when its card is opened.
+    """
+    latitude = float(latitude)
+    longitude = float(longitude)
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        raise ValueError("Missing or invalid place coordinates")
+    limit = max(1, min(int(limit), 10))
+
+    cache_key = (round(latitude, 5), round(longitude, 5), limit)
+    now = time.monotonic()
+    with GAME_NEWS_CACHE_LOCK:
+        cached = GAME_NEWS_CACHE.get(cache_key)
+        if cached and now - cached[0] <= GAME_NEWS_CACHE_TTL_SECONDS:
+            return {
+                **cached[1],
+                "items": [dict(item) for item in cached[1].get("items", [])],
+            }
+
+    script = SCRIPT_DIR / "news_fetch.php"
+    if not script.is_file():
+        raise RuntimeError(f"missing {script.name}")
+
+    place_name = reverse_game_place_name(latitude, longitude)
+    argv = [
+        "php",
+        str(script),
+        "--json",
+        "--lazy",
+        "--source",
+        "googlenews",
+        "--search",
+        place_name,
+        "--limit",
+        str(max(limit * 2, 10)),
+    ]
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=SCRIPT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"could not run {script.name}: {exc}") from exc
+
+    items: list[dict] = []
+    seen_links: set[str] = set()
+    for payload in _read_news_ndjson(completed.stdout):
+        title = str(payload.get("title") or "").strip()
+        link = str(payload.get("link") or "").strip()
+        if not title or not link or link in seen_links:
+            continue
+        seen_links.add(link)
+        items.append(
+            {
+                "title": title,
+                "link": link,
+                "published": str(payload.get("published") or "").strip(),
+                "source": str(payload.get("source") or "Google News").strip(),
+                "section": str(payload.get("section") or "").strip(),
+                "summary": str(payload.get("summary") or "").strip()[:400],
+            }
+        )
+        if len(items) >= limit:
+            break
+
+    if completed.returncode != 0 and not items:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        detail = detail.splitlines()[-1] if detail else "no news data"
+        raise RuntimeError(f"Google News search failed: {detail}")
+
+    result = {
+        "place_name": place_name,
+        "query": place_name,
+        "items": items,
+    }
+    with GAME_NEWS_CACHE_LOCK:
+        if len(GAME_NEWS_CACHE) >= GAME_NEWS_CACHE_MAX_ITEMS:
+            GAME_NEWS_CACHE.pop(next(iter(GAME_NEWS_CACHE)), None)
+        GAME_NEWS_CACHE[cache_key] = (
+            now,
+            {**result, "items": [dict(item) for item in items]},
+        )
     return result
 
 
@@ -15487,6 +16062,55 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"symbol": symbol, "items": items})
             return
+        if path == "/api/game_geocode":
+            params = parse_qs(parsed.query)
+            requested = str((params.get("game") or [""])[0]).strip()
+            normalized = re.sub(
+                r"[^a-z0-9]+", "_", requested.lower()
+            ).strip("_")
+            compact = normalized.replace("_", "")
+            game = next(
+                (
+                    candidate
+                    for candidate in list_game_prompts()
+                    if candidate["name"] == normalized
+                    or candidate["name"].replace("_", "") == compact
+                ),
+                None,
+            )
+            if game is None:
+                self._send_error_json("Unknown game", 400)
+                return
+            query = " ".join((params.get("q") or [""])[0].split())
+            if len(query) < 2:
+                self._send_json({"game": game["name"], "items": []})
+                return
+            raw_limit = (params.get("limit") or [""])[0]
+            try:
+                limit = int(float(raw_limit)) if raw_limit else MAP_GEOCODE_LIMIT
+            except (TypeError, ValueError):
+                limit = MAP_GEOCODE_LIMIT
+            bounds = game.get("bounds")
+            viewbox = None
+            if isinstance(bounds, dict):
+                viewbox = (
+                    bounds.get("west"),
+                    bounds.get("south"),
+                    bounds.get("east"),
+                    bounds.get("north"),
+                )
+            try:
+                items = geocode_locations(
+                    query,
+                    limit,
+                    viewbox=viewbox,
+                    bounded=viewbox is not None,
+                )
+            except RuntimeError as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json({"game": game["name"], "items": items})
+            return
         if path == "/api/map_geocode":
             params = parse_qs(parsed.query)
             query = " ".join((params.get("q") or [""])[0].split())
@@ -15498,8 +16122,18 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 limit = int(float(raw_limit)) if raw_limit else MAP_GEOCODE_LIMIT
             except (TypeError, ValueError):
                 limit = MAP_GEOCODE_LIMIT
+            raw_bounded = (params.get("bounded") or [""])[0].strip().lower()
+            bounded = raw_bounded in {"1", "true", "yes", "on"}
+            viewbox = (params.get("viewbox") or [""])[0]
+            countrycodes = (params.get("countrycodes") or [""])[0]
             try:
-                items = geocode_locations(query, limit)
+                items = geocode_locations(
+                    query,
+                    limit,
+                    viewbox=viewbox,
+                    bounded=bounded,
+                    countrycodes=countrycodes,
+                )
             except RuntimeError as exc:
                 self._send_error_json(str(exc), 502)
                 return
@@ -15569,6 +16203,36 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 self._send_error_json(str(exc), 502)
                 return
             self._send_json({"items": items})
+            return
+        if path == "/api/game_place_news":
+            params = parse_qs(parsed.query)
+            try:
+                latitude = float((params.get("lat") or [""])[0])
+                longitude = float((params.get("lon") or [""])[0])
+            except (TypeError, ValueError):
+                self._send_error_json(
+                    "Missing or invalid place coordinates", 400
+                )
+                return
+            if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+                self._send_error_json(
+                    "Missing or invalid place coordinates", 400
+                )
+                return
+            raw_limit = (params.get("limit") or [""])[0]
+            try:
+                limit = int(float(raw_limit)) if raw_limit else GAME_NEWS_LIMIT
+            except (TypeError, ValueError):
+                limit = GAME_NEWS_LIMIT
+            try:
+                result = search_game_place_news(latitude, longitude, limit)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except RuntimeError as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json(result)
             return
         if path == "/api/game_place":
             params = parse_qs(parsed.query)
@@ -16295,6 +16959,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             if not _valid_game_coordinates(latitude, longitude):
                 self._send_error_json(
                     "Missing or invalid game coordinates", 400
+                )
+                return
+            if not _game_bounds_contain(
+                game.get("bounds"), latitude, longitude
+            ):
+                self._send_error_json(
+                    "That location is outside this game's exploration area",
+                    400,
                 )
                 return
             name = " ".join(
@@ -20060,7 +20732,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             return
         saved_start = saved_game_start(match["name"])
-        if saved_start is not None:
+        game_bounds = match.get("bounds")
+        if saved_start is not None and _game_bounds_contain(
+            game_bounds,
+            saved_start["latitude"],
+            saved_start["longitude"],
+        ):
             start = {**start, **saved_start}
 
         self._sse(
@@ -20081,6 +20758,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 },
                 "radius_meters": GAME_NEARBY_RADIUS_METERS,
                 "limit": GAME_NEARBY_LIMIT,
+                "bounds": game_bounds,
             },
         )
 

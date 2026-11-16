@@ -1524,6 +1524,79 @@
     flex-direction: column;
     gap: 8px;
   }
+  .game-location-setup {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .game-location-label {
+    flex: 0 0 auto;
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .game-location-field {
+    position: relative;
+    flex: 1 1 280px;
+    min-width: 0;
+  }
+  .game-location-input {
+    width: 100%;
+    padding: 7px 10px;
+    background: #0f1821;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+  }
+  .game-location-input:focus {
+    border-color: #3d6b8f;
+    outline: none;
+  }
+  .game-location-input::placeholder { color: var(--dim); }
+  .game-location-suggestions {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 20;
+    max-height: 240px;
+    overflow-y: auto;
+    padding: 4px;
+    background: #101a24;
+    border: 1px solid #2b4056;
+    border-radius: 6px;
+    box-shadow: 0 14px 40px rgba(0,0,0,.65);
+  }
+  .game-location-suggestions[hidden] { display: none; }
+  .game-location-suggestion {
+    display: block;
+    width: 100%;
+    padding: 7px 9px;
+    background: transparent;
+    border: 0;
+    border-radius: 4px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12px;
+    line-height: 1.35;
+    text-align: left;
+    cursor: pointer;
+  }
+  .game-location-suggestion:hover,
+  .game-location-suggestion:focus-visible,
+  .game-location-suggestion.is-active {
+    background: #1b2a38;
+    outline: none;
+  }
+  .game-location-status {
+    flex: 0 1 auto;
+    color: var(--dim);
+    font-size: 12px;
+  }
+  .game-location-status.is-error { color: var(--warn); }
   #game-map {
     flex: 1;
     min-height: 360px;
@@ -1559,6 +1632,13 @@
     cursor: pointer;
   }
   .game-marker.is-visited { background: #ffd166; }
+  /* Markers discovered by panning the map rather than by walking from the
+   * current location stay hollow so they read as places one can travel to. */
+  .game-marker.is-explore {
+    background: #0d151e;
+    border-color: #79c0ff;
+    box-shadow: 0 0 0 3px rgba(121,192,255,.2), 0 2px 8px rgba(0,0,0,.55);
+  }
   .game-marker.is-current {
     width: 26px;
     height: 26px;
@@ -2075,6 +2155,16 @@
     margin-bottom: 8px;
   }
   .map-yelp-note { color: var(--dim); font-size: 11px; font-weight: 400; }
+  .map-yelp-note a { color: var(--accent-2); text-decoration: none; }
+  .map-yelp-note a:hover { text-decoration: underline; }
+  .map-source-paragraph {
+    color: #cfdae5;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .news-body .map-source-paragraph { margin: 0 0 8px; }
+  .news-body .map-source-paragraph:last-child { margin-bottom: 0; }
+  .news-body .map-source-description { color: var(--dim); font-style: italic; }
   .map-yelp-rating { color: #ffd166; font-size: 13px; margin-bottom: 5px; }
   .map-yelp-fact { color: #cfdae5; font-size: 12.5px; line-height: 1.5; }
   .map-yelp-fact a { color: var(--accent-2); text-decoration: none; }
@@ -2124,6 +2214,13 @@
     background: #0b1620;
   }
   .map-osm-map-link { display: inline-block; margin-top: 6px; margin-right: 10px; }
+  /* A place modal opened from the /game explorer shows the location map as a
+   * static picture: the embed stays visible but cannot be scrolled, zoomed or
+   * dragged, so wheel gestures scroll the modal instead of panning the map. */
+  .map-osm-frame.is-static {
+    pointer-events: none;
+    user-select: none;
+  }
   .osm-nearby { margin-top: 12px; }
   .osm-nearby-head {
     color: var(--accent);
@@ -3803,6 +3900,14 @@
       <button id="game-close" type="button" title="Close (Esc)">×</button>
     </div>
     <div class="game-body">
+      <div class="game-location-setup">
+        <label class="game-location-label" for="game-location-input">Set Current Location</label>
+        <div class="game-location-field">
+          <input id="game-location-input" class="game-location-input" type="text" autocomplete="off" spellcheck="false" placeholder="Search an address or place" aria-autocomplete="list" aria-controls="game-location-suggestions">
+          <div id="game-location-suggestions" class="game-location-suggestions" role="listbox" aria-label="Address suggestions" hidden></div>
+        </div>
+        <div id="game-location-status" class="game-location-status" aria-live="polite"></div>
+      </div>
       <div id="game-map" role="application" aria-label="Explorer map"></div>
       <div id="game-status" class="game-status" aria-live="polite"></div>
     </div>
@@ -4103,6 +4208,9 @@ const gameMetaEl = $("#game-meta");
 const gameStartLinkEl = $("#game-start-link");
 const gameMapEl = $("#game-map");
 const gameStatusEl = $("#game-status");
+const gameLocationInputEl = $("#game-location-input");
+const gameLocationSuggestionsEl = $("#game-location-suggestions");
+const gameLocationStatusEl = $("#game-location-status");
 const gameCloseEl = $("#game-close");
 const gameContextMenuEl = $("#game-context-menu");
 const gameContextSetLocationEl = $("#game-context-set-location");
@@ -6810,6 +6918,14 @@ function makeNewsItem(entry, data) {
     mapVideosFetched: false,
     mapVideosError: "",
     mapVideosHasMore: false,
+    // Explorer place modals list Google News stories for the reverse-geocoded
+    // place name after the YouTube list. The stories are loaded lazily and
+    // each card opens in the normal /news detail modal so its body streams in.
+    localNews: [],
+    localNewsLoading: false,
+    localNewsFetched: false,
+    localNewsError: "",
+    localNewsPlaceName: "",
     youtubeVideoSearchPrefix: String(data.youtube_video_search_prefix || ""),
     learnable: data.learnable !== undefined
       ? Boolean(data.learnable)
@@ -7895,6 +8011,7 @@ async function openStockCompanyModal(symbol) {
 let gameState = null;
 let gameGeneration = 0;
 let gameContextTarget = null;
+let gameLocationSearch = { items: [], active: -1, requestId: 0, timer: null };
 
 function gamePlaceLatLng(place) {
   const latitude = drivingCoordinate(place?.latitude);
@@ -7908,6 +8025,201 @@ function gamePlaceKey(place) {
   if (!latlng) return "";
   const link = String(place?.link || "").trim();
   return `${link || place?.title || "place"}@${latlng[0].toFixed(6)},${latlng[1].toFixed(6)}`;
+}
+
+function gameLeafletBounds(bounds) {
+  // A game prompt may declare an exploration boundary such as the whole
+  // state of California. Leaflet uses a [[south, west], [north, east]] pair
+  // so the main map cannot be panned out of the game's area.
+  if (!bounds || typeof bounds !== "object") return null;
+  const south = drivingCoordinate(bounds.south);
+  const west = drivingCoordinate(bounds.west);
+  const north = drivingCoordinate(bounds.north);
+  const east = drivingCoordinate(bounds.east);
+  if (
+    south === null || west === null || north === null || east === null
+    || south >= north || west >= east
+  ) {
+    return null;
+  }
+  return [[south, west], [north, east]];
+}
+
+function gameInsideBounds(bounds, latitude, longitude) {
+  const box = gameLeafletBounds(bounds);
+  if (!box) return true;
+  const [[south, west], [north, east]] = box;
+  return (
+    latitude >= south && latitude <= north
+    && longitude >= west && longitude <= east
+  );
+}
+
+function setGameLocationStatus(text, isError = false) {
+  if (!gameLocationStatusEl) return;
+  gameLocationStatusEl.textContent = text || "";
+  gameLocationStatusEl.classList.toggle("is-error", Boolean(isError));
+}
+
+function resetGameLocationSearch(clearInput = false) {
+  const search = gameLocationSearch;
+  window.clearTimeout(search.timer);
+  search.timer = null;
+  search.requestId += 1;
+  search.items = [];
+  search.active = -1;
+  if (gameLocationSuggestionsEl) {
+    gameLocationSuggestionsEl.textContent = "";
+    gameLocationSuggestionsEl.hidden = true;
+  }
+  if (clearInput) {
+    if (gameLocationInputEl) gameLocationInputEl.value = "";
+    setGameLocationStatus("");
+  }
+}
+
+function renderGameLocationSuggestions() {
+  const search = gameLocationSearch;
+  if (!gameLocationSuggestionsEl) return;
+  gameLocationSuggestionsEl.textContent = "";
+  const items = Array.isArray(search.items) ? search.items : [];
+  gameLocationSuggestionsEl.hidden = !items.length;
+  items.forEach((destination, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "game-location-suggestion";
+    button.setAttribute("role", "option");
+    button.setAttribute(
+      "aria-selected", index === search.active ? "true" : "false"
+    );
+    button.classList.toggle("is-active", index === search.active);
+    button.title = String(destination.display_name || "");
+    button.textContent = String(destination.display_name || "");
+    button.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      chooseGameLocation(destination);
+    });
+    gameLocationSuggestionsEl.appendChild(button);
+  });
+}
+
+function chooseGameLocation(destination) {
+  if (!destination || !gameState) return;
+  const latitude = drivingCoordinate(destination.latitude);
+  const longitude = drivingCoordinate(destination.longitude);
+  if (latitude === null || longitude === null) return;
+  const name = String(
+    destination.display_name || destination.query || "Selected location"
+  ).trim();
+  const osmType = String(destination.osm_type || "").trim();
+  const osmId = destination.osm_id;
+  const osmLink = (
+    osmType && osmId !== null && osmId !== undefined
+  )
+    ? `https://www.openstreetmap.org/${osmType}/${osmId}`
+    : (
+      `https://www.openstreetmap.org/?mlat=${latitude.toFixed(6)}` +
+      `&mlon=${longitude.toFixed(6)}#map=18/` +
+      `${latitude.toFixed(6)}/${longitude.toFixed(6)}`
+    );
+  window.clearTimeout(gameLocationSearch.timer);
+  gameLocationSearch.timer = null;
+  gameLocationSearch.requestId += 1;
+  gameLocationSearch.items = [];
+  gameLocationSearch.active = -1;
+  if (gameLocationSuggestionsEl) {
+    gameLocationSuggestionsEl.textContent = "";
+    gameLocationSuggestionsEl.hidden = true;
+  }
+  if (gameLocationInputEl) gameLocationInputEl.value = name;
+  setGameLocationStatus("");
+  setGameCurrentLocation({
+    name,
+    title: name,
+    latitude,
+    longitude,
+    link: osmLink,
+    category: "Selected address",
+  });
+}
+
+function lookupGameLocation(query, autoChoose = false) {
+  const state = gameState;
+  if (!state) return;
+  const trimmed = String(query || "").trim();
+  if (trimmed.length < 2) {
+    setGameLocationStatus("Type at least 2 characters to search.", true);
+    return;
+  }
+  const gameName = String(state.gameName || "").trim();
+  if (!gameName) {
+    setGameLocationStatus("Could not search addresses: the game name is missing.", true);
+    return;
+  }
+  window.clearTimeout(gameLocationSearch.timer);
+  gameLocationSearch.timer = null;
+  const requestId = ++gameLocationSearch.requestId;
+  gameLocationSearch.items = [];
+  gameLocationSearch.active = -1;
+  renderGameLocationSuggestions();
+  setGameLocationStatus(`Searching for ${trimmed}…`);
+  const generation = state.generation;
+  const params = new URLSearchParams({
+    game: gameName,
+    q: trimmed,
+    limit: String(MAP_GEOCODE_SUGGESTION_LIMIT),
+  });
+  fetch(`/api/game_geocode?${params.toString()}`, { cache: "no-store" })
+    .then((response) => response.json().then((data) => {
+      if (!response.ok) {
+        throw new Error(data?.error || `HTTP ${response.status}`);
+      }
+      return data;
+    }))
+    .then((data) => {
+      if (!gameState || gameState.generation !== generation) return;
+      if (requestId !== gameLocationSearch.requestId) return;
+      const items = Array.isArray(data.items)
+        ? data.items.filter((item) => gamePlaceLatLng(item))
+        : [];
+      gameLocationSearch.items = items;
+      gameLocationSearch.active = -1;
+      renderGameLocationSuggestions();
+      if (!items.length) {
+        setGameLocationStatus(`No address in this explorer's area matched ${trimmed}.`, true);
+        return;
+      }
+      if (autoChoose) {
+        chooseGameLocation(items[0]);
+        return;
+      }
+      setGameLocationStatus(
+        `${items.length} address${items.length === 1 ? "" : "es"} found — choose one.`
+      );
+    })
+    .catch((error) => {
+      if (!gameState || gameState.generation !== generation) return;
+      if (requestId !== gameLocationSearch.requestId) return;
+      gameLocationSearch.items = [];
+      gameLocationSearch.active = -1;
+      renderGameLocationSuggestions();
+      setGameLocationStatus(
+        `Address search unavailable: ${error?.message || String(error)}`,
+        true
+      );
+    });
+}
+
+function clearGameExploration(state) {
+  if (!state) return;
+  if (state.exploreTimer) {
+    window.clearTimeout(state.exploreTimer);
+    state.exploreTimer = null;
+  }
+  state.exploreRequest = (state.exploreRequest || 0) + 1;
+  state.exploreLoading = false;
+  state.exploreCenter = null;
+  state.explorePlaces = [];
 }
 
 function hideGameContextMenu() {
@@ -7948,6 +8260,17 @@ function setGameCurrentLocation(place) {
   if (!state) return;
   const latlng = gamePlaceLatLng(place);
   if (!latlng) return;
+  if (!gameInsideBounds(state.bounds, latlng[0], latlng[1])) {
+    if (gameStatusEl) {
+      gameStatusEl.classList.add("is-error");
+      gameStatusEl.textContent = "That location is outside this game's exploration area.";
+    }
+    setGameLocationStatus(
+      "That address is outside this game's exploration area.",
+      true
+    );
+    return;
+  }
   const generation = state.generation;
   const gameName = String(state.gameName || "").trim();
   if (!gameName) {
@@ -7955,6 +8278,10 @@ function setGameCurrentLocation(place) {
       gameStatusEl.classList.add("is-error");
       gameStatusEl.textContent = "Could not save the current location: the game name is missing.";
     }
+    setGameLocationStatus(
+      "Could not save the current location: the game name is missing.",
+      true
+    );
     return;
   }
   if (gameStatusEl) {
@@ -7998,7 +8325,10 @@ function setGameCurrentLocation(place) {
         ),
       };
       state.current = current;
+      if (gameLocationInputEl) gameLocationInputEl.value = name;
+      setGameLocationStatus("");
       state.nearby = [];
+      clearGameExploration(state);
       const last = state.journey[state.journey.length - 1];
       if (!last || gamePlaceKey(last) !== gamePlaceKey(current)) {
         state.journey.push({ ...current });
@@ -8025,6 +8355,8 @@ function setGameCurrentLocation(place) {
 function closeGameModal() {
   gameGeneration += 1;
   hideGameContextMenu();
+  resetGameLocationSearch(true);
+  if (gameState) clearGameExploration(gameState);
   if (gameState?.map) {
     try {
       gameState.map.remove();
@@ -8041,9 +8373,10 @@ function closeGameModal() {
   }
 }
 
-function gameMarkerIcon(place, isCurrent, isVisited) {
+function gameMarkerIcon(place, isCurrent, isVisited, isExplore) {
   const classes = ["game-marker"];
   if (isCurrent) classes.push("is-current");
+  else if (isExplore) classes.push("is-explore");
   else if (isVisited) classes.push("is-visited");
   else classes.push("is-nearby");
   const size = isCurrent ? 26 : 20;
@@ -8106,12 +8439,12 @@ function renderGamePlaces() {
   const visitedKeys = new Set(state.journey.map(gamePlaceKey));
   const shown = new Set([currentKey]);
 
-  const addMarker = (place, isCurrent) => {
+  const addMarker = (place, isCurrent, isExplore) => {
     const latlng = gamePlaceLatLng(place);
     if (!latlng) return;
     const key = gamePlaceKey(place);
     const marker = window.L.marker(latlng, {
-      icon: gameMarkerIcon(place, isCurrent, visitedKeys.has(key)),
+      icon: gameMarkerIcon(place, isCurrent, visitedKeys.has(key), isExplore),
       title: String(place.title || place.name || "Place"),
       draggable: true,
       zIndexOffset: isCurrent ? 1000 : 0,
@@ -8124,7 +8457,9 @@ function renderGamePlaces() {
       if (gameState !== state) return;
       hideGameContextMenu();
       if (gamePlaceKey(state.current) === key) {
-        if (!state.nearby.length) loadGameNearby(state.current);
+        if (!state.nearby.length && !state.nearbyLoading) {
+          loadGameNearby(state.current);
+        }
       } else {
         visitGamePlace(place);
       }
@@ -8169,10 +8504,17 @@ function renderGamePlaces() {
     shown.add(key);
     addMarker(place, false);
   }
+  for (const place of state.explorePlaces || []) {
+    const key = gamePlaceKey(place);
+    if (!key || shown.has(key)) continue;
+    shown.add(key);
+    addMarker(place, false, true);
+  }
 
   if (gameMetaEl) {
     const currentName = state.current.name || state.current.title || "current place";
-    gameMetaEl.textContent = `Current: ${currentName} · ${state.journey.length} visited · ${state.nearby.length} nearby`;
+    const inView = (state.explorePlaces || []).length;
+    gameMetaEl.textContent = `Current: ${currentName} · ${state.journey.length} visited · ${state.nearby.length} nearby${inView ? ` · ${inView} in view` : ""}`;
   }
 }
 
@@ -8185,10 +8527,15 @@ function visitGamePlace(place) {
   if (key === gamePlaceKey(state.current)) return;
 
   state.current = { ...place };
+  if (gameLocationInputEl) {
+    gameLocationInputEl.value = String(place.name || place.title || "");
+  }
+  setGameLocationStatus("");
   const last = state.journey[state.journey.length - 1];
   if (!last || gamePlaceKey(last) !== key) {
     state.journey.push({ ...place });
   }
+  clearGameExploration(state);
   state.nearby = [];
   renderGamePlaces();
   try {
@@ -8271,6 +8618,14 @@ function loadGameNearby(place) {
   const generation = state.generation;
   const latlng = gamePlaceLatLng(place);
   if (!latlng) return;
+  // A request for an older current location can finish after the player has
+  // already moved or saved a new one. Tag each request so only the latest
+  // one may replace state.nearby; otherwise the map would briefly (or, when
+  // requests finish out of order, permanently) show places around the wrong
+  // location.
+  state.nearbyRequest = (state.nearbyRequest || 0) + 1;
+  const nearbyRequest = state.nearbyRequest;
+  state.nearbyLoading = true;
   const placeName = place.name || place.title || "this place";
   if (gameStatusEl) {
     gameStatusEl.classList.remove("is-error");
@@ -8291,6 +8646,8 @@ function loadGameNearby(place) {
     }))
     .then((data) => {
       if (!gameState || gameState.generation !== generation) return;
+      if (state.nearbyRequest !== nearbyRequest) return;
+      state.nearbyLoading = false;
       const items = Array.isArray(data.items) ? data.items : [];
       const currentKey = gamePlaceKey(state.current);
       state.nearby = items.filter(
@@ -8301,17 +8658,142 @@ function loadGameNearby(place) {
         const count = state.nearby.length;
         const name = state.current.name || state.current.title || "this place";
         gameStatusEl.textContent = count
-          ? `${count} place${count === 1 ? "" : "s"} around ${name} — click a marker to move there and open its details; drag the map or a marker to explore`
-          : `No nearby places were found around ${name}.`;
+          ? `${count} place${count === 1 ? "" : "s"} around ${name} — click a marker to move there and open its details; drag or zoom the map to explore more places, then click one to travel there`
+          : `No nearby places were found around ${name}. Drag or zoom the map to explore more places.`;
       }
     })
     .catch((error) => {
       if (!gameState || gameState.generation !== generation) return;
+      if (state.nearbyRequest !== nearbyRequest) return;
+      state.nearbyLoading = false;
       if (gameStatusEl) {
         gameStatusEl.classList.add("is-error");
         gameStatusEl.textContent = `Could not load nearby places: ${error?.message || String(error)}`;
       }
     });
+}
+
+function gameExploreRadius(state) {
+  // Adapt the search radius to what the map currently shows. At street zoom
+  // this stays at the walking radius; when the player zooms out to cross a
+  // county or the state, the server looks farther around the viewport center
+  // so there are still neighbor places to click.
+  const base = Number(state.radius) || 1200;
+  if (!state.map) return base;
+  try {
+    const center = state.map.getCenter();
+    const northEast = state.map.getBounds().getNorthEast();
+    const viewMeters = state.map.distance(center, northEast);
+    return Math.max(base, Math.min(15_000, Math.round(viewMeters * 0.65)));
+  } catch (_) {
+    return base;
+  }
+}
+
+function exploreGameViewport() {
+  const state = gameState;
+  if (!state || !state.map) return;
+  const generation = state.generation;
+  let center = null;
+  try {
+    center = state.map.getCenter();
+  } catch (_) {
+    return;
+  }
+  const current = gamePlaceLatLng(state.current);
+  if (!center || !current) return;
+  // The current-location cluster is already loaded by loadGameNearby(). Only
+  // fetch a viewport cluster once the player has panned a meaningful distance
+  // away from it, and do not repeat a fetch for tiny pans within one cluster.
+  let distance = 0;
+  try {
+    distance = state.map.distance(
+      center, window.L.latLng(current[0], current[1])
+    );
+  } catch (_) {
+    return;
+  }
+  const threshold = Math.max(300, (Number(state.radius) || 1200) * 0.6);
+  if (distance <= threshold) {
+    if ((state.explorePlaces || []).length) {
+      clearGameExploration(state);
+      renderGamePlaces();
+    }
+    return;
+  }
+  if (
+    state.exploreCenter
+    && state.map.distance(center, state.exploreCenter) < 400
+  ) {
+    return;
+  }
+  if (!gameInsideBounds(state.bounds, center.lat, center.lng)) return;
+
+  state.exploreRequest = (state.exploreRequest || 0) + 1;
+  const exploreRequest = state.exploreRequest;
+  state.exploreLoading = true;
+  // Remember the center now so a second moveend after the request starts does
+  // not immediately fire the same query again.
+  state.exploreCenter = window.L.latLng(center.lat, center.lng);
+  const radius = gameExploreRadius(state);
+  const params = new URLSearchParams({
+    lat: String(center.lat),
+    lon: String(center.lng),
+    radius: String(radius),
+    limit: "30",
+  });
+  fetch(`/api/game_nearby?${params.toString()}`, { cache: "no-store" })
+    .then((response) => response.json().then((data) => {
+      if (!response.ok) {
+        throw new Error(data?.error || `HTTP ${response.status}`);
+      }
+      return data;
+    }))
+    .then((data) => {
+      if (!gameState || gameState.generation !== generation) return;
+      if (state.exploreRequest !== exploreRequest) return;
+      state.exploreLoading = false;
+      const excluded = new Set([
+        gamePlaceKey(state.current),
+        ...state.nearby.map(gamePlaceKey),
+        ...state.journey.map(gamePlaceKey),
+      ]);
+      const items = Array.isArray(data.items) ? data.items : [];
+      state.explorePlaces = items.filter((item) => {
+        const key = gamePlaceKey(item);
+        return Boolean(key) && Boolean(gamePlaceLatLng(item))
+          && !excluded.has(key);
+      });
+      renderGamePlaces();
+      if (gameStatusEl && state.explorePlaces.length) {
+        const count = state.explorePlaces.length;
+        gameStatusEl.classList.remove("is-error");
+        gameStatusEl.textContent = `${count} place${
+          count === 1 ? "" : "s"
+        } around the map center — click a marker to travel there and load its nearby places`;
+      }
+    })
+    .catch((error) => {
+      if (!gameState || gameState.generation !== generation) return;
+      if (state.exploreRequest !== exploreRequest) return;
+      state.exploreLoading = false;
+      if (gameStatusEl) {
+        gameStatusEl.classList.add("is-error");
+        gameStatusEl.textContent = `Could not explore the map area: ${
+          error?.message || String(error)
+        }`;
+      }
+    });
+}
+
+function scheduleGameExplore() {
+  const state = gameState;
+  if (!state || !state.map) return;
+  if (state.exploreTimer) window.clearTimeout(state.exploreTimer);
+  state.exploreTimer = window.setTimeout(() => {
+    state.exploreTimer = null;
+    exploreGameViewport();
+  }, 650);
 }
 
 function openGameModal(data) {
@@ -8344,6 +8826,14 @@ function openGameModal(data) {
     link: String(start.link || ""),
     category: String(start.category || "Starting point"),
   };
+  resetGameLocationSearch(false);
+  if (gameLocationInputEl) {
+    gameLocationInputEl.value = current.name;
+    gameLocationInputEl.placeholder = `Search an address or place in ${
+      String(data.title || "this explorer")
+    }`;
+  }
+  setGameLocationStatus("");
 
   if (!window.L || typeof window.L.map !== "function") {
     if (gameStatusEl) {
@@ -8353,12 +8843,18 @@ function openGameModal(data) {
     return;
   }
 
+  // A game prompt can declare a whole-state exploration boundary. Applying
+  // it to Leaflet lets the player pan across every part of that area while
+  // keeping the map from wandering into unrelated regions.
+  const leafletBounds = gameLeafletBounds(data?.bounds);
   let map = null;
   try {
     map = window.L.map(gameMapEl, {
       zoomControl: true,
       scrollWheelZoom: true,
       attributionControl: true,
+      maxBounds: leafletBounds || undefined,
+      maxBoundsViscosity: 0.85,
     });
     window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
@@ -8383,6 +8879,10 @@ function openGameModal(data) {
         ),
       });
     });
+    // Panning or zooming the main map discovers more neighbor places at the
+    // new viewport center. They are drawn as hollow markers and only become
+    // the current location when the player clicks one.
+    map.on("moveend", scheduleGameExplore);
   } catch (error) {
     if (map) {
       try {
@@ -8405,6 +8905,14 @@ function openGameModal(data) {
     current,
     journey: [{ ...current }],
     nearby: [],
+    nearbyRequest: 0,
+    nearbyLoading: false,
+    explorePlaces: [],
+    exploreRequest: 0,
+    exploreLoading: false,
+    exploreCenter: null,
+    exploreTimer: null,
+    bounds: data?.bounds && leafletBounds ? data.bounds : null,
     radius: Number(data.radius_meters) || 1200,
     limit: Number(data.limit) || 15,
     youtubeVideoSearchPrefix: String(
@@ -8421,9 +8929,11 @@ function openGameModal(data) {
       // The panel may have been closed before layout completed.
     }
   }, 0);
-  if (gameStatusEl) {
-    gameStatusEl.textContent = `Click the ${current.name} marker to discover nearby places and open its details.`;
-  }
+  // Show the places around the current location as soon as the explorer
+  // opens. A game restored from a saved current_location therefore starts on
+  // that new location with its surrounding places already on the map instead
+  // of requiring an extra click on the current marker.
+  loadGameNearby(current);
 }
 
 if (gameCloseEl) {
@@ -8459,6 +8969,70 @@ if (gameContextMenuEl) {
     hideGameContextMenu();
   }, true);
   window.addEventListener("resize", hideGameContextMenu);
+}
+if (gameLocationInputEl) {
+  gameLocationInputEl.addEventListener("input", () => {
+    if (!gameState) return;
+    window.clearTimeout(gameLocationSearch.timer);
+    gameLocationSearch.timer = null;
+    gameLocationSearch.requestId += 1;
+    gameLocationSearch.items = [];
+    gameLocationSearch.active = -1;
+    renderGameLocationSuggestions();
+    setGameLocationStatus("");
+    const trimmed = gameLocationInputEl.value.trim();
+    if (trimmed.length < 3) return;
+    gameLocationSearch.timer = window.setTimeout(() => {
+      gameLocationSearch.timer = null;
+      lookupGameLocation(trimmed, false);
+    }, 400);
+  });
+  gameLocationInputEl.addEventListener("keydown", (event) => {
+    const items = gameLocationSearch.items || [];
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (!items.length) return;
+      event.preventDefault();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      let next = gameLocationSearch.active + delta;
+      if (next < 0) next = items.length - 1;
+      if (next >= items.length) next = 0;
+      gameLocationSearch.active = next;
+      renderGameLocationSuggestions();
+      const buttons = gameLocationSuggestionsEl?.querySelectorAll(
+        ".game-location-suggestion"
+      );
+      if (buttons?.[next]) buttons[next].scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const selected = items[gameLocationSearch.active];
+      if (selected) {
+        chooseGameLocation(selected);
+      } else {
+        lookupGameLocation(gameLocationInputEl.value, true);
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      if (gameLocationSearch.items.length || !gameLocationSuggestionsEl?.hidden) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      resetGameLocationSearch(false);
+      gameLocationInputEl.focus();
+    }
+  });
+  gameLocationInputEl.addEventListener("blur", () => {
+    window.setTimeout(() => {
+      if (gameLocationSuggestionsEl) gameLocationSuggestionsEl.hidden = true;
+    }, 150);
+  });
+  gameLocationInputEl.addEventListener("focus", () => {
+    if (gameLocationSuggestionsEl) {
+      gameLocationSuggestionsEl.hidden = !gameLocationSearch.items.length;
+    }
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -11940,6 +12514,42 @@ function newsBlocksText(blocks) {
   return parts;
 }
 
+function newsPlaceSourceTexts(item) {
+  // Explorer place modals render Wikipedia and the place's own website as
+  // labelled sections. Translation and read-aloud operate on the visible
+  // article, so those sections must be included here as well.
+  if (!item || String(item.articleApi || "") !== "/api/game_place") return [];
+  const parts = [];
+  const wikipedia = item.wikipedia && typeof item.wikipedia === "object"
+    ? item.wikipedia
+    : null;
+  if (wikipedia) {
+    const description = String(wikipedia.description || "").trim();
+    const summary = String(item.summary || "").trim();
+    if (description && description !== summary) parts.push(description);
+    const paragraphs = Array.isArray(wikipedia.paragraphs)
+      ? wikipedia.paragraphs
+      : [];
+    for (const value of paragraphs) {
+      const text = String(value || "").trim();
+      if (text) parts.push(text);
+    }
+  }
+  const website = item.website && typeof item.website === "object"
+    ? item.website
+    : null;
+  if (website) {
+    const paragraphs = Array.isArray(website.paragraphs)
+      ? website.paragraphs
+      : [];
+    for (const value of paragraphs) {
+      const text = String(value || "").trim();
+      if (text) parts.push(text);
+    }
+  }
+  return parts;
+}
+
 function newsArticleText(item) {
   if (!item) return "";
   const paragraphs = Array.isArray(item.paragraphs) ? item.paragraphs : [];
@@ -11960,6 +12570,7 @@ function newsArticleText(item) {
   for (const answer of Array.isArray(item.answers) ? item.answers : []) {
     parts.push(...newsBlocksText(answer.blocks));
   }
+  parts.push(...newsPlaceSourceTexts(item));
   return parts.join("\n\n");
 }
 
@@ -11988,6 +12599,10 @@ function newsTtsSegments(item) {
   for (const value of paragraphs) {
     const text = String(value || "").trim();
     if (text) parts.push(text);
+  }
+  for (const text of newsPlaceSourceTexts(item)) {
+    const clean = String(text || "").trim();
+    if (clean) parts.push(clean);
   }
 
   // A normal paragraph is one request. Very long paragraphs are split at a
@@ -12994,6 +13609,7 @@ function renderNewsModal(item) {
     ? item.questionBlocks
     : [];
   const summary = String(item.summary || "");
+  const hasPlaceSources = Boolean(item.wikipedia || item.website);
   if (blocks.length) {
     // Full article view: headings, text, lists, and figures stay in the
     // order they appear in the source article.
@@ -13053,7 +13669,7 @@ function renderNewsModal(item) {
       empty.title = item.articleError;
       newsBodyEl.appendChild(empty);
     }
-  } else if (!paragraphs.length && !blocks.length && !summary) {
+  } else if (!paragraphs.length && !blocks.length && !summary && !hasPlaceSources) {
     const empty = document.createElement("div");
     empty.className = "news-loading";
     empty.textContent = "This story has no readable paragraphs in the feed.";
@@ -13076,12 +13692,14 @@ function renderNewsModal(item) {
     appendRedditEmbed(item, newsBodyEl, false);
   }
   renderStackoverflowAnswers(item);
+  renderGamePlaceSources(item);
   // Keep the (possibly streaming) translation after the article body.
   renderNewsTranslation();
   renderOsmDetails(item);
   renderYelpDetails(item);
   renderMapPlaceLocation(item);
   renderMapVideos(item);
+  renderGamePlaceLocalNews(item);
   renderMapNearbyPlaces(item);
   renderNewsPodcast(item);
   syncNewsTtsButton();
@@ -13174,6 +13792,9 @@ function openNewsModal(item, options = {}) {
   ensureNewsArticle(item);
   ensureStackoverflowAnswers(item);
   if (item.map) ensureMapVideos(item);
+  if (String(item.articleApi || "") === "/api/game_place") {
+    ensureGamePlaceNews(item);
+  }
   if (item.osm) ensureOsmDetails(item);
   if (item.yelp) ensureYelpDetails(item);
 }
@@ -13251,7 +13872,18 @@ function ensureNewsArticle(item) {
       const paragraphs = Array.isArray(data.paragraphs)
         ? data.paragraphs.map((text) => String(text || "").trim()).filter(Boolean)
         : [];
-      if (paragraphs.length) item.paragraphs = paragraphs;
+      // Explorer place cards separate the OSM facts from the labelled
+      // Wikipedia and website sections; replace the placeholder paragraph
+      // even when the OSM fact list is empty.
+      if (paragraphs.length || articleApi === "/api/game_place") {
+        item.paragraphs = paragraphs;
+      }
+      if (data.wikipedia && typeof data.wikipedia === "object") {
+        item.wikipedia = data.wikipedia;
+      }
+      if (data.website && typeof data.website === "object") {
+        item.website = data.website;
+      }
       const images = Array.isArray(data.images)
         ? data.images.map((url) => String(url || "").trim()).filter(Boolean)
         : [];
@@ -13364,6 +13996,67 @@ function loadMoreMapVideos(item) {
     })
     .finally(() => {
       item.mapVideosLoading = false;
+      if (newsItem === item) renderNewsModal(item);
+    });
+}
+
+/* Explorer place modals also show recent local news. The server resolves the
+ * place name from the marker's coordinates with Nominatim and searches Google
+ * News through the same news_fetch.php pipeline used by /news search, so a
+ * story card behaves exactly like a regular news result. */
+function gamePlaceNewsItem(data, index) {
+  const entry = {
+    newsItems: [],
+    newsSource: String(data?.source || "Google News"),
+    newsDocs: false,
+  };
+  return makeNewsItem(entry, {
+    index,
+    title: data?.title || "(untitled)",
+    link: data?.link || "",
+    published: data?.published || "",
+    source: data?.source || "Google News",
+    section: data?.section || "",
+    summary: data?.summary || "",
+    complete: true,
+  });
+}
+
+function ensureGamePlaceNews(item) {
+  if (!item || String(item.articleApi || "") !== "/api/game_place") return;
+  if (item.localNewsFetched || item.localNewsLoading) return;
+  const latitude = Number(item.latitude);
+  const longitude = Number(item.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+
+  item.localNewsLoading = true;
+  item.localNewsError = "";
+  if (newsItem === item) renderNewsModal(item);
+  const params = new URLSearchParams({
+    lat: String(latitude),
+    lon: String(longitude),
+    limit: "5",
+  });
+  fetch(`/api/game_place_news?${params.toString()}`, { cache: "no-store" })
+    .then((response) => response.json().then((data) => {
+      if (!response.ok) {
+        throw new Error(data?.error || `HTTP ${response.status}`);
+      }
+      return data;
+    }))
+    .then((data) => {
+      item.localNewsFetched = true;
+      item.localNewsPlaceName = String(data?.place_name || "").trim();
+      const entries = Array.isArray(data?.items) ? data.items : [];
+      item.localNews = entries.map(
+        (entry, index) => gamePlaceNewsItem(entry, index + 1)
+      );
+    })
+    .catch((error) => {
+      item.localNewsError = error?.message || String(error);
+    })
+    .finally(() => {
+      item.localNewsLoading = false;
       if (newsItem === item) renderNewsModal(item);
     });
 }
@@ -13551,6 +14244,130 @@ function appendOsmRestaurantMap(section, item, latitude, longitude) {
   section.appendChild(block);
 }
 
+function gamePlaceWebsiteLabel(website) {
+  const label = String(website?.site || website?.title || "").trim();
+  if (label) return label;
+  const link = String(website?.link || website?.url || "").trim();
+  try {
+    return new URL(link).hostname || "website";
+  } catch (_) {
+    return "website";
+  }
+}
+
+function gamePlaceSourceLink(url, text) {
+  const link = document.createElement("a");
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = text;
+  link.title = `Open ${text} in a new tab`;
+  return link;
+}
+
+function renderGamePlaceSources(item) {
+  // The explorer's place modal labels the two remote sources explicitly:
+  // Wikipedia (found from the OSM tags, wikidata link, exact title, or a
+  // geolocation lookup) and the place's own website (extracted server-side
+  // with trafilatura). Other /map cards keep their existing layout.
+  if (!item || String(item.articleApi || "") !== "/api/game_place") return;
+
+  const wikipedia = item.wikipedia && typeof item.wikipedia === "object"
+    ? item.wikipedia
+    : {};
+  const wikiParagraphs = Array.isArray(wikipedia.paragraphs)
+    ? wikipedia.paragraphs.map((text) => String(text || "").trim()).filter(Boolean)
+    : [];
+  const wikiDescription = String(wikipedia.description || "").trim();
+  const wikiSummary = String(item.summary || "").trim();
+  const wikiLink = String(wikipedia.link || "").trim();
+  const wikiTitle = String(wikipedia.title || item.title || "Wikipedia").trim();
+  const hasWikiContent = Boolean(
+    wikiParagraphs.length || wikiDescription || wikiLink
+  );
+  if (hasWikiContent || item.articleFetched || item.articleLoading || item.articleError) {
+    const section = document.createElement("section");
+    section.className = "map-yelp map-source";
+    const head = document.createElement("div");
+    head.className = "map-yelp-head";
+    const label = document.createElement("span");
+    label.textContent = "From Wikipedia";
+    head.appendChild(label);
+    if (wikiLink) {
+      const note = document.createElement("span");
+      note.className = "map-yelp-note";
+      note.appendChild(gamePlaceSourceLink(wikiLink, wikiTitle));
+      head.appendChild(note);
+    } else if (hasWikiContent) {
+      const note = document.createElement("span");
+      note.className = "map-yelp-note";
+      note.textContent = wikiTitle;
+      head.appendChild(note);
+    }
+    section.appendChild(head);
+    const bodyText = wikiParagraphs.join(" ").toLowerCase();
+    if (
+      wikiDescription
+      && wikiDescription !== wikiSummary
+      && !bodyText.includes(wikiDescription.toLowerCase())
+    ) {
+      appendNewsParagraph(wikiDescription, "map-source-paragraph map-source-description", section);
+    }
+    for (const text of wikiParagraphs) {
+      appendNewsParagraph(text, "map-source-paragraph", section);
+    }
+    if (!hasWikiContent) {
+      const note = document.createElement("div");
+      note.className = "map-yelp-note-body";
+      note.textContent = item.articleLoading
+        ? "Searching Wikipedia near this place…"
+        : (item.articleError
+          ? "Wikipedia information could not be loaded."
+          : "No matching Wikipedia article was found near this place.");
+      section.appendChild(note);
+    }
+    newsBodyEl.appendChild(section);
+  }
+
+  const website = item.website && typeof item.website === "object"
+    ? item.website
+    : null;
+  if (!website) return;
+  const websiteParagraphs = Array.isArray(website.paragraphs)
+    ? website.paragraphs.map((text) => String(text || "").trim()).filter(Boolean)
+    : [];
+  const websiteLink = String(website.link || website.url || "").trim();
+  const websiteError = String(website.error || "").trim();
+  if (!websiteLink && !websiteParagraphs.length && !websiteError) return;
+
+  const section = document.createElement("section");
+  section.className = "map-yelp map-source";
+  const head = document.createElement("div");
+  head.className = "map-yelp-head";
+  const label = document.createElement("span");
+  label.textContent = "From Website";
+  head.appendChild(label);
+  if (websiteLink) {
+    const note = document.createElement("span");
+    note.className = "map-yelp-note";
+    note.appendChild(
+      gamePlaceSourceLink(websiteLink, gamePlaceWebsiteLabel(website))
+    );
+    head.appendChild(note);
+  }
+  section.appendChild(head);
+  for (const text of websiteParagraphs) {
+    appendNewsParagraph(text, "map-source-paragraph", section);
+  }
+  if (!websiteParagraphs.length && websiteError) {
+    const note = document.createElement("div");
+    note.className = "map-yelp-note-body";
+    note.textContent = websiteError;
+    section.appendChild(note);
+  }
+  newsBodyEl.appendChild(section);
+}
+
 function renderMapPlaceLocation(item) {
   // Each /map Wikipedia result is a place rather than a restaurant, so it has
   // no OSM/Yelp detail lookup. Give its modal the same OpenStreetMap view the
@@ -13584,12 +14401,16 @@ function renderMapPlaceLocation(item) {
     latitude + delta,
   ].map((value) => value.toFixed(6)).join("%2C");
   const marker = `${latitude.toFixed(6)}%2C${longitude.toFixed(6)}`;
+  // Explorer game place modals want a static picture rather than an
+  // interactive map, while /map keeps its scrollable embed.
+  const isGamePlace = String(item.articleApi || "") === "/api/game_place";
   const frame = document.createElement("iframe");
-  frame.className = "map-osm-frame";
+  frame.className = isGamePlace ? "map-osm-frame is-static" : "map-osm-frame";
   frame.loading = "lazy";
   frame.referrerPolicy = "no-referrer";
   frame.title = `${item.title || "Place"} location on OpenStreetMap`;
   frame.src = `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${marker}`;
+  if (isGamePlace) frame.tabIndex = -1;
   section.appendChild(frame);
 
   const mapLink = document.createElement("a");
@@ -14153,6 +14974,112 @@ function renderMapVideos(item) {
     });
     moreRow.appendChild(more);
     section.appendChild(moreRow);
+  }
+
+  newsBodyEl.appendChild(section);
+}
+
+/* Under the place's YouTube results, list recent Google News stories for the
+ * reverse-geocoded place name. The section is part of the explorer game's
+ * place modal; ordinary /map place cards do not request it. */
+function renderGamePlaceLocalNews(item) {
+  if (!item || String(item.articleApi || "") !== "/api/game_place") return;
+  const stories = Array.isArray(item.localNews) ? item.localNews : [];
+  const placeName = String(item.localNewsPlaceName || item.title || "this place")
+    .trim();
+
+  const section = document.createElement("section");
+  section.className = "video-results map-videos map-local-news";
+  const head = document.createElement("div");
+  head.className = "video-list-head";
+  const label = document.createElement("span");
+  label.textContent = "Local News";
+  const note = document.createElement("span");
+  note.className = "video-list-note";
+  if (item.localNewsError) {
+    note.textContent = "not loaded";
+  } else if (item.localNewsLoading) {
+    note.textContent = `searching Google News for ${placeName}…`;
+  } else if (item.localNewsFetched) {
+    const count = stories.length;
+    note.textContent = count
+      ? `${count} stor${count === 1 ? "y" : "ies"} · ${placeName}`
+      : `no recent stories · ${placeName}`;
+  } else {
+    note.textContent = placeName;
+  }
+  head.appendChild(label);
+  head.appendChild(note);
+  section.appendChild(head);
+
+  if (stories.length) {
+    const list = document.createElement("ol");
+    list.className = "news-list-items";
+    for (const story of stories) {
+      const li = document.createElement("li");
+      li.className = "news-item";
+      const main = document.createElement("div");
+      main.className = "news-item-main";
+
+      const titleRow = document.createElement("div");
+      titleRow.className = "news-title-row";
+      const title = document.createElement("a");
+      title.className = "news-title";
+      title.textContent = story.title || "(untitled)";
+      if (story.link) {
+        title.href = story.link;
+        title.target = "_blank";
+        title.rel = "noopener noreferrer";
+        title.title = "Read this story in a popup";
+      }
+      title.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openNewsModal(story, { restaurantHistory: "none" });
+      });
+      titleRow.appendChild(title);
+      main.appendChild(titleRow);
+
+      const meta = document.createElement("div");
+      meta.className = "news-meta";
+      meta.textContent = [
+        story.source,
+        story.published ? formatNewsDate(story.published) : "",
+      ].filter(Boolean).join(" · ");
+      main.appendChild(meta);
+
+      li.appendChild(main);
+      list.appendChild(li);
+    }
+    section.appendChild(list);
+  } else if (item.localNewsError) {
+    const error = document.createElement("div");
+    error.className = "video-more-error";
+    error.textContent = item.localNewsError;
+    section.appendChild(error);
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "video-more-btn";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      item.localNewsFetched = false;
+      item.localNewsError = "";
+      item.localNews = [];
+      ensureGamePlaceNews(item);
+    });
+    section.appendChild(retry);
+  } else if (item.localNewsLoading) {
+    const loading = document.createElement("div");
+    loading.className = "news-loading";
+    loading.textContent = `Searching Google News for news around ${placeName}…`;
+    section.appendChild(loading);
+  } else if (item.localNewsFetched) {
+    const empty = document.createElement("div");
+    empty.className = "map-yelp-note-body";
+    empty.textContent = `No recent local news was found for ${placeName}.`;
+    section.appendChild(empty);
   }
 
   newsBodyEl.appendChild(section);
