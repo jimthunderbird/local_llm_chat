@@ -20814,10 +20814,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 pass
 
     def _stream_dictionary(self, word: str, latest_answer: str | None) -> None:
-        # The popup shows exactly: word, IPA, part of speech, a COBUILD-style
-        # meaning, and the surrounding context. Keep the prompt and the
-        # streamed output limited to those fields (no synonyms, quote,
-        # model banner, or follow-up usage section).
+        # The popup shows exactly: word, IPA, part of speech, synonym, a
+        # COBUILD-style meaning, the surrounding context, and two sample
+        # sentences. Keep the prompt and the streamed output limited to those
+        # fields (no quote, model banner, or follow-up usage section).
         context = chat.dictionary_surrounding_context(word, latest_answer)
         prompt = chat.DICT_POPUP_PROMPT.format(
             word=word,

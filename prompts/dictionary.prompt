@@ -15,8 +15,10 @@ task.colins_cobuild_style_explanation (completed) {
     - Word: <word>
     - IPA: <IPA>
     - Part of Speech: <PART OF SPEECH>
+    - Synonym: <Synomyms>
     - Meaning: <DEFINITION using roughly 2500 most common and simple english words>
     - Context: <The Context>
+    - Sentences: <2 Sample Sentences of the <word> reflecting this meaning>
   }
 }
 

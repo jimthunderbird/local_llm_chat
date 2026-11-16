@@ -962,7 +962,7 @@ Meaning as a complete, natural definition (for example, "A ... is ...",
 the definition with "{word} means that" or any similar lead-in; state the
 meaning directly.
 
-For the word or phrase "{word}", show exactly these five labelled fields, in
+For the word or phrase "{word}", show exactly these seven labelled fields, in
 this order, and nothing else:
 
 Word: {word}
@@ -971,26 +971,31 @@ IPA: <International Phonetic Alphabet transcription, or — if unknown>
 
 Part of Speech: <part of speech, or — if unknown>
 
+Synonym: <one to three common synonyms of "{word}", comma separated, or — if
+none>
+
 Meaning: <the COBUILD-style definition of "{word}" using simple, common words>
 
 Context: <the short surrounding text from <context> that shows "{word}" in
 use, copied without quotation marks, or — if there is no context>
 
+Sentences: <two short sample sentences that use "{word}" with the meaning
+above, numbered 1. and 2.>
+
 Rules:
 - Separate each section from the next with exactly one blank line.
-- Do not add a title, preamble, conclusion, notes, synonyms, or any other
-  section.
+- Do not add a title, preamble, conclusion, notes, or any other section.
 - Do not include a separate Quote section.
 - Do not wrap the labels in markdown or add bullets.
-- Keep the whole answer under 120 words.
-- If "{word}" is not a valid English word or phrase, keep the five fields
+- Keep the whole answer under 140 words.
+- If "{word}" is not a valid English word or phrase, keep the seven fields
   and say so in Meaning.
 
 <context>
 {context}
 </context>"""
 
-# The word-click dictionary popup shows exactly these five labelled fields.
+# The word-click dictionary popup shows exactly these seven labelled fields.
 DICT_POPUP_PROMPT = DICT_PROMPT
 
 QUESTION_TRANSLATION_PROMPT = """Translate the following Simplified Chinese question into natural English.
@@ -5907,8 +5912,9 @@ def dictionary_contextual_meaning(answer: str) -> str:
     if not text:
         return ""
     label_re = re.compile(
-        r"(?i)^(Word|IPA|Part of Speech|Meaning|Context|Contextual Meaning|"
-        r"Contextural Meaning|Synonyms|Quote)\s*[:\-–—]\s*(.*)$"
+        r"(?i)^(Word|IPA|Part of Speech|Synonym|Synonyms|Meaning|Context|"
+        r"Contextual Meaning|Contextural Meaning|Sentences|Quote)"
+        r"\s*[:\-–—]\s*(.*)$"
     )
     meaning_labels = {"meaning", "contextual meaning", "contextural meaning"}
     collecting = False

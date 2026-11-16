@@ -16256,26 +16256,29 @@ outputEl.addEventListener("click", (event) => {
 /* ------------------------------------------------------------------ *
  *  Dictionary popup formatting
  *
- *  The popup must show exactly five labelled sections, in this order,
- *  with a blank line between each of them. The old Quote and Synonyms
- *  sections are deliberately not shown; if the model still emits one, it is
- *  discarded. Models occasionally wrap a label in markdown or add a short
- *  preamble, so normalise the streamed text instead of relying on the
- *  model's formatting alone.
+ *  The popup must show exactly seven labelled sections, in this order,
+ *  with a blank line between each of them. The old Quote section is
+ *  deliberately not shown; if the model still emits one, it is discarded.
+ *  Models occasionally wrap a label in markdown or add a short preamble, so
+ *  normalise the streamed text instead of relying on the model's formatting
+ *  alone.
  * ------------------------------------------------------------------ */
 const DICTIONARY_SECTION_LABELS = [
   "Word",
   "IPA",
   "Part of Speech",
+  "Synonym",
   "Meaning",
   "Context",
+  "Sentences",
 ];
-const DICTIONARY_IGNORED_LABELS = ["Synonyms", "Quote"];
-// Older answers used "Contextual Meaning". Accept that label for compatibility
-// and render it in the current "Context" slot.
+const DICTIONARY_IGNORED_LABELS = ["Quote"];
+// Older answers used "Contextual Meaning" and "Synonyms". Accept those labels
+// for compatibility and render them in the current "Context"/"Synonym" slots.
 const DICTIONARY_LABEL_ALIASES = {
   "contextual meaning": "Context",
   "contextural meaning": "Context",
+  "synonyms": "Synonym",
 };
 const DICTIONARY_ALL_LABELS = [
   ...DICTIONARY_SECTION_LABELS,
@@ -16288,7 +16291,7 @@ function parseDictionarySectionLine(line) {
   value = value.replace(/^#{1,6}\s*/, "");
   value = value.replace(/^[-*+]\s+/, "");
   value = value.replace(/\*\*|__/g, "");
-  const match = /^(Word|IPA|Part of Speech|Meaning|Context|Synonyms|Quote|Contextual Meaning|Contextural Meaning)\s*[:\-–—]\s*(.*)$/i.exec(
+  const match = /^(Word|IPA|Part of Speech|Synonym|Synonyms|Meaning|Context|Sentences|Quote|Contextual Meaning|Contextural Meaning)\s*[:\-–—]\s*(.*)$/i.exec(
     value
   );
   if (!match) return null;
