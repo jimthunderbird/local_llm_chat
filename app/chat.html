@@ -12361,6 +12361,7 @@ function renderNewsModal(item) {
   renderYelpDetails(item);
   renderMapPlaceLocation(item);
   renderMapVideos(item);
+  renderMapNearbyPlaces(item);
   renderNewsPodcast(item);
   syncNewsTtsButton();
   syncNewsPodcastButton();
@@ -12377,17 +12378,22 @@ function cancelNewsPodcastGeneration(item) {
 }
 
 function updateRestaurantNav() {
-  const isRestaurant = Boolean(newsItem?.osm);
-  newsPrevEl.hidden = !isRestaurant;
-  newsNextEl.hidden = !isRestaurant;
-  newsPrevEl.disabled = !isRestaurant || restaurantHistoryIndex <= 0;
-  newsNextEl.disabled = !isRestaurant
+  const isNavigable = Boolean(newsItem?.osm || newsItem?.map);
+  const noun = newsItem?.osm ? "restaurant" : "place";
+  newsPrevEl.hidden = !isNavigable;
+  newsNextEl.hidden = !isNavigable;
+  newsPrevEl.disabled = !isNavigable || restaurantHistoryIndex <= 0;
+  newsNextEl.disabled = !isNavigable
     || restaurantHistoryIndex < 0
     || restaurantHistoryIndex >= restaurantHistory.length - 1;
+  newsPrevEl.title = `Previous ${noun}`;
+  newsPrevEl.setAttribute("aria-label", `Previous ${noun}`);
+  newsNextEl.title = `Next ${noun}`;
+  newsNextEl.setAttribute("aria-label", `Next ${noun}`);
 }
 
 function trackRestaurantHistory(item, mode) {
-  if (!item?.osm) {
+  if (!item?.osm && !item?.map) {
     if (mode === "root") {
       restaurantHistory.length = 0;
       restaurantHistoryIndex = -1;
@@ -13411,6 +13417,81 @@ function renderMapVideos(item) {
     section.appendChild(moreRow);
   }
 
+  newsBodyEl.appendChild(section);
+}
+
+/* Under a place's YouTube results, list the other Wikipedia places from the
+ * same /map result set, nearest first. Selecting one opens it in the same
+ * modal and adds it to the place history used by the prev/next controls. */
+function renderMapNearbyPlaces(item) {
+  if (!item?.map || item.osm) return;
+  const entry = item.entry;
+  const places = Array.isArray(entry?.newsItems) ? entry.newsItems : [];
+  const latitude = Number(item.latitude);
+  const longitude = Number(item.longitude);
+  const hasOrigin = Number.isFinite(latitude) && Number.isFinite(longitude);
+
+  const nearby = places
+    .filter((place) => (
+      place
+      && place !== item
+      && place.map
+      && !place.osm
+    ))
+    .map((place) => {
+      const placeLatitude = Number(place.latitude);
+      const placeLongitude = Number(place.longitude);
+      const distance = hasOrigin
+        && Number.isFinite(placeLatitude)
+        && Number.isFinite(placeLongitude)
+        ? osmDistanceMeters(latitude, longitude, placeLatitude, placeLongitude)
+        : Number.POSITIVE_INFINITY;
+      return { place, distance };
+    })
+    .sort((left, right) => left.distance - right.distance)
+    .slice(0, 12);
+
+  if (!nearby.length) return;
+
+  const section = document.createElement("section");
+  section.className = "video-results map-videos map-nearby-places";
+  const head = document.createElement("div");
+  head.className = "video-list-head";
+  const label = document.createElement("span");
+  label.textContent = "Nearby Places";
+  const note = document.createElement("span");
+  note.className = "video-list-note";
+  note.textContent = `${nearby.length} place${nearby.length === 1 ? "" : "s"}`;
+  head.appendChild(label);
+  head.appendChild(note);
+  section.appendChild(head);
+
+  const list = document.createElement("div");
+  list.className = "osm-nearby-list";
+  for (const { place, distance } of nearby) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "osm-nearby-item";
+    button.title = `Open ${place.title || "place"} details`;
+    const name = document.createElement("span");
+    name.className = "osm-nearby-name";
+    name.textContent = place.title || "(untitled place)";
+    const meta = document.createElement("span");
+    meta.className = "osm-nearby-meta";
+    meta.textContent = Number.isFinite(distance)
+      ? osmDistanceText(distance)
+      : "nearby";
+    button.appendChild(name);
+    button.appendChild(meta);
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (place === newsItem) return;
+      openNewsModal(place, { restaurantHistory: "push" });
+    });
+    list.appendChild(button);
+  }
+  section.appendChild(list);
   newsBodyEl.appendChild(section);
 }
 

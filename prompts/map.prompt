@@ -7,6 +7,13 @@ knowledge {
   }
 }
 
+task.place_navigation_of_nearby_places (completed) {
+  in the popup modal for each nearby place {
+    - on top of the modal, provide a navigation menu similar to the dictionary, allow user to navigate back and forth of the places
+    - under the youtube videos section, add a new section "Nearby Places", similar to "Nearby Restaurants"
+  }
+}
+
 task.to_any_location (completed) {
   in the tab group in the result, add a new tab "To location" {
     - it should be after the tab "Nearby Restaurants"
