@@ -14789,8 +14789,8 @@ function submitText(text, fromChoice = false) {
     ? question.slice(1).split(/\s+/).slice(1)
     : [];
   // /news search, /mdn, /britanica, /wikivoyage, /map, /reddit, /tablelog,
-  // /stock, and /changelog stream their result lists; anchor each list at the
-  // top so new results do not drag the viewport down.
+  // /stock, /changelog, and /dictionary_history stream their result lists;
+  // anchor each list at the top so new results do not drag the viewport down.
   const pinsNewsSearch = (
     commandName === "news"
       && String(commandArgs[0] || "").toLowerCase() === "search"
@@ -14798,7 +14798,7 @@ function submitText(text, fromChoice = false) {
     || commandName === "britannica" || commandName === "wikivoyage"
     || commandName === "map" || commandName === "reddit"
     || commandName === "tablelog" || commandName === "stock"
-    || commandName === "changelog";
+    || commandName === "changelog" || commandName === "dictionary_history";
 
   addUserEcho(question, image);
   const isCommand = question.startsWith("/");

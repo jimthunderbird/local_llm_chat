@@ -2,6 +2,10 @@ dictionary_llm: ollama local model ornith-1.5:35b with no thinking
 
 dictionary_history_directory: {directory_of_this_prompt}/../.chat/dictionary_history
 
+task.do_not_scroll_on_dictionary_history (completed) {
+  after typing /dictionary_history, do not scroll
+}
+
 task.colins_cobuild_style_explanation (completed) {
   currently, the dictionary popup looks like:
   Contextual Meaning: <word> means that ...
