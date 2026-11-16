@@ -2264,6 +2264,34 @@
   .news-body .map-source-paragraph { margin: 0 0 8px; }
   .news-body .map-source-paragraph:last-child { margin-bottom: 0; }
   .news-body .map-source-description { color: var(--dim); font-style: italic; }
+  .map-source-more {
+    display: inline-block;
+    margin-top: 2px;
+    padding: 0;
+    border: 0;
+    border-bottom: 1px dotted #3d6b8f;
+    background: transparent;
+    color: var(--accent-2);
+    font: inherit;
+    font-size: 12.5px;
+    line-height: 1.6;
+    cursor: pointer;
+  }
+  .map-source-more:hover,
+  .map-source-more:focus-visible {
+    border-bottom-style: solid;
+    outline: none;
+  }
+  .map-source-more:disabled {
+    color: var(--dim);
+    cursor: default;
+  }
+  .map-source-more-body { margin-top: 8px; }
+  .map-source-more-error {
+    color: var(--warn);
+    font-size: 11px;
+    margin-top: 6px;
+  }
   .map-yelp-rating { color: #ffd166; font-size: 13px; margin-bottom: 5px; }
   .map-yelp-fact { color: #cfdae5; font-size: 12.5px; line-height: 1.5; }
   .map-yelp-fact a { color: var(--accent-2); text-decoration: none; }
@@ -12693,6 +12721,14 @@ function newsPlaceSourceTexts(item) {
       if (text) parts.push(text);
     }
   }
+  // The "More" link appends the full Wikipedia plaintext to the visible
+  // article, so read-aloud and translation should include it too.
+  if (item.wikiMoreStatus === "ready") {
+    for (const block of Array.isArray(item.wikiMoreBlocks) ? item.wikiMoreBlocks : []) {
+      const text = String(block?.text || "").trim();
+      if (text) parts.push(text);
+    }
+  }
   const website = item.website && typeof item.website === "object"
     ? item.website
     : null;
@@ -14423,6 +14459,219 @@ function gamePlaceSourceLink(url, text) {
   return link;
 }
 
+const gameWikiPlaintextCache = new Map();
+
+function gameWikiNormText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function gameWikiTextOverlapsExisting(text, existingTexts) {
+  const candidate = gameWikiNormText(text);
+  if (!candidate) return true;
+  for (const existing of existingTexts) {
+    const normalized = gameWikiNormText(existing);
+    if (!normalized) continue;
+    if (candidate === normalized) return true;
+    // The place card's introduction is a truncated lead extract, so its last
+    // paragraph can be a prefix of the full plaintext paragraph.
+    if (
+      candidate.startsWith(normalized)
+      || normalized.startsWith(candidate)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseGameWikiPlaintext(text) {
+  const blocks = [];
+  for (const rawLine of String(text || "").split(/\n+/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const heading = line.match(/^(={2,6})\s*(.*?)\s*\1$/);
+    if (heading) {
+      const headingText = heading[2].trim();
+      if (headingText) {
+        blocks.push({
+          type: "heading",
+          level: heading[1].length,
+          text: headingText,
+        });
+      }
+      continue;
+    }
+    blocks.push({ type: "paragraph", text: line });
+  }
+  return blocks;
+}
+
+function appendGameWikiMoreBlocks(blocks, target) {
+  for (const block of Array.isArray(blocks) ? blocks : []) {
+    if (!block) continue;
+    if (block.type === "heading") {
+      appendNewsHeading(block.text, block.level, target);
+    } else {
+      appendNewsParagraph(block.text, "map-source-paragraph", target);
+    }
+  }
+}
+
+function appendGameWikiMore(item, section, existingTexts) {
+  const status = String(item.wikiMoreStatus || "idle");
+  if (status === "ready") {
+    const body = document.createElement("div");
+    body.className = "map-source-more-body";
+    const blocks = (Array.isArray(item.wikiMoreBlocks) ? item.wikiMoreBlocks : [])
+      .filter((block) => (
+        block?.type !== "paragraph"
+        || !gameWikiTextOverlapsExisting(block.text, existingTexts)
+      ));
+    appendGameWikiMoreBlocks(blocks, body);
+    if (!body.childNodes.length) {
+      const note = document.createElement("div");
+      note.className = "map-yelp-note-body";
+      note.textContent = "No additional Wikipedia plaintext is available.";
+      body.appendChild(note);
+    }
+    section.appendChild(body);
+    return;
+  }
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "map-source-more";
+  button.textContent = status === "loading" ? "Loading…" : "More";
+  button.disabled = status === "loading";
+  button.title = "Show the full Wikipedia article as plain text";
+  if (status !== "loading") {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      loadGameWikiMore(item, section, existingTexts, button);
+    });
+  }
+  section.appendChild(button);
+  if (status === "error") {
+    const note = document.createElement("div");
+    note.className = "map-source-more-error";
+    note.textContent = `Could not load the full Wikipedia article: ${
+      item.wikiMoreError || "unknown error"
+    }`;
+    section.appendChild(note);
+  }
+}
+
+function loadGameWikiMore(item, section, existingTexts, button) {
+  if (item.wikiMoreStatus === "loading") return;
+  const wikipedia = item.wikipedia && typeof item.wikipedia === "object"
+    ? item.wikipedia
+    : {};
+  const wikiLink = String(wikipedia.link || "").trim();
+  let title = String(wikipedia.title || "").trim();
+  if (!title && wikiLink) {
+    try {
+      const path = new URL(wikiLink).pathname;
+      const match = path.match(/\/wiki\/([^/?#]+)/);
+      if (match) title = decodeURIComponent(match[1].replace(/_/g, " ")).trim();
+    } catch (_) {
+      title = "";
+    }
+  }
+  if (!title) title = String(item.title || "").trim();
+  if (!title) {
+    item.wikiMoreStatus = "error";
+    item.wikiMoreError = "no Wikipedia article title is available for this place";
+    button.disabled = false;
+    button.textContent = "More";
+    const note = document.createElement("div");
+    note.className = "map-source-more-error";
+    note.textContent = `Could not load the full Wikipedia article: ${
+      item.wikiMoreError
+    }`;
+    button.insertAdjacentElement("afterend", note);
+    return;
+  }
+  const languageMatch = wikiLink.match(
+    /^https?:\/\/([a-z-]+)\.wikipedia\.org\//i
+  );
+  const language = languageMatch ? languageMatch[1].toLowerCase() : "en";
+  const cacheKey = `${language}:${title}`;
+  item.wikiMoreStatus = "loading";
+  item.wikiMoreError = "";
+  button.disabled = true;
+  button.textContent = "Loading…";
+  section.querySelector(".map-source-more-error")?.remove();
+
+  const cached = gameWikiPlaintextCache.get(cacheKey);
+  const request = cached
+    ? Promise.resolve(cached)
+    : fetch(`https://${language}.wikipedia.org/w/api.php?${new URLSearchParams({
+      action: "query",
+      prop: "extracts",
+      explaintext: "true",
+      titles: title,
+      redirects: "1",
+      format: "json",
+      formatversion: "2",
+      origin: "*",
+    }).toString()}`)
+      .then((response) => response.json().then((data) => {
+        if (!response.ok) {
+          throw new Error(data?.error?.info || `HTTP ${response.status}`);
+        }
+        return data;
+      }))
+      .then((data) => {
+        let pages = data?.query?.pages;
+        if (pages && !Array.isArray(pages)) pages = Object.values(pages);
+        const page = Array.isArray(pages) ? pages[0] : null;
+        if (!page || page.missing) {
+          throw new Error(`Wikipedia has no article named "${title}"`);
+        }
+        const blocks = parseGameWikiPlaintext(page.extract || "");
+        if (!blocks.length) {
+          throw new Error("Wikipedia returned no plaintext for this article");
+        }
+        gameWikiPlaintextCache.set(cacheKey, blocks);
+        return blocks;
+      });
+
+  request
+    .then((blocks) => {
+      item.wikiMoreStatus = "ready";
+      item.wikiMoreBlocks = blocks;
+      if (newsItem !== item) return;
+      const body = document.createElement("div");
+      body.className = "map-source-more-body";
+      const visible = blocks.filter((block) => (
+        block?.type !== "paragraph"
+        || !gameWikiTextOverlapsExisting(block.text, existingTexts)
+      ));
+      appendGameWikiMoreBlocks(visible, body);
+      if (!body.childNodes.length) {
+        const note = document.createElement("div");
+        note.className = "map-yelp-note-body";
+        note.textContent = "No additional Wikipedia plaintext is available.";
+        body.appendChild(note);
+      }
+      button.replaceWith(body);
+    })
+    .catch((error) => {
+      item.wikiMoreStatus = "error";
+      item.wikiMoreError = error?.message || String(error);
+      if (newsItem !== item) return;
+      button.disabled = false;
+      button.textContent = "More";
+      const note = document.createElement("div");
+      note.className = "map-source-more-error";
+      note.textContent = `Could not load the full Wikipedia article: ${
+        item.wikiMoreError
+      }`;
+      button.insertAdjacentElement("afterend", note);
+    });
+}
+
 function renderGamePlaceSources(item) {
   // The explorer's place modal labels the two remote sources explicitly:
   // Wikipedia (found from the OSM tags, wikidata link, exact title, or a
@@ -14483,6 +14732,13 @@ function renderGamePlaceSources(item) {
           ? "Wikipedia information could not be loaded."
           : "No matching Wikipedia article was found near this place.");
       section.appendChild(note);
+    } else {
+      // The lead extract is capped server-side. "More" appends the complete
+      // article plaintext from the Wikipedia extracts API under the intro.
+      appendGameWikiMore(item, section, [
+        wikiDescription,
+        ...wikiParagraphs,
+      ]);
     }
     newsBodyEl.appendChild(section);
   }

@@ -3,6 +3,16 @@ youtube_video_search_prefix: San Francisco
 game_data_file: {diretory_of_this_prompt}/../../.chat/games/san_francisco_explorer.json
 exploration_bounds: south=32.5343, west=-124.4096, north=42.0095, east=-114.1308
 
+task.wiki_detail_in_plaintext (completed) {
+  for each place's detail modal:
+  - below the wikipedia introduction, add a "More" link {
+    plaintext:use the following endpoint to extract the plaintext of the place {
+      https://en.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=true&titles=<the place title>&format=json
+    }
+    append {plaintext}
+  }
+}
+
 task (completed) {
   reference task.nearby_20_restaurants_in_wheat and task.nearby_20_places:
   - both nearby restaurants and nearby places are not showing
@@ -90,7 +100,7 @@ task.set_arbitrary_starting_point (completed) {
 task.append_prefix_on_video_search.update (completed) {
   in {the place modal}.{youtube videos list section}:
   - show list of video by /youtube search "{youtube_video_search_prefix} {place name}" 
-    note that we must use double quote around the keyword
+  note that we must use double quote around the keyword
 }
 
 
@@ -102,7 +112,7 @@ task.append_prefix_on_video_search (completed) {
 task.potential_bug.Modern_Eden_Gallery (completed) {
   when I open the place modal for Modern_Eden_Gallery (Coordinates: 37.7881, -122.419):
   - the detail shows me:
-    Hotel Carlton is a boutique hotel on Nob Hill in San Francisco which has been operating since 1927...
+  Hotel Carlton is a boutique hotel on Nob Hill in San Francisco which has been operating since 1927...
 
   this is not matching, please fix it in a systematic way
 }
