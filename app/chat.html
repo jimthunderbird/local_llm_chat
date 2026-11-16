@@ -1492,6 +1492,92 @@
     font-size: 12px;
   }
   .leaflet-container a.leaflet-popup-close-button { color: var(--dim); }
+  /* /game: a full-screen OpenStreetMap explorer. All places and the walk
+   * between them live in one draggable Leaflet map. */
+  #game-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 64;
+    background: rgba(2, 6, 10, .78);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  #game-panel[hidden] { display: none; }
+  .game-card {
+    width: min(1100px, 100%);
+    height: min(88vh, 900px);
+    display: flex;
+    flex-direction: column;
+    background: #0d151e;
+    border: 1px solid #2b4056;
+    border-radius: 10px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.7);
+    overflow: hidden;
+  }
+  .game-body {
+    flex: 1;
+    min-height: 0;
+    padding: 12px 14px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  #game-map {
+    flex: 1;
+    min-height: 360px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: #0f1821;
+    position: relative;
+    z-index: 0;
+  }
+  #game-map .leaflet-container { background: #0f1821; }
+  .game-status {
+    min-height: 1.4em;
+    color: var(--dim);
+    font-size: 12px;
+  }
+  .game-status.is-error { color: var(--warn); }
+  .game-marker {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 2px solid #0d151e;
+    background: #79c0ff;
+    color: #08111a;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    box-shadow: 0 2px 8px rgba(0,0,0,.55);
+    cursor: pointer;
+  }
+  .game-marker.is-visited { background: #ffd166; }
+  .game-marker.is-current {
+    width: 26px;
+    height: 26px;
+    background: #7ee787;
+    font-size: 14px;
+  }
+  .game-marker:hover { transform: scale(1.12); }
+  #game-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+    user-select: none;
+  }
+  #game-close:hover { color: var(--text); }
   /* /stock keeps the profile card above a News/Reddit tab group. */
   .news-tabs {
     display: flex;
@@ -1663,6 +1749,9 @@
     padding: 20px;
   }
   #news-panel[hidden] { display: none; }
+  /* A place modal opened from the /game explorer must sit above the explorer
+   * overlay while keeping the game (and its map state) alive underneath. */
+  #news-panel.is-over-game { z-index: 70; }
   .news-card {
     width: min(1120px, 100%);
     max-height: 88vh;
@@ -2224,7 +2313,7 @@
   #video-panel {
     position: fixed;
     inset: 0;
-    z-index: 58;
+    z-index: 71;
     background: rgba(2, 6, 10, .78);
     display: flex;
     align-items: center;
@@ -3674,6 +3763,23 @@
   </div>
 </div>
 
+<div id="game-panel" hidden>
+  <div class="game-card" role="dialog" aria-modal="true" aria-labelledby="game-title">
+    <div class="news-head">
+      <div class="news-head-main">
+        <div id="game-title" class="news-modal-title">Explorer</div>
+        <div id="game-meta" class="news-modal-meta"></div>
+      </div>
+      <a id="game-start-link" class="news-link" href="#" target="_blank" rel="noopener noreferrer">Open starting point ↗</a>
+      <button id="game-close" type="button" title="Close (Esc)">×</button>
+    </div>
+    <div class="game-body">
+      <div id="game-map" role="application" aria-label="Explorer map"></div>
+      <div id="game-status" class="game-status" aria-live="polite"></div>
+    </div>
+  </div>
+</div>
+
 <div id="changelog-panel" hidden>
   <div class="changelog-card" role="dialog" aria-modal="true" aria-labelledby="changelog-title">
     <div class="news-head">
@@ -3958,6 +4064,13 @@ const drivingMetaEl = $("#driving-meta");
 const drivingOpenEl = $("#driving-open");
 const drivingBodyEl = $("#driving-body");
 const drivingCloseEl = $("#driving-close");
+const gamePanelEl = $("#game-panel");
+const gameTitleEl = $("#game-title");
+const gameMetaEl = $("#game-meta");
+const gameStartLinkEl = $("#game-start-link");
+const gameMapEl = $("#game-map");
+const gameStatusEl = $("#game-status");
+const gameCloseEl = $("#game-close");
 const newsTitleEl = $("#news-title");
 const newsMetaEl = $("#news-meta");
 const newsPrevEl = $("#news-prev");
@@ -6662,6 +6775,7 @@ function makeNewsItem(entry, data) {
     mapVideosFetched: false,
     mapVideosError: "",
     mapVideosHasMore: false,
+    youtubeVideoSearchPrefix: String(data.youtube_video_search_prefix || ""),
     learnable: data.learnable !== undefined
       ? Boolean(data.learnable)
       : !(data.docs || data.mdn || entry.newsDocs),
@@ -7738,6 +7852,413 @@ async function openStockCompanyModal(symbol) {
     }`;
     stockCompanyBodyEl.appendChild(message);
   }
+}
+
+/* ------------------------------------------------------------------ *
+ *  /game: OpenStreetMap explorer
+ * ------------------------------------------------------------------ */
+let gameState = null;
+let gameGeneration = 0;
+
+function gamePlaceLatLng(place) {
+  const latitude = drivingCoordinate(place?.latitude);
+  const longitude = drivingCoordinate(place?.longitude);
+  if (latitude === null || longitude === null) return null;
+  return [latitude, longitude];
+}
+
+function gamePlaceKey(place) {
+  const latlng = gamePlaceLatLng(place);
+  if (!latlng) return "";
+  const link = String(place?.link || "").trim();
+  return `${link || place?.title || "place"}@${latlng[0].toFixed(6)},${latlng[1].toFixed(6)}`;
+}
+
+function closeGameModal() {
+  gameGeneration += 1;
+  if (gameState?.map) {
+    try {
+      gameState.map.remove();
+    } catch (_) {
+      // Leaflet may already have torn the map down with its container.
+    }
+  }
+  gameState = null;
+  if (gamePanelEl) gamePanelEl.hidden = true;
+  if (gameMapEl) gameMapEl.textContent = "";
+  if (gameStatusEl) {
+    gameStatusEl.textContent = "";
+    gameStatusEl.classList.remove("is-error");
+  }
+}
+
+function gameMarkerIcon(place, isCurrent, isVisited) {
+  const classes = ["game-marker"];
+  if (isCurrent) classes.push("is-current");
+  else if (isVisited) classes.push("is-visited");
+  else classes.push("is-nearby");
+  const size = isCurrent ? 26 : 20;
+  return window.L.divIcon({
+    className: classes.join(" "),
+    html: isCurrent ? "★" : "",
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+    tooltipAnchor: [0, -size / 2],
+  });
+}
+
+function gamePlaceTooltip(place) {
+  const meta = [place.category, place.distance_text].filter(Boolean).join(" · ");
+  return `${String(place.title || place.name || "Place")}${meta ? ` — ${meta}` : ""}`;
+}
+
+function renderGamePlaces() {
+  const state = gameState;
+  if (!state || !state.map) return;
+  state.placeLayer.clearLayers();
+  state.lineLayer.clearLayers();
+
+  const currentLatLng = gamePlaceLatLng(state.current);
+  if (!currentLatLng) return;
+
+  // A solid line follows the route the player actually walked.
+  const journeyLatLngs = state.journey.map(gamePlaceLatLng).filter(Boolean);
+  if (journeyLatLngs.length > 1) {
+    window.L.polyline(journeyLatLngs, {
+      color: "#0b1118",
+      weight: 8,
+      opacity: 0.8,
+      lineCap: "round",
+      lineJoin: "round",
+    }).addTo(state.lineLayer);
+    window.L.polyline(journeyLatLngs, {
+      color: "#79c0ff",
+      weight: 4,
+      opacity: 0.95,
+      lineCap: "round",
+      lineJoin: "round",
+    }).addTo(state.lineLayer);
+  }
+
+  // Solid spokes connect every place currently on screen to the current
+  // location, so the whole explorer always stays visibly connected.
+  for (const place of state.nearby) {
+    const latlng = gamePlaceLatLng(place);
+    if (!latlng) continue;
+    window.L.polyline([currentLatLng, latlng], {
+      color: "#3d6b8f",
+      weight: 1.4,
+      opacity: 0.7,
+      lineCap: "round",
+    }).addTo(state.lineLayer);
+  }
+
+  const currentKey = gamePlaceKey(state.current);
+  const visitedKeys = new Set(state.journey.map(gamePlaceKey));
+  const shown = new Set([currentKey]);
+
+  const addMarker = (place, isCurrent) => {
+    const latlng = gamePlaceLatLng(place);
+    if (!latlng) return;
+    const key = gamePlaceKey(place);
+    const marker = window.L.marker(latlng, {
+      icon: gameMarkerIcon(place, isCurrent, visitedKeys.has(key)),
+      title: String(place.title || place.name || "Place"),
+      draggable: true,
+      zIndexOffset: isCurrent ? 1000 : 0,
+    });
+    marker.bindTooltip(gamePlaceTooltip(place), {
+      direction: "top",
+      offset: [0, -6],
+    });
+    marker.on("click", () => {
+      if (gameState !== state) return;
+      if (gamePlaceKey(state.current) === key) {
+        if (!state.nearby.length) loadGameNearby(state.current);
+      } else {
+        visitGamePlace(place);
+      }
+      openGamePlaceModal(place);
+    });
+    marker.on("dragend", () => {
+      if (gameState !== state) return;
+      const moved = marker.getLatLng();
+      place.latitude = moved.lat;
+      place.longitude = moved.lng;
+      const journeyPlace = state.journey.find(
+        (candidate) => gamePlaceKey(candidate) === key
+      );
+      if (journeyPlace) {
+        journeyPlace.latitude = moved.lat;
+        journeyPlace.longitude = moved.lng;
+      }
+      renderGamePlaces();
+      if (isCurrent) loadGameNearby(state.current);
+    });
+    marker.addTo(state.placeLayer);
+  };
+
+  addMarker(state.current, true);
+  for (const place of state.nearby) {
+    const key = gamePlaceKey(place);
+    if (!key || shown.has(key)) continue;
+    shown.add(key);
+    addMarker(place, false);
+  }
+  for (const place of state.journey) {
+    const key = gamePlaceKey(place);
+    if (!key || shown.has(key)) continue;
+    shown.add(key);
+    addMarker(place, false);
+  }
+
+  if (gameMetaEl) {
+    const currentName = state.current.name || state.current.title || "current place";
+    gameMetaEl.textContent = `Current: ${currentName} · ${state.journey.length} visited · ${state.nearby.length} nearby`;
+  }
+}
+
+function visitGamePlace(place) {
+  const state = gameState;
+  if (!state) return;
+  const latlng = gamePlaceLatLng(place);
+  if (!latlng) return;
+  const key = gamePlaceKey(place);
+  if (key === gamePlaceKey(state.current)) return;
+
+  state.current = { ...place };
+  const last = state.journey[state.journey.length - 1];
+  if (!last || gamePlaceKey(last) !== key) {
+    state.journey.push({ ...place });
+  }
+  state.nearby = [];
+  renderGamePlaces();
+  try {
+    state.map.panTo(latlng, { animate: true });
+  } catch (_) {
+    // The map can be closed between the click and the pan animation.
+  }
+  loadGameNearby(state.current);
+}
+
+function openGamePlaceModal(place) {
+  if (!place) return;
+  const source = place.source || "OpenStreetMap";
+  // A game prompt can declare a video search prefix such as
+  // "youtube_video_search_prefix: san_francisco"; apply it to every place
+  // card opened from this explorer so the related-video list is local.
+  const videoPrefix = String(
+    gameState?.youtubeVideoSearchPrefix || ""
+  ).trim();
+  // The shared news modal draws a place card with a summary, paragraphs,
+  // images, an OpenStreetMap embed, and a nearby-places list. Give it the
+  // current explorer places as "news" items so that list is populated too.
+  const entry = {
+    newsItems: [],
+    newsSource: source,
+    newsDocs: true,
+    newsDocsLabel: "OpenStreetMap",
+  };
+  const nearbyPlaces = Array.isArray(gameState?.nearby)
+    ? gameState.nearby
+    : [];
+  entry.newsItems = nearbyPlaces
+    .filter((candidate) => gamePlaceKey(candidate) !== gamePlaceKey(place))
+    .map((candidate, index) => makeNewsItem(entry, {
+      index: index + 1,
+      title: candidate.title,
+      link: candidate.link,
+      source: candidate.source || "OpenStreetMap",
+      section: candidate.section || candidate.category || "",
+      summary: candidate.summary || candidate.category || "",
+      latitude: candidate.latitude,
+      longitude: candidate.longitude,
+      distance_m: candidate.distance_m,
+      docs: true,
+      docs_label: "OpenStreetMap",
+      learnable: false,
+      map: true,
+      youtube_video_search_prefix: videoPrefix,
+      article_api: "/api/game_place",
+      complete: true,
+    }));
+
+  const item = makeNewsItem(entry, {
+    title: place.title,
+    link: place.link,
+    source,
+    section: place.section || place.category || "",
+    summary: place.summary || place.category || "",
+    paragraphs: [place.summary || place.section || place.category].filter(Boolean),
+    latitude: place.latitude,
+    longitude: place.longitude,
+    distance_m: place.distance_m,
+    docs: true,
+    docs_label: "OpenStreetMap",
+    learnable: false,
+    map: true,
+    youtube_video_search_prefix: videoPrefix,
+    article_api: "/api/game_place",
+    complete: true,
+  });
+  // The detail request fills the modal with the OSM tags and any linked
+  // Wikipedia extract; keep it lazy so right-clicking stays immediate.
+  item.articleFetched = false;
+  openNewsModal(item, { overGame: true });
+}
+
+function loadGameNearby(place) {
+  const state = gameState;
+  if (!state) return;
+  const generation = state.generation;
+  const latlng = gamePlaceLatLng(place);
+  if (!latlng) return;
+  const placeName = place.name || place.title || "this place";
+  if (gameStatusEl) {
+    gameStatusEl.classList.remove("is-error");
+    gameStatusEl.textContent = `Exploring around ${placeName}…`;
+  }
+  const params = new URLSearchParams({
+    lat: String(latlng[0]),
+    lon: String(latlng[1]),
+    radius: String(state.radius),
+    limit: String(state.limit),
+  });
+  fetch(`/api/game_nearby?${params.toString()}`, { cache: "no-store" })
+    .then((response) => response.json().then((data) => {
+      if (!response.ok) {
+        throw new Error(data?.error || `HTTP ${response.status}`);
+      }
+      return data;
+    }))
+    .then((data) => {
+      if (!gameState || gameState.generation !== generation) return;
+      const items = Array.isArray(data.items) ? data.items : [];
+      const currentKey = gamePlaceKey(state.current);
+      state.nearby = items.filter(
+        (item) => gamePlaceLatLng(item) && gamePlaceKey(item) !== currentKey
+      );
+      renderGamePlaces();
+      if (gameStatusEl) {
+        const count = state.nearby.length;
+        const name = state.current.name || state.current.title || "this place";
+        gameStatusEl.textContent = count
+          ? `${count} place${count === 1 ? "" : "s"} around ${name} — click a marker to move there and open its details; drag the map or a marker to explore`
+          : `No nearby places were found around ${name}.`;
+      }
+    })
+    .catch((error) => {
+      if (!gameState || gameState.generation !== generation) return;
+      if (gameStatusEl) {
+        gameStatusEl.classList.add("is-error");
+        gameStatusEl.textContent = `Could not load nearby places: ${error?.message || String(error)}`;
+      }
+    });
+}
+
+function openGameModal(data) {
+  const start = data?.start;
+  if (!start || !gamePanelEl) return;
+  const latlng = gamePlaceLatLng(start);
+  if (!latlng) return;
+
+  closeGameModal();
+  const generation = gameGeneration;
+  if (gameTitleEl) gameTitleEl.textContent = String(data.title || "Explorer");
+  if (gameStartLinkEl) {
+    const link = String(start.link || "").trim();
+    gameStartLinkEl.href = link || "#";
+    gameStartLinkEl.textContent = `Open ${start.name || "starting point"} ↗`;
+    gameStartLinkEl.hidden = !link;
+  }
+  if (gameStatusEl) {
+    gameStatusEl.classList.remove("is-error");
+    gameStatusEl.textContent = "Loading the explorer…";
+  }
+  gamePanelEl.hidden = false;
+
+  const current = {
+    name: String(start.name || "Current location"),
+    title: String(start.name || "Current location"),
+    latitude: latlng[0],
+    longitude: latlng[1],
+    link: String(start.link || ""),
+    category: "Starting point",
+  };
+
+  if (!window.L || typeof window.L.map !== "function") {
+    if (gameStatusEl) {
+      gameStatusEl.classList.add("is-error");
+      gameStatusEl.textContent = "The explorer map could not load because Leaflet is unavailable.";
+    }
+    return;
+  }
+
+  let map = null;
+  try {
+    map = window.L.map(gameMapEl, {
+      zoomControl: true,
+      scrollWheelZoom: true,
+      attributionControl: true,
+    });
+    window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    }).addTo(map);
+    map.setView(latlng, 16);
+  } catch (error) {
+    if (map) {
+      try {
+        map.remove();
+      } catch (_) {
+        // Ignore a half-initialized Leaflet map.
+      }
+    }
+    if (gameStatusEl) {
+      gameStatusEl.classList.add("is-error");
+      gameStatusEl.textContent = `The explorer map could not be drawn: ${error?.message || String(error)}`;
+    }
+    return;
+  }
+
+  gameState = {
+    generation,
+    map,
+    current,
+    journey: [{ ...current }],
+    nearby: [],
+    radius: Number(data.radius_meters) || 1200,
+    limit: Number(data.limit) || 15,
+    youtubeVideoSearchPrefix: String(
+      data.youtube_video_search_prefix || ""
+    ).trim(),
+    placeLayer: window.L.layerGroup().addTo(map),
+    lineLayer: window.L.layerGroup().addTo(map),
+  };
+  renderGamePlaces();
+  window.setTimeout(() => {
+    try {
+      map.invalidateSize();
+    } catch (_) {
+      // The panel may have been closed before layout completed.
+    }
+  }, 0);
+  if (gameStatusEl) {
+    gameStatusEl.textContent = `Click the ${current.name} marker to discover nearby places and open its details.`;
+  }
+}
+
+if (gameCloseEl) {
+  gameCloseEl.addEventListener("click", (event) => {
+    event.preventDefault();
+    closeGameModal();
+  });
+}
+if (gamePanelEl) {
+  gamePanelEl.addEventListener("click", (event) => {
+    if (event.target === gamePanelEl) closeGameModal();
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -12431,6 +12952,12 @@ function openNewsModal(item, options = {}) {
   newsItem = item;
   updateRestaurantNav();
   newsPanelEl.classList.toggle("is-map", Boolean(item.map));
+  // The explorer can open a place modal from a right click; keep that modal
+  // above the game overlay instead of closing the in-progress game.
+  newsPanelEl.classList.toggle(
+    "is-over-game",
+    Boolean(options.overGame) || Boolean(gamePanelEl && !gamePanelEl.hidden)
+  );
   resetNewsTts();
   resetNewsTranslation();
   resetNewsChat();
@@ -12572,11 +13099,22 @@ function ensureNewsArticle(item) {
  * list comes from the same /youtube search backend used by the main chat, so
  * cards, playlists, Learn, and Summary behave identically. */
 function mapVideoRequest(item, exclude = []) {
+  // Game prompts can declare a search prefix (for example "San Francisco")
+  // so a place modal lists videos for "San Francisco <place name>" rather
+  // than for the bare place name. Quote the combined phrase so it is sent as
+  // one keyword argument, matching `/youtube search "<prefix> <place>"`.
+  // The API strips the surrounding quotes exactly like the slash command
+  // before querying YouTube.
+  const prefix = String(item.youtubeVideoSearchPrefix || "").trim();
+  const phrase = `${prefix} ${item.title || ""}`.trim().replace(/"/g, "");
+  const keyword = prefix && phrase
+    ? `"${phrase}"`
+    : item.title || "";
   return fetch("/api/youtube_more", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      keyword: item.title || "",
+      keyword,
       exclude,
     }),
   }).then((response) => response.json().then((data) => {
@@ -15042,6 +15580,9 @@ function submitText(text, fromChoice = false) {
       articleItem.fullArticleLoaded = true;
       openNewsModal(articleItem);
     },
+    game: (data) => {
+      if (data?.type === "start" && data.start) openGameModal(data);
+    },
     news: (data) => addNewsEvent(entry, data || {}),
     changelog: (data) => addChangelogEvent(entry, data || {}),
     dictionary_history: (data) => {
@@ -15328,6 +15869,16 @@ function completionContext() {
       args.lastIndexOf(",")
     );
     start = firstSpace + 1 + lastSeparator + 1;
+  }
+  else if (name === "/game") {
+    // The first argument is one of the prompts in ./prompts/games.
+    const args = value.slice(firstSpace + 1, caret);
+    if (args.search(/\s/) < 0) {
+      kind = "games";
+      start = firstSpace + 1;
+    } else {
+      return null;
+    }
   }
   else if (name === "/article") {
     // A URL opens the reader popup; only a local path needs filesystem
@@ -15719,6 +16270,12 @@ function handleKeyDown(event) {
   if (!newsPanelEl.hidden && key === "Escape") {
     event.preventDefault();
     closeNewsModal();
+    return;
+  }
+
+  if (!gamePanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeGameModal();
     return;
   }
 
@@ -16152,6 +16709,11 @@ document.addEventListener("keydown", (event) => {
     closeNewsModal();
     return;
   }
+  if (!gamePanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeGameModal();
+    return;
+  }
   if (!changelogPanelEl.hidden && key === "Escape") {
     event.preventDefault();
     closeChangelogModal();
@@ -16224,6 +16786,8 @@ inputEl.addEventListener("blur", () => {
       !lineHelpPanel.hidden ||
       !bookOptionsPanelEl.hidden ||
       !stockCompanyPanelEl.hidden ||
+      !drivingPanelEl.hidden ||
+      !gamePanelEl.hidden ||
       !newsPanelEl.hidden ||
       !changelogPanelEl.hidden ||
       !videoPanelEl.hidden

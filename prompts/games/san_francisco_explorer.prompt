@@ -1,0 +1,30 @@
+youtube_video_search_prefix: San Francisco
+
+task.append_prefix_on_video_search.update (completed) {
+  in {the place modal}.{youtube videos list section}:
+  - show list of video by /youtube search "{youtube_video_search_prefix} {place name}" 
+    note that we must use double quote around the keyword
+}
+
+
+task.append_prefix_on_video_search (completed) {
+  in {the place modal}.{youtube videos list section}:
+  - show list of video by searching the keyword "{youtube_video_search_prefix} {place name}" 
+}
+
+task.potential_bug.Modern_Eden_Gallery (completed) {
+  when I open the place modal for Modern_Eden_Gallery (Coordinates: 37.7881, -122.419):
+  - the detail shows me:
+    Hotel Carlton is a boutique hotel on Nob Hill in San Francisco which has been operating since 1927...
+
+  this is not matching, please fix it in a systematic way
+}
+
+task.fix_youtube_video_popup (completed) {
+  in the place modal:
+  - when clicking on the youtube video, the video popup should show up, but seems like we can only see the video popup after we close the mapview, please fix this! 
+}
+
+task (completed) {
+  clone the features of ./sapporo_explorer.prompt, starting location should be "San Francisco Ferry Building"
+}

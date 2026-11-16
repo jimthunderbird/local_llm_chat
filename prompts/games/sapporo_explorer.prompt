@@ -1,0 +1,31 @@
+task.place_modal_with_wiki_introduction (completed) {
+  learn from /map, in each place in /map's place entry, when opening the modal, there is a wiki introduction to the place, please impelemnt similar feature in this game too
+}
+
+task.left_click_open_place_modal (completed) {
+  reference task.right_click_place_show_place_popup_modal:
+  - instead of right click open the place modal, left click should:
+    - load the nearby places on the map
+    - open the place modal
+}
+
+task.right_click_place_show_place_popup_modal (completed) {
+  - when right clicking on the place dot, open up a place modal showing similar content like the content of /map's nearby place popup modal
+}
+
+task (completed) {
+  requirement {
+    - use OpenStreetMap apis simmilar to /map
+  }
+  logic {
+    when the game command is enter:
+    - present "sapporo jr tower" an url in a modal, this is the main <explorer_modal>, this is also the "current location"
+    - clicking on "sapporo jr tower" should show near its nearby places, draw those places around the "current location"
+    - clicking any one of the {place} in {places}:
+      - update "current location" to {place}
+      - show the nearby places around "current location"
+    - all places should be connected with solid line
+    - <explorer_modal>:
+      - it will allow me to drag and drop all places horizonally and vertically
+  }
+}

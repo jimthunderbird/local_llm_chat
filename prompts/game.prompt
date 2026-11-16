@@ -1,0 +1,15 @@
+/**
+ * this is about the games
+ */
+
+task.game_command (completed) {
+  create new command: /game {
+    - if no arguments are presented, list all the games in {diretory_of_this_prompt}/games
+    - else:
+      /game <game_name>, load the game <game_name>
+  } 
+}
+
+task (persistent) {
+  complete all tasks in {diretory_of_this_prompt}/games
+}

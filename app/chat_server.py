@@ -5,7 +5,7 @@ The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /youtube, /news, /mdn, /britanica,
 /stackoverflow, /reddit, /tablelog, /stock, /googlenews, /medium,
-/gutenberg, /openlibrary, /changelog, /wikivoyage, /map, /wiki,
+/gutenberg, /openlibrary, /changelog, /wikivoyage, /map, /game, /wiki,
 /wiki_article, /deepresearch, /write_a_book, /books,
 /article, /dict, /dictionary_history, and /ask. The browser is a
 pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
@@ -23,7 +23,7 @@ Endpoints:
     GET  /api/english_words      ?range=<10k|20k|30k|50k|100k|range> the
                                   English Corner vocabulary used to highlight
                                   words in article readers
-    GET  /api/autocomplete       ?kind=commands|transcripts|paths|
+    GET  /api/autocomplete       ?kind=commands|games|transcripts|paths|
                                   stackoverflow_subcommands&q=...
     GET  /api/wiki?word=...      JSON Wikipedia summary
     GET  /api/transcripts?q=...  ag title search results
@@ -79,6 +79,11 @@ Endpoints:
                                   and coordinate lookup for /map's To location tab
     GET  /api/map_restaurants    ?lat=<latitude>&lon=<longitude> fetch nearby
                                   restaurants from the Overpass API for /map
+    GET  /api/game_nearby        ?lat=<latitude>&lon=<longitude> fetch nearby
+                                  attractions for the /game explorer modal
+    GET  /api/game_place         ?url=<osm_url>&name=<name> fetch one explorer
+                                  marker's tags and Wikipedia extract for its
+                                  right-click place modal
     GET  /api/driving_instructions
                                   ?from_lat=<lat>&from_lon=<lon>
                                   &to_lat=<lat>&to_lon=<lon> driving route and
@@ -143,6 +148,7 @@ import threading
 import wave
 import zipfile
 import time
+import unicodedata
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -302,6 +308,7 @@ WEB_COMMANDS = {
     "/howstuffworks": "search HowStuffWorks articles by keywords: /howstuffworks <keywords>",
     "/wikivoyage": "search Wikivoyage destinations by keywords: /wikivoyage <keywords>",
     "/map": "geocode a location with OpenStreetMap and list nearby Wikipedia articles: /map <location>",
+    "/game": "play a map explorer game: /game lists the games; /game <game_name> starts one",
     "/medium": "list the latest stories from the Medium author in ~/.medium/username (optionally /medium [count])",
     "/ai_news_podcast": "show the top five stories from the last 12 hours and create a two-voice AI news podcast",
     "/gutenberg": "search Project Gutenberg books: /gutenberg search <keywords>; click a book to read it and ask questions",
@@ -3907,6 +3914,39 @@ DRIVING_CACHE_LOCK = threading.Lock()
 YELP_SEARCH_URL = "https://api.yelp.com/v3/businesses/search"
 YELP_BUSINESS_URL = "https://api.yelp.com/v3/businesses/{business_id}"
 YELP_DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+# /game is a small walking-explorer game built on the same OpenStreetMap data
+# as /map. Each prompt under ./prompts/games supplies one game; the catalogue
+# below holds the fixed starting point and the browser asks /api/game_nearby
+# for the places around whichever marker the player clicks.
+GAMES_DIR = SCRIPT_DIR / "prompts" / "games"
+GAME_START_LOCATIONS = {
+    "sapporo_explorer": {
+        "title": "Sapporo Explorer",
+        "name": "Sapporo JR Tower",
+        "latitude": 43.0681986,
+        "longitude": 141.3525873,
+        "link": (
+            "https://www.openstreetmap.org/?mlat=43.0681986"
+            "&mlon=141.3525873#map=18/43.0681986/141.3525873"
+        ),
+    },
+    "san_francisco_explorer": {
+        "title": "San Francisco Explorer",
+        "name": "San Francisco Ferry Building",
+        "latitude": 37.7955487,
+        "longitude": -122.3934746,
+        "link": "https://www.openstreetmap.org/way/558731934",
+    },
+}
+GAME_NEARBY_RADIUS_METERS = 1_200
+GAME_NEARBY_LIMIT = 15
+# Right-clicking a game marker opens a /map-style place modal. OSM tags and
+# the linked Wikipedia extract rarely change, so the detail payload is cached
+# per OSM id for an hour.
+GAME_PLACE_CACHE_TTL_SECONDS = 3_600
+GAME_PLACE_CACHE_MAX_ITEMS = 512
+GAME_PLACE_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
+GAME_PLACE_CACHE_LOCK = threading.Lock()
 
 
 def _map_plain_text(value: object) -> str:
@@ -5073,6 +5113,705 @@ def search_map_places(location: str) -> tuple[dict, list[dict]]:
     return geo, results
 
 
+# ---- /game -----------------------------------------------------------
+def list_game_prompts() -> list[dict]:
+    """List the playable prompts in ./prompts/games.
+
+    A prompt file gives the game its name, while GAME_START_LOCATIONS holds
+    the map data the browser needs. Entries in the catalogue are still shown
+    if the prompt folder is unavailable, so /game remains discoverable.
+    """
+    games: dict[str, dict] = {}
+    try:
+        prompt_paths = sorted(GAMES_DIR.glob("*.prompt"))
+    except OSError:
+        prompt_paths = []
+    for path in prompt_paths:
+        name = path.stem
+        meta = GAME_START_LOCATIONS.get(name, {})
+        games[name] = {
+            "name": name,
+            "title": str(meta.get("title") or name.replace("_", " ").title()),
+            "playable": name in GAME_START_LOCATIONS,
+            "youtube_video_search_prefix": _game_prompt_video_prefix(path),
+        }
+    for name, meta in GAME_START_LOCATIONS.items():
+        games.setdefault(
+            name,
+            {
+                "name": name,
+                "title": str(
+                    meta.get("title") or name.replace("_", " ").title()
+                ),
+                "playable": True,
+                "youtube_video_search_prefix": "",
+            },
+        )
+    return [games[name] for name in sorted(games)]
+
+
+def _game_prompt_video_prefix(path: Path) -> str:
+    """Read the optional youtube_video_search_prefix from a game prompt."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    match = re.search(
+        r"^\s*youtube_video_search_prefix\s*:\s*(.+?)\s*$",
+        text,
+        re.MULTILINE,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _game_place_category(tags: dict) -> str:
+    """Return a short readable category for one OSM element."""
+    for key in ("tourism", "historic", "leisure", "amenity"):
+        value = _map_plain_text(tags.get(key)).replace("_", " ").strip()
+        if value:
+            return value.title()
+    return "Place"
+
+
+def search_game_places(
+    latitude: float,
+    longitude: float,
+    radius_meters: int = GAME_NEARBY_RADIUS_METERS,
+    limit: int = GAME_NEARBY_LIMIT,
+) -> list[dict]:
+    """List named attractions near one coordinate for the /game explorer.
+
+    Overpass supplies the landmarks, parks, museums, historic sites, markets,
+    and other visitor-friendly places around the current location. Named
+    elements only are kept because every result becomes a clickable marker in
+    the explorer modal. If Overpass is unavailable, the Wikipedia GeoSearch
+    fallback still gives the game useful places to walk between.
+    """
+    radius = max(100, min(int(radius_meters), 3_000))
+    limit = max(1, min(int(limit), 30))
+    query = (
+        "[out:json][timeout:25];\n"
+        "(\n"
+        '  nwr["name"]["tourism"~"^(attraction|museum|viewpoint|'
+        'gallery|zoo|theme_park|aquarium)$"]'
+        f"(around:{radius},{latitude:.6f},{longitude:.6f});\n"
+        '  nwr["name"]["historic"~"^(castle|fort|monument|archaeological_site|'
+        'ruins|city_gate|battlefield|wayside_shrine|tower)$"]'
+        f"(around:{radius},{latitude:.6f},{longitude:.6f});\n"
+        '  nwr["name"]["leisure"~"^(park|garden|nature_reserve)$"]'
+        f"(around:{radius},{latitude:.6f},{longitude:.6f});\n"
+        '  nwr["name"]["amenity"~"^(theatre|arts_centre|marketplace)$"]'
+        f"(around:{radius},{latitude:.6f},{longitude:.6f});\n"
+        ");\n"
+        "out center 100;"
+    )
+    data = None
+    last_error: Exception | None = None
+    for endpoint in OVERPASS_API_URLS:
+        try:
+            response = requests.get(
+                endpoint,
+                params={"data": query},
+                headers={**chat.HTTP_HEADERS, "User-Agent": MAP_USER_AGENT},
+                timeout=(8, 35),
+            )
+            response.raise_for_status()
+            data = response.json()
+            break
+        except (requests.RequestException, ValueError) as exc:
+            last_error = exc
+
+    elements = data.get("elements") if isinstance(data, dict) else None
+    results: list[dict] = []
+    seen_links: set[str] = set()
+    seen_names: set[str] = set()
+    if isinstance(elements, list):
+        for element in elements:
+            if not isinstance(element, dict):
+                continue
+            tags = element.get("tags")
+            if not isinstance(tags, dict):
+                continue
+            name = _osm_tag_text(tags, "name:en", "name")
+            if not name or name.lower() in seen_names:
+                continue
+
+            element_latitude = element.get("lat")
+            element_longitude = element.get("lon")
+            if not isinstance(element_latitude, (int, float)) or not isinstance(
+                element_longitude, (int, float)
+            ):
+                center = element.get("center")
+                if isinstance(center, dict):
+                    element_latitude = center.get("lat")
+                    element_longitude = center.get("lon")
+            if not isinstance(element_latitude, (int, float)) or not isinstance(
+                element_longitude, (int, float)
+            ):
+                continue
+
+            osm_type = str(element.get("type") or "node")
+            osm_id = element.get("id")
+            if osm_id is None:
+                continue
+            link = f"https://www.openstreetmap.org/{osm_type}/{osm_id}"
+            if link in seen_links:
+                continue
+            seen_links.add(link)
+            seen_names.add(name.lower())
+
+            place_latitude = float(element_latitude)
+            place_longitude = float(element_longitude)
+            distance = _haversine_meters(
+                latitude, longitude, place_latitude, place_longitude
+            )
+            # The current location may also be tagged as an attraction; do not
+            # offer it as a place to click while standing on it.
+            if distance is not None and distance < 15:
+                continue
+
+            category = _game_place_category(tags)
+            description = _map_plain_text(
+                tags.get("description:en") or tags.get("description")
+            )
+            distance_text = _map_distance(distance)
+            section = " · ".join(
+                value for value in (distance_text, category) if value
+            )
+            results.append(
+                {
+                    "title": name,
+                    "link": link,
+                    "category": category,
+                    "section": section,
+                    "summary": description or category,
+                    "latitude": place_latitude,
+                    "longitude": place_longitude,
+                    "distance_m": distance,
+                    "distance_text": distance_text,
+                    "source": "OpenStreetMap",
+                    "osm_type": osm_type,
+                    "osm_id": osm_id,
+                }
+            )
+
+    results.sort(
+        key=lambda item: (
+            item["distance_m"] is None,
+            item["distance_m"] if item["distance_m"] is not None else 0.0,
+            item["title"].lower(),
+        )
+    )
+    if results:
+        return results[:limit]
+
+    # Overpass returned nothing (or failed). Wikipedia's GeoSearch API uses a
+    # different service, so it can keep the explorer playable during an
+    # Overpass outage.
+    try:
+        pages = search_wikipedia_nearby(
+            latitude, longitude, radius_meters=radius, limit=limit
+        )
+    except RuntimeError:
+        if isinstance(data, dict):
+            return []
+        raise RuntimeError(f"OpenStreetMap place search failed: {last_error}")
+
+    fallback: list[dict] = []
+    for page in pages:
+        title = _map_plain_text(page.get("title"))
+        page_latitude = page.get("latitude")
+        page_longitude = page.get("longitude")
+        if (
+            not title
+            or not isinstance(page_latitude, (int, float))
+            or not isinstance(page_longitude, (int, float))
+        ):
+            continue
+        distance = page.get("distance_m")
+        distance_text = _map_distance(distance)
+        description = _map_plain_text(page.get("description"))
+        fallback.append(
+            {
+                "title": title,
+                "link": str(page.get("link") or ""),
+                "category": "Wikipedia",
+                "section": " · ".join(
+                    value for value in (distance_text, "Wikipedia") if value
+                ),
+                "summary": description or "Wikipedia article",
+                "latitude": float(page_latitude),
+                "longitude": float(page_longitude),
+                "distance_m": distance,
+                "distance_text": distance_text,
+                "source": "Wikipedia",
+            }
+        )
+    return fallback[:limit]
+
+
+@lru_cache(maxsize=512)
+def _game_wikipedia_page(language: str, page_title: str) -> dict:
+    """Fetch a Wikipedia page's lead extract, image, and URL."""
+    language = re.sub(r"[^a-z-]", "", str(language or "").lower()) or "en"
+    page_title = str(page_title or "").strip()
+    if not page_title:
+        return {}
+    params = {
+        "action": "query",
+        "titles": page_title,
+        "prop": "extracts|pageimages|info|coordinates",
+        "inprop": "url",
+        "exintro": 1,
+        "explaintext": 1,
+        "exchars": 2_500,
+        "piprop": "thumbnail",
+        "pithumbsize": 640,
+        "redirects": 1,
+        "format": "json",
+        "formatversion": 2,
+    }
+    try:
+        response = requests.get(
+            f"https://{language}.wikipedia.org/w/api.php",
+            params=params,
+            headers=chat.HTTP_HEADERS,
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return {}
+    query = data.get("query") if isinstance(data, dict) else None
+    pages = query.get("pages") if isinstance(query, dict) else None
+    if isinstance(pages, dict):
+        pages = list(pages.values())
+    if not isinstance(pages, list) or not pages:
+        return {}
+    page = pages[0]
+    if not isinstance(page, dict) or page.get("missing"):
+        return {}
+    thumbnail = page.get("thumbnail")
+    image = ""
+    if isinstance(thumbnail, dict):
+        image = str(thumbnail.get("source") or "").strip()
+        if image.startswith("//"):
+            image = "https:" + image
+    latitude = None
+    longitude = None
+    coordinates = page.get("coordinates")
+    if isinstance(coordinates, list) and coordinates:
+        first = coordinates[0]
+        if isinstance(first, dict):
+            try:
+                latitude = float(first.get("lat"))
+                longitude = float(first.get("lon"))
+            except (TypeError, ValueError):
+                latitude = None
+                longitude = None
+    return {
+        "title": str(page.get("title") or ""),
+        "extract": _map_plain_text(page.get("extract")),
+        "description": _map_plain_text(page.get("description")),
+        "image": image,
+        "link": str(page.get("fullurl") or "").strip(),
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+
+def _game_wikipedia_details(tags: dict) -> dict:
+    """Return Wikipedia details from an OSM ``wikipedia`` tag, if present."""
+    raw = _map_plain_text(tags.get("wikipedia:en") or tags.get("wikipedia"))
+    if not raw:
+        return {}
+    if ":" in raw:
+        language, page_title = raw.split(":", 1)
+    else:
+        language, page_title = "en", raw
+    return _game_wikipedia_page(language, page_title)
+
+
+GAME_WIKI_NAME_STOP_WORDS = {
+    "the",
+    "a",
+    "an",
+    "of",
+    "and",
+    "at",
+    "in",
+    "on",
+    "for",
+    "to",
+    "gallery",
+    "museum",
+    "park",
+    "building",
+    "center",
+    "centre",
+    "theater",
+    "theatre",
+    "plaza",
+    "garden",
+    "gardens",
+}
+
+
+def _game_wiki_normalize(value: object) -> str:
+    """Normalize a place or article name for matching."""
+    text = html.unescape(str(value or "")).lower().replace("&", " and ")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(
+        char for char in text if not unicodedata.combining(char)
+    )
+    text = re.sub(r"[^a-z0-9\u3040-\u30ff\u4e00-\u9fff]+", " ", text)
+    return " ".join(text.split())
+
+
+def _game_wiki_tokens(value: object) -> set[str]:
+    """Return distinctive tokens from a place or article name."""
+    return {
+        token
+        for token in _game_wiki_normalize(value).split()
+        if len(token) > 2 and token not in GAME_WIKI_NAME_STOP_WORDS
+    }
+
+
+def _game_wiki_matches_place(page_title: str, names: list[str]) -> bool:
+    """Check whether a Wikipedia page title really describes the place.
+
+    The GeoSearch fallback used by /map returns the closest articles around a
+    coordinate, not necessarily the same landmark. For example, searching
+    around Modern Eden Gallery can return the Hotel Carlton article. A nearby
+    article is only used as the place introduction when its title matches the
+    OSM name, the English name, or shares enough distinctive words.
+    """
+    title_normalized = _game_wiki_normalize(page_title)
+    if not title_normalized:
+        return False
+    title_tokens = _game_wiki_tokens(page_title)
+    for candidate in names:
+        name_normalized = _game_wiki_normalize(candidate)
+        if not name_normalized:
+            continue
+        if title_normalized == name_normalized:
+            return True
+        # A multi-word name contained in the title (or the reverse) is a
+        # strong match. A single-word page such as "Sapporo" must not match
+        # every place whose name starts with that city name.
+        if (
+            len(name_normalized) >= 8
+            and len(name_normalized.split()) >= 2
+            and name_normalized in title_normalized
+        ):
+            return True
+        if (
+            len(title_normalized) >= 8
+            and len(title_normalized.split()) >= 2
+            and title_normalized in name_normalized
+        ):
+            return True
+        name_tokens = _game_wiki_tokens(candidate)
+        if not name_tokens or not title_tokens:
+            continue
+        overlap = len(name_tokens & title_tokens)
+        if (
+            overlap >= 2
+            and overlap / max(len(name_tokens), len(title_tokens)) >= 0.75
+        ):
+            return True
+    return False
+
+
+@lru_cache(maxsize=512)
+def _game_wikidata_sitelink(wikidata_id: str, language: str = "en") -> str:
+    """Return the Wikipedia title linked from an OSM ``wikidata`` tag."""
+    identifier = str(wikidata_id or "").strip().upper()
+    if not re.fullmatch(r"Q\d+", identifier):
+        return ""
+    site = f"{language}wiki"
+    try:
+        response = requests.get(
+            "https://www.wikidata.org/w/api.php",
+            params={
+                "action": "wbgetentities",
+                "ids": identifier,
+                "props": "sitelinks",
+                "sitefilter": site,
+                "format": "json",
+            },
+            headers=chat.HTTP_HEADERS,
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return ""
+    entities = data.get("entities") if isinstance(data, dict) else None
+    entity = entities.get(identifier) if isinstance(entities, dict) else None
+    sitelinks = entity.get("sitelinks") if isinstance(entity, dict) else None
+    sitelink = sitelinks.get(site) if isinstance(sitelinks, dict) else None
+    if not isinstance(sitelink, dict):
+        return ""
+    return str(sitelink.get("title") or "").strip()
+
+
+def _game_wikipedia_from_url(url: str) -> dict:
+    """Return Wikipedia details when the place link is already a wiki URL."""
+    match = re.match(
+        r"https?://([a-z-]+)\.wikipedia\.org/wiki/([^?#]+)",
+        str(url or ""),
+        re.IGNORECASE,
+    )
+    if not match:
+        return {}
+    return _game_wikipedia_page(
+        match.group(1), unquote(match.group(2).replace("_", " "))
+    )
+
+
+def _game_image_url(tags: dict) -> str:
+    """Turn an OSM image or Wikimedia Commons tag into an image URL."""
+    value = _osm_tag_text(tags, "image", "wikimedia_commons")
+    if not value:
+        return ""
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    if value.lower().startswith("file:"):
+        return (
+            "https://commons.wikimedia.org/wiki/Special:FilePath/"
+            + quote(value[5:], safe="()_,.- ")
+        )
+    return ""
+
+
+def fetch_game_place_details(
+    osm_type: str = "",
+    osm_id: str | int = "",
+    name: str = "",
+    latitude: float | None = None,
+    longitude: float | None = None,
+    link: str = "",
+) -> dict:
+    """Fetch one explorer marker's details for the /map-style place modal.
+
+    The right-click handler already knows the marker's OSM identity and link,
+    so the exact OSM object is queried for its tags. When the object carries a
+    ``wikipedia`` tag (or its link is a Wikipedia URL), that page's lead
+    extract and image are added too. The result deliberately reuses the /map
+    card shape: a summary, paragraphs, images, coordinates, and ``map: true``
+    so the shared modal draws the OpenStreetMap embed and related content.
+    """
+    osm_type = str(osm_type or "").strip().lower()
+    identifier = str(osm_id or "").strip()
+    if link:
+        match = re.search(
+            r"openstreetmap\.org/(node|way|relation)/(\d+)",
+            str(link),
+            re.IGNORECASE,
+        )
+        if match:
+            osm_type = match.group(1).lower()
+            identifier = match.group(2)
+
+    valid_identity = (
+        osm_type in OSM_RESTAURANT_TYPES
+        and identifier.isdigit()
+        and int(identifier) > 0
+    )
+    cache_key = (osm_type, identifier) if valid_identity else None
+    now = time.monotonic()
+    if cache_key is not None:
+        with GAME_PLACE_CACHE_LOCK:
+            cached = GAME_PLACE_CACHE.get(cache_key)
+            if cached and now - cached[0] <= GAME_PLACE_CACHE_TTL_SECONDS:
+                return cached[1]
+
+    tags: dict = {}
+    found = False
+    if valid_identity:
+        query = (
+            "[out:json][timeout:20];\n"
+            f"{osm_type}({identifier});\n"
+            "out center;"
+        )
+        data = None
+        for endpoint in OVERPASS_API_URLS:
+            try:
+                response = requests.get(
+                    endpoint,
+                    params={"data": query},
+                    headers={**chat.HTTP_HEADERS, "User-Agent": MAP_USER_AGENT},
+                    timeout=(8, 30),
+                )
+                response.raise_for_status()
+                data = response.json()
+                break
+            except (requests.RequestException, ValueError):
+                continue
+        elements = data.get("elements") if isinstance(data, dict) else None
+        element = next(
+            (
+                item
+                for item in elements or []
+                if isinstance(item, dict) and isinstance(item.get("tags"), dict)
+            ),
+            None,
+        )
+        if element is not None:
+            tags = element["tags"]
+            found = True
+            if latitude is None or longitude is None:
+                latitude, longitude = _osm_coordinates(element)
+
+    osm_name = _osm_tag_text(tags, "name")
+    title = _osm_tag_text(tags, "name:en", "name") or _map_plain_text(name) or "Place"
+    category = _game_place_category(tags) if tags else "Place"
+    description = _osm_tag_text(tags, "description", "note")
+    address = " ".join(
+        value
+        for value in (
+            _osm_tag_text(tags, "addr:housenumber"),
+            _osm_tag_text(tags, "addr:street", "addr:place"),
+            _osm_tag_text(tags, "addr:city", "addr:town", "addr:village"),
+            _osm_tag_text(tags, "addr:postcode"),
+        )
+        if value
+    ).strip()
+    opening_hours = _osm_hours_summary(
+        tags.get("opening_hours"), latitude, longitude
+    ).get("raw", "")
+    website = _osm_tag_text(tags, "website", "contact:website", "url")
+    phone = _osm_tag_text(tags, "phone", "contact:phone")
+
+    wiki = _game_wikipedia_details(tags)
+    # /map cards use English Wikipedia, so prefer the English page from the
+    # Wikidata sitelink when the OSM object has one.
+    wikidata_title = _game_wikidata_sitelink(tags.get("wikidata", ""))
+    if wikidata_title:
+        english_wiki = _game_wikipedia_page("en", wikidata_title)
+        if english_wiki.get("extract"):
+            wiki = english_wiki
+    if not wiki and link:
+        wiki = _game_wikipedia_from_url(link)
+    if not wiki and title and re.search(r"[A-Za-z]", title):
+        # Exact-title lookup only; a missing page simply returns no extract.
+        wiki = _game_wikipedia_page("en", title)
+    if not wiki and osm_name and re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", osm_name):
+        # Many Japanese landmarks have a Japanese Wikipedia page even when
+        # their OSM element has no wikipedia tag.
+        wiki = _game_wikipedia_page("ja", osm_name)
+    if not wiki and isinstance(latitude, (int, float)) and isinstance(
+        longitude, (int, float)
+    ):
+        # Last resort mirrors /map, but only a title-matching page is used.
+        # GeoSearch returns the nearest articles, not necessarily this place;
+        # accepting the first result blindly produced unrelated introductions
+        # such as Hotel Carlton for Modern Eden Gallery.
+        try:
+            wiki_pages = search_wikipedia_nearby(
+                float(latitude), float(longitude), radius_meters=500, limit=5
+            )
+        except RuntimeError:
+            wiki_pages = []
+        place_names = list(
+            dict.fromkeys(
+                value
+                for value in (title, osm_name, _map_plain_text(name))
+                if value
+            )
+        )
+        for page in wiki_pages:
+            page_title = str(page.get("title") or "")
+            if not _game_wiki_matches_place(page_title, place_names):
+                continue
+            wiki = {
+                "title": page_title,
+                "extract": _map_plain_text(page.get("extract")),
+                "description": _map_plain_text(page.get("description")),
+                "image": str(page.get("image") or "").strip(),
+                "link": str(page.get("link") or "").strip(),
+            }
+            break
+    extract = str(wiki.get("extract") or "").strip()
+    wiki_description = str(wiki.get("description") or "").strip()
+    if not wiki_description:
+        wiki_description = description or category
+
+    paragraphs: list[str] = []
+    if extract:
+        paragraphs.append(extract)
+    detail_parts: list[str] = []
+    if category and category != "Place":
+        detail_parts.append(f"Type: {category}")
+    if description and description not in extract:
+        detail_parts.append(f"About: {description}")
+    if address:
+        detail_parts.append(f"Address: {address}")
+    if opening_hours:
+        detail_parts.append(f"Opening hours: {opening_hours}")
+    if phone:
+        detail_parts.append(f"Phone: {phone}")
+    if website:
+        detail_parts.append(f"Website: {website}")
+    if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
+        detail_parts.append(
+            f"Coordinates: {float(latitude):.6g}, {float(longitude):.6g}"
+        )
+    if detail_parts:
+        paragraphs.append(" · ".join(detail_parts))
+    if not paragraphs:
+        paragraphs.append(
+            "No detailed description is available for this place yet."
+        )
+
+    images: list[str] = []
+    for image in (_game_image_url(tags), str(wiki.get("image") or "")):
+        image = str(image or "").strip()
+        if image and image not in images:
+            images.append(image)
+
+    if valid_identity:
+        detail_link = f"https://www.openstreetmap.org/{osm_type}/{identifier}"
+    else:
+        detail_link = str(wiki.get("link") or link or "").strip()
+    result = {
+        "title": title,
+        "link": detail_link,
+        "source": "OpenStreetMap" if found else "Wikipedia",
+        "section": category if category != "Place" else "Place",
+        "summary": wiki_description or description or category,
+        "paragraphs": paragraphs,
+        "images": images,
+        "latitude": (
+            float(latitude) if isinstance(latitude, (int, float)) else None
+        ),
+        "longitude": (
+            float(longitude) if isinstance(longitude, (int, float)) else None
+        ),
+        "coordinates": (
+            f"{float(latitude):.6g}, {float(longitude):.6g}"
+            if isinstance(latitude, (int, float))
+            and isinstance(longitude, (int, float))
+            else ""
+        ),
+        "docs": True,
+        "docs_label": "OpenStreetMap" if found else "Wikipedia",
+        "learnable": False,
+        "map": True,
+        "complete": True,
+        "osm_type": osm_type if found else "",
+        "osm_id": int(identifier) if found else None,
+        "found": found or bool(extract),
+    }
+    if cache_key is not None:
+        with GAME_PLACE_CACHE_LOCK:
+            if len(GAME_PLACE_CACHE) >= GAME_PLACE_CACHE_MAX_ITEMS:
+                GAME_PLACE_CACHE.pop(next(iter(GAME_PLACE_CACHE)), None)
+            GAME_PLACE_CACHE[cache_key] = (now, result)
+    return result
+
+
 # ---- /changelog ------------------------------------------------------
 def changelog_directory() -> Path | None:
     """Return the folder holding completed-task summary pages."""
@@ -5709,6 +6448,7 @@ def _mathtutor_append_history(
 COMMAND_ARGUMENTS = {
     "/youtube",
     "/ask",
+    "/game",
     "/wiki",
     "/wiki_article",
     "/article",
@@ -5855,6 +6595,24 @@ YOUTUBE_SEARCH_PREFETCH_RESULTS = YOUTUBE_SEARCH_PAGE_RESULTS
 # How long a "More" request will wait for that prefetch before doing its own
 # search.  A prefetch normally finishes in a few seconds.
 YOUTUBE_PREFETCH_WAIT_SECONDS = 8.0
+
+
+def strip_surrounding_search_quotes(keyword: str) -> str:
+    """Normalize a command/API search keyword like ``/youtube search "..."``.
+
+    The slash command receives shell-style quotes only when typed directly in
+    the terminal.  The browser API sends JSON, so it applies the same
+    normalization explicitly: a single pair of surrounding single or double
+    quotes groups the phrase but is not part of the text sent to YouTube.
+    """
+    keyword = (keyword or "").strip()
+    if (
+        len(keyword) >= 2
+        and keyword[0] == keyword[-1]
+        and keyword[0] in "\"'"
+    ):
+        return keyword[1:-1].strip()
+    return keyword
 
 # The browser's "中文" button translates a finished answer paragraph by
 # paragraph. ./prompts/translation.prompt requires qwen3:8b for translation to
@@ -14642,6 +15400,94 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"items": items})
             return
+        if path == "/api/game_nearby":
+            params = parse_qs(parsed.query)
+            try:
+                latitude = float((params.get("lat") or [""])[0])
+                longitude = float((params.get("lon") or [""])[0])
+            except (TypeError, ValueError):
+                self._send_error_json("Missing or invalid game coordinates", 400)
+                return
+            if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+                self._send_error_json("Missing or invalid game coordinates", 400)
+                return
+            raw_radius = (params.get("radius") or [""])[0]
+            raw_limit = (params.get("limit") or [""])[0]
+            try:
+                radius = (
+                    int(float(raw_radius))
+                    if raw_radius
+                    else GAME_NEARBY_RADIUS_METERS
+                )
+            except (TypeError, ValueError):
+                radius = GAME_NEARBY_RADIUS_METERS
+            try:
+                limit = (
+                    int(float(raw_limit))
+                    if raw_limit
+                    else GAME_NEARBY_LIMIT
+                )
+            except (TypeError, ValueError):
+                limit = GAME_NEARBY_LIMIT
+            try:
+                items = search_game_places(latitude, longitude, radius, limit)
+            except RuntimeError as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json({"items": items})
+            return
+        if path == "/api/game_place":
+            params = parse_qs(parsed.query)
+            osm_type = (params.get("type") or [""])[0].strip()
+            osm_id = (params.get("id") or [""])[0].strip()
+            name = (
+                params.get("name")
+                or params.get("title")
+                or [""]
+            )[0].strip()
+            link = (params.get("url") or params.get("link") or [""])[0].strip()
+            raw_latitude = (params.get("lat") or [""])[0].strip()
+            raw_longitude = (params.get("lon") or [""])[0].strip()
+            latitude = None
+            longitude = None
+            if raw_latitude or raw_longitude:
+                try:
+                    latitude = float(raw_latitude)
+                    longitude = float(raw_longitude)
+                except (TypeError, ValueError):
+                    self._send_error_json(
+                        "Missing or invalid game place coordinates", 400
+                    )
+                    return
+                if not (
+                    -90 <= latitude <= 90 and -180 <= longitude <= 180
+                ):
+                    self._send_error_json(
+                        "Missing or invalid game place coordinates", 400
+                    )
+                    return
+            if not (osm_type and osm_id) and not name and not link and latitude is None:
+                self._send_error_json(
+                    "Missing game place identity", 400
+                )
+                return
+            try:
+                details = fetch_game_place_details(
+                    osm_type=osm_type,
+                    osm_id=osm_id,
+                    name=name,
+                    latitude=latitude,
+                    longitude=longitude,
+                    link=link,
+                )
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except RuntimeError as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json(details)
+            return
         if path == "/api/driving_instructions":
             params = parse_qs(parsed.query)
             try:
@@ -14862,6 +15708,17 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 if name.startswith(query or "/"):
                     items.append({"value": name, "description": description})
             return items
+
+        if kind == "games":
+            lowered = query.lower()
+            return [
+                {
+                    "value": game["name"],
+                    "description": game["title"],
+                }
+                for game in list_game_prompts()
+                if game["name"].startswith(lowered)
+            ]
 
         if kind == "youtube_subcommands":
             lowered = query.lower()
@@ -15287,7 +16144,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             if payload is None:
                 return
-            keyword = str(payload.get("keyword") or "").strip()
+            keyword = strip_surrounding_search_quotes(
+                str(payload.get("keyword") or "")
+            )
             raw_exclude = payload.get("exclude")
             exclude = (
                 {str(value) for value in raw_exclude}
@@ -16849,6 +17708,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_wikivoyage(argument)
         elif name == "/map":
             self._command_map(argument)
+        elif name == "/game":
+            self._command_game(argument)
         elif name == "/medium":
             self._command_medium(argument)
         elif name == "/ai_news_podcast":
@@ -17636,9 +18497,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         result page is cached so the "More" button can reveal the remaining
         videos without another search.
         """
-        keyword = argument.strip()
-        if len(keyword) >= 2 and keyword[0] == keyword[-1] and keyword[0] in "\"'":
-            keyword = keyword[1:-1].strip()
+        keyword = strip_surrounding_search_quotes(argument)
         if not keyword:
             self._sse_text(
                 "output", '\nUsage: /youtube search "<keyword>"\n'
@@ -18934,6 +19793,86 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._sse_text(
                 "output", f"\n/wikivoyage: no destinations matched {keyword!r}.\n"
             )
+
+    def _command_game(self, argument: str) -> None:
+        """List the available explorer games or start one.
+
+        Usage: /game [<game_name>]
+        With no argument the command lists every prompt in ./prompts/games.
+        A known game emits one "game" SSE event; the browser opens a
+        full-screen Leaflet explorer and loads nearby OSM places as the
+        player moves from marker to marker.
+        """
+        games = list_game_prompts()
+        requested = " ".join(argument.split()).strip()
+        if not requested:
+            if not games:
+                self._sse_text(
+                    "output",
+                    "\nNo games are available in ./prompts/games yet.\n",
+                )
+                return
+            lines = ["", "Games:"]
+            for game in games:
+                suffix = "" if game["playable"] else " (prompt only)"
+                lines.append(
+                    f"  /game {game['name']:<20} {game['title']}{suffix}"
+                )
+            lines.append("")
+            self._sse_text("output", "\n".join(lines) + "\n")
+            return
+
+        normalized = re.sub(
+            r"[^a-z0-9]+", "_", requested.lower()
+        ).strip("_")
+        compact = normalized.replace("_", "")
+        match = next(
+            (
+                game
+                for game in games
+                if game["name"] == normalized
+                or game["name"].replace("_", "") == compact
+            ),
+            None,
+        )
+        if match is None:
+            available = ", ".join(
+                f"/game {game['name']}" for game in games
+            ) or "none"
+            self._sse_text(
+                "output",
+                f"\nUnknown game: {requested}.\n"
+                f"Available games: {available}\n",
+            )
+            return
+
+        start = GAME_START_LOCATIONS.get(match["name"])
+        if start is None:
+            self._sse_text(
+                "output",
+                f"\nGame {match['title']} is not playable yet.\n",
+            )
+            return
+
+        self._sse(
+            "game",
+            {
+                "type": "start",
+                "game": match["name"],
+                "title": match["title"],
+                "youtube_video_search_prefix": match.get(
+                    "youtube_video_search_prefix", ""
+                ),
+                "start": {
+                    "name": start["name"],
+                    "latitude": start["latitude"],
+                    "longitude": start["longitude"],
+                    "link": start["link"],
+                },
+                "radius_meters": GAME_NEARBY_RADIUS_METERS,
+                "limit": GAME_NEARBY_LIMIT,
+            },
+        )
 
     def _command_map(self, argument: str) -> None:
         """Geocode a location and list nearby Wikipedia articles.
