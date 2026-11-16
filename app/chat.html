@@ -4023,7 +4023,6 @@
         <div id="game-title" class="news-modal-title">Explorer</div>
         <div id="game-meta" class="news-modal-meta"></div>
       </div>
-      <a id="game-start-link" class="news-link" href="#" target="_blank" rel="noopener noreferrer">Open starting point ↗</a>
       <button id="game-close" type="button" title="Close (Esc)">×</button>
     </div>
     <div class="game-body">
@@ -4332,7 +4331,6 @@ const drivingCloseEl = $("#driving-close");
 const gamePanelEl = $("#game-panel");
 const gameTitleEl = $("#game-title");
 const gameMetaEl = $("#game-meta");
-const gameStartLinkEl = $("#game-start-link");
 const gameMapEl = $("#game-map");
 const gameStatusEl = $("#game-status");
 const gameLocationInputEl = $("#game-location-input");
@@ -8994,12 +8992,6 @@ function openGameModal(data) {
   const generation = gameGeneration;
   hideGameContextMenu();
   if (gameTitleEl) gameTitleEl.textContent = String(data.title || "Explorer");
-  if (gameStartLinkEl) {
-    const link = String(start.link || "").trim();
-    gameStartLinkEl.href = link || "#";
-    gameStartLinkEl.textContent = `Open ${start.name || "starting point"} ↗`;
-    gameStartLinkEl.hidden = !link;
-  }
   if (gameStatusEl) {
     gameStatusEl.classList.remove("is-error");
     gameStatusEl.textContent = "Loading the explorer…";
