@@ -1866,6 +1866,94 @@
    * widen it by 20% along with the explorer shell so the map, article, and
    * related-video rail keep their proportions. */
   #news-panel.is-over-game .news-card { width: min(1344px, 100%); }
+  /* /game type is 20% larger in both the explorer shell and the place modal
+   * that opens on top of it. Shared news/video styles stay untouched, so the
+   * ordinary /news, /map, and /youtube modals keep their original sizes. */
+  #game-panel .news-modal-title { font-size: 16.8px; }
+  #game-panel .news-modal-meta { font-size: 13.2px; }
+  #game-panel .news-link { font-size: 13.8px; }
+  #game-panel .game-location-label,
+  #game-panel .game-location-suggestion,
+  #game-panel .game-location-status,
+  #game-panel .game-status { font-size: 14.4px; }
+  #game-panel .game-location-input { font-size: 15.6px; }
+  #game-panel .game-marker { font-size: 13.2px; }
+  #game-panel .game-marker.is-current { font-size: 16.8px; }
+  #game-panel #game-close { font-size: 24px; }
+  #game-panel .leaflet-popup-content { font-size: 14.4px; }
+  #game-context-menu button { font-size: 15.6px; }
+
+  #news-panel.is-over-game .news-card {
+    --news-result-font-size: 15.6px;
+  }
+  #news-panel.is-over-game .news-card .news-modal-title { font-size: 16.8px; }
+  #news-panel.is-over-game .news-card .news-modal-meta { font-size: 13.2px; }
+  #news-panel.is-over-game .news-card .news-link { font-size: 13.8px; }
+  #news-panel.is-over-game .news-card .news-nav { font-size: 22.8px; }
+  #news-panel.is-over-game .news-card #news-close { font-size: 24px; }
+  #news-panel.is-over-game .news-card .news-body { font-size: 15.6px; }
+  #news-panel.is-over-game .news-card .news-body h2.news-heading { font-size: 19.2px; }
+  #news-panel.is-over-game .news-card .news-body h3.news-heading { font-size: 16.8px; }
+  #news-panel.is-over-game .news-card .news-body h4.news-heading,
+  #news-panel.is-over-game .news-card .news-body h5.news-heading,
+  #news-panel.is-over-game .news-card .news-body h6.news-heading { font-size: 15.6px; }
+  #news-panel.is-over-game .news-card .news-figure figcaption { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .news-body .news-loading { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .news-reddit-embed summary { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .news-answers-heading { font-size: 16.8px; }
+  #news-panel.is-over-game .news-card .news-answer-head { font-size: 13.2px; }
+  #news-panel.is-over-game .news-card .news-answer-link { font-size: 13.8px; }
+  #news-panel.is-over-game .news-card .news-list-head { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .news-list-head .news-list-note { font-size: 13.2px; }
+  #news-panel.is-over-game .news-card .news-source-head { font-size: 13.2px; }
+  #news-panel.is-over-game .news-card .news-title-translation { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .news-meta { font-size: 13.2px; }
+  #news-panel.is-over-game .news-card .news-description { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .map-yelp-head { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .map-yelp-note { font-size: 13.2px; }
+  #news-panel.is-over-game .news-card .map-source-paragraph { font-size: 15px; }
+  #news-panel.is-over-game .news-card .map-yelp-rating { font-size: 15.6px; }
+  #news-panel.is-over-game .news-card .map-yelp-fact { font-size: 15px; }
+  #news-panel.is-over-game .news-card .map-yelp-error,
+  #news-panel.is-over-game .news-card .map-yelp-note-body,
+  #news-panel.is-over-game .news-card .map-yelp-hours { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .osm-nearby-head { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .osm-nearby-item { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .osm-nearby-meta { font-size: 13.2px; }
+  #news-panel.is-over-game .news-card .osm-nearby-empty { font-size: 13.8px; }
+  #news-panel.is-over-game .news-card .video-list-head { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .video-list-note { font-size: 13.2px; }
+  #news-panel.is-over-game .news-card .video-card.no-thumb .video-title { font-size: 15px; }
+  #news-panel.is-over-game .news-card .video-title { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .video-duration,
+  #news-panel.is-over-game .news-card .video-channel,
+  #news-panel.is-over-game .news-card .video-url,
+  #news-panel.is-over-game .news-card .video-date,
+  #news-panel.is-over-game .news-card .video-learn-label { font-size: 12.6px; }
+  #news-panel.is-over-game .news-card .video-summary-btn { font-size: 13.2px; }
+  #news-panel.is-over-game .news-card .video-more-btn { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .video-more-error { font-size: 13.2px; }
+  #news-panel.is-over-game .news-card .video-action-title { font-size: 13.2px; }
+  #news-panel.is-over-game .news-card .video-action-note { font-size: 13.8px; }
+  #news-panel.is-over-game .news-card .video-action-btn { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card #news-chat-close { font-size: 21.6px; }
+  #news-panel.is-over-game .news-card .video-chat-messages { font-size: 15px; }
+  #news-panel.is-over-game .news-card .video-chat-empty,
+  #news-panel.is-over-game .news-card .video-chat-thinking,
+  #news-panel.is-over-game .news-card .video-chat-error { font-size: 13.8px; }
+  #news-panel.is-over-game .news-card #news-chat-input,
+  #news-panel.is-over-game .news-card #news-chat-send { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .markdown .code-copy { font-size: 13.2px; }
+  #news-panel.is-over-game .news-card .markdown .code-search-input,
+  #news-panel.is-over-game .news-card .markdown .code-ask-input { font-size: 14.4px; }
+  #news-panel.is-over-game .news-card .markdown .code-search-count,
+  #news-panel.is-over-game .news-card .markdown .code-ask-head,
+  #news-panel.is-over-game .news-card .markdown .code-ask-send,
+  #news-panel.is-over-game .news-card .markdown .code-ask-loading { font-size: 13.2px; }
+  #news-panel.is-over-game .news-card .markdown .code-search-close,
+  #news-panel.is-over-game .news-card .markdown .code-ask-close { font-size: 20.4px; }
+  #news-panel.is-over-game .news-card .markdown .code-ask-answer { font-size: 15.6px; }
+  #news-panel.is-over-game .news-card .markdown pre .line-help { font-size: 12px; }
   .news-card {
     width: min(1120px, 100%);
     max-height: 88vh;
