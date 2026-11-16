@@ -3,6 +3,10 @@ youtube_video_search_prefix: San Francisco
 game_data_file: {diretory_of_this_prompt}/../../.chat/games/san_francisco_explorer.json
 exploration_bounds: south=32.5343, west=-124.4096, north=42.0095, east=-114.1308
 
+task.increase_width_of_model (completed) {
+  - make the main explorer modal and the place modal 20% wider
+}
+
 task.set_current_location_with_auto_hinting_dropdown (completed) {
   in the main exporer map, right above the map, add a component <Current Location Setup> {
     UI {

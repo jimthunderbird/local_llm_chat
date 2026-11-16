@@ -1506,7 +1506,8 @@
   }
   #game-panel[hidden] { display: none; }
   .game-card {
-    width: min(1100px, 100%);
+    /* 20% wider than the original 1100px explorer shell. */
+    width: min(1320px, 100%);
     height: min(88vh, 900px);
     display: flex;
     flex-direction: column;
@@ -1861,6 +1862,10 @@
   /* A place modal opened from the /game explorer must sit above the explorer
    * overlay while keeping the game (and its map state) alive underneath. */
   #news-panel.is-over-game { z-index: 70; }
+  /* Place details opened from the /game explorer use the shared news card;
+   * widen it by 20% along with the explorer shell so the map, article, and
+   * related-video rail keep their proportions. */
+  #news-panel.is-over-game .news-card { width: min(1344px, 100%); }
   .news-card {
     width: min(1120px, 100%);
     max-height: 88vh;
