@@ -9035,11 +9035,8 @@ if (gameCloseEl) {
     closeGameModal();
   });
 }
-if (gamePanelEl) {
-  gamePanelEl.addEventListener("click", (event) => {
-    if (event.target === gamePanelEl) closeGameModal();
-  });
-}
+// A click on the dark area around the explorer card must not close the game.
+// The explorer can be dismissed only through its × button or the Escape key.
 if (gameContextSetLocationEl) {
   gameContextSetLocationEl.addEventListener("click", (event) => {
     event.preventDefault();

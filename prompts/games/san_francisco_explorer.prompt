@@ -3,6 +3,10 @@ youtube_video_search_prefix: San Francisco
 game_data_file: {diretory_of_this_prompt}/../../.chat/games/san_francisco_explorer.json
 exploration_bounds: south=32.5343, west=-124.4096, north=42.0095, east=-114.1308
 
+task.do_not_close_main_explorer_modal_when_click_outside (completed) {
+  DO NOT close the main explorer modal when clicking outside of it
+}
+
 task.increase_font_size (completed) {
   increase the font size in the main explorer modal and the place modal by 20%
 }
