@@ -518,7 +518,7 @@ const ARTICLE_CACHE_FAILURE_TTL = 3600; // one hour for articles we could not lo
 // failed mirror lookup on the next news request instead of hiding the story
 // for a full hour.
 const ARTICLE_READER_FAILURE_TTL = 120;
-const ARTICLE_EXTRACTOR_VERSION = 11;  // bump when article extraction logic changes
+const ARTICLE_EXTRACTOR_VERSION = 12;  // bump when article extraction logic changes
 const ARTICLE_MIN_BODY_CHARS = 1200;   // a container this large is a real body, not metadata
 const ARTICLE_PARTIAL_BODY_CHARS = 1200; // shorter fallback bodies may be previews
 // A preview body is better than an empty modal, but it should not be treated
@@ -1745,6 +1745,37 @@ function collectParagraphNodes(iterable $nodes): array
 }
 
 /**
+ * Collect the standfirst inside an explicit paywall/teaser container.
+ *
+ * WordPress paywall plugins (for example Investor's Business Daily's
+ * "investors-paywall-excerpt") render only a short teaser in the page while
+ * the real body is kept in an encrypted script or behind an API. Without
+ * recognizing that container, the page-wide paragraph fallback picks up
+ * unrelated story teasers, market snapshots, and legal footers, and the page
+ * looks like a complete article. Returning the standfirst lets the caller
+ * mark the result as a preview and continue through the recovery chain
+ * (reader proxy, WordPress REST, syndicated copy, or archive).
+ *
+ * @return list<string>
+ */
+function articlePaywallExcerptParagraphs(DOMXPath $xpath): array
+{
+    $paywall = 'contains(@class, "paywall") or contains(@id, "paywall")';
+    $teaser = 'contains(@class, "excerpt") or contains(@class, "preview")'
+        . ' or contains(@class, "teaser") or contains(@class, "summary")'
+        . ' or contains(@class, "standfirst")'
+        . ' or contains(@id, "excerpt") or contains(@id, "preview")'
+        . ' or contains(@id, "teaser") or contains(@id, "summary")';
+    $nodes = $xpath->query(
+        '//*[(' . $paywall . ') and (' . $teaser . ')]//p'
+    );
+    if ($nodes === false) {
+        return [];
+    }
+    return collectParagraphNodes($nodes);
+}
+
+/**
  * Extract the readable body paragraphs from a full article page.
  *
  * Prefer semantic article containers and fall back to every paragraph when
@@ -1772,6 +1803,9 @@ function extractArticleParagraphs(string $html, string $pageUrl = ''): array
     }
 
     $xpath = new DOMXPath($document);
+    // A gated page only exposes a standfirst; remember it so the page-wide
+    // paragraph queries cannot turn unrelated teasers into the article body.
+    $paywallExcerpt = articlePaywallExcerptParagraphs($xpath);
     $queries = [
         '//*[@itemprop="articleBody"]//p',
         '//*[@data-testid="article-body"]//p',
@@ -1791,6 +1825,11 @@ function extractArticleParagraphs(string $html, string $pageUrl = ''): array
     ];
 
     $candidates = [];
+    // Semantic article containers, without the page-wide <main>/<p> fallback.
+    // Paywalled pages need this narrower set: their real body (when present)
+    // lives in a semantic container, while the broad queries only collect
+    // promo rails and footers around the encrypted story.
+    $strictCandidates = [];
     foreach ($queries as $query) {
         $nodes = $xpath->query($query);
         if ($nodes === false) {
@@ -1799,6 +1838,9 @@ function extractArticleParagraphs(string $html, string $pageUrl = ''): array
         $candidate = collectParagraphNodes($nodes);
         if ($candidate) {
             $candidates[] = $candidate;
+            if ($query !== '//main//p') {
+                $strictCandidates[] = $candidate;
+            }
         }
     }
 
@@ -1826,8 +1868,27 @@ function extractArticleParagraphs(string $html, string $pageUrl = ''): array
             $candidate = collectLineSegmentNodes($node);
             if ($candidate) {
                 $candidates[] = $candidate;
+                if ($query !== '//main') {
+                    $strictCandidates[] = $candidate;
+                }
             }
         }
+    }
+
+    if ($paywallExcerpt) {
+        $hasRealBody = false;
+        foreach ($strictCandidates as $candidate) {
+            if (articleParagraphsLength($candidate) >= ARTICLE_MIN_BODY_CHARS) {
+                $hasRealBody = true;
+                break;
+            }
+        }
+        if (!$hasRealBody) {
+            return $paywallExcerpt;
+        }
+        // A semantic container carries the story, so ignore the page-wide
+        // fallback that would otherwise win on length with unrelated rails.
+        $candidates = $strictCandidates;
     }
 
     $nodes = $xpath->query('//p');
@@ -2776,6 +2837,7 @@ function articleProxyFallbackUrls(string $url): array
  */
 function fetchArticleProxyFallback(string $url, string $sourceKey): ?array
 {
+    $bestPartial = null;
     foreach (articleProxyFallbackUrls($url) as $proxy) {
         $accept = $proxy['kind'] === 'markdown'
             ? 'text/plain, text/markdown;q=0.9, text/html;q=0.8, */*;q=0.7'
@@ -2805,13 +2867,26 @@ function fetchArticleProxyFallback(string $url, string $sourceKey): ?array
             && !articleBodyLooksBlocked($paragraphs)
             && !articleBodyIsPlaceholder($paragraphs)
         ) {
-            return [
+            $result = [
                 'paragraphs' => $paragraphs,
                 'image' => $image,
             ];
+            // A proxy can render the same paywall teaser as the publisher
+            // page (Google Translate does this). Keep it as a fallback but
+            // try the remaining proxies, which may render the full story.
+            if (!articleFallbackIsPreview($paragraphs)) {
+                return $result;
+            }
+            $current = $bestPartial['paragraphs'] ?? [];
+            if ($bestPartial === null
+                || articleParagraphsLength($paragraphs)
+                    > articleParagraphsLength($current)
+            ) {
+                $bestPartial = $result;
+            }
         }
     }
-    return null;
+    return $bestPartial;
 }
 
 /**

@@ -1,3 +1,7 @@
+task.bug."https://www.investors.com/news/technology/jensen-huang-considers-returning-to-nvidia-stock/" (completed) {
+  the article "https://www.investors.com/news/technology/jensen-huang-considers-returning-to-nvidia-stock/" is not loading the full article
+}
+
 task.refactor_article_command (completed) {
   refactor /article command:
   - when typing /article <url_of_the_article>
