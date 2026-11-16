@@ -1633,6 +1633,12 @@
     cursor: pointer;
   }
   .game-marker.is-visited { background: #ffd166; }
+  /* Restaurants use wheat markers so they read separately from the blue
+   * nearby-place markers and the yellow visited places. */
+  .game-marker.is-restaurant {
+    background: #f5deb3;
+    border-color: #7a5c16;
+  }
   /* Markers discovered by panning the map rather than by walking from the
    * current location stay hollow so they read as places one can travel to. */
   .game-marker.is-explore {
@@ -8120,6 +8126,23 @@ function gamePlaceKey(place) {
   return `${link || place?.title || "place"}@${latlng[0].toFixed(6)},${latlng[1].toFixed(6)}`;
 }
 
+function gameRestaurantPlace(item) {
+  // /api/game_nearby returns restaurants from the shared /map restaurant
+  // search. Give them the same shape the explorer marker and place modal
+  // expect, while preserving the OSM fields used by the detail fetch.
+  if (!item || typeof item !== "object" || !gamePlaceLatLng(item)) return null;
+  const cuisine = String(item.cuisine || "").trim();
+  const category = ["Restaurant", cuisine].filter(Boolean).join(" · ");
+  return {
+    ...item,
+    category,
+    section: String(item.section || category).trim(),
+    summary: String(item.summary || category).trim() || category,
+    source: String(item.source || "OpenStreetMap").trim() || "OpenStreetMap",
+    restaurant: true,
+  };
+}
+
 function gameLeafletBounds(bounds) {
   // A game prompt may declare an exploration boundary such as the whole
   // state of California. Leaflet uses a [[south, west], [north, east]] pair
@@ -8421,6 +8444,7 @@ function setGameCurrentLocation(place) {
       if (gameLocationInputEl) gameLocationInputEl.value = name;
       setGameLocationStatus("");
       state.nearby = [];
+      state.restaurants = [];
       clearGameExploration(state);
       const last = state.journey[state.journey.length - 1];
       if (!last || gamePlaceKey(last) !== gamePlaceKey(current)) {
@@ -8466,13 +8490,14 @@ function closeGameModal() {
   }
 }
 
-function gameMarkerIcon(place, isCurrent, isVisited, isExplore) {
+function gameMarkerIcon(place, isCurrent, isVisited, isExplore, isRestaurant) {
   const classes = ["game-marker"];
   if (isCurrent) classes.push("is-current");
+  else if (isRestaurant) classes.push("is-restaurant");
   else if (isExplore) classes.push("is-explore");
   else if (isVisited) classes.push("is-visited");
   else classes.push("is-nearby");
-  const size = isCurrent ? 26 : 20;
+  const size = isCurrent ? 26 : isRestaurant ? 16 : 20;
   return window.L.divIcon({
     className: classes.join(" "),
     html: isCurrent ? "★" : "",
@@ -8483,7 +8508,8 @@ function gameMarkerIcon(place, isCurrent, isVisited, isExplore) {
 }
 
 function gamePlaceTooltip(place) {
-  const meta = [place.category, place.distance_text].filter(Boolean).join(" · ");
+  const meta = [place.category, place.distance_text].filter(Boolean).join(" · ")
+    || String(place.section || place.summary || "").trim();
   return `${String(place.title || place.name || "Place")}${meta ? ` — ${meta}` : ""}`;
 }
 
@@ -8532,14 +8558,20 @@ function renderGamePlaces() {
   const visitedKeys = new Set(state.journey.map(gamePlaceKey));
   const shown = new Set([currentKey]);
 
-  const addMarker = (place, isCurrent, isExplore) => {
+  const addMarker = (place, isCurrent, isExplore, isRestaurant) => {
     const latlng = gamePlaceLatLng(place);
     if (!latlng) return;
     const key = gamePlaceKey(place);
     const marker = window.L.marker(latlng, {
-      icon: gameMarkerIcon(place, isCurrent, visitedKeys.has(key), isExplore),
+      icon: gameMarkerIcon(
+        place,
+        isCurrent,
+        visitedKeys.has(key),
+        isExplore,
+        isRestaurant
+      ),
       title: String(place.title || place.name || "Place"),
-      draggable: true,
+      draggable: !isRestaurant,
       zIndexOffset: isCurrent ? 1000 : 0,
     });
     marker.bindTooltip(gamePlaceTooltip(place), {
@@ -8549,6 +8581,12 @@ function renderGamePlaces() {
     marker.on("click", () => {
       if (gameState !== state) return;
       hideGameContextMenu();
+      if (isRestaurant) {
+        // A restaurant is a detail marker, not a walking destination, so open
+        // its place modal without replacing the player's current location.
+        openGamePlaceModal(place);
+        return;
+      }
       if (gamePlaceKey(state.current) === key) {
         if (!state.nearby.length && !state.nearbyLoading) {
           loadGameNearby(state.current);
@@ -8567,7 +8605,7 @@ function renderGamePlaces() {
       });
     });
     marker.on("dragend", () => {
-      if (gameState !== state) return;
+      if (gameState !== state || isRestaurant) return;
       const moved = marker.getLatLng();
       place.latitude = moved.lat;
       place.longitude = moved.lng;
@@ -8591,6 +8629,12 @@ function renderGamePlaces() {
     shown.add(key);
     addMarker(place, false);
   }
+  for (const place of state.restaurants || []) {
+    const key = gamePlaceKey(place);
+    if (!key || shown.has(key)) continue;
+    shown.add(key);
+    addMarker(place, false, false, true);
+  }
   for (const place of state.journey) {
     const key = gamePlaceKey(place);
     if (!key || shown.has(key)) continue;
@@ -8607,7 +8651,10 @@ function renderGamePlaces() {
   if (gameMetaEl) {
     const currentName = state.current.name || state.current.title || "current place";
     const inView = (state.explorePlaces || []).length;
-    gameMetaEl.textContent = `Current: ${currentName} · ${state.journey.length} visited · ${state.nearby.length} nearby${inView ? ` · ${inView} in view` : ""}`;
+    const restaurantCount = (state.restaurants || []).length;
+    gameMetaEl.textContent = `Current: ${currentName} · ${state.journey.length} visited · ${state.nearby.length} nearby${
+      restaurantCount ? ` · ${restaurantCount} restaurants` : ""
+    }${inView ? ` · ${inView} in view` : ""}`;
   }
 }
 
@@ -8630,6 +8677,7 @@ function visitGamePlace(place) {
   }
   clearGameExploration(state);
   state.nearby = [];
+  state.restaurants = [];
   renderGamePlaces();
   try {
     state.map.panTo(latlng, { animate: true });
@@ -8713,9 +8761,9 @@ function loadGameNearby(place) {
   if (!latlng) return;
   // A request for an older current location can finish after the player has
   // already moved or saved a new one. Tag each request so only the latest
-  // one may replace state.nearby; otherwise the map would briefly (or, when
-  // requests finish out of order, permanently) show places around the wrong
-  // location.
+  // one may replace state.nearby and state.restaurants; otherwise the map
+  // would briefly (or, when requests finish out of order, permanently) show
+  // markers around the wrong location.
   state.nearbyRequest = (state.nearbyRequest || 0) + 1;
   const nearbyRequest = state.nearbyRequest;
   state.nearbyLoading = true;
@@ -8746,13 +8794,32 @@ function loadGameNearby(place) {
       state.nearby = items.filter(
         (item) => gamePlaceLatLng(item) && gamePlaceKey(item) !== currentKey
       );
+      const nearbyKeys = new Set(state.nearby.map(gamePlaceKey));
+      state.restaurants = (
+        Array.isArray(data.restaurants) ? data.restaurants : []
+      )
+        .map(gameRestaurantPlace)
+        .filter(
+          (item) =>
+            item &&
+            gamePlaceKey(item) !== currentKey &&
+            !nearbyKeys.has(gamePlaceKey(item))
+        );
       renderGamePlaces();
       if (gameStatusEl) {
         const count = state.nearby.length;
+        const restaurantCount = state.restaurants.length;
         const name = state.current.name || state.current.title || "this place";
-        gameStatusEl.textContent = count
-          ? `${count} place${count === 1 ? "" : "s"} around ${name} — click a marker to move there and open its details; drag or zoom the map to explore more places, then click one to travel there`
-          : `No nearby places were found around ${name}. Drag or zoom the map to explore more places.`;
+        const counts = [];
+        if (count) counts.push(`${count} place${count === 1 ? "" : "s"}`);
+        if (restaurantCount) {
+          counts.push(
+            `${restaurantCount} restaurant${restaurantCount === 1 ? "" : "s"}`
+          );
+        }
+        gameStatusEl.textContent = counts.length
+          ? `${counts.join(" and ")} around ${name} — click a marker to open its details; drag or zoom the map to explore more places, then click one to travel there`
+          : `No nearby places or restaurants were found around ${name}. Drag or zoom the map to explore more places.`;
       }
     })
     .catch((error) => {
@@ -8833,7 +8900,7 @@ function exploreGameViewport() {
     lat: String(center.lat),
     lon: String(center.lng),
     radius: String(radius),
-    limit: "30",
+    limit: "20",
   });
   fetch(`/api/game_nearby?${params.toString()}`, { cache: "no-store" })
     .then((response) => response.json().then((data) => {
@@ -9000,6 +9067,7 @@ function openGameModal(data) {
     nearby: [],
     nearbyRequest: 0,
     nearbyLoading: false,
+    restaurants: [],
     explorePlaces: [],
     exploreRequest: 0,
     exploreLoading: false,
@@ -9007,7 +9075,7 @@ function openGameModal(data) {
     exploreTimer: null,
     bounds: data?.bounds && leafletBounds ? data.bounds : null,
     radius: Number(data.radius_meters) || 1200,
-    limit: Number(data.limit) || 15,
+    limit: Number(data.limit) || 20,
     youtubeVideoSearchPrefix: String(
       data.youtube_video_search_prefix || ""
     ).trim(),

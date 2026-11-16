@@ -86,7 +86,8 @@ Endpoints:
     GET  /api/map_restaurants    ?lat=<latitude>&lon=<longitude> fetch nearby
                                   restaurants from the Overpass API for /map
     GET  /api/game_nearby        ?lat=<latitude>&lon=<longitude> fetch nearby
-                                  attractions for the /game explorer modal
+                                  attractions and nearby restaurants for the
+                                  /game explorer map
     GET  /api/game_place         ?url=<osm_url>&name=<name> fetch one explorer
                                   marker's tags, geolocated Wikipedia extract, and
                                   trafilatura-extracted website text for its
@@ -3965,7 +3966,21 @@ GAME_START_LOCATIONS = {
     },
 }
 GAME_NEARBY_RADIUS_METERS = 1_200
-GAME_NEARBY_LIMIT = 15
+GAME_NEARBY_LIMIT = 20
+# Each explorer location also marks its nearby restaurants. They use the same
+# walking radius as the other places but a separate 20-item cap so the two
+# marker groups stay balanced on the map.
+GAME_NEARBY_RESTAURANT_LIMIT = 20
+# Overpass rate-limits concurrent queries, so the same coordinate can briefly
+# return no places, no restaurants, or both. Keep the last successful payload
+# for a few minutes; reopening a marker then paints immediately and a transient
+# outage cannot make both marker groups disappear from the explorer.
+GAME_NEARBY_CACHE_TTL_SECONDS = 300
+GAME_NEARBY_CACHE_MAX_ITEMS = 256
+GAME_NEARBY_CACHE: dict[
+    tuple[float, float, int, int, int], tuple[float, dict]
+] = {}
+GAME_NEARBY_CACHE_LOCK = threading.Lock()
 # Right-clicking a game marker opens a /map-style place modal. OSM tags and
 # the linked Wikipedia extract rarely change, so the detail payload is cached
 # per OSM id for an hour.
@@ -4456,6 +4471,7 @@ def search_nearby_restaurants(
             {
                 "title": name,
                 "link": link,
+                "category": kind,
                 "section": section,
                 "summary": summary,
                 "paragraphs": paragraphs,
@@ -4464,6 +4480,7 @@ def search_nearby_restaurants(
                     f"{float(element_longitude):.6g}"
                 ),
                 "distance_m": distance,
+                "distance_text": distance_text,
                 "source": "OpenStreetMap",
                 "docs": True,
                 "docs_label": "OpenStreetMap",
@@ -5450,6 +5467,53 @@ def _osm_point_link(latitude: float, longitude: float) -> str:
     )
 
 
+def _game_nearby_cache_key(
+    latitude: float,
+    longitude: float,
+    radius_meters: int,
+    place_limit: int,
+    restaurant_limit: int,
+) -> tuple[float, float, int, int, int]:
+    """Return a stable cache key for one explorer nearby lookup."""
+    return (
+        round(float(latitude), 5),
+        round(float(longitude), 5),
+        int(radius_meters),
+        int(place_limit),
+        int(restaurant_limit),
+    )
+
+
+def cached_game_nearby(
+    key: tuple[float, float, int, int, int],
+) -> dict | None:
+    """Return the unexpired cached nearby payload for key, if any."""
+    now = time.monotonic()
+    with GAME_NEARBY_CACHE_LOCK:
+        entry = GAME_NEARBY_CACHE.get(key)
+        if entry is None:
+            return None
+        stored_at, payload = entry
+        if now - stored_at > GAME_NEARBY_CACHE_TTL_SECONDS:
+            GAME_NEARBY_CACHE.pop(key, None)
+            return None
+        return dict(payload)
+
+
+def store_game_nearby(
+    key: tuple[float, float, int, int, int], payload: dict
+) -> None:
+    """Remember a successful nearby payload until its TTL expires."""
+    with GAME_NEARBY_CACHE_LOCK:
+        if len(GAME_NEARBY_CACHE) >= GAME_NEARBY_CACHE_MAX_ITEMS:
+            oldest = min(
+                GAME_NEARBY_CACHE,
+                key=lambda item: GAME_NEARBY_CACHE[item][0],
+            )
+            GAME_NEARBY_CACHE.pop(oldest, None)
+        GAME_NEARBY_CACHE[key] = (time.monotonic(), dict(payload))
+
+
 def saved_game_start(game_name: str) -> dict | None:
     """Return the saved current_location as a /game start payload."""
     saved = load_game_data(game_name).get("current_location")
@@ -5491,13 +5555,14 @@ def search_game_places(
     radius_meters: int = GAME_NEARBY_RADIUS_METERS,
     limit: int = GAME_NEARBY_LIMIT,
 ) -> list[dict]:
-    """List named attractions near one coordinate for the /game explorer.
+    """List named places near one coordinate for the /game explorer.
 
     Overpass supplies the landmarks, parks, museums, historic sites, markets,
-    and other visitor-friendly places around the current location. Named
-    elements only are kept because every result becomes a clickable marker in
-    the explorer modal. If Overpass is unavailable, the Wikipedia GeoSearch
-    fallback still gives the game useful places to walk between.
+    hospitals, libraries, schools, churches, and other visitor-friendly places
+    around the current location. Named elements only are kept because every
+    result becomes a clickable marker in the explorer modal. If Overpass is
+    unavailable, the Wikipedia GeoSearch fallback still gives the game useful
+    places to walk between.
     """
     radius = max(100, min(int(radius_meters), 15_000))
     limit = max(1, min(int(limit), 30))
@@ -5512,7 +5577,10 @@ def search_game_places(
         f"(around:{radius},{latitude:.6f},{longitude:.6f});\n"
         '  nwr["name"]["leisure"~"^(park|garden|nature_reserve)$"]'
         f"(around:{radius},{latitude:.6f},{longitude:.6f});\n"
-        '  nwr["name"]["amenity"~"^(theatre|arts_centre|marketplace)$"]'
+        '  nwr["name"]["amenity"~"^(theatre|arts_centre|marketplace|hospital|'
+        'library|school|place_of_worship)$"]'
+        f"(around:{radius},{latitude:.6f},{longitude:.6f});\n"
+        '  nwr["name"]["building"="church"]'
         f"(around:{radius},{latitude:.6f},{longitude:.6f});\n"
         ");\n"
         "out center 100;"
@@ -16197,12 +16265,81 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
             except (TypeError, ValueError):
                 limit = GAME_NEARBY_LIMIT
-            try:
-                items = search_game_places(latitude, longitude, radius, limit)
-            except RuntimeError as exc:
-                self._send_error_json(str(exc), 502)
+            restaurant_radius = min(radius, 5_000)
+            cache_key = _game_nearby_cache_key(
+                latitude,
+                longitude,
+                radius,
+                limit,
+                GAME_NEARBY_RESTAURANT_LIMIT,
+            )
+            cached = cached_game_nearby(cache_key)
+            if cached is not None:
+                cached["cached"] = True
+                self._send_json(cached)
                 return
-            self._send_json({"items": items})
+            # The two Overpass queries used to share one failure path: if the
+            # place query raised, the endpoint returned 502 and the browser
+            # showed neither places nor restaurants. Run them independently and
+            # treat either group as useful on its own, then retry a failed side
+            # once sequentially before giving up.
+            places_failed = False
+            restaurants_failed = False
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                places_future = executor.submit(
+                    search_game_places, latitude, longitude, radius, limit
+                )
+                restaurants_future = executor.submit(
+                    search_nearby_restaurants,
+                    latitude,
+                    longitude,
+                    restaurant_radius,
+                    GAME_NEARBY_RESTAURANT_LIMIT,
+                )
+                try:
+                    items = places_future.result()
+                except Exception:
+                    items = []
+                    places_failed = True
+                try:
+                    restaurants = restaurants_future.result()
+                except Exception:
+                    restaurants = []
+                    restaurants_failed = True
+            if places_failed:
+                try:
+                    items = search_game_places(
+                        latitude, longitude, radius, limit
+                    )
+                    places_failed = False
+                except Exception:
+                    items = []
+            if restaurants_failed:
+                try:
+                    restaurants = search_nearby_restaurants(
+                        latitude,
+                        longitude,
+                        restaurant_radius,
+                        GAME_NEARBY_RESTAURANT_LIMIT,
+                    )
+                    restaurants_failed = False
+                except Exception:
+                    restaurants = []
+            payload = {"items": items, "restaurants": restaurants}
+            if not places_failed and not restaurants_failed:
+                store_game_nearby(cache_key, payload)
+            elif places_failed and restaurants_failed:
+                self._send_error_json(
+                    "OpenStreetMap nearby search is temporarily unavailable; "
+                    "please try again in a moment.",
+                    502,
+                )
+                return
+            elif places_failed:
+                payload["places_unavailable"] = True
+            elif restaurants_failed:
+                payload["restaurants_unavailable"] = True
+            self._send_json(payload)
             return
         if path == "/api/game_place_news":
             params = parse_qs(parsed.query)

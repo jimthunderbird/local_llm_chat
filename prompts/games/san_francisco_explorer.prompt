@@ -3,6 +3,23 @@ youtube_video_search_prefix: San Francisco
 game_data_file: {diretory_of_this_prompt}/../../.chat/games/san_francisco_explorer.json
 exploration_bounds: south=32.5343, west=-124.4096, north=42.0095, east=-114.1308
 
+task (completed) {
+  reference task.nearby_20_restaurants_in_wheat and task.nearby_20_places:
+  - both nearby restaurants and nearby places are not showing
+}
+
+task.nearby_20_restaurants_in_wheat (completed) {
+  for each location, please also show me the nearby 20 restaurants in wheat color
+}
+
+task.nearby_20_places (completed) {
+  for each location, please show me the nearby 20 places
+}
+
+task.nearby_places_include_hospital_library_school_churchs (completed) {
+  for the nearby places, can we include hospital, library, school, church
+}
+
 task.do_not_close_main_explorer_modal_when_click_outside (completed) {
   DO NOT close the main explorer modal when clicking outside of it
 }
