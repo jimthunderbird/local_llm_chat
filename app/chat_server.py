@@ -84,6 +84,10 @@ Endpoints:
     GET  /api/game_place         ?url=<osm_url>&name=<name> fetch one explorer
                                   marker's tags and Wikipedia extract for its
                                   right-click place modal
+    POST /api/game_current_location
+                                  {"game":..., "latitude":..., "longitude":...}
+                                  persist the explorer's chosen starting point
+                                  so the next /game opens there
     GET  /api/driving_instructions
                                   ?from_lat=<lat>&from_lon=<lon>
                                   &to_lat=<lat>&to_lon=<lon> driving route and
@@ -3919,6 +3923,8 @@ YELP_DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 # below holds the fixed starting point and the browser asks /api/game_nearby
 # for the places around whichever marker the player clicks.
 GAMES_DIR = SCRIPT_DIR / "prompts" / "games"
+GAME_DATA_DIR = SCRIPT_DIR / ".chat" / "games"
+GAME_DATA_LOCK = threading.Lock()
 GAME_START_LOCATIONS = {
     "sapporo_explorer": {
         "title": "Sapporo Explorer",
@@ -5162,6 +5168,134 @@ def _game_prompt_video_prefix(path: Path) -> str:
         re.MULTILINE,
     )
     return match.group(1).strip() if match else ""
+
+
+def _game_prompt_data_file(path: Path) -> Path:
+    """Resolve the optional game_data_file declared by one game prompt.
+
+    The path may contain the same ``{diretory_of_this_prompt}`` placeholder
+    (including its historical spelling) used by the prompt tasks. Declared
+    paths are allowed only inside the repository so a prompt can never make
+    the server write outside its own state directory.
+    """
+    fallback = GAME_DATA_DIR / f"{path.stem}.json"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return fallback
+    match = re.search(
+        r"^\s*game_data_file\s*:\s*(.+?)\s*$", text, re.MULTILINE
+    )
+    if not match:
+        return fallback
+    raw = match.group(1).strip().strip('"').strip("'")
+    for placeholder in (
+        "{diretory_of_this_prompt}",
+        "{directory_of_this_prompt}",
+    ):
+        raw = raw.replace(placeholder, str(path.parent))
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = SCRIPT_DIR / candidate
+    try:
+        candidate = candidate.resolve()
+        candidate.relative_to(SCRIPT_DIR.resolve())
+    except (OSError, ValueError):
+        return fallback
+    if candidate.suffix.lower() != ".json":
+        return fallback
+    return candidate
+
+
+def game_data_file(game_name: str) -> Path:
+    """Return the JSON state file used by one explorer game."""
+    name = str(game_name or "")
+    prompt_path = GAMES_DIR / f"{name}.prompt"
+    try:
+        prompt_path.resolve().relative_to(GAMES_DIR.resolve())
+    except (OSError, ValueError):
+        prompt_path = GAMES_DIR / "__invalid__.prompt"
+    if prompt_path.is_file():
+        return _game_prompt_data_file(prompt_path)
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._") or "game"
+    return GAME_DATA_DIR / f"{safe}.json"
+
+
+def load_game_data(game_name: str) -> dict:
+    """Read one game's persisted state, tolerating a missing/corrupt file."""
+    path = game_data_file(game_name)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_game_data(game_name: str, data: dict) -> None:
+    """Atomically write one game's state file."""
+    path = game_data_file(game_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with GAME_DATA_LOCK:
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            os.replace(temporary, path)
+        except Exception:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+
+
+def _valid_game_coordinates(latitude: object, longitude: object) -> bool:
+    """Return whether two values are an in-range latitude/longitude pair."""
+    return (
+        isinstance(latitude, (int, float))
+        and isinstance(longitude, (int, float))
+        and math.isfinite(latitude)
+        and math.isfinite(longitude)
+        and -90 <= latitude <= 90
+        and -180 <= longitude <= 180
+    )
+
+
+def _osm_point_link(latitude: float, longitude: float) -> str:
+    """Build an OpenStreetMap link for a right-clicked map coordinate."""
+    return (
+        f"https://www.openstreetmap.org/?mlat={latitude:.6f}"
+        f"&mlon={longitude:.6f}#map=18/{latitude:.6f}/{longitude:.6f}"
+    )
+
+
+def saved_game_start(game_name: str) -> dict | None:
+    """Return the saved current_location as a /game start payload."""
+    saved = load_game_data(game_name).get("current_location")
+    if not isinstance(saved, dict):
+        return None
+    try:
+        latitude = float(saved.get("latitude"))
+        longitude = float(saved.get("longitude"))
+    except (TypeError, ValueError):
+        return None
+    if not _valid_game_coordinates(latitude, longitude):
+        return None
+    name = " ".join(
+        str(saved.get("name") or saved.get("title") or "Saved location").split()
+    )
+    link = str(saved.get("link") or "").strip()
+    category = " ".join(str(saved.get("category") or "").split())[:80]
+    return {
+        "name": name or "Saved location",
+        "latitude": latitude,
+        "longitude": longitude,
+        "link": link or _osm_point_link(latitude, longitude),
+        "category": category or "Custom location",
+    }
 
 
 def _game_place_category(tags: dict) -> str:
@@ -16129,6 +16263,78 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 video_id, question, reset=bool(payload.get("reset"))
             )
             return
+        if parsed.path == "/api/game_current_location":
+            payload = self._read_json()
+            if payload is None:
+                return
+            requested = str(payload.get("game") or "").strip()
+            normalized = re.sub(
+                r"[^a-z0-9]+", "_", requested.lower()
+            ).strip("_")
+            compact = normalized.replace("_", "")
+            game = next(
+                (
+                    candidate
+                    for candidate in list_game_prompts()
+                    if candidate["name"] == normalized
+                    or candidate["name"].replace("_", "") == compact
+                ),
+                None,
+            )
+            if game is None:
+                self._send_error_json("Unknown game", 400)
+                return
+            try:
+                latitude = float(payload.get("latitude"))
+                longitude = float(payload.get("longitude"))
+            except (TypeError, ValueError):
+                self._send_error_json(
+                    "Missing or invalid game coordinates", 400
+                )
+                return
+            if not _valid_game_coordinates(latitude, longitude):
+                self._send_error_json(
+                    "Missing or invalid game coordinates", 400
+                )
+                return
+            name = " ".join(
+                str(
+                    payload.get("name")
+                    or payload.get("title")
+                    or "Saved location"
+                ).split()
+            )[:200]
+            link = str(payload.get("link") or "").strip()
+            category = " ".join(
+                str(payload.get("category") or "Custom location").split()
+            )[:80]
+            current_location = {
+                "name": name or "Saved location",
+                "latitude": latitude,
+                "longitude": longitude,
+                "link": link or _osm_point_link(latitude, longitude),
+                "category": category or "Custom location",
+                "saved_at": datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat(),
+            }
+            data = load_game_data(game["name"])
+            data["current_location"] = current_location
+            try:
+                save_game_data(game["name"], data)
+            except OSError as exc:
+                self._send_error_json(
+                    f"Could not save the starting location: {exc}", 500
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "game": game["name"],
+                    "current_location": current_location,
+                }
+            )
+            return
         if parsed.path == "/api/youtube_bookmark":
             payload = self._read_json()
             if payload is None:
@@ -19853,6 +20059,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 f"\nGame {match['title']} is not playable yet.\n",
             )
             return
+        saved_start = saved_game_start(match["name"])
+        if saved_start is not None:
+            start = {**start, **saved_start}
 
         self._sse(
             "game",
@@ -19868,6 +20077,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "latitude": start["latitude"],
                     "longitude": start["longitude"],
                     "link": start["link"],
+                    "category": start.get("category", "Starting point"),
                 },
                 "radius_meters": GAME_NEARBY_RADIUS_METERS,
                 "limit": GAME_NEARBY_LIMIT,

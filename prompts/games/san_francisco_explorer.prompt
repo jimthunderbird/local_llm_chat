@@ -1,5 +1,16 @@
 youtube_video_search_prefix: San Francisco
 
+game_data_file: {diretory_of_this_prompt}/../../.chat/games/san_francisco_explorer.json
+
+task.set_arbitrary_starting_point (completed) {
+  in the main explorer map, righ clicking on a location should show a menu item:
+  - set as current location {
+    when clicked, save the location's coordinates to {game_data_file}.current_location key
+    show nearby places around the new current location
+  }
+  - when starting the game, if {game_data_file}.current_location key is set, use that as the starting location
+}
+
 task.append_prefix_on_video_search.update (completed) {
   in {the place modal}.{youtube videos list section}:
   - show list of video by /youtube search "{youtube_video_search_prefix} {place name}" 
