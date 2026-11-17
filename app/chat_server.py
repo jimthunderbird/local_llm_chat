@@ -350,7 +350,7 @@ WEB_COMMANDS = {
     "/tablelog": "japan food and restaurant guide for travelers - search Tabelog restaurant pages by keywords: /tablelog <keywords>",
     "/stock": "show a stock symbol profile, financial details, and related news articles: /stock <stock_symbol>",
     "/deepresearch": "run a bounded multi-round research report on <topic>: /deepresearch <topic>",
-    "/research_with_the_news": "research a topic from recent news, then keep doing so for each follow-up: /research_with_the_news <topic>; /research_with_the_news off",
+    "/research_with_the_news": "research a topic from recent news, Wikipedia, or a doctor's hospital website, then keep doing so for each follow-up: /research_with_the_news <topic>; /research_with_the_news off",
     "/write_a_book": "ask for every book setting (model, directory, words, chapters, sub-questions, articles per sub-question), then research recent news and write a book: /write_a_book [<subject>]",
     "/books": "list the books written by /write_a_book in .chat/books: /books [keyword]",
     "/settings": "set English Corner options: /settings english_words_to_learn <range> (3k, 5k, 10k, 20k, 30k, 50k, 100k, or a range such as 10k..50k; default 10k..50k; off disables highlighting)",
@@ -415,6 +415,69 @@ question. Follow these rules:
 - Do not answer the question and do not add outside facts.
 - Do not number the questions.
 - Return only the two questions, one per line.
+"""
+RESEARCH_WITH_NEWS_SOURCE_PROMPT = """Decide where a research question should look for evidence.
+
+<accumulated_research_context>
+{accumulated_context}
+</accumulated_research_context>
+
+<question>
+{topic}
+</question>
+
+Answer with exactly one word:
+- doctor: the question is about a specific named medical doctor or physician,
+  their hospital, patients, research, statements, or medical opinion.
+- wikipedia: the question asks for a stable fact such as a birthday, biography,
+  definition, history, what a company does, or how a concept works, and it is
+  not about a specific doctor.
+- news: the question asks about recent events, current developments,
+  announcements, prices, or what happened lately, and it is not about a
+  specific doctor.
+
+Answer:"""
+RESEARCH_WITH_NEWS_DOCTOR_PROMPT = """Identify the specific medical doctor and the hospital where the doctor works.
+
+<accumulated_research_context>
+{accumulated_context}
+</accumulated_research_context>
+
+<question>
+{topic}
+</question>
+
+<wikipedia_article>
+{article}
+</wikipedia_article>
+
+Return exactly four lines:
+doctor: <the doctor's full name without the Dr. title>
+hospital: <the hospital or health system name>
+website: <the hospital's official website domain, for example ucsfhealth.org>
+specialty: <the doctor's medical specialty>
+
+Use the question, the Wikipedia article, and well-known public facts. Prefer
+the Wikipedia article when it names the doctor's hospital. Write "unknown"
+for any value you cannot establish, and never invent a website.
+"""
+RESEARCH_WITH_NEWS_HOSPITAL_WEBSITE_PROMPT = """Find the official website of the hospital where this doctor works.
+
+<doctor>
+{doctor}
+</doctor>
+
+<hospital>
+{hospital}
+</hospital>
+
+<hospital_wikipedia_article>
+{article}
+</hospital_wikipedia_article>
+
+Return only the hospital's official website domain, for example ucsfhealth.org.
+Do not include a path, a search engine, Wikipedia, a news site, or social media.
+If you are not confident, return unknown.
 """
 RESEARCH_WITH_NEWS_ANSWER_PROMPT = """You are a careful news research assistant. Using only the news context below,
 write a factual briefing about the question.
@@ -10642,6 +10705,553 @@ def _research_with_news_clean_questions(
     return questions
 
 
+_GENERAL_FACT_TOPIC_RE = re.compile(
+    r"\b(?:birthday|date of birth|born|biography|what is|what are|who is|"
+    r"who was|define|definition|meaning of|what does .* do|how does .* work|"
+    r"history of)\b",
+    re.IGNORECASE,
+)
+
+# A named doctor is a strong signal for hospital-website research. The local
+# model makes the real decision; this fallback covers a question such as
+# "what does Dr. Jane Smith think about the new treatment?" when Ollama is
+# unavailable. Obvious biography questions still go to Wikipedia first.
+_DOCTOR_TOPIC_RE = re.compile(
+    r"\b(?:dr\.?\s+[a-z][\w'’.-]*|"
+    r"(?:doctor|physician|surgeon|cardiologist|oncologist|neurologist|"
+    r"dermatologist|pediatrician|psychiatrist|radiologist|"
+    r"gastroenterologist|endocrinologist|immunologist|rheumatologist|"
+    r"nephrologist|pulmonologist|urologist|obstetrician|gynecologist|"
+    r"orthopedic surgeon|primary care physician))\b",
+    re.IGNORECASE,
+)
+_DOCTOR_BIOGRAPHY_RE = re.compile(
+    r"\b(?:birthday|date of birth|born|age|biography|who is|wikipedia)\b",
+    re.IGNORECASE,
+)
+
+
+def classify_research_with_news_source(
+    topic: str,
+    log: Callable[[str], None],
+    accumulated_context: str = "",
+) -> str:
+    """Return ``doctor``, ``wikipedia``, or ``news`` for a research topic.
+
+    A specific doctor needs a different evidence path from both a stable
+    general fact and a breaking-news question: the next step is to identify
+    the doctor's hospital and search that hospital's own website. The local
+    model makes the decision; if it is unavailable, small keyword fallbacks
+    keep the obvious cases working.
+    """
+    context = accumulated_context.strip() or "(no previous research context)"
+    try:
+        response = chat.generate_text(
+            RESEARCH_WITH_NEWS_SOURCE_PROMPT.format(
+                topic=topic, accumulated_context=context
+            ),
+            model=RESEARCH_WITH_NEWS_MODEL,
+            temperature=0.0,
+            num_predict=8,
+            stop=["\n"],
+        )
+    except RuntimeError as exc:
+        log(
+            "[research_with_the_news: could not classify the question "
+            f"source: {exc}; using the keyword fallback]"
+        )
+        response = ""
+    choice = chat.THINK_PATTERN.sub("", response).casefold()
+    if "doctor" in choice:
+        return "doctor"
+    if "wikipedia" in choice:
+        return "wikipedia"
+    if re.search(r"\bnews\b", choice):
+        return "news"
+    if (
+        _DOCTOR_TOPIC_RE.search(topic)
+        and not _DOCTOR_BIOGRAPHY_RE.search(topic)
+    ):
+        return "doctor"
+    if _GENERAL_FACT_TOPIC_RE.search(topic):
+        return "wikipedia"
+    return "news"
+
+
+def is_research_with_news_general_fact(
+    topic: str,
+    log: Callable[[str], None],
+    accumulated_context: str = "",
+) -> bool:
+    """Compatibility helper: True when the topic is a Wikipedia fact."""
+    return (
+        classify_research_with_news_source(topic, log, accumulated_context)
+        == "wikipedia"
+    )
+
+
+def _research_with_wikipedia_paragraphs(text: str) -> list[str]:
+    """Split a fetched Wikipedia article into clean, deduplicated paragraphs."""
+    paragraphs: list[str] = []
+    seen: set[str] = set()
+    for block in re.split(r"\n\s*\n", str(text or "")):
+        for line in block.splitlines():
+            paragraph = " ".join(line.split())
+            if not paragraph:
+                continue
+            key = paragraph.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            paragraphs.append(paragraph)
+    return paragraphs
+
+
+def search_research_with_wikipedia(
+    question: str,
+    limit: int = 1,
+    log: Callable[[str], None] | None = None,
+) -> list[dict]:
+    """Fetch the relevant English Wikipedia article for a general question."""
+    report = log or (lambda _text: None)
+    limit = max(1, int(limit))
+    entities = chat.wiki_related_entities(
+        question, model=RESEARCH_WITH_NEWS_MODEL, limit=4
+    )
+    if not entities:
+        entities = [question]
+    articles: list[dict] = []
+    seen: set[str] = set()
+    for entity in entities:
+        resolved = chat.wiki_disambiguate_entity(entity, question)
+        report(
+            "[research_with_the_news: fetching Wikipedia article "
+            f"{resolved!r} from en.wikipedia.org]"
+        )
+        article = chat.fetch_wiki_full_article(resolved)
+        if article is None:
+            report(
+                "[research_with_the_news: no Wikipedia article found for "
+                f"{resolved!r}]"
+            )
+            continue
+        title = " ".join(
+            str(article.get("title") or resolved).split()
+        )
+        link = str(article.get("url") or "").strip()
+        paragraphs = _research_with_wikipedia_paragraphs(
+            str(article.get("text") or "")
+        )
+        if not paragraphs:
+            report(
+                "[research_with_the_news: Wikipedia article "
+                f"{title!r} had no readable text]"
+            )
+            continue
+        key = (link or title).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        articles.append(
+            {
+                "title": title,
+                "link": link,
+                "published": "",
+                "source": "Wikipedia",
+                "summary": paragraphs[0],
+                "paragraphs": paragraphs,
+                "question": question,
+            }
+        )
+        report(
+            "[research_with_the_news: using Wikipedia article: "
+            f"{title} ({link or 'no URL'})]"
+        )
+        if len(articles) >= limit:
+            break
+    if not articles:
+        raise RuntimeError(
+            f"no readable Wikipedia article was found ({question!r})"
+        )
+    return articles
+
+
+_RESEARCH_WITH_NEWS_WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php"
+_RESEARCH_WITH_NEWS_WEBSITE_PROPERTY = "P856"
+_RESEARCH_WITH_NEWS_BLOCKED_WEBSITES = {
+    "wikipedia.org",
+    "en.wikipedia.org",
+    "wikidata.org",
+    "google.com",
+    "news.google.com",
+    "facebook.com",
+    "twitter.com",
+    "x.com",
+    "instagram.com",
+    "linkedin.com",
+    "youtube.com",
+    "tiktok.com",
+}
+
+
+def _research_with_news_clean_profile_value(value: str) -> str:
+    """Normalize one line value from the doctor-profile model output."""
+    cleaned = " ".join(str(value or "").split()).strip("\"'`“”")
+    cleaned = cleaned.rstrip(".").strip()
+    if cleaned.casefold() in {
+        "",
+        "unknown",
+        "none",
+        "n/a",
+        "na",
+        "not known",
+        "-",
+    }:
+        return ""
+    return cleaned
+
+
+def _research_with_news_normalize_website(value: str) -> str:
+    """Return a bare, safe website domain from a model or Wikidata value."""
+    website = _research_with_news_clean_profile_value(value)
+    if not website:
+        return ""
+    website = re.sub(r"^[a-z][a-z0-9+.-]*://", "", website, flags=re.I)
+    website = website.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    website = website.strip().rstrip(".")
+    website = re.sub(r"^www\.", "", website, flags=re.I).casefold()
+    if not re.fullmatch(
+        r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}",
+        website,
+        re.IGNORECASE,
+    ):
+        return ""
+    if website in _RESEARCH_WITH_NEWS_BLOCKED_WEBSITES:
+        return ""
+    if any(website.endswith("." + blocked) for blocked in (
+        "wikipedia.org",
+        "wikidata.org",
+        "google.com",
+        "facebook.com",
+        "twitter.com",
+        "instagram.com",
+        "linkedin.com",
+        "youtube.com",
+    )):
+        return ""
+    return website
+
+
+def _wikipedia_official_website(title: str) -> str:
+    """Look up a Wikipedia page's official website through Wikidata P856."""
+    title = " ".join(str(title or "").split())
+    if not title:
+        return ""
+    try:
+        response = requests.get(
+            WIKIPEDIA_API_URL,
+            params={
+                "action": "query",
+                "prop": "pageprops",
+                "titles": title,
+                "format": "json",
+                "redirects": 1,
+            },
+            headers=chat.HTTP_HEADERS,
+            timeout=20,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return ""
+    pages = ((data.get("query") or {}).get("pages") or {})
+    item = ""
+    for page in pages.values():
+        if not isinstance(page, dict):
+            continue
+        item = str(((page.get("pageprops") or {}).get("wikibase_item")) or "")
+        if item:
+            break
+    if not item:
+        return ""
+    try:
+        response = requests.get(
+            _RESEARCH_WITH_NEWS_WIKIDATA_API_URL,
+            params={
+                "action": "wbgetentities",
+                "ids": item,
+                "props": "claims",
+                "format": "json",
+            },
+            headers=chat.HTTP_HEADERS,
+            timeout=20,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return ""
+    entity = ((data.get("entities") or {}).get(item) or {})
+    claims = ((entity.get("claims") or {}).get(
+        _RESEARCH_WITH_NEWS_WEBSITE_PROPERTY
+    ) or [])
+    for claim in claims:
+        try:
+            raw_value = claim["mainsnak"]["datavalue"]["value"]
+        except (KeyError, TypeError):
+            continue
+        website = _research_with_news_normalize_website(str(raw_value))
+        if website:
+            return website
+    return ""
+
+
+def _research_with_news_parse_doctor_profile(response: str) -> dict[str, str]:
+    """Parse the four ``key: value`` lines from the doctor-profile model."""
+    profile = {"doctor": "", "hospital": "", "website": "", "specialty": ""}
+    for raw_line in chat.THINK_PATTERN.sub("", response).splitlines():
+        match = re.match(
+            r"^\s*(doctor|hospital|website|specialty)\s*[:=\-]\s*(.*?)\s*$",
+            raw_line,
+            re.IGNORECASE,
+        )
+        if match is None:
+            continue
+        key = match.group(1).casefold()
+        value = _research_with_news_clean_profile_value(match.group(2))
+        if key == "doctor":
+            value = re.sub(
+                r"^(?:dr\.?|doctor)\s+", "", value, flags=re.IGNORECASE
+            ).strip()
+            value = re.sub(
+                r",?\s*(?:M\.?D\.?|D\.?O\.?|PhD|MBBS)$",
+                "",
+                value,
+                flags=re.IGNORECASE,
+            ).strip()
+        elif key == "website":
+            value = _research_with_news_normalize_website(value)
+        profile[key] = value
+    return profile
+
+
+def _research_with_news_find_doctor_article(
+    topic: str, report: Callable[[str], None]
+) -> tuple[dict, list[str]]:
+    """Fetch a Wikipedia article that can reveal the doctor's hospital."""
+    entities = chat.wiki_related_entities(
+        topic, model=RESEARCH_WITH_NEWS_MODEL, limit=4
+    )
+    if not entities:
+        entities = [topic]
+    for entity in entities[:4]:
+        resolved = chat.wiki_disambiguate_entity(entity, topic)
+        article = chat.fetch_wiki_full_article(resolved)
+        if article is None:
+            continue
+        paragraphs = _research_with_wikipedia_paragraphs(
+            str(article.get("text") or "")
+        )
+        if not paragraphs:
+            continue
+        return article, paragraphs
+    return {}, []
+
+
+def _research_with_news_hospital_website(
+    doctor: str,
+    hospital: str,
+    report: Callable[[str], None],
+) -> str:
+    """Resolve a hospital's official website from Wikipedia/Wikidata."""
+    if not hospital:
+        return ""
+    article = chat.fetch_wiki_full_article(hospital)
+    title = str((article or {}).get("title") or hospital)
+    website = _wikipedia_official_website(title)
+    if website:
+        report(
+            "[research_with_the_news: found the hospital website through "
+            f"Wikipedia/Wikidata: {title} -> {website}]"
+        )
+        return website
+    if article is None:
+        return ""
+    paragraphs = _research_with_wikipedia_paragraphs(
+        str(article.get("text") or "")
+    )
+    if not paragraphs:
+        return ""
+    try:
+        response = chat.generate_text(
+            RESEARCH_WITH_NEWS_HOSPITAL_WEBSITE_PROMPT.format(
+                doctor=doctor or "unknown",
+                hospital=hospital,
+                article="\n\n".join(paragraphs)[:5000],
+            ),
+            model=RESEARCH_WITH_NEWS_MODEL,
+            temperature=0.0,
+            num_predict=24,
+            stop=["\n"],
+        )
+    except RuntimeError as exc:
+        report(
+            "[research_with_the_news: could not ask for the hospital "
+            f"website: {exc}]"
+        )
+        return ""
+    for line in chat.THINK_PATTERN.sub("", response).splitlines():
+        website = _research_with_news_normalize_website(line)
+        if website:
+            report(
+                "[research_with_the_news: found the hospital website from "
+                f"the article: {hospital} -> {website}]"
+            )
+            return website
+    return ""
+
+
+def plan_research_with_doctor_profile(
+    topic: str,
+    log: Callable[[str], None],
+    accumulated_context: str = "",
+) -> dict[str, str]:
+    """Identify the doctor, hospital, and hospital website for a question.
+
+    The doctor's Wikipedia article grounds the extraction, and a hospital's
+    Wikipedia/Wikidata entry supplies the official website when the model does
+    not know it. If the website cannot be established, the caller falls back
+    to an unrestricted news search for the doctor and hospital.
+    """
+    report = log or (lambda _text: None)
+    article, paragraphs = _research_with_news_find_doctor_article(topic, report)
+    article_title = str((article or {}).get("title") or "")
+    article_text = "\n\n".join(paragraphs)[:6000]
+    if article_title:
+        report(
+            "[research_with_the_news: using the Wikipedia article "
+            f"{article_title!r} to identify the doctor's hospital]"
+        )
+    context = accumulated_context.strip() or "(no previous research context)"
+    try:
+        response = chat.generate_text(
+            RESEARCH_WITH_NEWS_DOCTOR_PROMPT.format(
+                topic=topic,
+                accumulated_context=context,
+                article=article_text or "(no Wikipedia article available)",
+            ),
+            model=RESEARCH_WITH_NEWS_MODEL,
+            temperature=0.0,
+            num_predict=160,
+            stop=["\n\nQuestion:", "\n\nArticle:"],
+        )
+        profile = _research_with_news_parse_doctor_profile(response)
+    except RuntimeError as exc:
+        report(
+            "[research_with_the_news: could not identify the doctor's "
+            f"hospital: {exc}]"
+        )
+        profile = {
+            "doctor": "",
+            "hospital": "",
+            "website": "",
+            "specialty": "",
+        }
+    if (
+        not profile.get("doctor")
+        and article_title
+        and not re.search(
+            r"\b(?:hospital|medical center|clinic|health|university|"
+            r"institute|school)\b",
+            article_title,
+            re.IGNORECASE,
+        )
+    ):
+        profile["doctor"] = re.sub(
+            r"\s*\([^)]*\)\s*$", "", article_title
+        ).strip()
+    if profile.get("hospital") and not profile.get("website"):
+        profile["website"] = _research_with_news_hospital_website(
+            profile.get("doctor", ""), profile["hospital"], report
+        )
+    profile["website_used"] = False
+    details = [
+        f"doctor={profile.get('doctor') or 'unknown'}",
+        f"hospital={profile.get('hospital') or 'unknown'}",
+        f"website={profile.get('website') or 'unknown'}",
+    ]
+    report(
+        "[research_with_the_news: doctor profile: " + ", ".join(details) + "]"
+    )
+    return profile
+
+
+def search_research_with_doctor(
+    question: str,
+    profile: dict[str, str],
+    limit: int = RESEARCH_WITH_NEWS_ARTICLES_PER_QUESTION,
+    log: Callable[[str], None] | None = None,
+) -> list[dict]:
+    """Search the doctor's hospital website, then fall back to the news index."""
+    report = log or (lambda _text: None)
+    doctor = str(profile.get("doctor") or "").strip()
+    hospital = str(profile.get("hospital") or "").strip()
+    website = str(profile.get("website") or "").strip()
+    site_queries: list[str] = []
+    if doctor:
+        if doctor.casefold() in question.casefold():
+            site_queries.append(question)
+        else:
+            site_queries.append(f'"{doctor}" {question}'.strip())
+        site_queries.append(f'"{doctor}"')
+    elif hospital:
+        if hospital.casefold() in question.casefold():
+            site_queries.append(question)
+        else:
+            site_queries.append(f'"{hospital}" {question}'.strip())
+        site_queries.append(f'"{hospital}"')
+    else:
+        site_queries.append(question)
+    seen_queries: set[str] = set()
+    for site_query in site_queries:
+        key = site_query.casefold()
+        if not site_query or key in seen_queries:
+            continue
+        seen_queries.add(key)
+        if not website:
+            break
+        report(
+            "[research_with_the_news: searching the hospital website "
+            f"{website!r} for {site_query!r}]"
+        )
+        try:
+            results = search_research_with_news(
+                site_query, limit=limit, website=website
+            )
+        except RuntimeError as exc:
+            report(
+                "[research_with_the_news: no readable article on "
+                f"{website!r} for {site_query!r}: {exc}]"
+            )
+            continue
+        profile["website_used"] = True
+        for article in results:
+            article["research_source"] = "hospital_website"
+        return results
+    query_parts = [
+        value for value in (doctor, hospital, question) if value
+    ]
+    query = " ".join(query_parts) or question
+    if website:
+        report(
+            "[research_with_the_news: no hospital-website story was found; "
+            f"falling back to the news index for {query!r}]"
+        )
+    results = search_research_with_news(query, limit=limit)
+    for article in results:
+        article["research_source"] = "news_index"
+    return results
+
+
 def plan_research_with_news_questions(
     topic: str,
     log: Callable[[str], None],
@@ -10706,12 +11316,23 @@ def plan_research_with_news_questions(
 
 
 def search_research_with_news(
-    question: str, limit: int = RESEARCH_WITH_NEWS_ARTICLES_PER_QUESTION
+    question: str,
+    limit: int = RESEARCH_WITH_NEWS_ARTICLES_PER_QUESTION,
+    website: str = "",
 ) -> list[dict]:
-    """Fetch the top Google News stories and their full article bodies."""
+    """Fetch the top Google News stories and their full article bodies.
+
+    ``website`` restricts the Google News query to one site with the
+    ``site:`` operator. This is how doctor research reads a hospital's own
+    website while still using the existing article fetcher and parser.
+    """
     script = SCRIPT_DIR / "news_fetch.php"
     if not script.exists():
         raise RuntimeError("missing news_fetch.php")
+    query = question
+    website = _research_with_news_normalize_website(website)
+    if website:
+        query = f"site:{website} {question}"
     command = [
         "php",
         str(script),
@@ -10719,7 +11340,7 @@ def search_research_with_news(
         "--source",
         "googlenews",
         "--search",
-        question,
+        query,
         "--limit",
         str(limit),
     ]
@@ -19659,10 +20280,45 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         state = self.state
         # Earlier research turns stay in state.conversation. They are used to
         # resolve follow-up questions, but they are never mixed into the
-        # factual context: only the freshly fetched news articles supply facts.
+        # factual context: only the freshly fetched sources supply facts.
         accumulated_context = format_conversation(state.conversation)
         started = time.monotonic()
         log = lambda text: self._sse_text("log", text)
+        source = classify_research_with_news_source(
+            topic, log, accumulated_context
+        )
+        general_fact = source == "wikipedia"
+        doctor_research = source == "doctor"
+        doctor_profile: dict[str, str] = {}
+        if general_fact:
+            log(
+                "[research_with_the_news: general-fact question; restricting "
+                "research to en.wikipedia.org]"
+            )
+        elif doctor_research:
+            log(
+                "[research_with_the_news: doctor question; identifying the "
+                "doctor's hospital and its website]"
+            )
+            doctor_profile = plan_research_with_doctor_profile(
+                topic, log, accumulated_context
+            )
+            if doctor_profile.get("website"):
+                log(
+                    "[research_with_the_news: restricting searches to the "
+                    f"hospital website {doctor_profile['website']!r}]"
+                )
+            elif doctor_profile.get("hospital"):
+                log(
+                    "[research_with_the_news: no hospital website was found "
+                    f"for {doctor_profile['hospital']!r}; using the news "
+                    "index for the doctor and hospital]"
+                )
+            else:
+                log(
+                    "[research_with_the_news: could not identify the "
+                    "doctor's hospital; using the news index]"
+                )
         if accumulated_context:
             log(
                 "[research_with_the_news: planning two time-neutral search "
@@ -19679,7 +20335,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         )
         if not questions:
             message = (
-                f"Could not plan a news search for {topic!r}. "
+                f"Could not plan a search for {topic!r}. "
                 "Try rephrasing the topic."
             )
             self._sse_text("delta", message)
@@ -19701,9 +20357,22 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         articles: list[dict] = []
         seen_articles: set[str] = set()
+        source_noun = {
+            "wikipedia": "Wikipedia article",
+            "doctor": "doctor article",
+        }.get(source, "news article")
         for question in questions:
             try:
-                results = search_research_with_news(question)
+                if general_fact:
+                    results = search_research_with_wikipedia(
+                        question, log=log
+                    )
+                elif doctor_research:
+                    results = search_research_with_doctor(
+                        question, doctor_profile, log=log
+                    )
+                else:
+                    results = search_research_with_news(question)
             except RuntimeError as exc:
                 log(
                     "[research_with_the_news: search failed for "
@@ -19726,14 +20395,28 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     break
             log(
                 "[research_with_the_news: using "
-                f"{added} news article(s) for {question!r}]"
+                f"{added} {source_noun}(s) for {question!r}]"
             )
 
         if not articles:
-            message = (
-                f"No readable recent news stories were found for {topic!r}. "
-                "Try a broader topic."
-            )
+            if general_fact:
+                message = (
+                    f"No readable Wikipedia article was found for "
+                    f"{topic!r}. Try a more specific name or topic."
+                )
+            elif doctor_research:
+                doctor = doctor_profile.get("doctor") or "the doctor"
+                hospital = doctor_profile.get("hospital") or "their hospital"
+                message = (
+                    f"No readable articles about {doctor} were found from "
+                    f"{hospital}. Try the doctor's full name or another "
+                    "topic."
+                )
+            else:
+                message = (
+                    f"No readable recent news stories were found for "
+                    f"{topic!r}. Try a broader topic."
+                )
             self._sse_text("delta", message)
             state.latest_answer = message
             state.latest_sources = []
@@ -19753,10 +20436,21 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         context = build_research_with_news_context(articles)
         context_seconds = time.monotonic() - context_started
         if not context:
-            message = (
-                f"The news stories found for {topic!r} had no readable text. "
-                "Try another topic."
-            )
+            if general_fact:
+                message = (
+                    f"The Wikipedia article found for {topic!r} had no "
+                    "readable text. Try another topic."
+                )
+            elif doctor_research:
+                message = (
+                    f"The articles found for {topic!r} had no readable "
+                    "text. Try another doctor or topic."
+                )
+            else:
+                message = (
+                    f"The news stories found for {topic!r} had no readable "
+                    "text. Try another topic."
+                )
             self._sse_text("delta", message)
             state.latest_answer = message
             state.latest_sources = []
@@ -19774,17 +20468,62 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "mode": "research_with_the_news",
                 "model": RESEARCH_WITH_NEWS_MODEL,
                 "think": False,
-                "label": "news research",
+                "label": {
+                    "wikipedia": "wikipedia research",
+                    "doctor": "doctor research",
+                }.get(source, "news research"),
             },
         )
-        self._sse_answer_source(
-            source=SOURCE_OLLAMA,
-            label=f"news research with {RESEARCH_WITH_NEWS_MODEL}",
-            model=RESEARCH_WITH_NEWS_MODEL,
-            detail=(
+        if doctor_research:
+            doctor = doctor_profile.get("doctor") or "the doctor"
+            hospital = doctor_profile.get("hospital") or "their hospital"
+            website_articles = sum(
+                1
+                for article in articles
+                if article.get("research_source") == "hospital_website"
+            )
+            news_articles = len(articles) - website_articles
+            if website_articles == len(articles):
+                detail = (
+                    f"answer synthesized from {len(articles)} article(s) "
+                    f"gathered from {hospital}'s website "
+                    f"({doctor_profile.get('website')}) for {doctor}"
+                )
+            elif website_articles:
+                detail = (
+                    f"answer synthesized from {len(articles)} article(s): "
+                    f"{website_articles} from {hospital}'s website "
+                    f"({doctor_profile.get('website')}) and {news_articles} "
+                    f"from the news index for {doctor}"
+                )
+            else:
+                detail = (
+                    f"answer synthesized from {len(articles)} article(s) "
+                    f"about {doctor} and {hospital}; no hospital-website "
+                    "article was readable"
+                )
+        elif general_fact:
+            detail = (
+                f"answer synthesized from {len(articles)} Wikipedia "
+                "article(s) gathered from en.wikipedia.org"
+            )
+        else:
+            detail = (
                 f"answer synthesized from {len(articles)} recent news "
                 "article(s) gathered by the two generated search questions"
-            ),
+            )
+        self._sse_answer_source(
+            source=SOURCE_OLLAMA,
+            label={
+                "wikipedia": (
+                    f"Wikipedia research with {RESEARCH_WITH_NEWS_MODEL}"
+                ),
+                "doctor": (
+                    f"doctor research with {RESEARCH_WITH_NEWS_MODEL}"
+                ),
+            }.get(source, f"news research with {RESEARCH_WITH_NEWS_MODEL}"),
+            model=RESEARCH_WITH_NEWS_MODEL,
+            detail=detail,
         )
         prompt = RESEARCH_WITH_NEWS_ANSWER_PROMPT.format(
             topic=topic,
@@ -19836,6 +20575,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             "research_with_the_news": {
                 "questions": questions,
                 "articles": len(articles),
+                "source": source,
+                "doctor": doctor_profile.get("doctor", ""),
+                "hospital": doctor_profile.get("hospital", ""),
             },
         }
         self._sse("annotations", {"items": []})

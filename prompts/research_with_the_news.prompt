@@ -1,5 +1,17 @@
 research_llm: ollama local model ornith-1.5:35b
 
+task.question_source_fine_tuning.doctors (completed) {
+  - if <topic> is about a specific Drs, find the doctor's hospital, get the related articles from the hospital websites and add to context
+}
+
+task.question_source_fine_tuning (completed) {
+  - if a <topic> is about general facts, for example:
+    - what is donald trump's birthday?
+    - what does nvidia do?
+    restrict the news search to en.wikipedia.org, get the wikipedia article and add to the context
+
+}
+
 task (completed) {
   when RESEARCH_WITH_NEWS_MODE is off, the previous accumulated context should be cleared
 }
