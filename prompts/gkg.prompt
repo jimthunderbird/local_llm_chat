@@ -1,3 +1,42 @@
+task.geolocation_search (completed) {
+  example {
+    import requests
+
+    # GDELT GEO 2.0 API endpoint
+    url = "https://api.gdeltproject.org/api/v2/geo/geo"
+
+    params = {
+        "query": "artificial intelligence",
+        # Coordinates for San Francisco with a 15km radius search
+        "lat": 37.7749,
+        "lon": -122.4194,
+        "radius": 15, 
+        "mode": "point",
+        "format": "json"
+    }
+
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    # Parse returned spatial features/points
+    if "features" in data:
+        for feature in data["features"]:
+            props = feature.get("properties", {})
+            print(f"Title: {props.get('name')}")
+            print(f"URL: {props.get('url')}\n")
+  }
+
+  - learn from {example}, when doing /gkg restaurant:san francico bayview,ca:
+    - convert "san francico bayview,ca" to its latitude and longtitude
+    - pass the latitude and longtitude to https://api.gdeltproject.org/api/v2/geo/geo
+}
+
+task.bug.bayview (completed) {
+  bug:
+  the following does not seem to work:
+  /gkg :san francisco bayview, ca 
+}
+
 task.keyword_with_location (completed) {
   - add support for /gkg <keyword>:<location>:
     for example:

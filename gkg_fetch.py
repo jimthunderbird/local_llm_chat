@@ -5,14 +5,18 @@ Usage:
     python3 gkg_fetch.py <keyword>[:<location>] [--limit 20]
 
 The location part is optional.  ``keyword`` is matched against the article
-metadata exactly as before, while ``location`` restricts the result to records
-whose GDELT locations mention that place.  Either side may be empty:
+metadata exactly as before, while ``location`` is geocoded with OpenStreetMap
+Nominatim and restricts the result to GKG records whose extracted places fall
+within a radius of those coordinates (15 km by default).  Either side may be
+empty:
 
     python3 gkg_fetch.py restaurant:"san francisco, ca"
     python3 gkg_fetch.py :"san francisco bayview, ca"
 
-Locations can be a city/region name, a comma-separated address-like string, or
-a US state abbreviation (``ca`` is expanded to ``california``).
+When geocoding is unavailable, location filtering falls back to matching the
+place name against GDELT's location metadata.  Locations can be a city/region
+name, a comma-separated address-like string, or a US state abbreviation
+(``ca`` is expanded to ``california``).
 
 The GKG is published every 15 minutes as a zipped, tab-delimited file.  This
 command downloads the newest GKG files (reusing a small on-disk cache), scans
@@ -35,6 +39,7 @@ import argparse
 import html
 import io
 import json
+import math
 import re
 import sys
 import time
@@ -43,7 +48,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlencode, urlparse
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CACHE_DIR = SCRIPT_DIR / ".chat" / "gdelt_gkg_cache"
@@ -53,6 +58,18 @@ LASTUPDATE_URLS = (
     "http://data.gdeltproject.org/gdeltv2/lastupdate.txt",
 )
 GKG_URL = "https://data.gdeltproject.org/gdeltv2/{stamp}.gkg.csv.zip"
+
+# GDELT's GEO 2.0 API (``/api/v2/geo/geo``) is no longer served, so the same
+# intent is implemented directly against the GKG files: OpenStreetMap
+# geocoding turns the place name into coordinates, and each record's parsed
+# V1Locations/V2Locations points are filtered by distance from that point.
+GEOCODE_URL = "https://nominatim.openstreetmap.org/search"
+# Nominatim rejects browser-like agents with HTTP 429; it asks for a stable
+# application identifier with a contact URL instead.
+GEOCODE_USER_AGENT = "local-llm-chat/1.0 (+https://github.com/)"
+GEOCODE_TIMEOUT = 20
+GEO_RADIUS_KM = 15.0
+GEO_BROADENED_RADIUS_KM = 50.0
 
 RESULT_LIMIT = 20
 MAX_FILES = 8          # scan at most two hours of 15-minute GKG batches
@@ -94,6 +111,15 @@ REGION_ABBREVIATIONS = {
     "ns": "nova scotia", "nt": "northwest territories", "nu": "nunavut",
     "on": "ontario", "pe": "prince edward island", "qc": "quebec",
     "sk": "saskatchewan", "yt": "yukon",
+}
+
+# Tokens too generic to identify a place on their own.  They only count when
+# part of a complete phrase (``new york``), never as the lone anchor for a
+# relaxed neighbourhood-level match.
+PLACE_STOPWORDS = {
+    "city", "county", "district", "north", "south", "east", "west",
+    "central", "greater", "metro", "metropolitan", "new", "old", "san",
+    "santa", "saint", "st", "los", "las", "el", "la", "le", "the",
 }
 
 
@@ -332,13 +358,71 @@ def metadata_summary(fields: list[str]) -> str:
     return summary
 
 
-def location_score(location_metadata: str, location: str) -> int | None:
+def _token_matches(text: str, tokens: set[str], token: str) -> bool:
+    """Return True when ``token`` (or its postal expansion) is present."""
+    expansion = REGION_ABBREVIATIONS.get(token)
+    choices = [token]
+    if expansion:
+        choices.append(expansion)
+    return any(
+        (choice in text if " " in choice else choice in tokens)
+        for choice in choices
+    )
+
+
+def _component_quality(
+    component: str, text: str, text_tokens: set[str], *, relaxed: bool
+) -> int | None:
+    """Score how well one comma-separated location component matches.
+
+    Quality 3 is an exact phrase (``san francisco``), 2 means every token
+    matched (possibly via a postal abbreviation), and -- only in relaxed mode
+    -- 1 means a distinctive part of a finer-grained name matched.  The last
+    tier is what lets ``san francisco bayview, ca`` still return San Francisco
+    stories when GDELT has no record carrying the neighbourhood name itself.
+    """
+    normalised = normalise(component)
+    if not normalised:
+        return None
+    tokens = normalised.split()
+    if normalised in text:
+        return 3
+    if all(_token_matches(text, text_tokens, token) for token in tokens):
+        return 2
+    if not relaxed:
+        return None
+
+    # A distinctive token can anchor a multi-word place name even when the
+    # finer-grained qualifier (a neighbourhood or suburb) is absent.
+    if any(
+        len(token) >= 5
+        and token not in PLACE_STOPWORDS
+        and _token_matches(text, text_tokens, token)
+        for token in tokens
+    ):
+        return 1
+    if len(tokens) >= 2 and sum(
+        _token_matches(text, text_tokens, token) for token in tokens
+    ) >= 2:
+        return 1
+    return None
+
+
+def location_score(
+    location_metadata: str, location: str, *, relaxed: bool = False
+) -> int | None:
     """Return a score when a GKG record mentions ``location``, else None.
 
     Comma-separated components are all required.  Each component may match as
     a complete phrase, or all of its tokens may occur across the combined
     location names (GDELT stores multiple places in one field).  Postal
     abbreviations are expanded, so ``ca`` matches ``California``.
+
+    With ``relaxed=True`` a component may match only its distinctive part, so
+    ``san francisco bayview, ca`` accepts a record tagged
+    ``San Francisco, California, United States`` when no record mentions
+    Bayview during the scanned window.  Relaxed matches always score below
+    exact ones, and at least one non-region component must still match.
     """
     phrase = normalise(location)
     if not phrase:
@@ -352,37 +436,196 @@ def location_score(location_metadata: str, location: str) -> int | None:
     if not components:
         components = [location]
 
+    qualities: list[int] = []
     for component in components:
-        normalised = normalise(component)
-        if not normalised:
-            continue
-        tokens = normalised.split()
-        # A multi-word component can match as a phrase; single short tokens
-        # (notably state abbreviations) must match a whole token to avoid
-        # accidental substring hits such as "ca" inside "california".
-        if len(tokens) > 1 and normalised in text:
-            continue
-        component_matches = True
-        for token in tokens:
-            expansion = REGION_ABBREVIATIONS.get(token)
-            choices = [token]
-            if expansion:
-                choices.append(expansion)
-            if any(
-                (choice in text if " " in choice else choice in text_tokens)
-                for choice in choices
-            ):
-                continue
-            component_matches = False
-            break
-        if component_matches:
-            continue
-        return None
+        quality = _component_quality(
+            component, text, text_tokens, relaxed=relaxed
+        )
+        if quality is None:
+            return None
+        qualities.append(quality)
+
+    if relaxed:
+        # Do not turn a relaxed query into a statewide match: at least one
+        # component must be a real place name rather than only a region code.
+        place_components = [
+            component
+            for component in components
+            if not (
+                len(normalise(component).split()) == 1
+                and normalise(component) in REGION_ABBREVIATIONS
+            )
+        ]
+        if not place_components:
+            return None
+        if not any(
+            quality == 1
+            for component, quality in zip(components, qualities)
+            if component in place_components
+        ) and not all(quality >= 2 for quality in qualities):
+            return None
 
     # Prefer an exact phrase match over a scattered token match.
     if phrase in text:
         return 60
-    return 35
+    if all(quality >= 2 for quality in qualities):
+        return 35
+    # Relaxed, partial-name match: still useful, noticeably below exact hits.
+    return 18
+
+
+def _haversine_km(
+    latitude: float, longitude: float, other_latitude: float, other_longitude: float
+) -> float:
+    """Return the great-circle distance between two points in kilometres."""
+    radius = 6371.0088
+    lat1 = math.radians(latitude)
+    lat2 = math.radians(other_latitude)
+    delta_lat = math.radians(other_latitude - latitude)
+    delta_lon = math.radians(other_longitude - longitude)
+    haversine = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+    )
+    return radius * 2 * math.atan2(math.sqrt(haversine), math.sqrt(1 - haversine))
+
+
+def geocode_location(location: str) -> dict | None:
+    """Resolve ``location`` to coordinates with OpenStreetMap Nominatim.
+
+    Nominatim requires an identifying User-Agent and asks clients to stay
+    below roughly one request per second.  ``gkg_fetch.py`` makes at most one
+    lookup per command, so no persistent cache is needed.  A failed lookup is
+    reported to stderr and returns ``None`` so the caller can fall back to the
+    GKG's own place-name metadata.
+    """
+    location = " ".join(str(location or "").split())
+    if not location:
+        return None
+    params = urlencode(
+        {
+            "q": location,
+            "format": "jsonv2",
+            "limit": 5,
+            "addressdetails": 1,
+        }
+    )
+    request = urllib.request.Request(
+        f"{GEOCODE_URL}?{params}",
+        headers={
+            "User-Agent": GEOCODE_USER_AGENT,
+            "Accept": "application/json",
+            "Accept-Language": "en",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=GEOCODE_TIMEOUT) as response:
+            data = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        log(f"[gkg: geocoding {location!r} failed: {exc}]")
+        return None
+
+    if not isinstance(data, list) or not data:
+        return None
+
+    # Prefer a settlement/administrative boundary over an arbitrary road or
+    # building when Nominatim returns several equally valid matches.
+    preferred_types = {
+        "city", "town", "village", "municipality", "borough", "suburb",
+        "neighbourhood", "quarter", "county", "state", "country",
+        "administrative",
+    }
+    best: tuple[float, dict] | None = None
+    for match in data:
+        if not isinstance(match, dict):
+            continue
+        try:
+            latitude = float(match.get("lat"))
+            longitude = float(match.get("lon"))
+        except (TypeError, ValueError):
+            continue
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+            continue
+        try:
+            rank = float(match.get("place_rank") or 0)
+        except (TypeError, ValueError):
+            rank = 0.0
+        address_type = str(match.get("addresstype") or match.get("type") or "")
+        score = rank + (20.0 if address_type in preferred_types else 0.0)
+        if best is None or score > best[0]:
+            best = (score, match)
+    if best is None:
+        return None
+
+    match = best[1]
+    return {
+        "query": location,
+        "latitude": float(match["lat"]),
+        "longitude": float(match["lon"]),
+        "display_name": clean_text(match.get("display_name")) or location,
+    }
+
+
+def parse_location_points(location_blocks: list[str]) -> list[tuple[float, float, str]]:
+    """Extract ``(latitude, longitude, name)`` triples from GKG location fields.
+
+    V2Locations stores nine ``#``-delimited values per place (latitude at 5,
+    longitude at 6); the legacy V1Locations field stores seven (latitude at 4,
+    longitude at 5).  V2 is parsed first and V1 fills in any gaps for older or
+    partially populated records.
+    """
+    points: list[tuple[float, float, str]] = []
+    seen: set[tuple[float, float, str]] = set()
+    layouts = ((1, 5, 6), (0, 4, 5))
+    for block_index, latitude_index, longitude_index in layouts:
+        if block_index >= len(location_blocks):
+            continue
+        block = location_blocks[block_index]
+        for part in (block or "").split(";"):
+            pieces = part.split("#")
+            if len(pieces) <= max(latitude_index, longitude_index):
+                continue
+            try:
+                latitude = float(pieces[latitude_index])
+                longitude = float(pieces[longitude_index])
+            except (TypeError, ValueError):
+                continue
+            if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+                continue
+            if latitude == 0 and longitude == 0:
+                continue
+            name = clean_text(pieces[1]) if len(pieces) > 1 else ""
+            key = (round(latitude, 4), round(longitude, 4), name.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            points.append((latitude, longitude, name))
+    return points
+
+
+def geo_location_score(
+    location_blocks: list[str],
+    latitude: float,
+    longitude: float,
+    radius_km: float,
+) -> int | None:
+    """Score a record by the closest GKG place inside ``radius_km``.
+
+    Records without any parsed place inside the radius are rejected.  Closer
+    places score higher, while still leaving enough range for keyword
+    prominence to matter when several records are within the area.
+    """
+    closest: float | None = None
+    for point_latitude, point_longitude, _ in parse_location_points(location_blocks):
+        distance = _haversine_km(
+            latitude, longitude, point_latitude, point_longitude
+        )
+        if distance <= radius_km and (closest is None or distance < closest):
+            closest = distance
+    if closest is None:
+        return None
+    proximity = max(0.0, 1.0 - closest / radius_km)
+    return 40 + int(round(35 * proximity))
 
 
 def record_score(
@@ -525,18 +768,37 @@ def parse_record(line: str) -> dict | None:
             ]
         ),
         # Location fields are kept separately so a location-only search works
-        # even when no keyword is supplied.
+        # even when no keyword is supplied.  The raw blocks retain the
+        # coordinates used by the geocoded distance filter.
         "locations": " ".join(
             [fields[9], fields[10] if len(fields) > 10 else ""]
         ),
+        "location_blocks": [
+            fields[9],
+            fields[10] if len(fields) > 10 else "",
+        ],
     }
 
 
-def search_gkg(keyword: str, location: str, limit: int) -> list[dict]:
+def search_gkg(
+    keyword: str,
+    location: str,
+    limit: int,
+    *,
+    relaxed: bool = False,
+    geo: dict | None = None,
+    radius_km: float = GEO_RADIUS_KM,
+) -> list[dict]:
     phrase = normalise(keyword)
     tokens = [token for token in phrase.split() if token]
     if not phrase and not normalise(location):
         return []
+
+    geo_latitude = None
+    geo_longitude = None
+    if geo is not None and location:
+        geo_latitude = float(geo["latitude"])
+        geo_longitude = float(geo["longitude"])
 
     base = latest_gkg_stamp() or rounded_now_stamp()
     stamps = timestamp_candidates(base, MAX_FILES + 4)
@@ -574,9 +836,19 @@ def search_gkg(keyword: str, location: str, limit: int) -> list[dict]:
                         continue
                     score += keyword_score
                 if location:
-                    place_score = location_score(
-                        record.get("locations", ""), location
-                    )
+                    if geo_latitude is not None and geo_longitude is not None:
+                        place_score = geo_location_score(
+                            record.get("location_blocks") or [],
+                            geo_latitude,
+                            geo_longitude,
+                            radius_km,
+                        )
+                    else:
+                        place_score = location_score(
+                            record.get("locations", ""),
+                            location,
+                            relaxed=relaxed,
+                        )
                     if place_score is None:
                         continue
                     score += place_score
@@ -618,6 +890,15 @@ def main(argv: list[str] | None = None) -> int:
         help="restrict results to this location (alternative to keyword:location)",
     )
     parser.add_argument("--limit", type=int, default=RESULT_LIMIT)
+    parser.add_argument(
+        "--radius",
+        type=float,
+        default=GEO_RADIUS_KM,
+        help=(
+            "search radius in kilometres around the geocoded location "
+            f"(default {GEO_RADIUS_KM:g})"
+        ),
+    )
     # The chat server always passes these for the shared /news pipeline.
     parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--lazy", action="store_true", help=argparse.SUPPRESS)
@@ -646,28 +927,89 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     limit = max(1, min(250, int(args.limit or RESULT_LIMIT)))
+    radius_km = max(0.5, min(500.0, float(args.radius or GEO_RADIUS_KM)))
+    geo = geocode_location(location) if location else None
+    if geo is not None:
+        log(
+            f"[gkg: geocoded {location!r} to "
+            f"{geo['latitude']:.5f}, {geo['longitude']:.5f} "
+            f"({geo['display_name']})]"
+        )
+    elif location:
+        log(
+            f"[gkg: could not geocode {location!r}; "
+            "falling back to GKG place-name matching]"
+        )
+
     subject = keyword or "news"
     if location:
         subject = f"{subject} in {location}"
+    description = (
+        f"Newest {limit} GDELT 2.0 GKG news records matching "
+        f"{subject!r}."
+    )
+    if geo is not None:
+        description = (
+            f"Newest {limit} GDELT 2.0 GKG news records matching "
+            f"{subject!r} within {radius_km:g} km of "
+            f"{geo['display_name']}."
+        )
     emit(
         {
             "type": "start",
             "source": "GDELT Global Knowledge Graph",
-            "description": (
-                f"Newest {limit} GDELT 2.0 GKG news records matching "
-                f"{subject!r}."
-            ),
+            "description": description,
             "feed": "https://www.gdeltproject.org/",
         }
     )
 
     started = time.monotonic()
     try:
-        records = search_gkg(keyword, location, limit)
+        records = search_gkg(
+            keyword,
+            location,
+            limit,
+            geo=geo,
+            radius_km=radius_km,
+        )
+        broadened_message = ""
+        if not records and location and geo is not None:
+            # The exact place turned up no GKG rows in the scanned batches.
+            # Retry a wider radius around the same geocoded point before
+            # falling back to place-name text matching.
+            wider_radius = max(GEO_BROADENED_RADIUS_KM, radius_km * 3.0)
+            records = search_gkg(
+                keyword,
+                location,
+                limit,
+                geo=geo,
+                radius_km=wider_radius,
+            )
+            if records:
+                broadened_message = (
+                    f"No GDELT GKG records had a place within "
+                    f"{radius_km:g} km of {geo['display_name']!r} in the "
+                    f"scanned batches; showing matches within "
+                    f"{wider_radius:g} km instead."
+                )
+        if not records and location:
+            # No story carries the exact place hierarchy in the current
+            # batches.  Retry with a relaxed neighbourhood-level match (for
+            # example, San Francisco stories for "san francisco bayview, ca").
+            records = search_gkg(keyword, location, limit, relaxed=True)
+            if records and not broadened_message:
+                broadened_message = (
+                    f"No GDELT GKG records mentioned {location!r} exactly in "
+                    "the scanned batches; showing matches for the broader "
+                    "place name instead."
+                )
     except Exception as exc:  # Keep the browser informed instead of hanging.
         log(f"[gkg: search failed: {exc}]")
         emit({"type": "error", "message": f"GDELT GKG search failed: {exc}"})
         return 1
+
+    if broadened_message:
+        emit({"type": "warning", "message": broadened_message})
 
     for index, record in enumerate(records, start=1):
         item = {
