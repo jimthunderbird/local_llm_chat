@@ -289,6 +289,21 @@ const SOURCES = [
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
     . 'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+// Google News wraps every RSS story in news.google.com/rss/articles/<id>. The
+// bare wrapper URL often answers HTTP 429 with Google's "automated queries"
+// page, even when the batchexecute exchange that resolves the article still
+// works. Google's regional news hosts serve the same global article id with a
+// different edge, so try them in order and use the first one that returns the
+// timestamp/signature handshake.
+const GOOGLE_NEWS_LOCALE = 'hl=en-US&gl=US&ceid=US:en';
+const GOOGLE_NEWS_WRAPPER_ENDPOINTS = [
+    ['host' => 'news.google.co.uk', 'query' => 'hl=en-GB&gl=GB&ceid=GB:en'],
+    ['host' => 'news.google.co.jp', 'query' => 'hl=ja&gl=JP&ceid=JP:ja'],
+    ['host' => 'news.google.com.au', 'query' => 'hl=en-AU&gl=AU&ceid=AU:en'],
+    ['host' => 'news.google.de', 'query' => 'hl=de&gl=DE&ceid=DE:de'],
+    ['host' => 'news.google.com', 'query' => GOOGLE_NEWS_LOCALE],
+];
+
 // Some publisher WAFs reject a specific browser identity (PBS answers the
 // Chrome 131 UA with an HTTP 202 JavaScript challenge) while serving the same
 // article to another mainstream browser. Retry a blocked article page with
@@ -527,6 +542,11 @@ const ARTICLE_PARTIAL_BODY_CHARS = 1200; // shorter fallback bodies may be previ
 const ARTICLE_PARTIAL_TTL = 900;
 const ARTICLE_FETCH_CONCURRENCY = 6;
 const MAX_ARTICLE_CACHE_ENTRIES = 500;
+// A resolved Google News wrapper is stable, so remember the publisher URL
+// for a week. Repeating the Google handshake for every /news refresh is both
+// slow and the fastest way to trigger Google's "automated queries" block.
+const RESOLVED_LINK_CACHE_TTL = 604800;
+const MAX_RESOLVED_LINK_CACHE_ENTRIES = 5000;
 // Some publishers put the complete story in a public RSS feed while the
 // article page itself is behind a bot challenge. Feeds also give us the lead
 // image and a usable summary when the full body stays blocked. Keyed by host
@@ -1310,11 +1330,91 @@ function parseGoogleNewsResponse(string $body): string
 }
 
 /**
+ * Read the timestamp/signature pair from a Google News wrapper page.
+ *
+ * @return array{0:int, 1:string}|null
+ */
+function parseGoogleNewsWrapperTokens(string $body): ?array
+{
+    if (!preg_match('/data-n-a-ts="(\d+)"/', $body, $timestampMatch)) {
+        return null;
+    }
+    if (!preg_match('/data-n-a-sg="([^"]+)"/', $body, $signatureMatch)) {
+        return null;
+    }
+    return [(int)$timestampMatch[1], $signatureMatch[1]];
+}
+
+/**
+ * Cache successful Google News wrapper resolutions by article id.
+ */
+function resolvedLinkCacheFile(): string
+{
+    $home = getenv('HOME');
+    if ($home === false || $home === '') {
+        $home = sys_get_temp_dir();
+    }
+    $directory = rtrim($home, '/') . '/.cache/news_fetch';
+    if (!is_dir($directory)) {
+        @mkdir($directory, 0775, true);
+    }
+    return $directory . '/resolved_links.json';
+}
+
+/**
+ * @return array<string, array{link:string, ts:int}>
+ */
+function loadResolvedLinkCache(): array
+{
+    $file = resolvedLinkCacheFile();
+    if (!is_file($file)) {
+        return [];
+    }
+    $raw = @file_get_contents($file);
+    if ($raw === false || trim($raw) === '') {
+        return [];
+    }
+    $data = json_decode($raw, true);
+    return is_array($data) ? $data : [];
+}
+
+/**
+ * @param array<string, array{link:string, ts:int}> $cache
+ */
+function saveResolvedLinkCache(array $cache): void
+{
+    $now = time();
+    foreach ($cache as $id => $entry) {
+        if (!is_array($entry)
+            || (int)($entry['ts'] ?? 0) + RESOLVED_LINK_CACHE_TTL <= $now
+        ) {
+            unset($cache[$id]);
+        }
+    }
+    if (count($cache) > MAX_RESOLVED_LINK_CACHE_ENTRIES) {
+        uasort(
+            $cache,
+            static fn(array $a, array $b): int =>
+                (int)($b['ts'] ?? 0) <=> (int)($a['ts'] ?? 0)
+        );
+        $cache = array_slice($cache, 0, MAX_RESOLVED_LINK_CACHE_ENTRIES, true);
+    }
+    @file_put_contents(
+        resolvedLinkCacheFile(),
+        json_encode($cache, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        LOCK_EX
+    );
+}
+
+/**
  * Resolve Google News redirect links to their real publisher URLs.
  *
- * Google News RSS hands out a news.google.com/rss/articles/... wrapper; the
- * wrapper page exposes a timestamp + signature that must be exchanged through
- * Google's batchexecute endpoint to obtain the underlying article URL.
+ * Google News RSS hands out a news.google.com wrapper; the wrapper page
+ * exposes a timestamp + signature that must be exchanged through Google's
+ * batchexecute endpoint to obtain the underlying article URL. Regional Google
+ * News hosts are tried in order because the US wrapper endpoint is the one
+ * most often answered with Google's "automated queries" block. Successful
+ * resolutions are cached by article id.
  *
  * @param array<int, string> $links
  * @return array<int, string>
@@ -1323,34 +1423,66 @@ function resolveGoogleNewsLinks(array $links, string $sourceKey): array
 {
     $resolved = [];
     $ids = [];
+    $now = time();
+    $cache = loadResolvedLinkCache();
+    $cacheChanged = false;
     foreach ($links as $index => $link) {
         $id = googleNewsArticleId($link);
-        if ($id !== '') {
-            $ids[$index] = $id;
+        if ($id === '') {
+            continue;
         }
+        $entry = $cache[$id] ?? null;
+        if (is_array($entry)) {
+            $cachedLink = trim((string)($entry['link'] ?? ''));
+            $cachedAt = (int)($entry['ts'] ?? 0);
+            if ($cachedLink !== ''
+                && !isGoogleNewsLink($cachedLink)
+                && $cachedAt + RESOLVED_LINK_CACHE_TTL > $now
+            ) {
+                $resolved[$index] = $cachedLink;
+                continue;
+            }
+        }
+        $ids[$index] = $id;
     }
     if (!$ids) {
         return $resolved;
     }
 
-    $requests = [];
-    foreach ($ids as $index => $id) {
-        $requests[$index] = [
-            'url' => 'https://news.google.com/rss/articles/' . $id,
-        ];
+    $tokens = [];
+    $pending = $ids;
+    foreach (GOOGLE_NEWS_WRAPPER_ENDPOINTS as $endpoint) {
+        if (!$pending) {
+            break;
+        }
+        $requests = [];
+        foreach ($pending as $index => $id) {
+            $requests[$index] = [
+                'url' => 'https://' . $endpoint['host'] . '/rss/articles/'
+                    . $id . '?' . $endpoint['query'],
+            ];
+        }
+        $pages = fetchUrlsConcurrently($requests, $sourceKey);
+        foreach ($pending as $index => $id) {
+            $page = $pages[$index] ?? null;
+            if (!is_array($page) || $page['body'] === '') {
+                continue;
+            }
+            $parsed = parseGoogleNewsWrapperTokens($page['body']);
+            if ($parsed !== null) {
+                $tokens[$index] = $parsed;
+                unset($pending[$index]);
+            }
+        }
     }
-    $pages = fetchUrlsConcurrently($requests, $sourceKey);
+    if (!$tokens) {
+        return $resolved;
+    }
 
     $posts = [];
-    foreach ($ids as $index => $id) {
-        $page = $pages[$index] ?? null;
-        if (!is_array($page) || $page['body'] === '') {
-            continue;
-        }
-        if (!preg_match('/data-n-a-ts="(\d+)"/', $page['body'], $timestampMatch)) {
-            continue;
-        }
-        if (!preg_match('/data-n-a-sg="([^"]+)"/', $page['body'], $signatureMatch)) {
+    foreach ($tokens as $index => [$timestamp, $signature]) {
+        $id = $ids[$index] ?? '';
+        if ($id === '') {
             continue;
         }
 
@@ -1372,8 +1504,8 @@ function resolveGoogleNewsLinks(array $links, string $sourceKey): array
                 0,
             ],
             $id,
-            (int)$timestampMatch[1],
-            $signatureMatch[1],
+            $timestamp,
+            $signature,
         ];
         $inner = json_encode($garturlreq, JSON_UNESCAPED_SLASHES);
         $outer = json_encode([[["Fbv4je", $inner]]], JSON_UNESCAPED_SLASHES);
@@ -1381,7 +1513,8 @@ function resolveGoogleNewsLinks(array $links, string $sourceKey): array
             continue;
         }
         $posts[$index] = [
-            'url' => 'https://news.google.com/_/DotsSplashUi/data/batchexecute',
+            'url' => 'https://news.google.com/_/DotsSplashUi/data/batchexecute?'
+                . GOOGLE_NEWS_LOCALE,
             'method' => 'POST',
             'body' => http_build_query(['f.req' => $outer]),
             'headers' => [
@@ -1400,9 +1533,57 @@ function resolveGoogleNewsLinks(array $links, string $sourceKey): array
         $url = parseGoogleNewsResponse((string)$response['body']);
         if ($url !== '' && preg_match('{^https?://}i', $url)) {
             $resolved[$index] = $url;
+            $id = $ids[$index] ?? '';
+            if ($id !== '') {
+                $cache[$id] = ['link' => $url, 'ts' => $now];
+                $cacheChanged = true;
+            }
         }
     }
+    if ($cacheChanged) {
+        saveResolvedLinkCache($cache);
+    }
     return $resolved;
+}
+
+/**
+ * Replace Google News wrapper links in a story batch with publisher URLs.
+ *
+ * Google News RSS item links point at news.google.com/articles/<id>. Opening
+ * one directly in a browser can show Google's "automated queries" block,
+ * especially when the feed was fetched programmatically a moment earlier.
+ * Resolving the publisher URL before the item is rendered keeps every visible
+ * link (list title, Open article, Learn metadata) on the publisher's site.
+ * The resolver only fetches the lightweight wrapper handshake; it never
+ * downloads the article body.
+ *
+ * @param list<array<string, mixed>> $stories
+ * @return list<array<string, mixed>>
+ */
+function resolveGoogleNewsStoryLinks(array $stories, string $sourceKey): array
+{
+    $links = [];
+    foreach ($stories as $index => $story) {
+        $link = trim((string)($story['link'] ?? ''));
+        if ($link !== '' && isGoogleNewsLink($link)) {
+            $links[$index] = $link;
+        }
+    }
+    if (!$links) {
+        return $stories;
+    }
+
+    $resolved = resolveGoogleNewsLinks($links, $sourceKey);
+    foreach ($resolved as $index => $publisherUrl) {
+        if (!isset($stories[$index]) || $publisherUrl === '') {
+            continue;
+        }
+        if (isGoogleNewsLink($publisherUrl)) {
+            continue;
+        }
+        $stories[$index]['link'] = $publisherUrl;
+    }
+    return $stories;
 }
 
 /**
@@ -4665,6 +4846,10 @@ function storyStream(array $sourceKeys, ?int $limit, ?string $section, bool $laz
                 $selected = enrichStoryContent($selected, $sourceKey);
                 $selected = enrichStoryImages($selected, $sourceKey);
             }
+            // Replace Google News redirect wrappers before either the web UI
+            // or the human reader sees them. This also repairs a wrapper link
+            // that came from an older article-cache entry.
+            $selected = resolveGoogleNewsStoryLinks($selected, $sourceKey);
             yield [
                 'source_key' => $sourceKey,
                 'source_label' => $source['label'],

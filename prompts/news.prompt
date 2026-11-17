@@ -65,6 +65,17 @@ task (persistent) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
+task.fix_automated_queries (completed) {
+  when clicking on a new result entry url, i got:
+  ```
+  We're sorry...
+  ... but your computer or network may be sending automated queries. To protect our users, we can't process your request right now.
+
+  See Google Help for more information.
+  ```
+  please find a way to make sure this is not happening 
+}
+
 task.php_fix (completed) {
   bug:
   PHP Warning: Undefined variable $feedPreview in /Users/jhuang/airesearch/local_llm_chat/news_fetch.php on line 4327

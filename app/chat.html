@@ -1592,6 +1592,23 @@
     background: #1b2a38;
     outline: none;
   }
+  .game-location-suggestion-kind {
+    display: inline-block;
+    margin-right: 7px;
+    padding: 1px 5px;
+    border-radius: 999px;
+    background: #163246;
+    color: #9fd0f5;
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    vertical-align: 1px;
+  }
+  .game-location-suggestion.is-place .game-location-suggestion-kind {
+    background: #173a2d;
+    color: #a9e7bd;
+  }
   .game-location-status {
     flex: 0 1 auto;
     color: var(--dim);
@@ -4030,7 +4047,7 @@
         <label class="game-location-label" for="game-location-input">Set Current Location</label>
         <div class="game-location-field">
           <input id="game-location-input" class="game-location-input" type="text" autocomplete="off" spellcheck="false" placeholder="Search an address or place" aria-autocomplete="list" aria-controls="game-location-suggestions">
-          <div id="game-location-suggestions" class="game-location-suggestions" role="listbox" aria-label="Address suggestions" hidden></div>
+          <div id="game-location-suggestions" class="game-location-suggestions" role="listbox" aria-label="Place and address suggestions" hidden></div>
         </div>
         <div id="game-location-status" class="game-location-status" aria-live="polite"></div>
       </div>
@@ -7905,7 +7922,7 @@ function renderNewsList(entry) {
       titleEl.className = "news-title";
       titleEl.textContent = item.title;
       if (item.link) {
-        titleEl.href = item.link;
+        titleEl.href = newsOpenHref(item.link, item.title);
         titleEl.target = "_blank";
         titleEl.rel = "noopener noreferrer";
         titleEl.title = "Read this story in a popup";
@@ -8235,8 +8252,18 @@ function renderGameLocationSuggestions() {
       "aria-selected", index === search.active ? "true" : "false"
     );
     button.classList.toggle("is-active", index === search.active);
+    const kind = destination.suggestion_kind === "place"
+      ? "place"
+      : "address";
+    button.classList.toggle("is-place", kind === "place");
     button.title = String(destination.display_name || "");
-    button.textContent = String(destination.display_name || "");
+    const badge = document.createElement("span");
+    badge.className = "game-location-suggestion-kind";
+    badge.textContent = kind === "place" ? "Place" : "Address";
+    button.appendChild(badge);
+    button.appendChild(
+      document.createTextNode(String(destination.display_name || ""))
+    );
     button.addEventListener("mousedown", (event) => {
       event.preventDefault();
       chooseGameLocation(destination);
@@ -8281,7 +8308,9 @@ function chooseGameLocation(destination) {
     latitude,
     longitude,
     link: osmLink,
-    category: "Selected address",
+    category: destination.suggestion_kind === "place"
+      ? "Selected place"
+      : "Selected address",
   });
 }
 
@@ -8295,7 +8324,7 @@ function lookupGameLocation(query, autoChoose = false) {
   }
   const gameName = String(state.gameName || "").trim();
   if (!gameName) {
-    setGameLocationStatus("Could not search addresses: the game name is missing.", true);
+    setGameLocationStatus("Could not search places and addresses: the game name is missing.", true);
     return;
   }
   window.clearTimeout(gameLocationSearch.timer);
@@ -8304,7 +8333,7 @@ function lookupGameLocation(query, autoChoose = false) {
   gameLocationSearch.items = [];
   gameLocationSearch.active = -1;
   renderGameLocationSuggestions();
-  setGameLocationStatus(`Searching for ${trimmed}…`);
+  setGameLocationStatus(`Searching places and addresses for ${trimmed}…`);
   const generation = state.generation;
   const params = new URLSearchParams({
     game: gameName,
@@ -8328,16 +8357,30 @@ function lookupGameLocation(query, autoChoose = false) {
       gameLocationSearch.active = -1;
       renderGameLocationSuggestions();
       if (!items.length) {
-        setGameLocationStatus(`No address in this explorer's area matched ${trimmed}.`, true);
+        setGameLocationStatus(
+          `No place or address in this explorer's area matched ${trimmed}.`,
+          true
+        );
         return;
       }
       if (autoChoose) {
         chooseGameLocation(items[0]);
         return;
       }
-      setGameLocationStatus(
-        `${items.length} address${items.length === 1 ? "" : "es"} found — choose one.`
-      );
+      const placeCount = items.filter(
+        (item) => item.suggestion_kind === "place"
+      ).length;
+      const addressCount = items.length - placeCount;
+      const counts = [];
+      if (placeCount) {
+        counts.push(`${placeCount} place${placeCount === 1 ? "" : "s"}`);
+      }
+      if (addressCount) {
+        counts.push(
+          `${addressCount} address${addressCount === 1 ? "" : "es"}`
+        );
+      }
+      setGameLocationStatus(`${counts.join(" and ")} found — choose one.`);
     })
     .catch((error) => {
       if (!gameState || gameState.generation !== generation) return;
@@ -8346,7 +8389,7 @@ function lookupGameLocation(query, autoChoose = false) {
       gameLocationSearch.active = -1;
       renderGameLocationSuggestions();
       setGameLocationStatus(
-        `Address search unavailable: ${error?.message || String(error)}`,
+        `Place and address search unavailable: ${error?.message || String(error)}`,
         true
       );
     });
@@ -13755,6 +13798,22 @@ function appendRedditEmbed(item, target, open = false) {
   (target || newsBodyEl).appendChild(details);
 }
 
+const NEWS_GOOGLE_WRAPPER_RE = /^https?:\/\/news\.google\.com\/(?:rss\/)?articles\//i;
+
+/* Google News RSS hands out news.google.com wrapper links. Opening one
+ * directly can show Google's "automated queries" page. The server can
+ * resolve the wrapper without the browser touching Google, so route any
+ * remaining wrapper through /api/news_open and let it redirect to the
+ * publisher. Publisher links are returned unchanged. */
+function newsOpenHref(url, title = "") {
+  const value = String(url || "").trim();
+  if (!value) return "";
+  if (!NEWS_GOOGLE_WRAPPER_RE.test(value)) return value;
+  const headline = String(title || "").trim();
+  return `/api/news_open?url=${encodeURIComponent(value)}`
+    + (headline ? `&title=${encodeURIComponent(headline)}` : "");
+}
+
 function renderNewsModal(item) {
   if (newsPanelEl) {
     newsPanelEl.classList.toggle(
@@ -13774,7 +13833,7 @@ function renderNewsModal(item) {
   if (item.published) metaParts.push(formatNewsDate(item.published));
   newsMetaEl.textContent = metaParts.join(" · ");
   if (item.link) {
-    newsLinkEl.href = item.link;
+    newsLinkEl.href = newsOpenHref(item.link, item.title);
     newsLinkEl.textContent = item.linkLabel
       || (item.docs
         ? `Open on ${item.docsLabel || "MDN"} ↗`
@@ -15433,7 +15492,7 @@ function renderGamePlaceLocalNews(item) {
       title.className = "news-title";
       title.textContent = story.title || "(untitled)";
       if (story.link) {
-        title.href = story.link;
+        title.href = newsOpenHref(story.link, story.title);
         title.target = "_blank";
         title.rel = "noopener noreferrer";
         title.title = "Read this story in a popup";
@@ -15683,7 +15742,13 @@ function renderStackoverflowAnswers(item) {
 function openNewsStory(newsId, fallbackUrl = "", fallbackTitle = "") {
   const id = String(newsId || "");
   if (!/^news_[A-Za-z0-9]+$/.test(id)) {
-    if (fallbackUrl) window.open(fallbackUrl, "_blank", "noopener,noreferrer");
+    if (fallbackUrl) {
+      window.open(
+        newsOpenHref(fallbackUrl, fallbackTitle),
+        "_blank",
+        "noopener,noreferrer"
+      );
+    }
     return;
   }
   fetch(`/api/news_item?id=${encodeURIComponent(id)}`)
@@ -15711,7 +15776,11 @@ function openNewsStory(newsId, fallbackUrl = "", fallbackTitle = "") {
     })
     .catch(() => {
       if (fallbackUrl) {
-        window.open(fallbackUrl, "_blank", "noopener,noreferrer");
+        window.open(
+          newsOpenHref(fallbackUrl, fallbackTitle),
+          "_blank",
+          "noopener,noreferrer"
+        );
       }
     });
 }

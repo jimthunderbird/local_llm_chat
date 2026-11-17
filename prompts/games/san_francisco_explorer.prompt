@@ -3,6 +3,12 @@ youtube_video_search_prefix: San Francisco
 game_data_file: {diretory_of_this_prompt}/../../.chat/games/san_francisco_explorer.json
 exploration_bounds: south=32.5343, west=-124.4096, north=42.0095, east=-114.1308
 
+task.current_location_hinting_with_places (completed) {
+  reference task.set_current_location_with_auto_hinting_dropdown:
+  - please add places auto hinting on top of the existing auto hinting
+    for example: I should be able to auto hint on "Land End Trail"
+}
+
 task.remove_top_link (completed) {
   currently, in the main explorer, we have a link in the top right of the modal like: 
   <a id="game-start-link" class="news-link" href="https://www.openstreetmap.org/way/237055578" target="_blank" rel="noopener noreferrer">Open China Basin, 185, Mission Bay, San Francisco, California, United States ↗</a>

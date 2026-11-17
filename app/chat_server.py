@@ -71,6 +71,8 @@ Endpoints:
     GET  /api/news_item          ?id=<news_id> full learned story for the modal
     GET  /api/news_article       ?url=<article_url> fetch a story body for the
                                   detail modal when the list feed had no body
+    GET  /api/news_open          ?url=<article_url> redirect to the publisher,
+                                  resolving a Google News wrapper first
     GET  /api/reddit_article     ?url=<post_url> fetch a Reddit post body and
                                   comments for the /reddit detail modal
     GET  /api/stock_reddit       ?symbol=<ticker> fetch unique Reddit posts from
@@ -79,10 +81,11 @@ Endpoints:
                                   and coordinate lookup for /map's To location tab
                                   optional viewbox=<west>,<south>,<east>,<north>,
                                   bounded=1, and countrycodes=<cc[,cc]>
-    GET  /api/game_geocode       ?game=<game_name>&q=<address>&limit=<n>
-                                  address autocomplete constrained to one
-                                  game's exploration boundary for the /game
-                                  Set Current Location dropdown
+    GET  /api/game_geocode       ?game=<game_name>&q=<place or address>&limit=<n>
+                                  combined place and address autocomplete
+                                  constrained to one game's exploration
+                                  boundary for the /game Set Current Location
+                                  dropdown
     GET  /api/map_restaurants    ?lat=<latitude>&lon=<longitude> fetch nearby
                                   restaurants from the Overpass API for /map
     GET  /api/game_nearby        ?lat=<latitude>&lon=<longitude> fetch nearby
@@ -330,7 +333,7 @@ WEB_COMMANDS = {
     "/mdn": "search MDN Web Docs by keywords: /mdn <keywords>",
     "/britanica": "search Encyclopædia Britannica by keywords: /britanica <keywords>",
     "/googlenews": "search Google News for the latest stories: /googlenews <keywords>",
-    "/gkg": "search the latest GDELT 2.0 Global Knowledge Graph news: /gkg <keyword>[:<location>] (for example /gkg restaurant:san francisco, ca)",
+    "/gkg": "search the latest GDELT 2.0 Global Knowledge Graph news: /gkg <keyword>[:<location>] (the location is geocoded and searched within 15 km; for example /gkg restaurant:san francisco, ca)",
     "/howstuffworks": "search HowStuffWorks articles by keywords: /howstuffworks <keywords>",
     "/wikivoyage": "search Wikivoyage destinations by keywords: /wikivoyage <keywords>",
     "/map": "geocode a location with OpenStreetMap and list nearby Wikipedia articles: /map <location>",
@@ -3898,6 +3901,11 @@ def fetch_wikivoyage_article(url: str, title: str = "") -> dict:
 # contact URL is used because example.com addresses are rejected with HTTP 403.
 MAP_USER_AGENT = "local-llm-chat/1.0 (+https://github.com/)"
 NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search"
+# Photon (Komoot) is a Nominatim-backed geocoder with fuzzy prefix matching.
+# It recognizes place names such as "Land End Trail" even when Nominatim's
+# exact address search finds nothing, so it is used for the /game place
+# suggestions layered above the existing address suggestions.
+PHOTON_SEARCH_URL = "https://photon.komoot.io/api/"
 # Address autocomplete for /map's "To location" tab. Nominatim asks clients to
 # cache results and to stay below roughly one request per second, so recent
 # prefixes are served from this small in-process cache.
@@ -4186,6 +4194,209 @@ def geocode_locations(
             MAP_GEOCODE_CACHE.pop(oldest, None)
         MAP_GEOCODE_CACHE[cache_key] = (now, [dict(item) for item in results])
     return results
+
+
+def _game_place_display_name(properties: dict) -> str:
+    """Build a readable suggestion label from Photon feature properties."""
+    name = _map_plain_text(properties.get("name"))
+    if not name:
+        name = _map_plain_text(properties.get("street"))
+    if not name:
+        return ""
+    parts = [name]
+    seen = {name.casefold()}
+    for key in ("street", "city", "state"):
+        value = _map_plain_text(properties.get(key))
+        if value and value.casefold() not in seen:
+            parts.append(value)
+            seen.add(value.casefold())
+    return ", ".join(parts)
+
+
+def search_game_place_suggestions(
+    query: str,
+    limit: int = MAP_GEOCODE_LIMIT,
+    *,
+    bbox: object = None,
+) -> list[dict]:
+    """Find named places for the /game current-location autocomplete.
+
+    Photon resolves fuzzy place names (for example a misspelled trail name)
+    and returns OSM nodes, ways, and relations with coordinates. The result
+    shape matches ``geocode_locations`` so the browser can use one suggestion
+    list and one selection handler for both places and addresses.
+    """
+    query = " ".join(str(query or "").split())
+    if not query:
+        return []
+    limit = max(1, min(int(limit), 10))
+    normalized_bbox = _geocode_viewbox(bbox)
+
+    params: dict[str, object] = {
+        "q": query,
+        "limit": limit,
+        "lang": "en",
+    }
+    if normalized_bbox:
+        west, south, east, north = normalized_bbox
+        params["bbox"] = f"{west},{south},{east},{north}"
+
+    try:
+        response = requests.get(
+            PHOTON_SEARCH_URL,
+            params=params,
+            headers={
+                **chat.HTTP_HEADERS,
+                "User-Agent": MAP_USER_AGENT,
+                "Accept-Language": "en",
+            },
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"Place search failed: {exc}") from exc
+
+    features = data.get("features") if isinstance(data, dict) else None
+    results: list[dict] = []
+    seen: set[tuple[str, int, int]] = set()
+    for feature in features if isinstance(features, list) else []:
+        if not isinstance(feature, dict):
+            continue
+        properties = feature.get("properties")
+        geometry = feature.get("geometry")
+        if not isinstance(properties, dict) or not isinstance(geometry, dict):
+            continue
+        display_name = _game_place_display_name(properties)
+        coordinates = geometry.get("coordinates")
+        if (
+            not display_name
+            or not isinstance(coordinates, list)
+            or len(coordinates) < 2
+        ):
+            continue
+        try:
+            longitude = float(coordinates[0])
+            latitude = float(coordinates[1])
+        except (TypeError, ValueError):
+            continue
+        key = (display_name.casefold(), round(latitude, 6), round(longitude, 6))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        raw_osm_type = str(properties.get("osm_type") or "").strip().upper()
+        osm_type = {
+            "N": "node",
+            "W": "way",
+            "R": "relation",
+        }.get(raw_osm_type, raw_osm_type.lower())
+        osm_id = properties.get("osm_id")
+        if osm_type and osm_id is not None:
+            link = f"https://www.openstreetmap.org/{osm_type}/{osm_id}"
+        else:
+            link = (
+                f"https://www.openstreetmap.org/?mlat={latitude:.6f}"
+                f"&mlon={longitude:.6f}#map=18/{latitude:.6f}/{longitude:.6f}"
+            )
+        osm_value = _map_plain_text(
+            properties.get("osm_value")
+            or properties.get("type")
+            or properties.get("osm_key")
+        )
+        category = osm_value.replace("_", " ").strip().title() or "Place"
+        results.append(
+            {
+                "query": query,
+                "display_name": display_name,
+                "latitude": latitude,
+                "longitude": longitude,
+                "category": category,
+                "type": osm_value,
+                "osm_type": osm_type,
+                "osm_id": osm_id,
+                "address": {
+                    key: _map_plain_text(properties.get(key))
+                    for key in (
+                        "street", "district", "city", "state",
+                        "postcode", "country",
+                    )
+                    if properties.get(key)
+                },
+                "suggestion_kind": "place",
+            }
+        )
+    return results
+
+
+def search_game_geocode_suggestions(
+    game: dict,
+    query: str,
+    limit: int = MAP_GEOCODE_LIMIT,
+) -> list[dict]:
+    """Return place suggestions followed by address suggestions for /game."""
+    bounds = game.get("bounds")
+    viewbox = None
+    if isinstance(bounds, dict):
+        viewbox = (
+            bounds.get("west"),
+            bounds.get("south"),
+            bounds.get("east"),
+            bounds.get("north"),
+        )
+
+    places: list[dict] = []
+    addresses: list[dict] = []
+    place_error: Exception | None = None
+    address_error: Exception | None = None
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        places_future = executor.submit(
+            search_game_place_suggestions,
+            query,
+            limit,
+            bbox=viewbox,
+        )
+        addresses_future = executor.submit(
+            geocode_locations,
+            query,
+            limit,
+            viewbox=viewbox,
+            bounded=viewbox is not None,
+        )
+        try:
+            places = places_future.result()
+        except Exception as exc:  # noqa: BLE001 - report one side's failure
+            place_error = exc
+        try:
+            addresses = addresses_future.result()
+        except Exception as exc:  # noqa: BLE001 - report one side's failure
+            address_error = exc
+
+    if place_error is not None and address_error is not None:
+        raise RuntimeError(
+            f"Place and address search failed: {place_error}; {address_error}"
+        )
+    for item in addresses:
+        item["suggestion_kind"] = "address"
+
+    # Places are the new layer and appear above the existing addresses. Drop
+    # an address that is the same named feature at the same coordinate.
+    seen: set[tuple[str, int, int]] = set()
+    combined: list[dict] = []
+    for item in [*places, *addresses]:
+        try:
+            key = (
+                str(item.get("display_name") or "").casefold(),
+                round(float(item.get("latitude")), 6),
+                round(float(item.get("longitude")), 6),
+            )
+        except (TypeError, ValueError):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        combined.append(item)
+    return combined
 
 
 def geocode_location(location: str) -> dict:
@@ -10259,6 +10470,14 @@ def fetch_news_article(url: str, title: str = "") -> dict:
     url = str(url or "").strip()
     if not re.match(r"^https?://", url, re.IGNORECASE):
         raise ValueError("Missing or invalid article URL")
+    # Resolve a Google News wrapper before asking news_fetch.php for the body.
+    # This avoids downloading through a URL that Google may answer with its
+    # "automated queries" block, and makes the returned canonical link the
+    # publisher URL that the modal can offer as "Open article".
+    if GOOGLE_NEWS_ARTICLE_RE.match(url):
+        resolved = resolve_google_news_url(url)
+        if resolved:
+            url = resolved
     command = [
         "php",
         str(SCRIPT_DIR / "news_fetch.php"),
@@ -10629,6 +10848,27 @@ REDDIT_ENTITY_STOPWORDS = frozenset(
 GOOGLE_NEWS_ARTICLE_RE = re.compile(
     r"^https?://news\.google\.com/(?:rss/)?articles/", re.IGNORECASE
 )
+GOOGLE_NEWS_LOCALE_QUERY = "hl=en-US&gl=US&ceid=US:en"
+# The main news.google.com wrapper endpoint can answer HTTP 429 with Google's
+# "automated queries" page while the article id remains resolvable through a
+# regional Google News edge. Try the English regional endpoints first, then
+# the US endpoint as a final check.
+GOOGLE_NEWS_WRAPPER_ENDPOINTS = (
+    ("news.google.co.uk", "hl=en-GB&gl=GB&ceid=GB:en"),
+    ("news.google.co.jp", "hl=ja&gl=JP&ceid=JP:ja"),
+    ("news.google.com.au", "hl=en-AU&gl=AU&ceid=AU:en"),
+    ("news.google.de", "hl=de&gl=DE&ceid=DE:de"),
+    ("news.google.com", GOOGLE_NEWS_LOCALE_QUERY),
+)
+GOOGLE_NEWS_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+# Resolving a wrapper takes two Google requests. Cache successful publisher
+# URLs by article id so a repeated /news or /reddit result does not make the
+# same handshake again (and does not contribute to Google's rate limiting).
+_GOOGLE_NEWS_RESOLUTION_CACHE: dict[str, tuple[float, str]] = {}
+_GOOGLE_NEWS_RESOLUTION_TTL = 86400
 
 
 def _is_reddit_url(url: str) -> bool:
@@ -11138,12 +11378,12 @@ def _reddit_result_keys(payload: dict) -> tuple[str, ...]:
 
 
 def resolve_google_news_url(url: str) -> str:
-    """Resolve a news.google.com/rss/articles/... wrapper to its publisher.
+    """Resolve a news.google.com wrapper to its real publisher URL.
 
     Google exposes a timestamp and signature in the wrapper page that must be
     exchanged through its batchexecute endpoint. This mirrors the resolution
-    news_fetch.php uses for Google News feeds, so a Reddit result can be
-    opened even when the feed itself did not resolve the wrapper.
+    news_fetch.php uses for Google News feeds, so a Reddit result or a stored
+    story link can be opened without sending the browser to Google.
     """
     url = str(url or "").strip()
     match = re.match(
@@ -11154,19 +11394,34 @@ def resolve_google_news_url(url: str) -> str:
     if not match:
         return ""
     article_id = match.group(1)
+    cached = _GOOGLE_NEWS_RESOLUTION_CACHE.get(article_id)
+    if cached and time.time() - cached[0] < _GOOGLE_NEWS_RESOLUTION_TTL:
+        return cached[1]
+
     headers = {
-        "User-Agent": REDDIT_USER_AGENT,
+        "User-Agent": GOOGLE_NEWS_USER_AGENT,
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
     }
-    try:
-        page = requests.get(
-            url, headers=headers, timeout=REDDIT_REQUEST_TIMEOUT
+    timestamp = None
+    signature = None
+    for host, locale in GOOGLE_NEWS_WRAPPER_ENDPOINTS:
+        page_url = (
+            f"https://{host}/rss/articles/"
+            f"{quote(article_id, safe='')}?{locale}"
         )
-        page.raise_for_status()
-    except requests.RequestException:
-        return ""
-    timestamp = re.search(r'data-n-a-ts="(\d+)"', page.text)
-    signature = re.search(r'data-n-a-sg="([^"]+)"', page.text)
+        try:
+            page = requests.get(
+                page_url, headers=headers, timeout=REDDIT_REQUEST_TIMEOUT
+            )
+        except requests.RequestException:
+            continue
+        if page.status_code >= 400:
+            continue
+        timestamp = re.search(r'data-n-a-ts="(\d+)"', page.text)
+        signature = re.search(r'data-n-a-sg="([^"]+)"', page.text)
+        if timestamp and signature:
+            break
     if not timestamp or not signature:
         return ""
 
@@ -11195,10 +11450,11 @@ def resolve_google_news_url(url: str) -> str:
     outer = json.dumps([[['Fbv4je', inner]]], separators=(",", ":"))
     try:
         response = requests.post(
-            "https://news.google.com/_/DotsSplashUi/data/batchexecute",
+            "https://news.google.com/_/DotsSplashUi/data/batchexecute?"
+            + GOOGLE_NEWS_LOCALE_QUERY,
             data={"f.req": outer},
             headers={
-                "User-Agent": REDDIT_USER_AGENT,
+                "User-Agent": GOOGLE_NEWS_USER_AGENT,
                 "Content-Type": (
                     "application/x-www-form-urlencoded;charset=UTF-8"
                 ),
@@ -11234,6 +11490,10 @@ def resolve_google_news_url(url: str) -> str:
             and isinstance(inner_data[1], str)
             and re.match(r"^https?://", inner_data[1], re.IGNORECASE)
         ):
+            _GOOGLE_NEWS_RESOLUTION_CACHE[article_id] = (
+                time.time(),
+                inner_data[1],
+            )
             return inner_data[1]
     return ""
 
@@ -15902,6 +16162,21 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     def _send_error_json(self, message: str, status: int = 400) -> None:
         self._send_json({"error": message}, status)
 
+    def _send_redirect(self, location: str, status: int = 302) -> None:
+        """Send the browser to a validated external URL without a Google hop."""
+        if (
+            not re.match(r"^https?://", location, re.IGNORECASE)
+            or "\r" in location
+            or "\n" in location
+        ):
+            self._send_error_json("Invalid redirect URL", 400)
+            return
+        self.send_response(status)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _send_wav(self, data: bytes) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "audio/wav")
@@ -16084,6 +16359,22 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             item["complete"] = True
             self._send_json(item)
             return
+        if path == "/api/news_open":
+            params = parse_qs(parsed.query)
+            url = (params.get("url") or [""])[0].strip()
+            if not re.match(r"^https?://", url, re.IGNORECASE):
+                self._send_error_json("Missing or invalid article URL", 400)
+                return
+            target = url
+            if GOOGLE_NEWS_ARTICLE_RE.match(url):
+                target = resolve_google_news_url(url)
+                if not target:
+                    self._send_error_json(
+                        "Could not resolve the Google News link", 502
+                    )
+                    return
+            self._send_redirect(target)
+            return
         if path == "/api/news_article":
             params = parse_qs(parsed.query)
             url = (params.get("url") or [""])[0].strip()
@@ -16160,22 +16451,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 limit = int(float(raw_limit)) if raw_limit else MAP_GEOCODE_LIMIT
             except (TypeError, ValueError):
                 limit = MAP_GEOCODE_LIMIT
-            bounds = game.get("bounds")
-            viewbox = None
-            if isinstance(bounds, dict):
-                viewbox = (
-                    bounds.get("west"),
-                    bounds.get("south"),
-                    bounds.get("east"),
-                    bounds.get("north"),
-                )
             try:
-                items = geocode_locations(
-                    query,
-                    limit,
-                    viewbox=viewbox,
-                    bounded=viewbox is not None,
-                )
+                items = search_game_geocode_suggestions(game, query, limit)
             except RuntimeError as exc:
                 self._send_error_json(str(exc), 502)
                 return
@@ -21193,11 +21470,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         gkg_fetch.py downloads the latest 15-minute GKG files, matches the
         keyword against each article's title, themes, people, organizations,
         locations, and URL, and streams at most 20 records as the same
-        news-style list used by /news. A ``:location`` suffix restricts the
-        results to stories whose GDELT locations mention that place; either
-        side may be empty (for example ``/gkg :san francisco bayview, ca``).
-        Opening a story fetches the full article body through the normal
-        /api/news_article path.
+        news-style list used by /news. A ``:location`` suffix is geocoded with
+        OpenStreetMap Nominatim and restricts the results to stories whose
+        GDELT places fall within 15 km of those coordinates; if geocoding is
+        unavailable it falls back to matching the place name in GDELT's
+        location metadata. Either side may be empty (for example
+        ``/gkg :san francisco bayview, ca``). Opening a story fetches the full
+        article body through the normal /api/news_article path.
         """
         keywords = " ".join(argument.split())
         if not keywords:
