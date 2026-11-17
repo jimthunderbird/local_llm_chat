@@ -1,0 +1,7 @@
+task (completed) {
+  create new command: /gkg <keyword> {
+    - learn from /news search <keyword>
+      use GDELT 2.0 Global Knowledge Graph (GKG) to search latest news containg <keyword>, limit to 20 records
+    - the UI/UX should be similar to /news
+  }
+}

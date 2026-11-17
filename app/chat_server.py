@@ -4,7 +4,7 @@
 The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /youtube, /news, /mdn, /britanica,
-/stackoverflow, /reddit, /tablelog, /stock, /googlenews, /medium,
+/stackoverflow, /reddit, /tablelog, /stock, /googlenews, /gkg, /medium,
 /gutenberg, /openlibrary, /changelog, /wikivoyage, /map, /game, /wiki,
 /wiki_article, /deepresearch, /write_a_book, /books,
 /article, /dict, /dictionary_history, and /ask. The browser is a
@@ -330,6 +330,7 @@ WEB_COMMANDS = {
     "/mdn": "search MDN Web Docs by keywords: /mdn <keywords>",
     "/britanica": "search Encyclopædia Britannica by keywords: /britanica <keywords>",
     "/googlenews": "search Google News for the latest stories: /googlenews <keywords>",
+    "/gkg": "search the latest GDELT 2.0 Global Knowledge Graph news: /gkg <keywords>",
     "/howstuffworks": "search HowStuffWorks articles by keywords: /howstuffworks <keywords>",
     "/wikivoyage": "search Wikivoyage destinations by keywords: /wikivoyage <keywords>",
     "/map": "geocode a location with OpenStreetMap and list nearby Wikipedia articles: /map <location>",
@@ -7236,6 +7237,7 @@ COMMAND_ARGUMENTS = {
     "/mdn",
     "/britanica",
     "/googlenews",
+    "/gkg",
     "/howstuffworks",
     "/tablelog",
     "/stock",
@@ -18713,6 +18715,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_stackoverflow(argument)
         elif name == "/googlenews":
             self._command_googlenews(argument)
+        elif name == "/gkg":
+            self._command_gkg(argument)
         elif name == "/howstuffworks":
             self._command_howstuffworks(argument)
         elif name == "/tablelog":
@@ -21181,6 +21185,30 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             ["--source", "googlenews", "--search", keywords],
         )
 
+    def _command_gkg(self, argument: str) -> None:
+        """Search the newest GDELT 2.0 Global Knowledge Graph batches.
+
+        Usage: /gkg <keywords>
+        gkg_fetch.py downloads the latest 15-minute GKG files, matches the
+        keyword against each article's title, themes, people, organizations,
+        locations, and URL, and streams at most 20 records as the same
+        news-style list used by /news. Opening a story fetches the full
+        article body through the normal /api/news_article path.
+        """
+        keywords = " ".join(argument.split())
+        if not keywords:
+            self._sse_text(
+                "output",
+                "\nUsage: /gkg <keywords>\n"
+                "Example: /gkg open source llm\n",
+            )
+            return
+        self._stream_news_events(
+            "gkg_fetch.py",
+            "/gkg",
+            ["--limit", "20", keywords],
+        )
+
     def _command_howstuffworks(self, argument: str) -> None:
         """Search HowStuffWorks articles by keywords.
 
@@ -21602,7 +21630,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             return 0
 
-        argv = ["php", str(script), "--json", "--lazy", *extra_argv]
+        argv = (
+            [sys.executable, str(script), "--json", "--lazy", *extra_argv]
+            if script.suffix == ".py"
+            else ["php", str(script), "--json", "--lazy", *extra_argv]
+        )
         log_prefix = command.lstrip("/")
         process = None
         item_count = 0
