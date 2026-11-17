@@ -603,6 +603,85 @@ WRITE_A_BOOK_EVIDENCE_CHARS = 12_000
 WRITE_A_BOOK_DIGEST_CHARS = 8_000
 WRITE_A_BOOK_REFERENCE_MAP_CHARS = 6_000
 
+# task.blocking_detection in prompts/write_a_book.prompt: every research
+# article fetch reports whether the body was read and, when it was not,
+# distinguishes Google News' "automated queries" interstitial from a publisher
+# paywall or bot challenge. These markers are only applied to failure details
+# and very short extracted bodies, so a real article that discusses blocking
+# is not mistaken for one.
+_BOOK_GOOGLE_NEWS_BLOCK_MARKERS = (
+    "automated queries",
+    "our systems have detected unusual traffic",
+)
+_BOOK_WEBSITE_BLOCK_MARKERS = (
+    "just a moment",
+    "security verification",
+    "access to this page has been denied",
+    "access denied",
+    "please enable js and disable any ad blocker",
+    "enable javascript and cookies",
+    "verify you are human",
+    "are you a robot",
+    "px-captcha",
+    "captcha",
+    "attention required",
+    "you have been blocked",
+    "the action you just performed triggered the security solution",
+    "subscription required",
+    "already a subscriber",
+    "sign in to continue",
+    "create a free account to continue",
+    "register to continue reading",
+    "this content is unavailable",
+    "get unlimited access",
+    "to continue reading",
+    "subscribers only",
+    "premium content",
+    "paywall",
+    "this page is not available",
+    "error code cg",
+)
+_BOOK_BLOCK_HTTP_RE = re.compile(
+    r"\b(?:401|403|429)\b|forbidden|too many requests|rate limit"
+    r"|access denied",
+    re.IGNORECASE,
+)
+
+
+def _book_block_reason(
+    text: str, *, from_google_news: bool = False
+) -> str:
+    """Classify a fetch failure or interstitial using the task's wording."""
+    lowered = " ".join(str(text or "").casefold().split())
+    if not lowered:
+        return ""
+    if any(marker in lowered for marker in _BOOK_GOOGLE_NEWS_BLOCK_MARKERS):
+        return "blocked by google news"
+    if from_google_news and re.search(
+        r"\b429\b|too many requests|rate limit", lowered
+    ):
+        return "blocked by google news"
+    if any(marker in lowered for marker in _BOOK_WEBSITE_BLOCK_MARKERS):
+        return "blocked by website"
+    if _BOOK_BLOCK_HTTP_RE.search(lowered):
+        return "blocked by website"
+    return ""
+
+
+def _book_paragraph_block_reason(paragraphs: list[str]) -> str:
+    """Detect a block/paywall page accidentally returned as article text."""
+    values = [str(paragraph) for paragraph in paragraphs if paragraph]
+    if not values:
+        return ""
+    reason = _book_block_reason(" ".join(values[:3]))
+    if not reason:
+        return ""
+    # A substantive article can mention a paywall or bot challenge. Only treat
+    # a short extracted body as an interstitial rather than the story itself.
+    if len(" ".join(values)) > 1_200:
+        return ""
+    return reason
+
 
 class WriteABookOptions(NamedTuple):
     """All customizable /write_a_book settings after argument parsing."""
@@ -10681,9 +10760,23 @@ def _book_search_candidates(
         except (OSError, subprocess.SubprocessError) as exc:
             log(f"[book: search failed for {keyword!r}: {exc}]")
             continue
+        items = _read_news_ndjson(result.stdout)
+        if not items:
+            search_output = "\n".join(
+                part for part in (result.stdout, result.stderr) if part
+            )
+            reason = _book_block_reason(
+                search_output, from_google_news=True
+            )
+            if reason:
+                log(f"[book: {reason} while searching for {keyword!r}]")
+            elif result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()
+                detail = detail.splitlines()[-1] if detail else "no results"
+                log(f"[book: search failed for {keyword!r}: {detail}]")
         bucket: list[dict] = []
         bucket_seen: set[str] = set()
-        for item in _read_news_ndjson(result.stdout):
+        for item in items:
             title = " ".join(str(item.get("title") or "").split())
             link = str(item.get("link") or "").strip()
             key = (link or title).casefold()
@@ -10781,20 +10874,68 @@ def _book_load_source(
     title = str(item.get("title") or "").strip()
     link = str(item.get("link") or "").strip()
     paragraphs = _book_clean_paragraphs(item.get("paragraphs") or [])
-    if len(paragraphs) < 2 and link:
+    if len(paragraphs) >= 2:
+        log(
+            "[book: article content available from the search result: "
+            f"{link} ({len(paragraphs)} paragraph(s))]"
+        )
+    elif link:
+        log(f"[book: fetching article: {link}]")
         try:
             article = fetch_news_article(link, title)
-            fetched = _book_clean_paragraphs(article.get("paragraphs") or [])
-            if len(fetched) > len(paragraphs):
-                paragraphs = fetched
-                link = str(article.get("link") or link).strip()
-        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
-            log(f"[book: could not read {title!r}: {exc}]")
+        except (
+            OSError,
+            subprocess.SubprocessError,
+            RuntimeError,
+            ValueError,
+        ) as exc:
+            detail = str(exc)
+            reason = _book_block_reason(detail)
+            if reason:
+                log(f"[book: {reason}: {link}]")
+            else:
+                log(f"[book: article fetch failed: {link} ({detail})]")
+        else:
+            fetched = _book_clean_paragraphs(
+                article.get("paragraphs") or []
+            )
+            article_link = str(article.get("link") or link).strip()
+            reason = _book_paragraph_block_reason(fetched)
+            if reason:
+                log(f"[book: {reason}: {article_link}]")
+            elif not fetched:
+                log(
+                    "[book: article fetch failed: "
+                    f"{article_link} (empty article body)]"
+                )
+            else:
+                log(
+                    "[book: article fetch succeeded: "
+                    f"{article_link} ({len(fetched)} paragraph(s))]"
+                )
+                if len(fetched) > len(paragraphs):
+                    paragraphs = fetched
+                    link = article_link
+                else:
+                    log(
+                        "[book: keeping the search excerpt: "
+                        f"{article_link} ({len(paragraphs)} paragraph(s))]"
+                    )
+    else:
+        log(
+            "[book: article fetch failed: "
+            f"{title or 'Untitled'} (no URL)]"
+        )
     if not paragraphs:
         summary = " ".join(str(item.get("summary") or "").split())
         if summary:
             paragraphs = [summary]
+            log(f"[book: using the search summary for: {link}]")
     if not paragraphs:
+        log(
+            "[book: article fetch failed: "
+            f"{link or title or 'Untitled'} (no content)]"
+        )
         return None
     return {
         "title": title or "Untitled",
@@ -19273,9 +19414,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         sources: list[dict] = []
         for index, item in enumerate(candidates, 1):
             title = str(item.get("title") or "Untitled")
+            link = str(item.get("link") or "").strip()
             self._sse_text(
                 "log",
-                f"[book: reading source {index}/{len(candidates)}: {title}]",
+                f"[book: reading source {index}/{len(candidates)}: {title} "
+                f"({link or 'no URL'})]",
             )
             source = _book_load_source(
                 item, lambda text: self._sse_text("log", text)

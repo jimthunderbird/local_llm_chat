@@ -1885,13 +1885,10 @@
   /* A place modal opened from the /game explorer must sit above the explorer
    * overlay while keeping the game (and its map state) alive underneath. */
   #news-panel.is-over-game { z-index: 70; }
-  /* Place details opened from the /game explorer use the shared news card;
-   * widen it by 20% along with the explorer shell so the map, article, and
-   * related-video rail keep their proportions. */
-  #news-panel.is-over-game .news-card { width: min(1344px, 100%); }
-  /* /game type is 20% larger in both the explorer shell and the place modal
-   * that opens on top of it. Shared news/video styles stay untouched, so the
-   * ordinary /news, /map, and /youtube modals keep their original sizes. */
+  /* Place details opened from the /game explorer use the shared news card,
+   * which is already 20% wider by default; the overlay only changes z-index.
+   * /game type is 20% larger too, so the rules below scale its fonts while
+   * leaving the shared card's font styles untouched. */
   #game-panel .news-modal-title { font-size: 16.8px; }
   #game-panel .news-modal-meta { font-size: 13.2px; }
   #game-panel .news-link { font-size: 13.8px; }
@@ -1978,7 +1975,7 @@
   #news-panel.is-over-game .news-card .markdown .code-ask-answer { font-size: 15.6px; }
   #news-panel.is-over-game .news-card .markdown pre .line-help { font-size: 12px; }
   .news-card {
-    width: min(1120px, 100%);
+    width: min(1344px, 100%);
     max-height: 88vh;
     display: flex;
     flex-direction: column;

@@ -65,6 +65,10 @@ task (persistent) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
+task.increase_news_article_modal_width (completed) {
+  increase news article modal width by 20% 
+}
+
 task.fix_automated_queries (completed) {
   when clicking on a new result entry url, i got:
   ```

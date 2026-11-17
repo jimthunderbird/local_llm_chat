@@ -7,6 +7,23 @@ settings {
   sub_questions_article_search_limit: 10
 }
 
+task.blocking_detection (completed) {
+  currently, before we write a book, we will search different sub questions with /news search
+  for each news article fetching, please indidate whether ths article content fetching is successful or not
+  if we encountered:
+  ```
+  We're sorry...
+  ... but your computer or network may be sending automated queries. To protect our users, we can't process your request right now.
+
+  See Google Help for more information.
+  ```
+  simply say "blocked by google news"
+
+  if there are blocking policies presented in individual website, simply say "blocked by website"
+
+  please also show the url of each article that's being fetched during this process
+}
+
 task.remove.articles_to_learn (completed) {
   remove the usage of articles_to_learn in the settings form
   we will no longer use settings.articles_to_learn, instead, we just rely on settings.sub_questions_to_ask_when_planning and settins.sub_questions_article_search_limit 
