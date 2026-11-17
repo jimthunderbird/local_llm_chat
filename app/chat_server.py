@@ -19607,7 +19607,16 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             state.research_with_news_mode = False
+            # Leaving the mode must not leave the research conversation behind
+            # as context for ordinary chat. Clear the accumulated turns (and
+            # the per-turn caches) so the next normal question starts clean.
+            self._reset_research_with_the_news_context()
             self._sse("meta", state.snapshot())
+            self._sse_text(
+                "log",
+                "[research_with_the_news: mode off; cleared the accumulated "
+                "research context]",
+            )
             self._sse_text(
                 "output",
                 "\nRESEARCH_WITH_NEWS_MODE is off; normal chat is back.\n",

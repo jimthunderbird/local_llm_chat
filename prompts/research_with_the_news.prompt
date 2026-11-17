@@ -1,5 +1,9 @@
 research_llm: ollama local model ornith-1.5:35b
 
+task (completed) {
+  when RESEARCH_WITH_NEWS_MODE is off, the previous accumulated context should be cleared
+}
+
 task.keep_track_of_previous_context (completed) {
   when RESEARCH_WITH_NEWS_MODE is on:
   for each {question} all subsequent questions {
