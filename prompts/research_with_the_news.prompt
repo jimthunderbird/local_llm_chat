@@ -1,0 +1,26 @@
+research_llm: ollama local model ornith-1.5:35b
+
+task.keep_track_of_previous_context (completed) {
+  when RESEARCH_WITH_NEWS_MODE is on:
+  for each {question} all subsequent questions {
+    - each relevant question for {question} that we are going to search using "/news search" should be related to the current accumulated context
+  }
+}
+
+task (completed) {
+  create command /research_with_the_news <topic> {
+    - starting RESEARCH_WITH_NEWS_MODE, and it will be set to be "on"
+    when RESEARCH_WITH_NEWS_MODE is on {
+      - clear all existing context, starting a clean context
+      logic.fetch_news_and_produce_answer {
+        - related_questions: use {research_llm} to come up with 2 most relevant questions regarding the topic, thse questions should not have any time/year information, we need to hyper focus on the <topic>
+        - learn from /news search <keywords>, we are going to use /news search {related_questions}, for each question, get the top 3 news and put them into context
+        - based on context: tell me about the <topic> in 100-250 words 
+      }
+      - there might be subsequent follow-up questions, for each question, treat it as a single <topic> and repeat logic.fetch_news_and_produce_answer
+    }
+
+    - to turn off RESEARCH_WITH_NEWS_MODE, we can do: /research_with_the_news off
+    when RESEARCH_WITH_NEWS_MODE is off, we are back to normal chat process
+  }
+}
