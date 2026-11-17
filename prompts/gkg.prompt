@@ -1,3 +1,11 @@
+task.keyword_with_location (completed) {
+  - add support for /gkg <keyword>:<location>:
+    for example:
+    /gkg restaurant:san francisco, ca (it will then only fetch restaurant related news articles in san francisco, ca)
+    /gkg :san francisco bayview, ca (it will then only fetch news articles in san francisco bayview)
+    ... 
+}
+
 task (completed) {
   create new command: /gkg <keyword> {
     - learn from /news search <keyword>

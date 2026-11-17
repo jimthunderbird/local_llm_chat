@@ -330,7 +330,7 @@ WEB_COMMANDS = {
     "/mdn": "search MDN Web Docs by keywords: /mdn <keywords>",
     "/britanica": "search Encyclopædia Britannica by keywords: /britanica <keywords>",
     "/googlenews": "search Google News for the latest stories: /googlenews <keywords>",
-    "/gkg": "search the latest GDELT 2.0 Global Knowledge Graph news: /gkg <keywords>",
+    "/gkg": "search the latest GDELT 2.0 Global Knowledge Graph news: /gkg <keyword>[:<location>] (for example /gkg restaurant:san francisco, ca)",
     "/howstuffworks": "search HowStuffWorks articles by keywords: /howstuffworks <keywords>",
     "/wikivoyage": "search Wikivoyage destinations by keywords: /wikivoyage <keywords>",
     "/map": "geocode a location with OpenStreetMap and list nearby Wikipedia articles: /map <location>",
@@ -21188,19 +21188,25 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     def _command_gkg(self, argument: str) -> None:
         """Search the newest GDELT 2.0 Global Knowledge Graph batches.
 
-        Usage: /gkg <keywords>
+        Usage: /gkg <keyword>[:<location>]
+
         gkg_fetch.py downloads the latest 15-minute GKG files, matches the
         keyword against each article's title, themes, people, organizations,
         locations, and URL, and streams at most 20 records as the same
-        news-style list used by /news. Opening a story fetches the full
-        article body through the normal /api/news_article path.
+        news-style list used by /news. A ``:location`` suffix restricts the
+        results to stories whose GDELT locations mention that place; either
+        side may be empty (for example ``/gkg :san francisco bayview, ca``).
+        Opening a story fetches the full article body through the normal
+        /api/news_article path.
         """
         keywords = " ".join(argument.split())
         if not keywords:
             self._sse_text(
                 "output",
-                "\nUsage: /gkg <keywords>\n"
-                "Example: /gkg open source llm\n",
+                "\nUsage: /gkg <keyword>[:<location>]\n"
+                "Example: /gkg open source llm\n"
+                "Example: /gkg restaurant:san francisco, ca\n"
+                "Example: /gkg :san francisco bayview, ca\n",
             )
             return
         self._stream_news_events(

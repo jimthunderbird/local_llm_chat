@@ -2,7 +2,17 @@
 """Search the latest GDELT 2.0 Global Knowledge Graph (GKG) news records.
 
 Usage:
-    python3 gkg_fetch.py <keyword> [--limit 20]
+    python3 gkg_fetch.py <keyword>[:<location>] [--limit 20]
+
+The location part is optional.  ``keyword`` is matched against the article
+metadata exactly as before, while ``location`` restricts the result to records
+whose GDELT locations mention that place.  Either side may be empty:
+
+    python3 gkg_fetch.py restaurant:"san francisco, ca"
+    python3 gkg_fetch.py :"san francisco bayview, ca"
+
+Locations can be a city/region name, a comma-separated address-like string, or
+a US state abbreviation (``ca`` is expanded to ``california``).
 
 The GKG is published every 15 minutes as a zipped, tab-delimited file.  This
 command downloads the newest GKG files (reusing a small on-disk cache), scans
@@ -59,6 +69,32 @@ TAG_RE = re.compile(r"<[^>]+>")
 SPACE_RE = re.compile(r"\s+")
 NON_WORD_RE = re.compile(r"[^\w]+", re.UNICODE)
 ZIP_SUFFIX = ".gkg.csv.zip"
+
+# GDELT location names usually spell states out.  Expand common US/Canadian
+# postal abbreviations so a query like ``restaurant:san francisco, ca`` still
+# matches ``San Francisco, California, United States``.
+REGION_ABBREVIATIONS = {
+    "al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas",
+    "ca": "california", "co": "colorado", "ct": "connecticut",
+    "de": "delaware", "fl": "florida", "ga": "georgia", "hi": "hawaii",
+    "id": "idaho", "il": "illinois", "in": "indiana", "ia": "iowa",
+    "ks": "kansas", "ky": "kentucky", "la": "louisiana", "me": "maine",
+    "md": "maryland", "ma": "massachusetts", "mi": "michigan",
+    "mn": "minnesota", "ms": "mississippi", "mo": "missouri",
+    "mt": "montana", "ne": "nebraska", "nv": "nevada",
+    "nh": "new hampshire", "nj": "new jersey", "nm": "new mexico",
+    "ny": "new york", "nc": "north carolina", "nd": "north dakota",
+    "oh": "ohio", "ok": "oklahoma", "or": "oregon", "pa": "pennsylvania",
+    "ri": "rhode island", "sc": "south carolina", "sd": "south dakota",
+    "tn": "tennessee", "tx": "texas", "ut": "utah", "vt": "vermont",
+    "va": "virginia", "wa": "washington", "wv": "west virginia",
+    "wi": "wisconsin", "wy": "wyoming", "dc": "district of columbia",
+    "ab": "alberta", "bc": "british columbia", "mb": "manitoba",
+    "nb": "new brunswick", "nl": "newfoundland and labrador",
+    "ns": "nova scotia", "nt": "northwest territories", "nu": "nunavut",
+    "on": "ontario", "pe": "prince edward island", "qc": "quebec",
+    "sk": "saskatchewan", "yt": "yukon",
+}
 
 
 def emit(payload: dict) -> None:
@@ -296,6 +332,59 @@ def metadata_summary(fields: list[str]) -> str:
     return summary
 
 
+def location_score(location_metadata: str, location: str) -> int | None:
+    """Return a score when a GKG record mentions ``location``, else None.
+
+    Comma-separated components are all required.  Each component may match as
+    a complete phrase, or all of its tokens may occur across the combined
+    location names (GDELT stores multiple places in one field).  Postal
+    abbreviations are expanded, so ``ca`` matches ``California``.
+    """
+    phrase = normalise(location)
+    if not phrase:
+        return 0
+    text = normalise(location_metadata)
+    if not text:
+        return None
+    text_tokens = set(text.split())
+
+    components = [part.strip() for part in location.split(",") if part.strip()]
+    if not components:
+        components = [location]
+
+    for component in components:
+        normalised = normalise(component)
+        if not normalised:
+            continue
+        tokens = normalised.split()
+        # A multi-word component can match as a phrase; single short tokens
+        # (notably state abbreviations) must match a whole token to avoid
+        # accidental substring hits such as "ca" inside "california".
+        if len(tokens) > 1 and normalised in text:
+            continue
+        component_matches = True
+        for token in tokens:
+            expansion = REGION_ABBREVIATIONS.get(token)
+            choices = [token]
+            if expansion:
+                choices.append(expansion)
+            if any(
+                (choice in text if " " in choice else choice in text_tokens)
+                for choice in choices
+            ):
+                continue
+            component_matches = False
+            break
+        if component_matches:
+            continue
+        return None
+
+    # Prefer an exact phrase match over a scattered token match.
+    if phrase in text:
+        return 60
+    return 35
+
+
 def record_score(
     title: str, url: str, metadata: str, phrase: str, tokens: list[str]
 ) -> int | None:
@@ -435,13 +524,18 @@ def parse_record(line: str) -> dict | None:
                 fields[26],
             ]
         ),
+        # Location fields are kept separately so a location-only search works
+        # even when no keyword is supplied.
+        "locations": " ".join(
+            [fields[9], fields[10] if len(fields) > 10 else ""]
+        ),
     }
 
 
-def search_gkg(keyword: str, limit: int) -> list[dict]:
+def search_gkg(keyword: str, location: str, limit: int) -> list[dict]:
     phrase = normalise(keyword)
     tokens = [token for token in phrase.split() if token]
-    if not phrase:
+    if not phrase and not normalise(location):
         return []
 
     base = latest_gkg_stamp() or rounded_now_stamp()
@@ -467,15 +561,25 @@ def search_gkg(keyword: str, limit: int) -> list[dict]:
                 url = record["url"]
                 if not url or url in seen_urls:
                     continue
-                score = record_score(
-                    record["title"],
-                    url,
-                    record["metadata"],
-                    phrase,
-                    tokens,
-                )
-                if score is None:
-                    continue
+                score = 0
+                if phrase:
+                    keyword_score = record_score(
+                        record["title"],
+                        url,
+                        record["metadata"],
+                        phrase,
+                        tokens,
+                    )
+                    if keyword_score is None:
+                        continue
+                    score += keyword_score
+                if location:
+                    place_score = location_score(
+                        record.get("locations", ""), location
+                    )
+                    if place_score is None:
+                        continue
+                    score += place_score
                 seen_urls.add(url)
                 batch.append((score, record))
         except (OSError, zipfile.BadZipFile) as exc:
@@ -503,26 +607,55 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Search the latest GDELT 2.0 GKG news records"
     )
-    parser.add_argument("keyword", nargs="*", help="keywords to search for")
+    parser.add_argument(
+        "keyword",
+        nargs="*",
+        help="keywords to search for; use <keyword>:<location> to filter by place",
+    )
+    parser.add_argument(
+        "--location",
+        default="",
+        help="restrict results to this location (alternative to keyword:location)",
+    )
     parser.add_argument("--limit", type=int, default=RESULT_LIMIT)
     # The chat server always passes these for the shared /news pipeline.
     parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--lazy", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
-    keyword = " ".join(part for part in args.keyword if part).strip()
-    if not keyword:
-        emit({"type": "error", "message": "Usage: /gkg <keyword>"})
+    raw_keyword = " ".join(part for part in args.keyword if part).strip()
+    location = " ".join((args.location or "").split()).strip()
+    keyword = raw_keyword
+    # A single colon separates the optional location, e.g.
+    # ``restaurant:san francisco, ca``.  Ignore URL-like ``://`` occurrences.
+    if ":" in raw_keyword and "://" not in raw_keyword:
+        left, right = raw_keyword.split(":", 1)
+        keyword = left.strip()
+        if not location:
+            location = right.strip()
+    if not keyword and not location:
+        emit(
+            {
+                "type": "error",
+                "message": (
+                    "Usage: /gkg <keyword>[:<location>] "
+                    "(for example /gkg restaurant:san francisco, ca)"
+                ),
+            }
+        )
         return 2
 
     limit = max(1, min(250, int(args.limit or RESULT_LIMIT)))
+    subject = keyword or "news"
+    if location:
+        subject = f"{subject} in {location}"
     emit(
         {
             "type": "start",
             "source": "GDELT Global Knowledge Graph",
             "description": (
                 f"Newest {limit} GDELT 2.0 GKG news records matching "
-                f"{keyword!r}."
+                f"{subject!r}."
             ),
             "feed": "https://www.gdeltproject.org/",
         }
@@ -530,7 +663,7 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.monotonic()
     try:
-        records = search_gkg(keyword, limit)
+        records = search_gkg(keyword, location, limit)
     except Exception as exc:  # Keep the browser informed instead of hanging.
         log(f"[gkg: search failed: {exc}]")
         emit({"type": "error", "message": f"GDELT GKG search failed: {exc}"})
@@ -557,7 +690,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "type": "warning",
                 "message": (
-                    f"No GDELT GKG records matched {keyword!r} in the most "
+                    f"No GDELT GKG records matched {subject!r} in the most "
                     "recent news batches."
                 ),
             }
