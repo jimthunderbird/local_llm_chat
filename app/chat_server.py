@@ -18647,6 +18647,9 @@ class ChatState:
             "depth_label": self.depth_label,
             "default_depth": chat.DEFAULT_DEPTH,
             "max_context_tokens": self.max_context_tokens,
+            "context_tokens": int(
+                (self.latest_benchmark or {}).get("context_tokens") or 0
+            ),
             "progressive": self.progressive,
             "chunks": len(self.chunks),
             "videos": len(video_ids),

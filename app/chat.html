@@ -4188,11 +4188,12 @@
       <span class="status-item"><strong>scope</strong> <span id="status-scope">…</span></span>
       <span class="status-item"><strong>depth</strong> <span id="status-depth">…</span></span>
       <span class="status-item"><strong>trunks</strong> <span id="status-chunks">…</span></span>
-      <span class="status-item"><strong>context</strong> <span id="status-conversation">0 turns</span></span>
+      <span class="status-item"><strong>context size</strong> <span id="status-context-size">…</span></span>
+      <span class="status-item"><strong>conversation</strong> <span id="status-conversation">0 turns</span></span>
       <span class="status-item"><strong>model</strong> <span id="status-model">…</span></span>
       <span class="status-item"><strong>source</strong> <span id="status-answer-source">—</span></span>
-      <span class="status-item"><strong>mode</strong> <span id="status-mode">INSERT</span></span>
-      <span class="status-item"><strong>research</strong> <span id="status-research">…</span></span>
+      <span class="status-item"><strong>edit mode</strong> <span id="status-mode">INSERT</span></span>
+      <span class="status-item"><strong>chat mode</strong> <span id="status-research">…</span></span>
       <span class="grow"></span>
       <span id="busy-indicator" hidden><span class="pulse">●</span> streaming — Ctrl+C cancels</span>
       <button id="popup-restore" hidden title="Restore dictionary popup">
@@ -4650,6 +4651,7 @@ const imageAttachmentRemoveEl = $("#image-attachment-remove");
 const imageDropHintEl = $("#image-drop-hint");
 const modeBadge = $("#mode-badge");
 const statusMode = $("#status-mode");
+const statusContextSize = $("#status-context-size");
 const researchModeSelect = $("#research-mode-select");
 const statusResearch = $("#status-research");
 const busyEl = $("#busy-indicator");
@@ -17530,6 +17532,16 @@ function applyState(state, loadHistory = false) {
     : `${state.chunks ?? "?"} / ${videoCount} videos`;
   $("#status-conversation").textContent =
     `${state.conversation_turns ?? 0} turn${(state.conversation_turns ?? 0) === 1 ? "" : "s"}`;
+  const contextTokens = Number(state.context_tokens ?? 0);
+  const maxContextTokens = Number(state.max_context_tokens ?? 0);
+  const usedContext = contextTokens > 0
+    ? `~${contextTokens.toLocaleString()}`
+    : "—";
+  statusContextSize.textContent = maxContextTokens > 0
+    ? `${usedContext} / ${maxContextTokens.toLocaleString()} tokens`
+    : `${usedContext} tokens`;
+  statusContextSize.title =
+    "Estimated size of the latest answer's context / maximum context window";
   const statusModelEl = $("#status-model");
   statusModelEl.textContent = displayModelName(state.models?.chat);
   statusModelEl.title = "";
