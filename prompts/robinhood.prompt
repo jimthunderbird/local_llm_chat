@@ -1,3 +1,10 @@
+task.local_config_file (completed) {
+  reference {directory_of_this_prompt}/../research/robinhood_mcp_setup.html:
+  - set up .chat/robinhood_mcp.json and modify existing related code to hook up to this file
+
+  implementation only, do not perform testing
+}
+
 task (completed) {
   create command /robinhood <stock_symbol>:
   - use RobinHood's MCP Server to search the current holdings of <stock_symbol:

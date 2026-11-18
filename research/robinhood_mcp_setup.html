@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>/robinhood: why it returns "Unknown server error" and what to configure</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 62rem;
+    margin: 2rem auto;
+    padding: 0 1.25rem;
+    line-height: 1.6;
+    color: #1f2328;
+    background: #fff;
+  }
+  h1 { font-size: 1.55rem; line-height: 1.25; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; border-bottom: 1px solid #d8dee4; padding-bottom: .3rem; }
+  h3 { font-size: 1rem; margin-top: 1.4rem; }
+  code { background: #f2f4f7; padding: .1rem .3rem; border-radius: .25rem; font-size: .9em; }
+  pre { background: #f6f8fa; padding: .8rem 1rem; border-radius: .4rem; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .93rem; }
+  th, td { border: 1px solid #d0d7de; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #f2f4f7; }
+  .verdict { border-left: 4px solid #1a7f37; background: #eef8f0; padding: .75rem 1rem; border-radius: .35rem; }
+  .warn { border-left: 4px solid #bf8700; background: #fff8e5; padding: .75rem 1rem; border-radius: .35rem; }
+  .danger { border-left: 4px solid #cf222e; background: #fff0f0; padding: .75rem 1rem; border-radius: .35rem; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: .3rem 0; }
+  .muted { color: #57606a; }
+  .tag-no { color: #cf222e; font-weight: 600; }
+  .tag-yes { color: #1a7f37; font-weight: 600; }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e6edf3; background: #0d1117; }
+    code, pre, th { background: #161b22; }
+    th, td { border-color: #30363d; }
+    h2 { border-color: #30363d; }
+    .verdict { background: #12261a; }
+    .warn { background: #2a2110; }
+    .danger { background: #2a1215; }
+    .muted { color: #8b949e; }
+  }
+</style>
+</head>
+<body>
+
+<h1><code>/robinhood</code>: why it returns "Unknown server error" and what to configure</h1>
+
+<p class="muted">
+  Research only. Inspected <code>app/chat_server.py</code>, <code>app/chat.html</code>,
+  <code>prompts/robinhood.prompt</code>, <code>.chat/</code>, the running
+  <code>chat_server.py</code> process environment, and the upstream
+  <code>robinhood-mcp</code> package (PyPI 0.1.2).
+</p>
+
+<div class="verdict">
+  <strong>Short answer: yes, <code>/robinhood</code> needs configuration, and nothing
+  is configured right now.</strong> There is no <code>.chat/robinhood_mcp.json</code>,
+  no <code>ROBINHOOD_MCP_*</code> environment variable, and no token file, so the command
+  cannot reach any MCP server. The browser shows
+  <code>Unknown server error.</code> only because a second, independent bug discards
+  the real "Robinhood MCP is not configured" message.
+</div>
+
+<h2>1. What is actually missing</h2>
+
+<p>
+  <code>/robinhood &lt;symbol&gt;</code> is registered in the command list
+  (<code>app/chat_server.py:354</code>) and dispatched at
+  <code>app/chat_server.py:21544-21545</code>. It calls
+  <code>robinhood_holdings_report()</code> (<code>:3058</code>), which builds an MCP
+  client from <code>_robinhood_mcp_config()</code> (<code>:2208</code>). The client
+  refuses to start when it has neither a command nor a token
+  (<code>:2330</code>) and raises the setup help from
+  <code>_robinhood_mcp_setup_help()</code> (<code>:2272</code>).
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Configuration source</th>
+      <th>Expected value</th>
+      <th>Present on this machine?</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>ROBINHOOD_MCP_COMMAND</code></td>
+      <td>stdio command, e.g. <code>uvx robinhood-mcp</code></td>
+      <td class="tag-no">No</td>
+    </tr>
+    <tr>
+      <td><code>ROBINHOOD_MCP_URL</code></td>
+      <td>HTTP endpoint (defaults to the official endpoint)</td>
+      <td class="tag-no">No</td>
+    </tr>
+    <tr>
+      <td><code>ROBINHOOD_MCP_TOKEN</code></td>
+      <td>static OAuth access token</td>
+      <td class="tag-no">No</td>
+    </tr>
+    <tr>
+      <td><code>ROBINHOOD_MCP_TOKEN_FILE</code></td>
+      <td>path to a token file</td>
+      <td class="tag-no">No</td>
+    </tr>
+    <tr>
+      <td><code>.chat/robinhood_mcp.json</code></td>
+      <td>JSON config (command/args/env or url/token)</td>
+      <td class="tag-no">Missing</td>
+    </tr>
+    <tr>
+      <td><code>~/.robinhood_mcp_token</code></td>
+      <td>token file fallback</td>
+      <td class="tag-no">Missing</td>
+    </tr>
+    <tr>
+      <td><code>.chat/robinhood_mcp_token</code></td>
+      <td>token file fallback</td>
+      <td class="tag-no">Missing</td>
+    </tr>
+    <tr>
+      <td><code>uvx</code> / <code>uv</code></td>
+      <td>required to run the local server</td>
+      <td class="tag-yes">Installed (<code>/opt/homebrew/bin/uvx</code>)</td>
+    </tr>
+    <tr>
+      <td><code>robinhood_mcp</code> Python module</td>
+      <td>server implementation</td>
+      <td class="tag-no">Not installed globally; <code>uvx</code> fetches it on first run</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  Environment variables are read from the process that runs
+  <code>chat_server.py</code>, so exporting them in a different terminal has no
+  effect on an already-running server. Restart it after changing them.
+</p>
+
+<h2>2. Why the UI says "Unknown server error"</h2>
+
+<p>
+  This is a presentation bug in the command's error path, not the underlying
+  failure. The server emits two different payload shapes for the SSE
+  <code>error</code> event:
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Emitter</th>
+      <th>Payload</th>
+      <th>Result in browser</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Most error paths, e.g. <code>app/chat_server.py:20118</code>, <code>:21677</code></td>
+      <td><code>{"message": "..."}</code></td>
+      <td>Message displayed correctly</td>
+    </tr>
+    <tr>
+      <td><code>_command_robinhood</code> at <code>app/chat_server.py:24580</code></td>
+      <td><code>{"text": "..."}</code> (via <code>_sse_text</code> at <code>:18743</code>)</td>
+      <td><code>data.message</code> is <code>undefined</code>, so the fallback string is shown</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  The browser handler reads only <code>message</code>:
+</p>
+
+<pre><code>// app/chat.html:18091 (handlers for streamSSE("/api/ask", ...) at :18100)
+error: (data) =&gt; addError(entry, data.message || "Unknown server error."),
+</code></pre>
+
+<p>
+  <code>streamSSE()</code> parses the SSE payload faithfully
+  (<code>app/chat.html:17428</code>), so the <code>{text: ...}</code> object arrives
+  intact and is simply ignored. The actionable setup instructions never reach the
+  screen.
+</p>
+
+<div class="warn">
+  <strong>The same mistake exists in other commands.</strong> <code>/mdn</code>
+  (<code>:23806</code>), <code>/britanica</code> (<code>:23880</code>),
+  <code>/stackoverflow</code> (<code>:23959</code>), <code>/wikivoyage</code>
+  (<code>:24040</code>), <code>/map</code> (<code>:24207</code>), and
+  <code>/article</code> (<code>:25194</code>) also call
+  <code>_sse_text("error", ...)</code>. Their real errors are masked the same way.
+</div>
+
+<p>A minimal fix (not applied — this document is research only):</p>
+
+<pre><code># app/chat_server.py:24580
+-            self._sse_text("error", f"\n/robinhood: {exc}\n")
++            self._sse("error", {"message": f"\n/robinhood: {exc}\n"})
+</code></pre>
+
+<h2>3. What to configure</h2>
+
+<h3>3.1 Local stdio server (recommended)</h3>
+
+<p>
+  The community package
+  <a href="https://pypi.org/project/robinhood-mcp/"><code>robinhood-mcp</code></a>
+  (v0.1.2, Python ≥ 3.11) is a read-only MCP server built on
+  <code>robin_stocks</code>. It uses the stdio transport that the client already
+  implements (<code>_start_stdio</code>, <code>app/chat_server.py:2377</code>).
+</p>
+
+<p>Create <code>.chat/robinhood_mcp.json</code> (the whole <code>.chat/</code>
+directory is gitignored, so credentials stay out of git):</p>
+
+<pre><code>{
+  "command": "uvx robinhood-mcp",
+  "env": {
+    "ROBINHOOD_USERNAME": "you@example.com",
+    "ROBINHOOD_PASSWORD": "your-password",
+    "ROBINHOOD_TOTP_SECRET": "optional-base32-secret"
+  }
+}
+</code></pre>
+
+<p>Or use environment variables instead of the JSON file:</p>
+
+<pre><code>export ROBINHOOD_MCP_COMMAND='uvx robinhood-mcp'
+export ROBINHOOD_USERNAME='you@example.com'
+export ROBINHOOD_PASSWORD='...'
+export ROBINHOOD_TOTP_SECRET='...'   # only if using an authenticator app
+make start
+</code></pre>
+
+<table>
+  <thead>
+    <tr>
+      <th>Variable</th>
+      <th>Required</th>
+      <th>Purpose</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>ROBINHOOD_USERNAME</code></td>
+      <td>Yes</td>
+      <td>Robinhood login e-mail</td>
+    </tr>
+    <tr>
+      <td><code>ROBINHOOD_PASSWORD</code></td>
+      <td>Yes</td>
+      <td>Robinhood password</td>
+    </tr>
+    <tr>
+      <td><code>ROBINHOOD_TOTP_SECRET</code></td>
+      <td>Only with an authenticator app</td>
+      <td>Base32 TOTP secret (A–Z, 2–7). Omit for SMS / push / passkey accounts.</td>
+    </tr>
+    <tr>
+      <td><code>ROBINHOOD_APPROVAL_TIMEOUT</code></td>
+      <td>No</td>
+      <td>Seconds to wait for a push approval; default 60</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  First use performs the login, which takes roughly 5–10 seconds. Without a TOTP
+  secret, the first call triggers a push notification in the Robinhood mobile app;
+  approve it within the timeout window. The session is then cached in
+  <code>~/.tokens/robinhood.pickle</code> and reused until it expires.
+</p>
+
+<p>
+  The client also accepts the server through
+  <code>{"command": ["uvx", "robinhood-mcp"], "args": [...]}</code> and merges the
+  JSON <code>env</code> block into a copy of the server's environment
+  (<code>_robinhood_mcp_config</code>, <code>app/chat_server.py:2208-2270</code>).
+</p>
+
+<h3>3.2 Official HTTP endpoint (limited support)</h3>
+
+<div class="danger">
+  <strong>Do not expect the official endpoint to work unattended.</strong>
+  <code>https://agent.robinhood.com/mcp/trading</code> uses OAuth 2.1
+  authorization-code + PKCE as a public client. The client here only sends a
+  static <code>Authorization: Bearer &lt;token&gt;</code>
+  (<code>app/chat_server.py:2475-2481</code>) and has no OAuth flow, refresh, or
+  dynamic client registration. A pasted token will expire with no renewal path.
+</div>
+
+<p>
+  The official route also requires a funded Robinhood <em>Agentic</em> account and
+  grants read access to all Robinhood accounts. If you still want to try it, put
+  a fresh token in the environment or a token file:
+</p>
+
+<pre><code>export ROBINHOOD_MCP_URL='https://agent.robinhood.com/mcp/trading'
+export ROBINHOOD_MCP_TOKEN='&lt;OAuth access token&gt;'
+</code></pre>
+
+<p>
+  A <code>401</code> from this endpoint is expected and healthy for an
+  unauthenticated probe — it confirms the endpoint is up and protected:
+</p>
+
+<pre><code>curl -s -D - -o /dev/null -X POST https://agent.robinhood.com/mcp/trading \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0"}}}'
+</code></pre>
+
+<h3>3.3 Precedence</h3>
+
+<p>
+  Per <code>_robinhood_mcp_config()</code>:
+  environment variables override <code>.chat/robinhood_mcp.json</code>, which
+  overrides the default URL; a <code>token</code> value overrides the standard
+  token files. Setting <code>ROBINHOOD_MCP_COMMAND</code> in the environment also
+  makes the JSON <code>args</code> array be ignored.
+</p>
+
+<h2>4. How to verify</h2>
+
+<ol>
+  <li>Add the config (JSON or environment variables).</li>
+  <li>Restart <code>chat_server.py</code> (<code>make start</code>), because the
+      process only sees environment variables set before it launched.</li>
+  <li>Run <code>/robinhood AAPL</code> in the browser.</li>
+  <li>If it still fails, test the MCP server independently of the chat server:</li>
+</ol>
+
+<pre><code>printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0"}}}' \
+  | ROBINHOOD_USERNAME=... ROBINHOOD_PASSWORD=... uvx robinhood-mcp
+</code></pre>
+
+<p>
+  The server should print an <code>initialize</code> result on stdout; diagnostics
+  and login errors go to stderr. Until the SSE payload bug is fixed, those
+  details are not visible in the browser — they would only appear as
+  <code>Unknown server error.</code>
+</p>
+
+<h2>5. Notes and caveats</h2>
+
+<ul>
+  <li><strong>Credentials are local.</strong> The local server authenticates
+      directly with Robinhood; no credentials are sent to this chat server. The
+      session pickle lives in <code>~/.tokens/robinhood.pickle</code>.</li>
+  <li><strong>Read-only.</strong> <code>robinhood-mcp</code> exposes no trading
+      tools. The official MCP endpoint, by contrast, can place trades in a
+      dedicated Agentic account.</li>
+  <li><strong>Unofficial API.</strong> The local server wraps
+      <code>robin_stocks</code>; Robinhood can change or rate-limit it at any time
+      (HTTP 429s are common under heavy use).</li>
+  <li><strong>Multiple accounts.</strong> Account-scoped tools may require an
+      account number; the command discovers one through
+      <code>robinhood_get_accounts</code> when a tool schema requires
+      <code>account_number</code> (<code>app/chat_server.py:3080-3093</code>).</li>
+  <li><strong>Tool naming is tolerant.</strong> The report matches many
+      naming conventions — <code>get_position</code>,
+      <code>robinhood_get_position</code>, <code>get_stock_positions</code>,
+      <code>get_open_orders</code>, <code>get_order_history</code>, and related
+      names (<code>app/chat_server.py:2174-2206</code>).</li>
+  <li><strong>Network access.</strong> The first <code>uvx robinhood-mcp</code>
+      run downloads the package and its dependencies; allow for that on the first
+      call.</li>
+</ul>
+
+<h2>6. Code references</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Location</th>
+      <th>What it does</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td><code>app/chat_server.py:2145-2158</code></td><td>Design notes for the Robinhood MCP integration and supported configuration</td></tr>
+    <tr><td><code>app/chat_server.py:2161-2165</code></td><td>Default URL, protocol versions, timeout, limits</td></tr>
+    <tr><td><code>app/chat_server.py:2208-2270</code></td><td><code>_robinhood_mcp_config()</code>: resolves command/url/token/env</td></tr>
+    <tr><td><code>app/chat_server.py:2272-2284</code></td><td><code>_robinhood_mcp_setup_help()</code>: the message that should be shown</td></tr>
+    <tr><td><code>app/chat_server.py:2330-2331</code></td><td>Fails fast when neither command nor token is configured</td></tr>
+    <tr><td><code>app/chat_server.py:2377</code> / <code>:2469</code></td><td>stdio and streamable-HTTP transports</td></tr>
+    <tr><td><code>app/chat_server.py:2475-2481</code></td><td>HTTP request headers, including the static bearer token</td></tr>
+    <tr><td><code>app/chat_server.py:3058</code></td><td><code>robinhood_holdings_report()</code>: positions, orders, history, average cost</td></tr>
+    <tr><td><code>app/chat_server.py:354</code> / <code>:21544</code> / <code>:24555</code></td><td>Command listing, dispatch, and <code>_command_robinhood()</code></td></tr>
+    <tr><td><code>app/chat_server.py:18743</code></td><td><code>_sse_text()</code>, which wraps text as <code>{"text": ...}</code></td></tr>
+    <tr><td><code>app/chat_server.py:24580</code></td><td>Mismatched error emission for <code>/robinhood</code></td></tr>
+    <tr><td><code>app/chat.html:17428</code></td><td><code>streamSSE()</code>: parses SSE payloads</td></tr>
+    <tr><td><code>app/chat.html:18091</code></td><td>Error handler that expects <code>data.message</code></td></tr>
+    <tr><td><code>.gitignore:1</code></td><td><code>.chat/</code> is ignored, so credentials there are not committed</td></tr>
+  </tbody>
+</table>
+
+</body>
+</html>

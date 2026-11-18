@@ -2148,13 +2148,15 @@ def _stock_cache_store(key: str, value: dict) -> None:
 # such as robinhood-mcp run locally over stdio.  Both transports are supported
 # so the chat can use whichever server the user has already connected.
 #
-# Configuration is read from the environment, then from
-# .chat/robinhood_mcp.json.  A JSON config may contain any of:
+# Configuration is read from .chat/robinhood_mcp.json first, with environment
+# variables taking precedence for one-off overrides.  The JSON config may
+# contain any of:
 #   {"url": "https://agent.robinhood.com/mcp/trading", "token": "..."}
-#   {"command": "uvx robinhood-mcp", "env": {"ROBINHOOD_USERNAME": "..."}}
-# Environment variables take precedence: ROBINHOOD_MCP_COMMAND,
-# ROBINHOOD_MCP_URL, ROBINHOOD_MCP_TOKEN, ROBINHOOD_MCP_TOKEN_FILE, and
-# ROBINHOOD_MCP_CONFIG.  The token may also be stored in
+#   {"command": "uvx robinhood-mcp", "args": [],
+#    "env": {"ROBINHOOD_USERNAME": "...", "ROBINHOOD_PASSWORD": "..."}}
+# Environment variables: ROBINHOOD_MCP_COMMAND, ROBINHOOD_MCP_URL,
+# ROBINHOOD_MCP_TOKEN, ROBINHOOD_MCP_TOKEN_FILE, and ROBINHOOD_MCP_CONFIG
+# (which points at an alternative JSON file).  The token may also be stored in
 # ~/.robinhood_mcp_token or .chat/robinhood_mcp_token.
 # ---------------------------------------------------------------------------
 
@@ -2163,6 +2165,24 @@ ROBINHOOD_MCP_PROTOCOL_VERSIONS = ("2025-06-18", "2024-11-05")
 ROBINHOOD_MCP_TIMEOUT = 90.0
 ROBINHOOD_MCP_PENDING_LIMIT = 20
 ROBINHOOD_MCP_HISTORY_LIMIT = 10
+ROBINHOOD_MCP_CONFIG_FILE = SCRIPT_DIR / ".chat" / "robinhood_mcp.json"
+# Placeholder values shipped in the sample config.  They must be treated as
+# "not configured" so the caller gets setup instructions instead of a failed
+# Robinhood login or a 401 from the official endpoint.
+ROBINHOOD_MCP_PLACEHOLDERS = {
+    "",
+    "...",
+    "you@example.com",
+    "your-password",
+    "your_password",
+    "changeme",
+    "optional-base32-secret",
+    "your_2fa_secret",
+    "your-2fa-secret",
+    "<oauth access token>",
+    "<username>",
+    "<password>",
+}
 
 
 class RobinhoodMCPError(RuntimeError):
@@ -2205,14 +2225,22 @@ _ACCOUNT_TOOL_CANDIDATES = (
 )
 
 
+def _robinhood_configured_value(value: object) -> str:
+    """Return a config value, or "" when it is empty or a placeholder."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in ROBINHOOD_MCP_PLACEHOLDERS else text
+
+
 def _robinhood_mcp_config() -> dict:
     """Resolve the MCP transport and credentials without exposing secrets."""
     config_path = Path(
-        os.environ.get("ROBINHOOD_MCP_CONFIG")
-        or (SCRIPT_DIR / ".chat" / "robinhood_mcp.json")
+        os.environ.get("ROBINHOOD_MCP_CONFIG") or ROBINHOOD_MCP_CONFIG_FILE
     ).expanduser()
     data: dict = {}
-    if config_path.is_file():
+    file_found = config_path.is_file()
+    if file_found:
         try:
             loaded = json.loads(config_path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
@@ -2220,8 +2248,9 @@ def _robinhood_mcp_config() -> dict:
         except (OSError, ValueError):
             data = {}
 
-    command_value = os.environ.get("ROBINHOOD_MCP_COMMAND") or data.get("command")
-    args_value = data.get("args") if "ROBINHOOD_MCP_COMMAND" not in os.environ else None
+    env_command = os.environ.get("ROBINHOOD_MCP_COMMAND")
+    command_value = env_command or data.get("command")
+    args_value = data.get("args") if env_command is None else None
     command: list[str] = []
     if isinstance(command_value, (list, tuple)):
         command = [str(part) for part in command_value if str(part)]
@@ -2235,7 +2264,9 @@ def _robinhood_mcp_config() -> dict:
         or data.get("url")
         or ROBINHOOD_MCP_DEFAULT_URL
     )
-    token = os.environ.get("ROBINHOOD_MCP_TOKEN") or data.get("token") or ""
+    token = _robinhood_configured_value(
+        os.environ.get("ROBINHOOD_MCP_TOKEN") or data.get("token")
+    )
     token_file = os.environ.get("ROBINHOOD_MCP_TOKEN_FILE")
     token_paths = []
     if token_file:
@@ -2250,38 +2281,64 @@ def _robinhood_mcp_config() -> dict:
         for path in token_paths:
             try:
                 if path.is_file():
-                    token = path.read_text(encoding="utf-8").strip()
+                    token = _robinhood_configured_value(
+                        path.read_text(encoding="utf-8")
+                    )
                     if token:
                         break
             except OSError:
                 continue
 
+    # Start from the process environment so exported credentials still work,
+    # then apply non-placeholder values from the JSON file.  Placeholder values
+    # are skipped rather than copying them into the child process.
     env = dict(os.environ)
     configured_env = data.get("env")
     if isinstance(configured_env, dict):
-        env.update({str(key): str(value) for key, value in configured_env.items()})
+        for key, value in configured_env.items():
+            key_text = str(key)
+            value_text = "" if value is None else str(value)
+            if value_text.strip().lower() in ROBINHOOD_MCP_PLACEHOLDERS:
+                continue
+            env[key_text] = value_text
+
+    credentials_missing: list[str] = []
+    if command:
+        for name in ("ROBINHOOD_USERNAME", "ROBINHOOD_PASSWORD"):
+            if not _robinhood_configured_value(env.get(name)):
+                credentials_missing.append(name)
 
     return {
         "command": command,
         "url": str(url).strip(),
-        "token": str(token).strip(),
+        "token": token,
         "env": env,
+        "config_path": str(config_path),
+        "file_found": file_found,
+        "credentials_missing": credentials_missing,
     }
 
 
-def _robinhood_mcp_setup_help() -> str:
-    return (
-        "Robinhood MCP is not configured.\n"
-        "Connect a Robinhood MCP server in one of these ways, then retry:\n"
-        "  local stdio server (recommended for community robinhood-mcp):\n"
-        "    export ROBINHOOD_MCP_COMMAND='uvx robinhood-mcp'\n"
-        "    export ROBINHOOD_USERNAME='you@example.com'\n"
-        "    export ROBINHOOD_PASSWORD='...'\n"
-        "  official streamable-HTTP endpoint:\n"
-        "    export ROBINHOOD_MCP_TOKEN='<OAuth access token>'\n"
-        f"    export ROBINHOOD_MCP_URL='{ROBINHOOD_MCP_DEFAULT_URL}'\n"
-        "  or write .chat/robinhood_mcp.json with command/args/env or url/token."
+def _robinhood_mcp_setup_help(
+    config_path: str = "", missing: list[str] | None = None
+) -> str:
+    path = config_path or str(ROBINHOOD_MCP_CONFIG_FILE)
+    lines = ["Robinhood MCP is not configured."]
+    if missing:
+        lines.append("Missing: " + ", ".join(missing) + ".")
+    lines.extend(
+        [
+            f"Fill in {path}, or export the variables below, then retry:",
+            "  local stdio server (recommended for community robinhood-mcp):",
+            "    export ROBINHOOD_MCP_COMMAND='uvx robinhood-mcp'",
+            "    export ROBINHOOD_USERNAME='you@example.com'",
+            "    export ROBINHOOD_PASSWORD='...'",
+            "  official streamable-HTTP endpoint:",
+            "    export ROBINHOOD_MCP_TOKEN='<OAuth access token>'",
+            f"    export ROBINHOOD_MCP_URL='{ROBINHOOD_MCP_DEFAULT_URL}'",
+        ]
     )
+    return "\n".join(lines)
 
 
 class _RobinhoodMCPClient:
@@ -2292,6 +2349,8 @@ class _RobinhoodMCPClient:
         self.url = str(config.get("url") or "")
         self.token = str(config.get("token") or "")
         self.env = dict(config.get("env") or os.environ)
+        self.config_path = str(config.get("config_path") or "")
+        self.credentials_missing = list(config.get("credentials_missing") or [])
         self.timeout = timeout
         self.transport = "stdio" if self.command else "http"
         self.session_id = ""
@@ -2327,8 +2386,14 @@ class _RobinhoodMCPClient:
                 pass
 
     def connect(self) -> None:
-        if not self.command and not self.token:
-            raise RobinhoodMCPError(_robinhood_mcp_setup_help())
+        if (not self.command and not self.token) or (
+            self.transport == "stdio" and self.credentials_missing
+        ):
+            raise RobinhoodMCPError(
+                _robinhood_mcp_setup_help(
+                    self.config_path, self.credentials_missing
+                )
+            )
         if self.transport == "stdio":
             self._start_stdio()
 
@@ -24559,7 +24624,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         The data comes from a Robinhood MCP server, either the official
         streamable-HTTP endpoint or a local stdio server such as
         ``uvx robinhood-mcp``. See _robinhood_mcp_config for the supported
-        environment variables and .chat/robinhood_mcp.json.
+        configuration keys and the ``.chat/robinhood_mcp.json`` template.
         """
         symbol = argument.strip().strip('"').strip("'").lstrip("$").upper()
         if not symbol or " " in symbol:
@@ -24567,8 +24632,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "output",
                 "\nUsage: /robinhood <stock_symbol>\n"
                 "Example: /robinhood AAPL\n"
-                "Requires a Robinhood MCP server (ROBINHOOD_MCP_COMMAND or "
-                "ROBINHOOD_MCP_TOKEN).\n",
+                "Requires a Robinhood MCP server: fill in "
+                ".chat/robinhood_mcp.json or set ROBINHOOD_MCP_COMMAND / "
+                "ROBINHOOD_MCP_TOKEN.\n",
             )
             return
         self._sse_text(
@@ -24577,7 +24643,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         try:
             report = robinhood_holdings_report(symbol)
         except RobinhoodMCPError as exc:
-            self._sse_text("error", f"\n/robinhood: {exc}\n")
+            self._sse("error", {"message": f"\n/robinhood: {exc}\n"})
             return
         self._sse_text("output", "\n" + report + "\n")
 
