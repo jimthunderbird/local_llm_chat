@@ -1,17 +1,19 @@
 # Start the browser chat server with `make start`.
 #
-# Some machines expose a pyenv/shim `python3` that does not have the project
-# requirements installed, so prefer the first interpreter that can import
-# requests. Override explicitly with `make start PYTHON=/path/to/python3`.
+# Resolve the actual Python command from the shell's `py` alias/command
+# (`type py` shows it). Make recipes run under /bin/sh and do not inherit
+# interactive aliases, so ask a login bash and extract the command. If `py`
+# is not defined, fall back to python3.
 
 PYTHON ?= $(shell \
-	for candidate in python3 python3.14 python3.13 python3.12 python3.11 python3.10; do \
-		if command -v $$candidate >/dev/null 2>&1 && \
-		   $$candidate -c 'import requests' >/dev/null 2>&1; then \
-			echo $$candidate; exit 0; \
-		fi; \
-	done; \
-	echo python3)
+	/bin/bash -lc 'shopt -s expand_aliases; type py' 2>/dev/null | \
+	sed -n -E "s/^py is aliased to [\`'](.*)'$$/\1/p; s/^py is (\/.*)$$/\1/p; s/^py is (.*)$$/\1/p" | \
+	head -n 1)
+
+ifeq ($(strip $(PYTHON)),)
+PYTHON := $(shell command -v python3 2>/dev/null || echo python3)
+endif
+
 HOST ?= 127.0.0.1
 PORT ?= 8765
 

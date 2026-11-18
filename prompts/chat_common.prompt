@@ -1,7 +1,15 @@
+task.update_make_file (completed) {
+  in the make file:
+  we should be able to do: make start {
+    - python_command: use type py to find out the actual python command
+    - then do: {python_command} app/chat_server.py
+  }
+}
+
 task.status_bar_update (completed) {
   currently, the chat status bar shows:
   mode: insert research: online
-  
+
   please change it to:
   edit mode: insert chat mode: online
 
@@ -10,7 +18,7 @@ task.status_bar_update (completed) {
 
 task (completed) {
   currently before an answer is created, we see something like:
-[youtube iterative: round 1/5, added 12 paragraph(s), evidence ~795 token(s)][youtube iterative: round 2/5, added 6 paragraph(s), evidence ~1,143 token(s)][youtube iterative: round 3/5, added 1 paragraph(s), evidence ~1,166 token(s)][youtube iterative: round 4/5, added 3 paragraph(s), evidence ~1,357 token(s)][youtube iterative: checker still wanted more after 5 round(s); using the 22 gathered paragraph(s)]
+  [youtube iterative: round 1/5, added 12 paragraph(s), evidence ~795 token(s)][youtube iterative: round 2/5, added 6 paragraph(s), evidence ~1,143 token(s)][youtube iterative: round 3/5, added 1 paragraph(s), evidence ~1,166 token(s)][youtube iterative: round 4/5, added 3 paragraph(s), evidence ~1,357 token(s)][youtube iterative: checker still wanted more after 5 round(s); using the 22 gathered paragraph(s)]
   please change the wording, instead of saying "youtube iterative", just say "context gathering" 
 }
 
@@ -52,15 +60,15 @@ task (completed) {
 task (completed) {
   bug: question chain:
   1. where is nijo market
-     (answer correctly)
+  (answer correctly)
   2. is it a seafood place?
-     (answer correctly)
+  (answer correctly)
   3. what time does it open?
-     (answer correctly)
+  (answer correctly)
   4. does it open on sunday?
-     (answer correctly)
+  (answer correctly)
   5. what is git worktree?
-     (No tagged knowledge could answer this question (tried: japan).)
+  (No tagged knowledge could answer this question (tried: japan).)
 
   for question number 5:what is git worktree?
 
@@ -71,16 +79,16 @@ task (completed) {
   Implemented:
   app/chat_server.py
   - Cross-tag fallback now ends with one unfiltered global-corpus attempt
-    when no tag-scoped attempt answers (including when no tag clears the
-    fallback score floor). Soft tags only filter evidence over the one global
-    corpus, so this finds a genuine answer even when its tag description does
-    not match the question's wording. It uses a distinct cache variant so the
-    cached tag-scoped refusal is never replayed.
+  when no tag-scoped attempt answers (including when no tag clears the
+  fallback score floor). Soft tags only filter evidence over the one global
+  corpus, so this finds a genuine answer even when its tag description does
+  not match the question's wording. It uses a distinct cache variant so the
+  cached tag-scoped refusal is never replayed.
   - Follow-up comparison now ignores case, punctuation, and articles. A model
-    that only re-adds "a" ("what is git worktree?" -> "What is a Git
-    worktree?") is treated as unchanged instead of a rewritten follow-up, so
-    the unrelated question resets the conversation/tag context instead of
-    keeping the previous topic's tag.
+  that only re-adds "a" ("what is git worktree?" -> "What is a Git
+  worktree?") is treated as unchanged instead of a rewritten follow-up, so
+  the unrelated question resets the conversation/tag context instead of
+  keeping the previous topic's tag.
 
   Verified through the live server (manual tag "japan") with the full chain:
   questions 1-4 answer Nijo Market correctly; question 5 logs "the question
@@ -93,68 +101,68 @@ task (completed) {
 task.always_compare_previous_question_and_reset_context_as_needed (completed) {
   always compare the current question with the previous question that has been asked in the chat:
   - if current question is a follow-up question of the previous question:
-    keep current context and give the answer based on the previous context
+  keep current context and give the answer based on the previous context
   - if current question is very different from the prevous question:
-    refresh the context and give the answer based on the refreshed context
+  refresh the context and give the answer based on the refreshed context
 
   Implemented:
   app/chat_server.py
   - Follow-up detection and context refresh now run for every question while a
-    conversation exists (resolve_question is called on each turn).
+  conversation exists (resolve_question is called on each turn).
   - Topic relatedness now compares the current question with the previous
-    *questions* only, using the overlap ratio against the smaller of the two
-    questions. Previously it compared against the previous answers too, so a
-    long answer mentioning "Japan" made a completely new visa question look
-    related and kept stale context alive.
+  *questions* only, using the overlap ratio against the smaller of the two
+  questions. Previously it compared against the previous answers too, so a
+  long answer mentioning "Japan" made a completely new visa question look
+  related and kept stale context alive.
   - resolve_question has three outcomes: decisive overlap (> 0.5) keeps the
-    context; no overlap (0.0) refreshes it immediately; partial overlap asks
-    the conversation model, so a longer follow-up is not dropped and a longer
-    unrelated question does not inherit stale context.
+  context; no overlap (0.0) refreshes it immediately; partial overlap asks
+  the conversation model, so a longer follow-up is not dropped and a longer
+  unrelated question does not inherit stale context.
   - A model that wrongly returns UNRELATED for a standalone question on the
-    same subject no longer clears the conversation when the question still
-    shares its topic with an earlier question.
+  same subject no longer clears the conversation when the question still
+  shares its topic with an earlier question.
 
   Verified (deterministic checks plus live ministral-3:3b calls):
   - "where is nijo market" -> "when does it open" / "what are the opening
-    hours?" -> rewritten to Nijo Market questions, context kept.
+  hours?" -> rewritten to Nijo Market questions, context kept.
   - "where is nijo market" -> "is nijo market open on sunday" -> rewritten,
-    context kept.
+  context kept.
   - "where is nijo market" -> "how do i cook pasta" / "what is the best
-    stock market strategy" / "what is the capital of france" -> fresh context.
+  stock market strategy" / "what is the capital of france" -> fresh context.
   - "where is nijo market" -> "please give me a detailed comparison of the
-    different long stay visa types available in japan" -> fresh context with
-    no model call (zero topic overlap with the previous question).
+  different long stay visa types available in japan" -> fresh context with
+  no model call (zero topic overlap with the previous question).
 }
 
 task.subsequent_questions (completed) {
   after a question is asked:
   - if the following is a sub question, correctly detect it
-    example:
-    question 1: where is nijo market
-    expect: answer the location information of nijo market
-    question 2: when does it open
-    expect: answer the open time for nijo market
+  example:
+  question 1: where is nijo market
+  expect: answer the location information of nijo market
+  question 2: when does it open
+  expect: answer the open time for nijo market
   - if  the following sub question is completely unrelated to the previous questions, refresh the context and do a fetch answer fetching
 
   Implemented:
   app/chat_server.py
   - Short or elliptical questions now count as possible follow-ups even
-    without an explicit pronoun, so "what are the opening hours?" is
-    resolved against the prior topic.
+  without an explicit pronoun, so "what are the opening hours?" is
+  resolved against the prior topic.
   - The conversation model now classifies the latest question as a related
-    follow-up or as a completely new topic (UNRELATED). Related questions are
-    rewritten into standalone retrieval questions (e.g. "when does it open"
-    -> "When are the opening hours of Nijo Market?").
+  follow-up or as a completely new topic (UNRELATED). Related questions are
+  rewritten into standalone retrieval questions (e.g. "when does it open"
+  -> "When are the opening hours of Nijo Market?").
   - An unrelated question resets the conversation before retrieval, so stale
-    names/pronouns cannot leak into tag routing, caching, or later turns, and
-    the answer is fetched fresh. Standalone questions with no lexical link to
-    the recent turns also start a fresh context without a model call.
+  names/pronouns cannot leak into tag routing, caching, or later turns, and
+  the answer is fetched fresh. Standalone questions with no lexical link to
+  the recent turns also start a fresh context without a model call.
   - Added ConversationResolution and lexical relatedness helpers; case and
-    punctuation-only rewrites are treated as unchanged.
+  punctuation-only rewrites are treated as unchanged.
 
   Verified through the live server:
   - "where is nijo market" -> "when does it open" was rewritten to Nijo
-    Market opening hours and answered 7am.
+  Market opening hours and answered 7am.
   - A later "how do i cook pasta" logged a fresh-context reset, routed to the
-    global scope, and did not inherit the Nijo Market conversation.
+  global scope, and did not inherit the Nijo Market conversation.
 }
