@@ -1,9 +1,13 @@
 research_llm: ollama local model ornith-1.5:35b
 
+hospital_map {
+  UCSF: ucsf.edu, ucsfhealth.org
+}
+
 task.question_source_fine_tuning.doctors (completed) {
   - if <topic> is about a specific Dr, do the following:
-    hospital: find the doctor's hospital
-    titles: get all related articles's titles by searching <the doctor's name> in <hospital>
+    hospitals: find the doctor's hospital based on {hospital_map}
+    titles: get all related articles's titles by searching <the doctor's name> in each one of <hospitals>
     articles: baed on the {titles}, try to pick the articles that with the title containing <the doctor's name>
     add {articles} to the context and answer the question
 }

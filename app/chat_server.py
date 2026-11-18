@@ -389,6 +389,36 @@ RESEARCH_WITH_NEWS_MODEL = os.environ.get(
 RESEARCH_WITH_NEWS_QUESTIONS = 2
 RESEARCH_WITH_NEWS_ARTICLES_PER_QUESTION = 3
 RESEARCH_WITH_NEWS_DOCTOR_TITLE_CANDIDATES = 20
+# The hospital_map in prompts/research_with_the_news.prompt. A doctor's
+# articles can live on either the university site or the hospital site, so a
+# mapped hospital is searched across every listed domain instead of only the
+# one domain the profile model happened to name.
+RESEARCH_WITH_NEWS_HOSPITAL_MAP = {
+    "ucsf": ("ucsf.edu", "ucsfhealth.org"),
+    "university of california san francisco": (
+        "ucsf.edu",
+        "ucsfhealth.org",
+    ),
+}
+RESEARCH_WITH_NEWS_HOSPITAL_STOPWORDS = {
+    "the",
+    "of",
+    "and",
+    "at",
+    "for",
+    "university",
+    "medical",
+    "center",
+    "centre",
+    "hospital",
+    "health",
+    "healthcare",
+    "system",
+    "school",
+    "medicine",
+    "childrens",
+    "children",
+}
 RESEARCH_WITH_NEWS_ARTICLE_CHARS = 1800
 RESEARCH_WITH_NEWS_CONTEXT_CHARS = 14000
 RESEARCH_WITH_NEWS_QUESTION_PROMPT = """You are planning a news search about a topic.
@@ -11016,6 +11046,43 @@ def _research_with_news_normalize_website(value: str) -> str:
     return website
 
 
+def _research_with_news_hospital_websites(hospital: str) -> list[str]:
+    """Return the domains listed for a hospital in the prompt's hospital_map.
+
+    Hospital names come from a local model, so they may include credentials
+    and generic words ("UCSF Medical Center", "University of California, San
+    Francisco Health"). Match on the significant name tokens and keep the
+    prompt's domain order. A hospital that is not in the map returns no
+    domains; callers then keep the single website from the doctor profile.
+    """
+    normalized = " ".join(
+        re.findall(r"[a-z0-9]+", str(hospital or "").casefold())
+    )
+    if not normalized:
+        return []
+    hospital_tokens = set(normalized.split())
+    matches: list[tuple[int, tuple[str, ...]]] = []
+    for name, domains in RESEARCH_WITH_NEWS_HOSPITAL_MAP.items():
+        name_tokens = {
+            token
+            for token in re.findall(r"[a-z0-9]+", name.casefold())
+            if token not in RESEARCH_WITH_NEWS_HOSPITAL_STOPWORDS
+        }
+        if name_tokens and name_tokens <= hospital_tokens:
+            matches.append((len(name_tokens), domains))
+    if not matches:
+        return []
+    # Prefer the most specific map entry (the full university name over the
+    # UCSF acronym when both are present).
+    domains = max(matches, key=lambda item: item[0])[1]
+    websites: list[str] = []
+    for domain in domains:
+        website = _research_with_news_normalize_website(domain)
+        if website and website not in websites:
+            websites.append(website)
+    return websites
+
+
 def _wikipedia_official_website(title: str) -> str:
     """Look up a Wikipedia page's official website through Wikidata P856."""
     title = " ".join(str(title or "").split())
@@ -11229,6 +11296,7 @@ def plan_research_with_doctor_profile(
             "hospital": "",
             "website": "",
             "specialty": "",
+            "websites": [],
         }
     if (
         not profile.get("doctor")
@@ -11243,15 +11311,35 @@ def plan_research_with_doctor_profile(
         profile["doctor"] = re.sub(
             r"\s*\([^)]*\)\s*$", "", article_title
         ).strip()
-    if profile.get("hospital") and not profile.get("website"):
-        profile["website"] = _research_with_news_hospital_website(
-            profile.get("doctor", ""), profile["hospital"], report
+    mapped_websites = _research_with_news_hospital_websites(
+        profile.get("hospital", "")
+    )
+    if mapped_websites:
+        profile["websites"] = mapped_websites
+        profile["website"] = mapped_websites[0]
+        report(
+            "[research_with_the_news: hospital_map matched "
+            f"{profile.get('hospital')!r} -> "
+            + ", ".join(mapped_websites)
+            + "]"
+        )
+    else:
+        if profile.get("hospital") and not profile.get("website"):
+            profile["website"] = _research_with_news_hospital_website(
+                profile.get("doctor", ""), profile["hospital"], report
+            )
+        profile["websites"] = (
+            [profile["website"]] if profile.get("website") else []
         )
     profile["website_used"] = False
     details = [
         f"doctor={profile.get('doctor') or 'unknown'}",
         f"hospital={profile.get('hospital') or 'unknown'}",
-        f"website={profile.get('website') or 'unknown'}",
+        "website="
+        + (
+            ", ".join(profile.get("websites") or [])
+            or str(profile.get("website") or "unknown")
+        ),
     ]
     report(
         "[research_with_the_news: doctor profile: " + ", ".join(details) + "]"
@@ -11380,34 +11468,57 @@ def search_research_with_doctor(
     limit: int = RESEARCH_WITH_NEWS_ARTICLES_PER_QUESTION,
     log: Callable[[str], None] | None = None,
 ) -> list[dict]:
-    """Search the doctor's hospital website, then fall back to the news index."""
+    """Search the doctor's hospital websites, then the news index."""
     report = log or (lambda _text: None)
     doctor = str(profile.get("doctor") or "").strip()
     hospital = str(profile.get("hospital") or "").strip()
-    website = str(profile.get("website") or "").strip()
-    # The task requires the doctor's name in the title. Read the hospital's
-    # article-title list first, keep only titles that name the doctor, and
-    # fetch those bodies. A hospital website can carry a doctor's page without
-    # the name in the headline, so the question-based site search below remains
-    # as a fallback when no title matches.
-    if website and doctor:
-        matching_titles = _research_with_news_doctor_title_candidates(
-            doctor,
-            website,
-            RESEARCH_WITH_NEWS_DOCTOR_TITLE_CANDIDATES,
-            report,
+    websites = [
+        website
+        for website in (
+            _research_with_news_normalize_website(value)
+            for value in (profile.get("websites") or [])
         )
+        if website
+    ]
+    website = _research_with_news_normalize_website(
+        str(profile.get("website") or "")
+    )
+    if website and not websites:
+        websites.append(website)
+    if not websites:
+        websites = _research_with_news_hospital_websites(hospital)
+    if websites:
+        profile["websites"] = websites
+        profile["website"] = websites[0]
+    # The task requires the doctor's name in the title. Read each hospital
+    # website's article-title list first, keep only titles that name the
+    # doctor, and fetch those bodies. A hospital website can carry a doctor's
+    # page without the name in the headline, so the question-based site search
+    # below remains as a fallback when no title matches.
+    if websites and doctor:
         selected: list[dict] = []
-        for candidate in matching_titles:
+        saw_matching_titles = False
+        for website in websites:
             if len(selected) >= limit:
                 break
-            article = _research_with_news_fetch_doctor_article(
-                candidate, report
+            matching_titles = _research_with_news_doctor_title_candidates(
+                doctor,
+                website,
+                RESEARCH_WITH_NEWS_DOCTOR_TITLE_CANDIDATES,
+                report,
             )
-            if article is None:
-                continue
-            article["research_source"] = "hospital_website"
-            selected.append(article)
+            if matching_titles:
+                saw_matching_titles = True
+            for candidate in matching_titles:
+                if len(selected) >= limit:
+                    break
+                article = _research_with_news_fetch_doctor_article(
+                    candidate, report
+                )
+                if article is None:
+                    continue
+                article["research_source"] = "hospital_website"
+                selected.append(article)
         if selected:
             profile["website_used"] = True
             report(
@@ -11416,7 +11527,7 @@ def search_research_with_doctor(
                 f"contains the doctor's name for {question!r}]"
             )
             return selected
-        if matching_titles:
+        if saw_matching_titles:
             report(
                 "[research_with_the_news: every matching hospital-website "
                 "title had no readable article body; falling back to a "
@@ -11437,37 +11548,36 @@ def search_research_with_doctor(
         site_queries.append(f'"{hospital}"')
     else:
         site_queries.append(question)
-    seen_queries: set[str] = set()
-    for site_query in site_queries:
-        key = site_query.casefold()
-        if not site_query or key in seen_queries:
-            continue
-        seen_queries.add(key)
-        if not website:
-            break
-        report(
-            "[research_with_the_news: searching the hospital website "
-            f"{website!r} for {site_query!r}]"
-        )
-        try:
-            results = search_research_with_news(
-                site_query, limit=limit, website=website
-            )
-        except RuntimeError as exc:
+    for website in websites:
+        seen_queries: set[str] = set()
+        for site_query in site_queries:
+            key = site_query.casefold()
+            if not site_query or key in seen_queries:
+                continue
+            seen_queries.add(key)
             report(
-                "[research_with_the_news: no readable article on "
-                f"{website!r} for {site_query!r}: {exc}]"
+                "[research_with_the_news: searching the hospital website "
+                f"{website!r} for {site_query!r}]"
             )
-            continue
-        profile["website_used"] = True
-        for article in results:
-            article["research_source"] = "hospital_website"
-        return results
+            try:
+                results = search_research_with_news(
+                    site_query, limit=limit, website=website
+                )
+            except RuntimeError as exc:
+                report(
+                    "[research_with_the_news: no readable article on "
+                    f"{website!r} for {site_query!r}: {exc}]"
+                )
+                continue
+            profile["website_used"] = True
+            for article in results:
+                article["research_source"] = "hospital_website"
+            return results
     query_parts = [
         value for value in (doctor, hospital, question) if value
     ]
     query = " ".join(query_parts) or question
-    if website:
+    if websites:
         report(
             "[research_with_the_news: no hospital-website story was found; "
             f"falling back to the news index for {query!r}]"
@@ -20555,10 +20665,17 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             doctor_profile = plan_research_with_doctor_profile(
                 topic, log, accumulated_context
             )
-            if doctor_profile.get("website"):
+            profile_websites = [
+                str(value)
+                for value in (doctor_profile.get("websites") or [])
+                if str(value).strip()
+            ]
+            if profile_websites:
                 log(
                     "[research_with_the_news: restricting searches to the "
-                    f"hospital website {doctor_profile['website']!r}]"
+                    "hospital website(s) "
+                    + ", ".join(repr(value) for value in profile_websites)
+                    + "]"
                 )
             elif doctor_profile.get("hospital"):
                 log(
@@ -20735,17 +20852,25 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 if article.get("research_source") == "hospital_website"
             )
             news_articles = len(articles) - website_articles
+            profile_websites = [
+                str(value)
+                for value in (doctor_profile.get("websites") or [])
+                if str(value).strip()
+            ]
+            website_label = ", ".join(profile_websites) or str(
+                doctor_profile.get("website") or "no mapped website"
+            )
             if website_articles == len(articles):
                 detail = (
                     f"answer synthesized from {len(articles)} article(s) "
                     f"gathered from {hospital}'s website "
-                    f"({doctor_profile.get('website')}) for {doctor}"
+                    f"({website_label}) for {doctor}"
                 )
             elif website_articles:
                 detail = (
                     f"answer synthesized from {len(articles)} article(s): "
                     f"{website_articles} from {hospital}'s website "
-                    f"({doctor_profile.get('website')}) and {news_articles} "
+                    f"({website_label}) and {news_articles} "
                     f"from the news index for {doctor}"
                 )
             else:
