@@ -845,6 +845,33 @@
   }
   #mode-badge { margin-top: 2px; }
   #prompt-label { margin-top: 2px; }
+  #research-mode-control {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 5px;
+    margin-top: 2px;
+    color: var(--dim);
+    font-size: 10.5px;
+    letter-spacing: .04em;
+    user-select: none;
+  }
+  #research-mode-control select {
+    background: #10243a;
+    color: var(--accent);
+    border: 1px solid #214868;
+    border-radius: 4px;
+    padding: 1px 4px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    cursor: pointer;
+    outline: 0;
+  }
+  #research-mode-control select:hover:not(:disabled),
+  #research-mode-control select:focus { color: #fff; border-color: var(--accent-2); }
+  #research-mode-control select:disabled { opacity: .55; cursor: default; }
+  #status-research.online { color: #6ee7a0; }
+  #status-research.local { color: #a9bacb; }
   #mode-badge {
     font-size: 10.5px;
     font-weight: 700;
@@ -3461,6 +3488,13 @@
     height: 13px;
     fill: currentColor;
   }
+  .research-sources-range {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .02em;
+    white-space: nowrap;
+  }
 
   #research-sources-panel {
     position: fixed;
@@ -3590,6 +3624,7 @@
     #topbar .tagline { display: none; }
     #statusbar { gap: 9px; padding: 3px 11px; font-size: 10.5px; }
     #promptline { padding: 8px 11px 10px; gap: 7px; }
+    #research-mode-control span { display: none; }
     #mode-badge { min-width: 54px; font-size: 9.5px; }
     #prompt-hint { display: none; }
     body { font-size: 13px; }
@@ -4095,6 +4130,7 @@
       <span class="status-item"><strong>model</strong> <span id="status-model">…</span></span>
       <span class="status-item"><strong>source</strong> <span id="status-answer-source">—</span></span>
       <span class="status-item"><strong>mode</strong> <span id="status-mode">INSERT</span></span>
+      <span class="status-item"><strong>research</strong> <span id="status-research">…</span></span>
       <span class="grow"></span>
       <span id="busy-indicator" hidden><span class="pulse">●</span> streaming — Ctrl+C cancels</span>
       <button id="popup-restore" hidden title="Restore dictionary popup">
@@ -4102,6 +4138,14 @@
       </button>
     </div>
     <div id="promptline">
+      <label id="research-mode-control" for="research-mode-select"
+             title="Online uses /research_with_the_news; Local answers from the local corpus">
+        <span>Mode</span>
+        <select id="research-mode-select" aria-label="Knowledge mode">
+          <option value="online">Online</option>
+          <option value="local">Local</option>
+        </select>
+      </label>
       <span id="mode-badge" class="insert">INSERT</span>
       <span id="prompt-label">You:</span>
       <div id="input-wrap">
@@ -4544,6 +4588,8 @@ const imageAttachmentRemoveEl = $("#image-attachment-remove");
 const imageDropHintEl = $("#image-drop-hint");
 const modeBadge = $("#mode-badge");
 const statusMode = $("#status-mode");
+const researchModeSelect = $("#research-mode-select");
+const statusResearch = $("#status-research");
 const busyEl = $("#busy-indicator");
 const completionBox = $("#completion-box");
 const newsSourcePicker = $("#news-source-picker");
@@ -17033,6 +17079,22 @@ function renderResearchSources(entry) {
     openResearchSources(items);
   });
   el.appendChild(button);
+
+  // Show the publication window covered by the cited articles. Undated or
+  // unparsable articles are ignored; if no article has a usable date the
+  // range is omitted rather than showing a misleading placeholder.
+  const publishedTimes = items
+    .map((item) => new Date(String(item.published || "").trim()))
+    .filter((date) => !Number.isNaN(date.getTime()))
+    .sort((a, b) => a.getTime() - b.getTime());
+  if (publishedTimes.length) {
+    const range = document.createElement("span");
+    range.className = "research-sources-range";
+    const from = formatNewsDate(publishedTimes[0]);
+    const to = formatNewsDate(publishedTimes[publishedTimes.length - 1]);
+    range.textContent = `From ${from} To ${to}`;
+    el.appendChild(range);
+  }
 }
 
 function openResearchSources(items) {
@@ -17325,6 +17387,17 @@ function applyState(state, loadHistory = false) {
     ? `article ${state.article_title || state.article} · ${state.chunks ?? "?"} paragraphs · ${modelLabel} · /help`
     : `global corpus · ${state.chunks ?? "?"} trunks · ${modelLabel} · /help`;
   updateModeUI();
+  const researchOn = Boolean(state.research_with_news_mode);
+  if (researchModeSelect) {
+    researchModeSelect.value = researchOn ? "online" : "local";
+  }
+  if (statusResearch) {
+    statusResearch.textContent = researchOn ? "online" : "local";
+    statusResearch.className = researchOn ? "online" : "local";
+    statusResearch.title = researchOn
+      ? "Online knowledge mode: /research_with_the_news is on"
+      : "Local knowledge mode: /research_with_the_news is off";
+  }
   syncEnglishCornerVocabulary(state);
   if (helpPanel.hidden === false) renderHelp();
 }
@@ -17340,6 +17413,7 @@ function setBusy(value) {
   busy = value;
   busyEl.hidden = !value;
   sendBtn.disabled = value;
+  if (researchModeSelect) researchModeSelect.disabled = value;
   inputEl.placeholder = value
     ? "Streaming… type your next question, or Ctrl+C to cancel"
     : "Ask a question, or type /help — Tab completes, Esc enters normal mode";
@@ -17794,7 +17868,7 @@ function submitText(text, fromChoice = false) {
   // forms stay non-clickable.
   const researchWithNewsAnswer = commandName === "research_with_the_news"
     && commandArgs.length > 0
-    && !["off", "stop", "disable", "disabled"].includes(
+    && !["on", "start", "enable", "enabled", "off", "stop", "disable", "disabled"].includes(
       String(commandArgs[0] || "").toLowerCase()
     );
   const entry = makeEntry(isCommand ? "command" : "assistant", {
@@ -19051,6 +19125,24 @@ imageAttachmentRemoveEl.addEventListener("click", () => {
   clearPendingImage();
   inputEl.focus({ preventScroll: true });
 });
+
+/* The Mode selector is a shortcut for /research_with_the_news on|off. */
+if (researchModeSelect) {
+  researchModeSelect.addEventListener("change", () => {
+    const wantOnline = researchModeSelect.value === "online";
+    const isOnline = Boolean(appState?.research_with_news_mode);
+    if (wantOnline === isOnline) return;
+    if (busy) {
+      toast("Wait for the current answer to finish, or press Ctrl+C to cancel.");
+      researchModeSelect.value = isOnline ? "online" : "local";
+      return;
+    }
+    submitText(
+      wantOnline ? "/research_with_the_news on" : "/research_with_the_news off"
+    );
+    inputEl.focus({ preventScroll: true });
+  });
+}
 
 /* The Send button next to the composer sends the same text as Enter. */
 sendBtn.addEventListener("click", () => {

@@ -350,7 +350,7 @@ WEB_COMMANDS = {
     "/tablelog": "japan food and restaurant guide for travelers - search Tabelog restaurant pages by keywords: /tablelog <keywords>",
     "/stock": "show a stock symbol profile, financial details, and related news articles: /stock <stock_symbol>",
     "/deepresearch": "run a bounded multi-round research report on <topic>: /deepresearch <topic>",
-    "/research_with_the_news": "research a topic from recent news, Wikipedia, or a doctor's hospital website, then keep doing so for each follow-up: /research_with_the_news <topic>; /research_with_the_news off",
+    "/research_with_the_news": "research a topic from recent news, Wikipedia, or a doctor's hospital website, then keep doing so for each follow-up: /research_with_the_news <topic>; /research_with_the_news on; /research_with_the_news off",
     "/write_a_book": "ask for every book setting (model, directory, words, chapters, sub-questions, articles per sub-question), then research recent news and write a book: /write_a_book [<subject>]",
     "/books": "list the books written by /write_a_book in .chat/books: /books [keyword]",
     "/settings": "set English Corner options: /settings english_words_to_learn <range> (3k, 5k, 10k, 20k, 30k, 50k, 100k, or a range such as 10k..50k; default 10k..50k; off disables highlighting)",
@@ -16799,8 +16799,9 @@ class ChatState:
         self.latest_benchmark: dict | None = None
         self.benchmark_mode = False
         # /research_with_the_news keeps answering every following question in
-        # the accumulated research context until the user turns it off.
-        self.research_with_news_mode = False
+        # the accumulated research context until the user turns it off. The
+        # Mode selector defaults to Online, so the browser starts in this mode.
+        self.research_with_news_mode = True
         self.conversation: list[dict] = []
         self.conversation_revision = 0
         # English Corner: corpus band highlighted in article readers. Shared
@@ -20562,6 +20563,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         """Turn the news-research mode on or off.
 
         Usage: /research_with_the_news <topic>
+               /research_with_the_news on
                /research_with_the_news off
         While the mode is on, every ordinary question is added to the current
         research context. The server asks the research model for two
@@ -20576,12 +20578,38 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._sse_text(
                 "output",
                 "\nUsage: /research_with_the_news <topic>\n"
+                "       /research_with_the_news on\n"
                 "       /research_with_the_news off\n"
                 "Researches a topic from recent news and keeps doing so for "
                 "each follow-up question.\n",
             )
             return
-        if topic.casefold() in {"off", "stop", "disable", "disabled"}:
+        normalized = topic.casefold()
+        if normalized in {"on", "start", "enable", "enabled"}:
+            if state.research_with_news_mode:
+                self._sse_text(
+                    "output",
+                    "\nRESEARCH_WITH_NEWS_MODE is already on; questions are "
+                    "answered from online research.\n",
+                )
+                return
+            state.research_with_news_mode = True
+            # Starting the mode must not carry ordinary chat context into the
+            # research thread.
+            self._reset_research_with_the_news_context()
+            self._sse("meta", state.snapshot())
+            self._sse_text(
+                "log",
+                "[research_with_the_news: mode on; cleared the previous "
+                "conversation context]",
+            )
+            self._sse_text(
+                "output",
+                "\nRESEARCH_WITH_NEWS_MODE is on; questions are answered from "
+                "online research.\n",
+            )
+            return
+        if normalized in {"off", "stop", "disable", "disabled"}:
             if not state.research_with_news_mode:
                 self._sse_text(
                     "output",

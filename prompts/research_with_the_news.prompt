@@ -4,6 +4,29 @@ hospital_map {
   UCSF: ucsf.edu, ucsfhealth.org
 }
 
+task.news_source_timeline (completed) {
+  reference task.sources_of_the_answer:
+  - next to the "Sources" icon, show me a from and to time of the related articles, format: From <from_time> To <to_time>
+}
+
+task.online_knowledge_mode_and_local_knowledge_mode (completed) {
+  - in the main chat window, on the left side of the "INSERT" button, add a dropdown with the following {
+    label: Mode
+    options {
+      - Online (default):
+        - This will essentially equas to running /research_with_the_news on
+      - Local:
+        - This will essentially equas to running /research_with_the_news off
+    }
+  }
+  - in the chat status bar, indict whethere is research mode is on or not
+}
+
+task.add_research_mode_on_option (completed) {
+  allow turning on research mode using:
+  /research_with_the_news on
+}
+
 task.sources_of_the_answer (completed) {
   - below each answer, show an icon for sources of news article the answer is based on, when click {
     - show a popup modal showing list of related article urls
