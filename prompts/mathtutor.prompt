@@ -1,5 +1,13 @@
 mathtutor_llm: ollama local model ornith-1.5:35b with no thinking
 
+task.support_drawing_tables (completed) {
+  when the question is asking about a table of data points, pleasse render a real table containing those data points
+}
+
+task.allow_removing_all_docs (completed) {
+  please allow removing all uploadded word docs
+}
+
 task.graph_linear_equations (completed) {
   for example:
   if we have System: y = -2x + 5 and y = 1/2x - 1 and we need to show the graph, please generate 2 lines correspondingly in the graph as well!

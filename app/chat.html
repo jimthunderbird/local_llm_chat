@@ -238,6 +238,31 @@
     border-left: 2px solid #2f4a60;
     color: #b4c5d5;
   }
+  .markdown .table-scroll {
+    max-width: 100%;
+    margin: .65em 0;
+    overflow-x: auto;
+  }
+  .markdown table {
+    width: auto;
+    min-width: 45%;
+    border-collapse: collapse;
+    font-size: .95em;
+    line-height: 1.4;
+  }
+  .markdown th, .markdown td {
+    padding: .32em .65em;
+    border: 1px solid #2d4d68;
+    vertical-align: top;
+  }
+  .markdown th {
+    color: #e6f0f8;
+    background: #122131;
+    font-weight: 700;
+  }
+  .markdown tbody tr:nth-child(even) {
+    background: rgba(255, 255, 255, .025);
+  }
   .markdown math {
     color: #e6f0f8;
     font-family: "STIX Two Math", "Cambria Math", "Latin Modern Math", serif;
@@ -3567,6 +3592,15 @@
     border-color: #9af0a2;
     color: #0c1510;
   }
+  .math-tutor button.math-tutor-btn.danger {
+    color: #ffb4b4;
+    border-color: #6b3131;
+  }
+  .math-tutor button.math-tutor-btn.danger:hover:not(:disabled) {
+    color: #fff;
+    background: #3a1717;
+    border-color: #d16666;
+  }
   .math-tutor-status {
     margin-top: 8px;
     color: var(--warn);
@@ -6343,6 +6377,80 @@ function makeLineHelpButton(codeLines, lineIndex, language) {
   return button;
 }
 
+function splitMarkdownTableRow(line) {
+  let row = String(line || "").trim();
+  if (row.startsWith("|")) row = row.slice(1);
+  if (row.endsWith("|") && !row.endsWith("\\|")) row = row.slice(0, -1);
+  const cells = [];
+  let current = "";
+  for (let index = 0; index < row.length; index += 1) {
+    const ch = row[index];
+    if (ch === "\\" && row[index + 1] === "|") {
+      current += "|";
+      index += 1;
+      continue;
+    }
+    if (ch === "|") {
+      cells.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+function markdownTableAlignments(separatorLine) {
+  const cells = splitMarkdownTableRow(separatorLine);
+  if (!cells.length || !cells.every((cell) => /^:?-{3,}:?$/.test(cell))) {
+    return null;
+  }
+  return cells.map((cell) => {
+    const left = cell.startsWith(":");
+    const right = cell.endsWith(":");
+    if (left && right) return "center";
+    if (right) return "right";
+    if (left) return "left";
+    return "";
+  });
+}
+
+function makeMarkdownTable(headerLine, separatorLine, rowLines, clickable, highlightWords) {
+  const headers = splitMarkdownTableRow(headerLine);
+  const alignments = markdownTableAlignments(separatorLine) || [];
+  const wrapper = document.createElement("div");
+  wrapper.className = "table-scroll";
+  const table = document.createElement("table");
+
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  headers.forEach((header, index) => {
+    const th = document.createElement("th");
+    if (alignments[index]) th.style.textAlign = alignments[index];
+    appendInline(th, header, clickable, highlightWords);
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const rowLine of rowLines) {
+    const cells = splitMarkdownTableRow(rowLine);
+    const tr = document.createElement("tr");
+    headers.forEach((_header, index) => {
+      const td = document.createElement("td");
+      if (alignments[index]) td.style.textAlign = alignments[index];
+      appendInline(td, cells[index] || "", clickable, highlightWords);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  wrapper.appendChild(table);
+  return wrapper;
+}
+
 function renderMarkdown(text, clickable = true, annotations = null, options = null) {
   const lineHelpEnabled = Boolean(options && options.lineHelp);
   // English Corner: assistant answers mark words inside the learner's selected
@@ -6467,6 +6575,38 @@ function renderMarkdown(text, clickable = true, annotations = null, options = nu
       codeBlock.appendChild(pre);
       container.appendChild(codeBlock);
       continue;
+    }
+
+    // GitHub-flavored Markdown pipe table. A header row followed by a
+    // separator row such as | --- | :---: | renders as a real <table>.
+    if (line.includes("|") && i + 1 < lines.length) {
+      const alignments = markdownTableAlignments(lines[i + 1]);
+      const headerCells = splitMarkdownTableRow(line);
+      if (alignments && alignments.length === headerCells.length) {
+        const headerLine = line;
+        const separatorLine = lines[i + 1];
+        const rowLines = [];
+        i += 2;
+        while (
+          i < lines.length &&
+          lines[i].trim() !== "" &&
+          lines[i].includes("|") &&
+          !BLOCK_START_RE.test(lines[i])
+        ) {
+          rowLines.push(lines[i]);
+          i += 1;
+        }
+        const table = makeMarkdownTable(
+          headerLine,
+          separatorLine,
+          rowLines,
+          clickable,
+          highlightWords
+        );
+        annotate(table);
+        container.appendChild(table);
+        continue;
+      }
     }
 
     // Horizontal rule.
@@ -10154,6 +10294,7 @@ function ensureMathtutorState(entry) {
       busy: false,
       moreBusy: false,
       answerBusy: false,
+      removing: false,
       status: "",
       error: "",
       index: 0,
@@ -10253,6 +10394,46 @@ async function generateMoreMathtutorProblems(entry) {
     state.status = "";
   } finally {
     state.moreBusy = false;
+    scheduleRender(entry);
+  }
+}
+
+async function removeAllMathtutorDocuments(entry) {
+  const state = ensureMathtutorState(entry);
+  const session = state.session;
+  if (!session || state.removing) return;
+  state.removing = true;
+  state.error = "";
+  state.status = "Removing the uploaded Word documents…";
+  scheduleRender(entry);
+  try {
+    if (state.controller) state.controller.abort();
+    const response = await fetch("/api/mathtutor_remove_docs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: session.id }),
+    });
+    let payload = null;
+    try { payload = await response.json(); } catch { /* ignore */ }
+    if (!response.ok) {
+      throw new Error(payload?.error || `HTTP ${response.status}`);
+    }
+    state.session = null;
+    entry.mathtutor = null;
+    state.pendingFiles = [];
+    state.index = 0;
+    state.answers = {};
+    state.results = {};
+    state.answerBusy = false;
+    state.moreBusy = false;
+    state.controller = null;
+    state.showUpload = true;
+    state.status = "";
+  } catch (error) {
+    state.error = error?.message || String(error);
+    state.status = "";
+  } finally {
+    state.removing = false;
     scheduleRender(entry);
   }
 }
@@ -10362,6 +10543,14 @@ function renderMathTutor(entry) {
       chip.appendChild(label);
       docs.appendChild(chip);
     }
+    const removeAll = document.createElement("button");
+    removeAll.type = "button";
+    removeAll.className = "math-tutor-btn danger";
+    removeAll.textContent = state.removing ? "Removing…" : "Remove all documents";
+    removeAll.title = "Delete every uploaded Word document and reset this tutor session";
+    removeAll.disabled = state.removing;
+    removeAll.addEventListener("click", () => void removeAllMathtutorDocuments(entry));
+    docs.appendChild(removeAll);
     container.appendChild(docs);
   }
 

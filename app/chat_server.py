@@ -7328,6 +7328,77 @@ def _mathtutor_save_session(session: dict) -> None:
             pass
 
 
+def _mathtutor_remove_document_files(session: dict) -> int:
+    """Delete the Word files that belong to one mathtutor session."""
+    session_id = str(session.get("id", ""))
+    upload_root = MATHUTOR_UPLOAD_DIR.resolve()
+    removed = 0
+    for document in session.get("documents", []):
+        stored_path = str(document.get("path") or "").strip()
+        if not stored_path:
+            continue
+        path = Path(stored_path).resolve()
+        try:
+            path.relative_to(upload_root)
+        except ValueError:
+            continue
+        if path.is_file():
+            path.unlink()
+            removed += 1
+    # Also remove files whose session entry was lost, for example after a
+    # partial upload. Every stored file starts with "<session id>_".
+    if session_id:
+        for path in MATHUTOR_UPLOAD_DIR.glob(f"{session_id}_*"):
+            if path.is_file():
+                path.unlink()
+                removed += 1
+    return removed
+
+
+def _mathtutor_remove_all_documents(session_id: str | None = None) -> int:
+    """Remove uploaded Word documents and the sessions derived from them.
+
+    When ``session_id`` is given only that session is cleared. Otherwise the
+    whole mathtutor store is emptied, which is what the browser's "Remove all"
+    action uses when there is no active session.
+    """
+    with MATHUTOR_LOCK:
+        sessions: list[dict] = []
+        if session_id:
+            sessions.append(_mathtutor_load_session(session_id))
+        else:
+            try:
+                paths = list(MATHUTOR_SESSIONS_DIR.glob("*.context.json"))
+            except OSError:
+                paths = []
+            for path in paths:
+                candidate = path.name.split(".", 1)[0]
+                if not MATHUTOR_SESSION_ID_RE.fullmatch(candidate):
+                    continue
+                try:
+                    sessions.append(_mathtutor_load_session(candidate))
+                except ValueError:
+                    sessions.append({"id": candidate, "documents": []})
+
+        removed = 0
+        for session in sessions:
+            removed += _mathtutor_remove_document_files(session)
+            try:
+                _mathtutor_session_path(str(session.get("id", ""))).unlink()
+            except FileNotFoundError:
+                pass
+
+        if session_id is None:
+            try:
+                for path in MATHUTOR_UPLOAD_DIR.iterdir():
+                    if path.is_file():
+                        path.unlink()
+                        removed += 1
+            except FileNotFoundError:
+                pass
+        return removed
+
+
 def _mathtutor_source_text(session: dict, limit: int) -> str:
     chunks: list[str] = []
     remaining = limit
@@ -7470,6 +7541,7 @@ Return ONLY a valid JSON array containing all {batch_size} problems (no prose, n
   "question": the complete practice problem, including all numbers and wording,
   "answer": a complete worked reference answer with the final result.
 Use LaTeX inside $...$ for math when helpful.
+If a problem gives data points or refers to a table, put that data in the "question" field as a GitHub-flavored Markdown pipe table (a header row, a | --- | separator row, then one row per data point). Do not describe the table only as inline prose.
 """
         for generation_prompt, temperature in (
             (prompt, 0.35),
@@ -7537,7 +7609,8 @@ Write a detailed answer in Markdown:
 1. If the student submitted an answer, first say whether it is correct, partially correct, or incorrect, and explain the mistake.
 2. Then give a clear step-by-step solution, showing the reasoning and calculations.
 3. End with the final answer and one short tip for similar problems.
-4. If the problem is a system of equations, or if a graph (for example a Cartesian coordinate system or a Cartesian plane) makes the solution easier to understand, include it as a fenced ```graph block whose body is JSON:
+4. When the problem or solution contains data points in a table, render it as a GitHub-flavored Markdown pipe table (a header row, a | --- | separator row, then one row per data point).
+5. If the problem is a system of equations, or if a graph (for example a Cartesian coordinate system or a Cartesian plane) makes the solution easier to understand, include it as a fenced ```graph block whose body is JSON:
 ```graph
 {{"title":"y = 2x + 1","x":[-5,5],"y":[-5,10],"lines":[{{"points":[[-2,-3],[0,1],[2,5]],"label":"y = 2x + 1"}}],"points":[{{"x":0,"y":1,"label":"(0, 1)"}}]}}
 ```
@@ -18575,6 +18648,26 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "added": len(added),
                 }
             )
+            return
+        if parsed.path == "/api/mathtutor_remove_docs":
+            payload = self._read_json()
+            if payload is None:
+                return
+            session_id = str(payload.get("id") or "").strip() or None
+            try:
+                removed = _mathtutor_remove_all_documents(session_id)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except OSError as exc:
+                self._send_error_json(
+                    f"Could not remove the uploaded documents: {exc}", 500
+                )
+                return
+            with self.state.lock:
+                if not session_id or self.state.mathtutor_session_id == session_id:
+                    self.state.mathtutor_session_id = None
+            self._send_json({"removed": removed})
             return
         if parsed.path == "/api/mathtutor_answer":
             payload = self._read_json()
