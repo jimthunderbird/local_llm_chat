@@ -2032,6 +2032,82 @@
   }
   .news-link:hover { border-bottom-style: solid; }
   .news-link[hidden] { display: none; }
+  /* "Find" is shown only for book readers loaded through the shared modal. */
+  .news-find-btn {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 1px solid #2b4056;
+    border-radius: 5px;
+    color: var(--accent-2);
+    font-size: 11px;
+    line-height: 1.2;
+    padding: 3px 8px;
+    margin-top: 1px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .news-find-btn:hover { border-color: var(--accent-2); color: var(--text); }
+  .news-find-btn[hidden] { display: none; }
+  #news-find-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 14px;
+    background: #0b131b;
+    border-bottom: 1px solid #223344;
+    color: var(--dim);
+  }
+  #news-find-bar[hidden] { display: none; }
+  .news-find-label {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+    user-select: none;
+  }
+  #news-find-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    background: #0d151e;
+    border: 1px solid #2b4056;
+    border-radius: 5px;
+    color: var(--text);
+    padding: 5px 8px;
+    font-family: var(--mono);
+    font-size: 12px;
+    outline: none;
+  }
+  #news-find-input:focus { border-color: var(--accent-2); }
+  .news-find-count {
+    min-width: 70px;
+    text-align: right;
+    color: var(--dim);
+    font-size: 11px;
+    user-select: none;
+  }
+  .news-find-count.is-empty { color: var(--warn); }
+  .news-find-nav,
+  .news-find-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    cursor: pointer;
+    line-height: 1;
+    user-select: none;
+  }
+  .news-find-nav { font-size: 18px; padding: 0 4px; }
+  .news-find-nav:hover:not(:disabled) { color: var(--text); }
+  .news-find-nav:disabled { opacity: .3; cursor: default; }
+  .news-find-close { font-size: 18px; padding: 0 3px; }
+  .news-find-close:hover { color: var(--text); }
+  .news-body::highlight(news-find) {
+    background: rgba(245, 215, 110, .42);
+    color: #fff;
+  }
+  .news-body::highlight(news-find-active) {
+    background: #f0b429;
+    color: #10151b;
+  }
   .news-nav {
     flex: 0 0 auto;
     background: transparent;
@@ -3980,6 +4056,8 @@
       <button id="news-next" class="news-nav" type="button"
               title="Next restaurant" aria-label="Next restaurant" hidden>›</button>
       <a id="news-link" class="news-link" href="#" target="_blank" rel="noopener noreferrer">Open article ↗</a>
+      <button id="news-find-btn" class="news-find-btn" type="button" hidden
+              title="Find words in this book (Ctrl/⌘+F)" aria-label="Find words in this book">Find</button>
       <button id="news-podcast" class="news-tts news-podcast" type="button" hidden
               title="Create and play an AI news podcast" aria-label="Create and play an AI news podcast">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -4003,6 +4081,18 @@
       <button id="news-translate" class="translate-btn news-translate" type="button" disabled
               title="Translate this story into Simplified Chinese with the local LLM">中文</button>
       <button id="news-close" type="button" title="Close (Esc)">×</button>
+    </div>
+    <div id="news-find-bar" class="news-find-bar" role="search" hidden>
+      <span class="news-find-label">Find</span>
+      <input id="news-find-input" type="search" autocomplete="off" spellcheck="false"
+             placeholder="Find words in this book… (Enter next, Shift+Enter previous)">
+      <span id="news-find-count" class="news-find-count"></span>
+      <button id="news-find-prev" class="news-find-nav" type="button"
+              title="Previous match (Shift+Enter)" aria-label="Previous match" disabled>‹</button>
+      <button id="news-find-next" class="news-find-nav" type="button"
+              title="Next match (Enter)" aria-label="Next match" disabled>›</button>
+      <button id="news-find-close" class="news-find-close" type="button"
+              title="Close find (Esc)" aria-label="Close find">×</button>
     </div>
     <div class="news-layout">
       <div id="news-body" class="news-body">
@@ -4392,6 +4482,13 @@ const newsMetaEl = $("#news-meta");
 const newsPrevEl = $("#news-prev");
 const newsNextEl = $("#news-next");
 const newsLinkEl = $("#news-link");
+const newsFindBtn = $("#news-find-btn");
+const newsFindBarEl = $("#news-find-bar");
+const newsFindInputEl = $("#news-find-input");
+const newsFindCountEl = $("#news-find-count");
+const newsFindPrevEl = $("#news-find-prev");
+const newsFindNextEl = $("#news-find-next");
+const newsFindCloseEl = $("#news-find-close");
 const newsBodyEl = $("#news-body");
 const newsTtsBtn = $("#news-tts");
 const newsPodcastBtn = $("#news-podcast");
@@ -11070,6 +11167,7 @@ function openWrittenBookReader(item) {
     linkLabel: "Open book file ↗",
     docs: true,
     learnable: false,
+    findable: true,
     complete: false,
     articleFetched: true,
     fullArticleLoaded: true,
@@ -14000,7 +14098,286 @@ function newsOpenHref(url, title = "") {
     + (headline ? `&title=${encodeURIComponent(headline)}` : "");
 }
 
+/* ------------------------------------------------------------------ *
+ *  Find words in a book loaded through the shared reader modal
+ * ------------------------------------------------------------------ *
+ *  Books written by /write_a_book open in the news/article reader instead
+ *  of a new tab. They set item.findable, which reveals the header "Find"
+ *  button and this search bar. Matches are painted with the CSS Custom
+ *  Highlight API so the book DOM is never mutated, and the active match is
+ *  scrolled into view without touching the reader's own layout. */
+const NEWS_FIND_MAX_MATCHES = 2000;
+let newsFindRanges = [];
+let newsFindActive = -1;
+let newsFindTruncated = false;
+let newsFindTimer = 0;
+let newsFindRefreshFrame = 0;
+const newsFindHighlight = typeof Highlight === "function" ? new Highlight() : null;
+const newsFindActiveHighlight = typeof Highlight === "function"
+  ? new Highlight()
+  : null;
+if (
+  newsFindHighlight
+  && newsFindActiveHighlight
+  && typeof CSS !== "undefined"
+  && CSS.highlights
+) {
+  CSS.highlights.set("news-find", newsFindHighlight);
+  CSS.highlights.set("news-find-active", newsFindActiveHighlight);
+}
+
+/* Concatenate the visible text nodes into one string and keep a map from
+ * string offsets back to each node. Searching the concatenated text makes
+ * multi-word queries work even though each word is wrapped in a .word span. */
+function newsFindTextParts() {
+  const parts = [];
+  let text = "";
+  if (!newsBodyEl) return { text, parts };
+  const walker = document.createTreeWalker(
+    newsBodyEl,
+    NodeFilter.SHOW_TEXT,
+    {
+      acceptNode(node) {
+        if (!node.nodeValue) return NodeFilter.FILTER_REJECT;
+        const parent = node.parentElement;
+        if (!parent) return NodeFilter.FILTER_REJECT;
+        if (parent.closest("script, style, #news-translation, .news-loading")) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        if (parent.closest("[hidden]")) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    }
+  );
+  let node;
+  while ((node = walker.nextNode())) {
+    parts.push({ node, start: text.length });
+    text += node.nodeValue;
+  }
+  return { text, parts };
+}
+
+function newsFindLocate(parts, offset) {
+  if (!parts.length) return null;
+  let low = 0;
+  let high = parts.length - 1;
+  while (low < high) {
+    const mid = (low + high + 1) >> 1;
+    if (parts[mid].start <= offset) low = mid;
+    else high = mid - 1;
+  }
+  const part = parts[low];
+  return {
+    node: part.node,
+    offset: Math.max(
+      0,
+      Math.min(offset - part.start, part.node.nodeValue.length)
+    ),
+  };
+}
+
+function newsFindCollectRanges(query) {
+  const ranges = [];
+  let truncated = false;
+  const needle = String(query || "").trim();
+  if (!needle) return { ranges, truncated };
+  const { text, parts } = newsFindTextParts();
+  if (!text || !parts.length) return { ranges, truncated };
+  const haystack = text.toLowerCase();
+  const target = needle.toLowerCase();
+  let from = 0;
+  while (ranges.length < NEWS_FIND_MAX_MATCHES) {
+    const index = haystack.indexOf(target, from);
+    if (index < 0) break;
+    const start = newsFindLocate(parts, index);
+    const end = newsFindLocate(parts, index + target.length);
+    if (start && end) {
+      const range = document.createRange();
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+      ranges.push(range);
+    }
+    from = index + Math.max(1, target.length);
+  }
+  if (ranges.length >= NEWS_FIND_MAX_MATCHES) {
+    truncated = haystack.indexOf(target, from) >= 0;
+  }
+  return { ranges, truncated };
+}
+
+function newsFindScrollToActive() {
+  const range = newsFindRanges[newsFindActive];
+  if (!range) return;
+  const rect = range.getBoundingClientRect();
+  const bodyRect = newsBodyEl.getBoundingClientRect();
+  if (!rect || (!rect.height && !rect.width)) return;
+  const top = newsBodyEl.scrollTop
+    + (rect.top - bodyRect.top)
+    - (newsBodyEl.clientHeight - rect.height) / 2;
+  newsBodyEl.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+}
+
+function newsFindPaint({ scroll = false } = {}) {
+  newsFindHighlight?.clear();
+  newsFindActiveHighlight?.clear();
+  for (let index = 0; index < newsFindRanges.length; index += 1) {
+    if (index === newsFindActive) continue;
+    newsFindHighlight?.add(newsFindRanges[index]);
+  }
+  if (newsFindActive >= 0 && newsFindRanges[newsFindActive]) {
+    newsFindActiveHighlight?.add(newsFindRanges[newsFindActive]);
+  }
+  const query = String(newsFindInputEl?.value || "").trim();
+  const total = newsFindRanges.length;
+  if (!query) {
+    newsFindCountEl.textContent = "";
+    newsFindCountEl.classList.remove("is-empty");
+  } else if (!total) {
+    newsFindCountEl.textContent = "No matches";
+    newsFindCountEl.classList.add("is-empty");
+  } else {
+    newsFindCountEl.textContent =
+      `${newsFindActive + 1} / ${total}${newsFindTruncated ? "+" : ""}`;
+    newsFindCountEl.classList.remove("is-empty");
+  }
+  newsFindPrevEl.disabled = !total;
+  newsFindNextEl.disabled = !total;
+  if (scroll) newsFindScrollToActive();
+}
+
+function newsFindRefresh({ resetIndex = false, scroll = false } = {}) {
+  if (!newsFindInputEl) return;
+  const query = String(newsFindInputEl.value || "").trim();
+  if (!query) {
+    newsFindRanges = [];
+    newsFindActive = -1;
+    newsFindTruncated = false;
+    newsFindPaint();
+    return;
+  }
+  const { ranges, truncated } = newsFindCollectRanges(query);
+  newsFindRanges = ranges;
+  newsFindTruncated = truncated;
+  if (resetIndex || newsFindActive < 0) {
+    newsFindActive = ranges.length ? 0 : -1;
+  } else if (newsFindActive >= ranges.length) {
+    newsFindActive = ranges.length - 1;
+  }
+  newsFindPaint({ scroll });
+}
+
+function newsFindScheduleRefresh() {
+  if (!newsFindBarEl || newsFindBarEl.hidden) return;
+  if (newsFindRefreshFrame) cancelAnimationFrame(newsFindRefreshFrame);
+  newsFindRefreshFrame = requestAnimationFrame(() => {
+    newsFindRefreshFrame = 0;
+    if (newsFindBarEl.hidden || newsPanelEl.hidden) return;
+    newsFindRefresh();
+  });
+}
+
+function newsFindMove(step) {
+  if (!newsFindRanges.length) return;
+  newsFindActive = (
+    newsFindActive + step + newsFindRanges.length
+  ) % newsFindRanges.length;
+  newsFindPaint({ scroll: true });
+}
+
+function syncNewsFindButton(item) {
+  if (!newsFindBtn) return;
+  const findable = Boolean(item && item.findable);
+  newsFindBtn.hidden = !findable;
+  if (!findable) resetNewsFind();
+}
+
+function openNewsFind() {
+  if (!newsFindBarEl || newsPanelEl.hidden || !newsItem?.findable) return;
+  newsFindBarEl.hidden = false;
+  newsFindInputEl.focus({ preventScroll: true });
+  newsFindInputEl.select();
+  newsFindScheduleRefresh();
+}
+
+function closeNewsFind({ clearQuery = false } = {}) {
+  if (newsFindTimer) {
+    window.clearTimeout(newsFindTimer);
+    newsFindTimer = 0;
+  }
+  if (newsFindRefreshFrame) {
+    cancelAnimationFrame(newsFindRefreshFrame);
+    newsFindRefreshFrame = 0;
+  }
+  newsFindRanges = [];
+  newsFindActive = -1;
+  newsFindTruncated = false;
+  newsFindHighlight?.clear();
+  newsFindActiveHighlight?.clear();
+  if (newsFindCountEl) {
+    newsFindCountEl.textContent = "";
+    newsFindCountEl.classList.remove("is-empty");
+  }
+  if (newsFindPrevEl) newsFindPrevEl.disabled = true;
+  if (newsFindNextEl) newsFindNextEl.disabled = true;
+  if (newsFindBarEl) newsFindBarEl.hidden = true;
+  if (clearQuery && newsFindInputEl) newsFindInputEl.value = "";
+}
+
+function resetNewsFind() {
+  closeNewsFind({ clearQuery: true });
+}
+
+newsFindBtn.addEventListener("click", () => {
+  if (newsFindBarEl.hidden) openNewsFind();
+  else closeNewsFind();
+});
+newsFindCloseEl.addEventListener("click", () => closeNewsFind());
+newsFindPrevEl.addEventListener("click", () => newsFindMove(-1));
+newsFindNextEl.addEventListener("click", () => newsFindMove(1));
+newsFindInputEl.addEventListener("input", () => {
+  if (newsFindTimer) window.clearTimeout(newsFindTimer);
+  newsFindTimer = window.setTimeout(() => {
+    newsFindTimer = 0;
+    newsFindRefresh({ resetIndex: true, scroll: true });
+  }, 120);
+});
+newsFindInputEl.addEventListener("keydown", (event) => {
+  if (event.isComposing) return;
+  if (event.key === "Enter") {
+    event.preventDefault();
+    event.stopPropagation();
+    if (newsFindTimer) {
+      window.clearTimeout(newsFindTimer);
+      newsFindTimer = 0;
+      newsFindRefresh({ resetIndex: true, scroll: true });
+      return;
+    }
+    newsFindMove(event.shiftKey ? -1 : 1);
+  }
+});
+
+/* Ctrl/⌘+F opens the book's Find bar instead of the browser's page find. */
+document.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented || event.isComposing) return;
+  if (event.altKey || !(event.metaKey || event.ctrlKey)) return;
+  if (String(event.key || "").toLowerCase() !== "f") return;
+  if (newsPanelEl.hidden || !newsItem?.findable) return;
+  event.preventDefault();
+  openNewsFind();
+}, true);
+
+/* Escape closes Find first, then a second Escape closes the book modal. */
+document.addEventListener("keydown", (event) => {
+  if (event.isComposing || event.key !== "Escape") return;
+  if (!newsFindBarEl || newsFindBarEl.hidden) return;
+  if (!popupEl.hidden || !lineHelpPanel.hidden || !helpPanel.hidden) return;
+  event.preventDefault();
+  event.stopPropagation();
+  closeNewsFind();
+}, true);
+
 function renderNewsModal(item) {
+  syncNewsFindButton(item);
   if (newsPanelEl) {
     newsPanelEl.classList.toggle(
       "is-docs",
@@ -14135,6 +14512,7 @@ function renderNewsModal(item) {
   renderNewsPodcast(item);
   syncNewsTtsButton();
   syncNewsPodcastButton();
+  newsFindScheduleRefresh();
 }
 
 function cancelNewsPodcastGeneration(item) {
@@ -14199,6 +14577,7 @@ function openNewsModal(item, options = {}) {
   trackRestaurantHistory(item, historyMode);
   if (newsItem && newsItem !== item) cancelNewsPodcastGeneration(newsItem);
   newsItem = item;
+  resetNewsFind();
   updateRestaurantNav();
   newsPanelEl.classList.toggle("is-map", Boolean(item.map));
   // The explorer can open a place modal from a right click; keep that modal
@@ -15974,6 +16353,7 @@ function openNewsStory(newsId, fallbackUrl = "", fallbackTitle = "") {
 function closeNewsModal() {
   cancelNewsPodcastGeneration(newsItem);
   newsItem = null;
+  resetNewsFind();
   updateRestaurantNav();
   resetNewsTts();
   resetNewsTranslation();

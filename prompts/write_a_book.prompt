@@ -7,6 +7,10 @@ settings {
   sub_questions_article_search_limit: 10
 }
 
+task.find_word_in_book (completed) {
+  please implement a "Find" component on top of the book loader modal, allow me the find words in the book
+}
+
 task.blocking_detection (completed) {
   currently, before we write a book, we will search different sub questions with /news search
   for each news article fetching, please indidate whether ths article content fetching is successful or not
