@@ -1,7 +1,11 @@
 research_llm: ollama local model ornith-1.5:35b
 
 task.question_source_fine_tuning.doctors (completed) {
-  - if <topic> is about a specific Drs, find the doctor's hospital, get the related articles from the hospital websites and add to context
+  - if <topic> is about a specific Dr, do the following:
+    hospital: find the doctor's hospital
+    titles: get all related articles's titles by searching <the doctor's name> in <hospital>
+    articles: baed on the {titles}, try to pick the articles that with the title containing <the doctor's name>
+    add {articles} to the context and answer the question
 }
 
 task.question_source_fine_tuning (completed) {

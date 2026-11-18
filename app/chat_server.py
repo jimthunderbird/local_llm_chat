@@ -388,6 +388,7 @@ RESEARCH_WITH_NEWS_MODEL = os.environ.get(
 )
 RESEARCH_WITH_NEWS_QUESTIONS = 2
 RESEARCH_WITH_NEWS_ARTICLES_PER_QUESTION = 3
+RESEARCH_WITH_NEWS_DOCTOR_TITLE_CANDIDATES = 20
 RESEARCH_WITH_NEWS_ARTICLE_CHARS = 1800
 RESEARCH_WITH_NEWS_CONTEXT_CHARS = 14000
 RESEARCH_WITH_NEWS_QUESTION_PROMPT = """You are planning a news search about a topic.
@@ -11258,6 +11259,121 @@ def plan_research_with_doctor_profile(
     return profile
 
 
+def _research_with_news_name_tokens(value: str) -> list[str]:
+    """Normalize a person's name for matching against an article title."""
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    normalized = "".join(
+        char for char in normalized if not unicodedata.combining(char)
+    )
+    return [
+        token
+        for token in re.split(r"[^0-9a-z]+", normalized.casefold())
+        if token
+    ]
+
+
+def _research_with_news_title_names_doctor(title: str, doctor: str) -> bool:
+    """True when an article title contains the doctor's name.
+
+    Google News titles often add credentials (``, MD``), drop a middle
+    initial (``Daniel Knott, MD``), or reorder a name (``Knott, P. Daniel``).
+    Match the full name first, then require every non-initial name token so
+    those forms are still selected.
+    """
+    title_tokens = _research_with_news_name_tokens(title)
+    doctor_tokens = _research_with_news_name_tokens(doctor)
+    if not title_tokens or not doctor_tokens:
+        return False
+    title_text = " ".join(title_tokens)
+    if f" {' '.join(doctor_tokens)} " in f" {title_text} ":
+        return True
+    significant_tokens = [
+        token for token in doctor_tokens if len(token) > 1
+    ] or doctor_tokens
+    return all(token in title_tokens for token in significant_tokens)
+
+
+def _research_with_news_doctor_title_candidates(
+    doctor: str,
+    website: str,
+    limit: int,
+    report: Callable[[str], None],
+) -> list[dict]:
+    """List hospital-website stories whose titles contain the doctor's name."""
+    report(
+        "[research_with_the_news: searching the hospital website "
+        f"{website!r} for article titles containing {doctor!r}]"
+    )
+    try:
+        candidates = search_research_with_news(
+            f'"{doctor}"',
+            limit=limit,
+            website=website,
+            lazy=True,
+            require_content=False,
+        )
+    except RuntimeError as exc:
+        report(
+            "[research_with_the_news: could not read the hospital "
+            f"website's article titles: {exc}]"
+        )
+        return []
+    titles = [
+        " ".join(str(item.get("title") or "").split())
+        for item in candidates
+    ]
+    if titles:
+        report(
+            "[research_with_the_news: found "
+            f"{len(titles)} hospital-website article title(s): "
+            + " | ".join(title[:120] for title in titles if title)
+            + "]"
+        )
+    matching = [
+        item
+        for item in candidates
+        if _research_with_news_title_names_doctor(
+            str(item.get("title") or ""), doctor
+        )
+    ]
+    report(
+        "[research_with_the_news: "
+        f"{len(matching)} of {len(candidates)} article title(s) contain "
+        f"the doctor's name {doctor!r}]"
+    )
+    return matching
+
+
+def _research_with_news_fetch_doctor_article(
+    candidate: dict,
+    report: Callable[[str], None],
+) -> dict | None:
+    """Load the full body of one doctor title candidate."""
+    link = str(candidate.get("link") or "").strip()
+    title = " ".join(str(candidate.get("title") or "").split())
+    if not link:
+        return None
+    try:
+        payload = fetch_news_article(link, title)
+    except (OSError, RuntimeError, ValueError) as exc:
+        report(
+            "[research_with_the_news: could not read the article "
+            f"{title!r}: {exc}]"
+        )
+        return None
+    paragraphs = _news_clean_paragraphs(payload.get("paragraphs") or [])
+    summary = " ".join(str(candidate.get("summary") or "").split())
+    if not paragraphs and summary:
+        paragraphs = [summary]
+    if not paragraphs:
+        return None
+    article = dict(candidate)
+    article["title"] = str(payload.get("title") or title).strip() or title
+    article["link"] = str(payload.get("link") or link).strip() or link
+    article["paragraphs"] = paragraphs
+    return article
+
+
 def search_research_with_doctor(
     question: str,
     profile: dict[str, str],
@@ -11269,6 +11385,43 @@ def search_research_with_doctor(
     doctor = str(profile.get("doctor") or "").strip()
     hospital = str(profile.get("hospital") or "").strip()
     website = str(profile.get("website") or "").strip()
+    # The task requires the doctor's name in the title. Read the hospital's
+    # article-title list first, keep only titles that name the doctor, and
+    # fetch those bodies. A hospital website can carry a doctor's page without
+    # the name in the headline, so the question-based site search below remains
+    # as a fallback when no title matches.
+    if website and doctor:
+        matching_titles = _research_with_news_doctor_title_candidates(
+            doctor,
+            website,
+            RESEARCH_WITH_NEWS_DOCTOR_TITLE_CANDIDATES,
+            report,
+        )
+        selected: list[dict] = []
+        for candidate in matching_titles:
+            if len(selected) >= limit:
+                break
+            article = _research_with_news_fetch_doctor_article(
+                candidate, report
+            )
+            if article is None:
+                continue
+            article["research_source"] = "hospital_website"
+            selected.append(article)
+        if selected:
+            profile["website_used"] = True
+            report(
+                "[research_with_the_news: using "
+                f"{len(selected)} hospital-website article(s) whose title "
+                f"contains the doctor's name for {question!r}]"
+            )
+            return selected
+        if matching_titles:
+            report(
+                "[research_with_the_news: every matching hospital-website "
+                "title had no readable article body; falling back to a "
+                "question search on the hospital website]"
+            )
     site_queries: list[str] = []
     if doctor:
         if doctor.casefold() in question.casefold():
@@ -11392,12 +11545,16 @@ def search_research_with_news(
     question: str,
     limit: int = RESEARCH_WITH_NEWS_ARTICLES_PER_QUESTION,
     website: str = "",
+    lazy: bool = False,
+    require_content: bool = True,
 ) -> list[dict]:
     """Fetch the top Google News stories and their full article bodies.
 
     ``website`` restricts the Google News query to one site with the
     ``site:`` operator. This is how doctor research reads a hospital's own
     website while still using the existing article fetcher and parser.
+    ``lazy`` asks news_fetch.php for the list without waiting on every article
+    page. ``require_content`` may be turned off for that title-only list.
     """
     script = SCRIPT_DIR / "news_fetch.php"
     if not script.exists():
@@ -11417,6 +11574,8 @@ def search_research_with_news(
         "--limit",
         str(limit),
     ]
+    if lazy:
+        command.append("--lazy")
     try:
         result = subprocess.run(
             command,
@@ -11439,7 +11598,7 @@ def search_research_with_news(
         summary = " ".join(str(item.get("summary") or "").split())
         if not paragraphs and summary:
             paragraphs = [summary]
-        if not paragraphs:
+        if require_content and not paragraphs:
             continue
         key = (link or title).casefold()
         if key in seen:
