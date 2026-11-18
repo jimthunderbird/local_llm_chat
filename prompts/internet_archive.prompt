@@ -1,5 +1,32 @@
 knowledge: Internet Archive MCP (archive-org): Connects to Archive.org and Open Library with no API key required. It lets your agent perform full-text searches inside digitized books by phrase or keyword and browse catalog metadata.
 
+task.only_shows_the_public_books (completed) {
+  - DO NOT show the restricted books, only show the public books
+}
+
+task.book_image (completed) {
+  can we put an image (a thumbnail) on each book in the result?
+}
+
+task.bug (completed) {
+  the public books are missing publish date, please try to fix it!
+}
+
+task.show_publish_date (completed) {
+  in the book results, for each book, next to the book title, please show the publish date
+}
+
+task (completed) {
+  refer to task.public_and_private_books:
+  - for all the public books, the book url must be a plaintext url that I can open in a browser
+}
+
+task.public_and_private_books (completed) {
+  please return 2 categories of matching books:
+  1. Publicly available to download
+  2. Restricted access
+}
+
 task (completed) {
   create command: /internet_artchive <keywords>:
   based on {knowledge}, return list of matching results

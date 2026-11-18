@@ -1,5 +1,11 @@
 task (completed) {
   bug:
+  chat_server.py:9105: FutureWarning: Possible set difference at position 5
+  GUTENBERG_NEWS_TITLE_SUFFIX_RE = re.compile
+}
+
+task (completed) {
+  bug:
   /gutenberg search the 39 steps:
   expect: we should find https://www.gutenberg.org/ebooks/558
   actual: https://www.gutenberg.org/ebooks/558 does not show up in the result list
@@ -12,7 +18,7 @@ task.refactor_book_search (completed) {
 }
 
 task (completed) {
-  find out how the chat works in the book specific chat, what kind of technique or algorithms does it use, save the findings to documents/project_gutenberg_book_specific_chat.html  
+  find out how the chat works in the book specific chat, what kind of technique or algorithms does it use, save the findings to documents/project_gutenberg_book_specific_chat.html
 }
 
 task (completed) {
@@ -21,7 +27,7 @@ task (completed) {
 }
 
 task (completed) {
-  in the left column of the book popup modal, make every single word of the plaintext content of the book dictionary searchable, similar to the behavior the answer  
+  in the left column of the book popup modal, make every single word of the plaintext content of the book dictionary searchable, similar to the behavior the answer
 }
 
 task (completed) {
@@ -31,7 +37,7 @@ task (completed) {
     - display the result as a list of book links with book title, link to the book (like "https://gutendex.com/books/1342")
 
     - when click on the book link, open up a modal with 2 columns similar to the youtube video popup {
-      column left:  
+      column left:
         - load the plaintext of the book
       column right:
         - ask question on the book, but keep in mind {

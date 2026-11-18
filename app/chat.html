@@ -3641,6 +3641,39 @@
   }
   .book-list-head strong { color: var(--accent); font-weight: 700; }
   .book-list-note { margin-left: auto; color: var(--dimmer); }
+  .book-group { margin-top: 9px; }
+  .book-group:first-of-type { margin-top: 0; }
+  .book-group-head {
+    margin: 0 0 6px;
+    color: var(--dim);
+    font-size: 10.5px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+  .book-group-head strong { color: #c5d5e3; font-weight: 700; }
+  .book-group-empty {
+    color: var(--dimmer);
+    font-size: 10.5px;
+    padding: 0 0 5px;
+  }
+  .book-availability {
+    align-self: flex-start;
+    padding: 1px 7px;
+    border: 1px solid;
+    border-radius: 999px;
+    font-size: 9.5px;
+    letter-spacing: .02em;
+  }
+  .book-availability.public {
+    color: #7fd1a0;
+    border-color: #2f5a43;
+    background: #12261c;
+  }
+  .book-availability.restricted {
+    color: #e0b46d;
+    border-color: #5a4a2f;
+    background: #251f12;
+  }
   .book-cards {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3648,14 +3681,31 @@
   }
   .book-card {
     display: flex;
-    flex-direction: column;
-    gap: 5px;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 9px;
     padding: 10px 11px;
     background: #0f1a25;
     border: 1px solid #22384b;
     border-radius: 7px;
     cursor: pointer;
     user-select: none;
+  }
+  .book-body {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    flex: 1;
+    min-width: 0;
+  }
+  .book-cover {
+    flex: 0 0 auto;
+    width: 62px;
+    height: 92px;
+    object-fit: cover;
+    border-radius: 4px;
+    border: 1px solid #22384b;
+    background: #152435;
   }
   .book-card:hover,
   .book-card:focus-visible {
@@ -3668,6 +3718,18 @@
     font-size: 12.5px;
     font-weight: 700;
     line-height: 1.35;
+  }
+  .book-title-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .book-publish-date {
+    color: var(--dim);
+    font-size: 10.5px;
+    font-weight: 500;
+    white-space: nowrap;
   }
   .book-authors { color: #c5d5e3; font-size: 11.5px; }
   .book-meta { color: var(--dim); font-size: 10.5px; line-height: 1.4; }
@@ -11065,15 +11127,146 @@ function normalizeBookItems(rawItems) {
         : [],
       downloadCount: Number(item?.download_count) || 0,
       firstPublishYear: Number(item?.first_publish_year) || 0,
+      publishDate: String(item?.publish_date || "").trim(),
       description: String(item?.description || "").trim(),
       relatedText: Array.isArray(item?.related_text)
         ? item.related_text.map((value) => String(value || "").trim()).filter(Boolean)
         : [],
       url: String(item?.url || "").trim(),
       textUrl: String(item?.text_url || "").trim(),
+      coverUrl: String(item?.cover_url || "").trim(),
       source: String(item?.source || "").trim(),
+      availability: ["public", "restricted"].includes(item?.availability)
+        ? item.availability
+        : "",
     }))
     .filter((item) => item.id && item.title);
+}
+
+function renderBookCard(item) {
+  const readable = Boolean(item.textUrl);
+  const card = document.createElement(readable ? "div" : "a");
+  card.className = "book-card";
+  const cardTitle = item.authors
+    ? `${item.title} · ${item.authors}`
+    : item.title;
+  const externalLabel = item.source === "internet_archive"
+    ? (item.availability === "public"
+      ? "Open plaintext ↗"
+      : "Open on Internet Archive ↗")
+    : "Open on Open Library ↗";
+  if (readable) {
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
+    card.title = cardTitle;
+    const open = () => openGutenbergModal(item);
+    card.addEventListener("click", open);
+    card.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      open();
+    });
+  } else {
+    card.href = item.url || "#";
+    card.target = "_blank";
+    card.rel = "noopener noreferrer";
+    card.title = `${cardTitle} · ${externalLabel.replace(" ↗", "")}`;
+  }
+
+  const titleRow = document.createElement("div");
+  titleRow.className = "book-title-row";
+  const body = document.createElement("div");
+  body.className = "book-body";
+  if (item.coverUrl) {
+    const cover = document.createElement("img");
+    cover.className = "book-cover";
+    cover.src = item.coverUrl;
+    cover.alt = "";
+    cover.loading = "lazy";
+    cover.referrerPolicy = "no-referrer";
+    cover.addEventListener("error", () => cover.remove());
+    card.appendChild(cover);
+  }
+
+  const title = document.createElement("div");
+  title.className = "book-title";
+  title.textContent = item.title;
+  titleRow.appendChild(title);
+  const publishDate = item.publishDate
+    || (item.firstPublishYear > 0 ? String(item.firstPublishYear) : "");
+  if (publishDate) {
+    const date = document.createElement("span");
+    date.className = "book-publish-date";
+    date.textContent = publishDate;
+    titleRow.appendChild(date);
+  }
+  body.appendChild(titleRow);
+
+  if (item.authors) {
+    const authors = document.createElement("div");
+    authors.className = "book-authors";
+    authors.textContent = item.authors;
+    body.appendChild(authors);
+  }
+
+  if (item.availability) {
+    const availability = document.createElement("span");
+    availability.className = `book-availability ${item.availability}`;
+    availability.textContent = item.availability === "public"
+      ? "Publicly available to download"
+      : "Restricted access";
+    body.appendChild(availability);
+  }
+
+  if (item.description) {
+    const description = document.createElement("div");
+    description.className = "book-description";
+    description.textContent = item.description;
+    body.appendChild(description);
+  }
+
+  const metaParts = [];
+  if (item.languages.length) {
+    metaParts.push(item.languages.join(", ").toUpperCase());
+  }
+  if (item.downloadCount > 0) {
+    metaParts.push(`${item.downloadCount.toLocaleString()} downloads`);
+  }
+  if (item.subjects.length) metaParts.push(item.subjects[0]);
+  const meta = document.createElement("div");
+  meta.className = "book-meta";
+  meta.textContent = metaParts.join(" · ") || `Book #${item.id}`;
+  body.appendChild(meta);
+
+  if (item.relatedText.length) {
+    const excerpts = document.createElement("div");
+    excerpts.className = "book-excerpts";
+    const excerptLabel = document.createElement("div");
+    excerptLabel.className = "book-excerpts-label";
+    excerptLabel.textContent = "Related text";
+    excerpts.appendChild(excerptLabel);
+    for (const text of item.relatedText) {
+      const excerpt = document.createElement("p");
+      excerpt.className = "book-excerpt";
+      excerpt.textContent = text;
+      excerpts.appendChild(excerpt);
+    }
+    body.appendChild(excerpts);
+  }
+
+  const action = document.createElement("span");
+  action.className = "book-action";
+  action.textContent = readable ? "Read & ask →" : externalLabel;
+  body.appendChild(action);
+  card.appendChild(body);
+  return card;
+}
+
+function renderBookCardGrid(items) {
+  const cards = document.createElement("div");
+  cards.className = "book-cards";
+  for (const item of items) cards.appendChild(renderBookCard(item));
+  return cards;
 }
 
 function renderBookResults(entry) {
@@ -11101,92 +11294,45 @@ function renderBookResults(entry) {
   head.appendChild(note);
   container.appendChild(head);
 
-  const cards = document.createElement("div");
-  cards.className = "book-cards";
-  for (const item of items) {
-    const readable = Boolean(item.textUrl);
-    const card = document.createElement(readable ? "div" : "a");
-    card.className = "book-card";
-    const cardTitle = item.authors
-      ? `${item.title} · ${item.authors}`
-      : item.title;
-    const externalLabel = item.source === "internet_archive"
-      ? "Open on Internet Archive ↗"
-      : "Open on Open Library ↗";
-    if (readable) {
-      card.tabIndex = 0;
-      card.setAttribute("role", "button");
-      card.title = cardTitle;
-      const open = () => openGutenbergModal(item);
-      card.addEventListener("click", open);
-      card.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        open();
-      });
-    } else {
-      card.href = item.url || "#";
-      card.target = "_blank";
-      card.rel = "noopener noreferrer";
-      card.title = `${cardTitle} · ${externalLabel.replace(" ↗", "")}`;
-    }
-
-    const title = document.createElement("div");
-    title.className = "book-title";
-    title.textContent = item.title;
-    card.appendChild(title);
-
-    if (item.authors) {
-      const authors = document.createElement("div");
-      authors.className = "book-authors";
-      authors.textContent = item.authors;
-      card.appendChild(authors);
-    }
-
-    if (item.description) {
-      const description = document.createElement("div");
-      description.className = "book-description";
-      description.textContent = item.description;
-      card.appendChild(description);
-    }
-
-    const metaParts = [];
-    if (item.firstPublishYear > 0) metaParts.push(`First published ${item.firstPublishYear}`);
-    if (item.languages.length) {
-      metaParts.push(item.languages.join(", ").toUpperCase());
-    }
-    if (item.downloadCount > 0) {
-      metaParts.push(`${item.downloadCount.toLocaleString()} downloads`);
-    }
-    if (item.subjects.length) metaParts.push(item.subjects[0]);
-    const meta = document.createElement("div");
-    meta.className = "book-meta";
-    meta.textContent = metaParts.join(" · ") || `Book #${item.id}`;
-    card.appendChild(meta);
-
-    if (item.relatedText.length) {
-      const excerpts = document.createElement("div");
-      excerpts.className = "book-excerpts";
-      const excerptLabel = document.createElement("div");
-      excerptLabel.className = "book-excerpts-label";
-      excerptLabel.textContent = "Related text";
-      excerpts.appendChild(excerptLabel);
-      for (const text of item.relatedText) {
-        const excerpt = document.createElement("p");
-        excerpt.className = "book-excerpt";
-        excerpt.textContent = text;
-        excerpts.appendChild(excerpt);
+  const hasAvailability = items.some((item) => item.availability);
+  if (hasAvailability) {
+    const groups = [
+      {
+        key: "public",
+        title: "Publicly available to download",
+        empty: "No publicly downloadable matches in this search.",
+      },
+      {
+        key: "restricted",
+        title: "Restricted access",
+        empty: "No restricted-access matches in this search.",
+      },
+    ];
+    for (const group of groups) {
+      const groupItems = items.filter((item) => (
+        item.availability === "restricted" ? "restricted" : "public"
+      ) === group.key);
+      const section = document.createElement("section");
+      section.className = "book-group";
+      const groupHead = document.createElement("div");
+      groupHead.className = "book-group-head";
+      const groupLabel = document.createElement("strong");
+      groupLabel.textContent = `${group.title} (${groupItems.length})`;
+      groupHead.appendChild(groupLabel);
+      section.appendChild(groupHead);
+      if (groupItems.length) {
+        section.appendChild(renderBookCardGrid(groupItems));
+      } else {
+        const empty = document.createElement("div");
+        empty.className = "book-group-empty";
+        empty.textContent = group.empty;
+        section.appendChild(empty);
       }
-      card.appendChild(excerpts);
+      container.appendChild(section);
     }
-
-    const action = document.createElement("span");
-    action.className = "book-action";
-    action.textContent = readable ? "Read & ask →" : externalLabel;
-    card.appendChild(action);
-    cards.appendChild(card);
+  } else {
+    container.appendChild(renderBookCardGrid(items));
   }
-  container.appendChild(cards);
 
   if (entry.booksError) {
     const errorEl = document.createElement("div");

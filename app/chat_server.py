@@ -9009,6 +9009,8 @@ OPENLIBRARY_SEARCH_URL = "https://openlibrary.org/search.json"
 OPENLIBRARY_INSIDE_SEARCH_URL = "https://openlibrary.org/search/inside.json"
 OPENLIBRARY_BOOK_PAGE_URL = "https://openlibrary.org{key}"
 OPENLIBRARY_WORK_JSON_URL = "https://openlibrary.org{key}.json"
+OPENLIBRARY_COVER_ID_URL = "https://covers.openlibrary.org/b/id/{cover_id}-M.jpg"
+OPENLIBRARY_COVER_OLID_URL = "https://covers.openlibrary.org/b/olid/{olid}-M.jpg"
 OPENLIBRARY_SEARCH_FIELDS = (
     "key,title,author_name,first_publish_year,language,subject,"
     "id_project_gutenberg,cover_i,cover_edition_key,edition_count,ebook_access"
@@ -9028,13 +9030,47 @@ OPENLIBRARY_DESCRIPTION_CACHE_LOCK = threading.Lock()
 INTERNET_ARCHIVE_FTS_URL = "https://archive.org/services/search/beta/page_production/"
 INTERNET_ARCHIVE_SEARCH_URL = "https://archive.org/advancedsearch.php"
 INTERNET_ARCHIVE_DETAILS_URL = "https://archive.org/details/{identifier}"
+INTERNET_ARCHIVE_METADATA_URL = "https://archive.org/metadata/{identifier}"
+INTERNET_ARCHIVE_DOWNLOAD_URL = (
+    "https://archive.org/download/{identifier}/{filename}"
+)
+INTERNET_ARCHIVE_COVER_URL = "https://archive.org/services/img/{identifier}"
 INTERNET_ARCHIVE_SEARCH_FIELDS = (
+    "identifier,title,creator,year,date,publicdate,addeddate,description,"
+    "downloads,language,subject,mediatype,collection,lending___status,"
+    "access-restricted-item"
+)
+# The beta full-text endpoint only returns fields named in this parameter.
+# `access-restricted-item` is not exposed by that index, so lending status and
+# collection membership are used alongside it when classifying an item.
+INTERNET_ARCHIVE_FTS_FIELDS = (
     "identifier,title,creator,year,date,description,downloads,"
-    "language,subject,mediatype"
+    "language,subject,mediatype,collection,lending___status"
+)
+INTERNET_ARCHIVE_RESTRICTED_COLLECTIONS = frozenset(
+    {
+        "borrowable",
+        "inlibrary",
+        "lendinglibrary",
+        "printdisabled",
+    }
+)
+INTERNET_ARCHIVE_RESTRICTED_LENDING_STATUSES = frozenset(
+    {
+        "available_to_borrow",
+        "available_to_browse",
+        "is_browsable",
+        "is_lendable",
+        "is_printdisabled",
+    }
 )
 INTERNET_ARCHIVE_RESULT_LIMIT = 20
 INTERNET_ARCHIVE_HIGHLIGHT_LIMIT = 3
 INTERNET_ARCHIVE_DESCRIPTION_LIMIT = 520
+# Item metadata/file lists keyed by identifier, so each search enriches every
+# public card with one metadata request instead of one per data point.
+INTERNET_ARCHIVE_METADATA_CACHE: dict[str, dict] = {}
+INTERNET_ARCHIVE_METADATA_CACHE_LOCK = threading.Lock()
 INTERNET_ARCHIVE_HEADERS = {
     **chat.HTTP_HEADERS,
     "User-Agent": "Mozilla/5.0 (compatible; personal-chatbot/1.0)",
@@ -9067,12 +9103,15 @@ GUTENBERG_NEWS_BOOK_LINK_RE = re.compile(
     re.IGNORECASE,
 )
 GUTENBERG_NEWS_TITLE_SUFFIX_RE = re.compile(
-    r"\s*[---|]\s*Project Gutenberg\s*$", re.IGNORECASE
+    r"\s*[|\u2013\u2014-]\s*Project Gutenberg\s*$", re.IGNORECASE
 )
 GUTENBERG_NEWS_BY_RE = re.compile(
     r"^(?P<title>.+)\s+by\s+(?P<authors>.+)$", re.IGNORECASE
 )
 GUTENBERG_BOOK_URL = "https://www.gutenberg.org/ebooks/{book_id}"
+GUTENBERG_COVER_URL = (
+    "https://www.gutenberg.org/cache/epub/{book_id}/pg{book_id}.cover.medium.jpg"
+)
 GUTENBERG_BOOK_CACHE_DIR = SCRIPT_DIR / ".chat" / "gutenberg_cache"
 GUTENBERG_BOOK_RESULT_LIMIT = 12
 GUTENBERG_BOOK_STATE_LIMIT = 3
@@ -16828,6 +16867,7 @@ def _gutenberg_openlibrary_card(doc: dict) -> dict | None:
         "download_count": 0,
         "url": GUTENBERG_BOOK_URL.format(book_id=book_id),
         "text_url": f"{GUTENBERG_BOOK_URL.format(book_id=book_id)}.txt.utf-8",
+        "cover_url": GUTENBERG_COVER_URL.format(book_id=book_id),
         "source": "openlibrary",
     }
 
@@ -16861,6 +16901,7 @@ def _gutenberg_search_card(block: str) -> dict | None:
         "download_count": downloads,
         "url": GUTENBERG_BOOK_URL.format(book_id=book_id),
         "text_url": f"{GUTENBERG_BOOK_URL.format(book_id=book_id)}.txt.utf-8",
+        "cover_url": GUTENBERG_COVER_URL.format(book_id=book_id),
         "source": "gutenberg.org",
     }
 
@@ -17128,6 +17169,19 @@ def _openlibrary_key(value: object) -> str:
     return key
 
 
+def _openlibrary_cover_url(doc: dict) -> str:
+    """Return a small Open Library cover image URL when the doc has one."""
+    if not isinstance(doc, dict):
+        return ""
+    cover_id = str(doc.get("cover_i") or "").strip()
+    if cover_id.isdigit():
+        return OPENLIBRARY_COVER_ID_URL.format(cover_id=cover_id)
+    olid = _openlibrary_key(doc.get("cover_edition_key")).lstrip("/")
+    if olid:
+        return OPENLIBRARY_COVER_OLID_URL.format(olid=quote(olid))
+    return ""
+
+
 def _openlibrary_first_text(value: object) -> str:
     if isinstance(value, (list, tuple)):
         for item in value:
@@ -17238,6 +17292,7 @@ def _openlibrary_doc_card(doc: dict, keyword: str) -> dict | None:
         "download_count": download_count,
         "url": OPENLIBRARY_BOOK_PAGE_URL.format(key=work_key),
         "text_url": "",
+        "cover_url": _openlibrary_cover_url(doc),
         "source": "openlibrary",
         "work_key": work_key,
     }
@@ -17308,6 +17363,7 @@ def _openlibrary_hit_card(hit: dict, keyword: str) -> dict | None:
         "download_count": 0,
         "url": url,
         "text_url": "",
+        "cover_url": _openlibrary_cover_url(edition),
         "source": "openlibrary",
         "work_key": work_key,
     }
@@ -17590,6 +17646,19 @@ def _internet_archive_values(value: object, limit: int = 0) -> list[str]:
     return unique
 
 
+def _internet_archive_publish_date(fields: dict) -> str:
+    """Return a human-readable publication date for an Internet Archive item."""
+    for name in ("date", "publicdate", "year", "addeddate"):
+        text = _internet_archive_first_text(fields.get(name)).strip()
+        if not text:
+            continue
+        match = re.match(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?", text)
+        if match:
+            return "-".join(part for part in match.groups() if part)
+        return text[:40]
+    return ""
+
+
 def _internet_archive_year(fields: dict) -> int:
     """Extract a four-digit publication year from the available fields."""
     for name in ("year", "date", "publicdate", "addeddate"):
@@ -17597,6 +17666,36 @@ def _internet_archive_year(fields: dict) -> int:
         if match:
             return int(match.group(1))
     return 0
+
+
+def _internet_archive_restricted_access(fields: dict) -> bool:
+    """Return True when an item is lending/borrow-only or otherwise restricted.
+
+    Internet Archive sets ``access-restricted-item`` on most lending items.
+    That field is not exposed by the full-text index, so the item's collections
+    and ``lending___status`` values are also inspected. Membership in the
+    generic ``internetarchivebooks`` collection is not enough: that collection
+    also holds public-domain items. Items with no lending/restriction marker
+    are publicly downloadable.
+    """
+    flag = _internet_archive_first_text(
+        fields.get("access-restricted-item")
+    ).strip().lower()
+    if flag in {"true", "yes", "1"}:
+        return True
+    if flag in {"false", "no", "0"}:
+        return False
+    collections = {
+        value.strip().lower()
+        for value in _internet_archive_values(fields.get("collection"))
+    }
+    if collections & INTERNET_ARCHIVE_RESTRICTED_COLLECTIONS:
+        return True
+    statuses = {
+        value.strip().lower()
+        for value in _internet_archive_values(fields.get("lending___status"))
+    }
+    return bool(statuses & INTERNET_ARCHIVE_RESTRICTED_LENDING_STATUSES)
 
 
 def _internet_archive_related_text(hit: dict) -> list[str]:
@@ -17648,6 +17747,9 @@ def _internet_archive_card(
         url = "https://archive.org" + href
     else:
         url = INTERNET_ARCHIVE_DETAILS_URL.format(identifier=quote(identifier))
+    availability = (
+        "restricted" if _internet_archive_restricted_access(fields) else "public"
+    )
     return {
         "id": identifier,
         "title": title,
@@ -17657,12 +17759,148 @@ def _internet_archive_card(
         "languages": languages,
         "subjects": subjects,
         "first_publish_year": first_publish_year,
+        "publish_date": _internet_archive_publish_date(fields),
         "download_count": download_count,
         "url": url,
         "text_url": "",
+        "cover_url": INTERNET_ARCHIVE_COVER_URL.format(
+            identifier=quote(identifier, safe="")
+        ),
+        "__text_hint__": _internet_archive_text_hint(href),
         "source": "internet_archive",
         "search_source": source,
+        "availability": availability,
     }
+
+
+def _internet_archive_text_hint(href: str) -> str:
+    """Return the file stem from an FTS ``/details/<id>/<file>`` link."""
+    path = urlparse(str(href or "")).path
+    parts = [unquote(part) for part in path.split("/") if part]
+    if len(parts) >= 3 and parts[0] == "details":
+        return parts[2]
+    return ""
+
+
+def _internet_archive_plaintext_filename(files: object, hint: str = "") -> str:
+    """Choose the best browser-readable OCR plaintext file for an item."""
+    if not isinstance(files, list):
+        return ""
+    hint_lower = str(hint or "").strip().lower()
+    candidates: list[tuple[int, int, int, str]] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        lower = name.lower()
+        if not lower.endswith(".txt") or lower.endswith("_meta.txt"):
+            continue
+        base = lower.rsplit("/", 1)[-1]
+        hint_match = 0 if hint_lower and base in {
+            f"{hint_lower}.txt",
+            f"{hint_lower}_djvu.txt",
+        } else 1
+        djvu = 0 if lower.endswith("_djvu.txt") else 1
+        candidates.append((hint_match, djvu, len(base), name))
+    if not candidates:
+        return ""
+    return min(candidates)[3]
+
+
+def _internet_archive_item_details(identifier: str) -> dict:
+    """Fetch and cache an item's metadata and file list from archive.org."""
+    identifier = str(identifier or "").strip()
+    if not identifier:
+        return {}
+    with INTERNET_ARCHIVE_METADATA_CACHE_LOCK:
+        cached = INTERNET_ARCHIVE_METADATA_CACHE.get(identifier)
+    if cached is not None:
+        return cached
+
+    details: dict = {}
+    try:
+        response = requests.get(
+            INTERNET_ARCHIVE_METADATA_URL.format(identifier=quote(identifier)),
+            headers=INTERNET_ARCHIVE_HEADERS,
+            timeout=(4, 15),
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict):
+            metadata = data.get("metadata")
+            files = data.get("files")
+            details = {
+                "metadata": metadata if isinstance(metadata, dict) else {},
+                "files": files if isinstance(files, list) else [],
+            }
+    except (requests.RequestException, ValueError):
+        details = {}
+
+    with INTERNET_ARCHIVE_METADATA_CACHE_LOCK:
+        INTERNET_ARCHIVE_METADATA_CACHE[identifier] = details
+    return details
+
+
+def _internet_archive_apply_item_details(
+    card: dict, details: dict, *, public: bool
+) -> None:
+    """Fill a card's missing date; point public cards at their plaintext file."""
+    metadata = details.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    # The full-text index omits ``publicdate``/``addeddate`` for many items,
+    # so books often arrive without a date. The per-item metadata endpoint
+    # still has it; copy it onto the card when the hit lacked it.
+    if not card.get("publish_date"):
+        card["publish_date"] = _internet_archive_publish_date(metadata)
+    if not card.get("first_publish_year"):
+        card["first_publish_year"] = _internet_archive_year(metadata)
+
+    if not public:
+        return
+    identifier = str(card.get("id") or "").strip()
+    if not identifier:
+        return
+    hint = str(card.get("__text_hint__") or "")
+    filename = _internet_archive_plaintext_filename(details.get("files"), hint)
+    if not filename:
+        # The conventional OCR plaintext name is the fallback when the
+        # metadata endpoint cannot answer, so every public result still gets
+        # a direct plaintext URL instead of a catalogue page.
+        filename = f"{identifier}_djvu.txt"
+    card["url"] = INTERNET_ARCHIVE_DOWNLOAD_URL.format(
+        identifier=quote(identifier), filename=quote(filename, safe="/")
+    )
+
+
+def _internet_archive_enrich_cards(cards: list[dict]) -> None:
+    """Add dates to cards missing one and plaintext URLs to public cards."""
+    pending = [
+        card
+        for card in cards
+        if card.get("id")
+        and (card.get("availability") == "public" or not card.get("publish_date"))
+    ]
+    if pending:
+        with ThreadPoolExecutor(max_workers=min(8, len(pending))) as executor:
+            futures = {
+                executor.submit(_internet_archive_item_details, str(card["id"])): card
+                for card in pending
+            }
+            for future in as_completed(futures):
+                card = futures[future]
+                try:
+                    details = future.result()
+                except Exception:
+                    details = {}
+                _internet_archive_apply_item_details(
+                    card,
+                    details,
+                    public=card.get("availability") == "public",
+                )
+    for card in cards:
+        card.pop("__text_hint__", None)
+
 
 
 def _fetch_internet_archive_fulltext(keyword: str, limit: int) -> list[dict]:
@@ -17673,6 +17911,7 @@ def _fetch_internet_archive_fulltext(keyword: str, limit: int) -> list[dict]:
         "hits_per_page": max(20, limit * 3),
         "page": 1,
         "aggregations": "false",
+        "fields": INTERNET_ARCHIVE_FTS_FIELDS,
     }
     try:
         response = requests.get(
@@ -17698,6 +17937,12 @@ def _fetch_internet_archive_fulltext(keyword: str, limit: int) -> list[dict]:
         if not isinstance(hit, dict):
             continue
         fields = hit.get("fields") if isinstance(hit.get("fields"), dict) else {}
+        # The beta index also matches audio/video/data items whose nested
+        # files contain text. This command is for digitized books, and such
+        # non-text items usually have no publication date, so skip them.
+        mediatype = _internet_archive_first_text(fields.get("mediatype")).strip().lower()
+        if mediatype and mediatype != "texts":
+            continue
         card = _internet_archive_card(
             fields, keyword, _internet_archive_related_text(hit), source="fts"
         )
@@ -17763,28 +18008,40 @@ def search_internet_archive(
     """Search Internet Archive texts and return clickable result cards.
 
     The beta full-text API matches phrases inside OCR text, which is the main
-    use case. When it fails or finds nothing, fall back to catalogue metadata
-    (title, creator, description) so a known book can still be located.
+    use case. Only publicly downloadable items are returned. When it fails or
+    finds no public item, fall back to catalogue metadata (title, creator,
+    description) so a known public book can still be located.
     """
     keyword = " ".join(str(keyword or "").split())
     if not keyword:
         return []
     limit = max(1, min(int(limit), 50))
 
+    def public_only(cards: list[dict]) -> list[dict]:
+        return [
+            card
+            for card in cards
+            if card.get("availability") == "public"
+        ]
+
     errors: list[str] = []
     try:
-        cards = _fetch_internet_archive_fulltext(keyword, limit)
+        cards = public_only(_fetch_internet_archive_fulltext(keyword, limit))
     except RuntimeError as exc:
         errors.append(str(exc))
         cards = []
     if not cards:
         try:
-            cards = _fetch_internet_archive_metadata(keyword, limit)
+            cards = public_only(
+                _fetch_internet_archive_metadata(keyword, limit)
+            )
         except RuntimeError as exc:
             errors.append(str(exc))
     if not cards and errors and len(errors) > 1:
         raise RuntimeError("; ".join(errors))
-    return cards[:limit]
+    cards = cards[:limit]
+    _internet_archive_enrich_cards(cards)
+    return cards
 
 
 def _search_gutenberg_openlibrary(
@@ -17942,6 +18199,8 @@ def _gutenberg_card_from_news_item(item: dict) -> dict | None:
             (str(value).strip() for value in images if str(value).strip()),
             "",
         )
+    if not cover_url:
+        cover_url = GUTENBERG_COVER_URL.format(book_id=book_id)
 
     return {
         "id": book_id,
@@ -25267,11 +25526,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         has_excerpts = any(item.get("related_text") for item in items)
         note = (
-            f"{len(items)} match{'' if len(items) == 1 else 'es'} · "
+            f"{len(items)} publicly downloadable match"
+            f"{'' if len(items) == 1 else 'es'} · "
             + (
-                "full-text matches · open on Internet Archive"
+                "full-text matches · results link to plaintext"
                 if has_excerpts
-                else "catalogue matches · open on Internet Archive"
+                else "catalogue matches · results link to plaintext"
             )
         )
         self._sse(
