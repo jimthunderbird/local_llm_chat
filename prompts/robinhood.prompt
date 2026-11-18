@@ -1,0 +1,7 @@
+task (completed) {
+  create command /robinhood <stock_symbol>:
+  - use RobinHood's MCP Server to search the current holdings of <stock_symbol:
+    - show the "Pending Order"
+    - show the "Recent Transaction History"
+    - show the current average price of my holdings
+}
