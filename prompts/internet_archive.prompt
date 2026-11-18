@@ -1,0 +1,6 @@
+knowledge: Internet Archive MCP (archive-org): Connects to Archive.org and Open Library with no API key required. It lets your agent perform full-text searches inside digitized books by phrase or keyword and browse catalog metadata.
+
+task (completed) {
+  create command: /internet_artchive <keywords>:
+  based on {knowledge}, return list of matching results
+}

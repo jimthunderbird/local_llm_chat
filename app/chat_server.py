@@ -5,7 +5,8 @@ The server reuses chat.py for chunk loading, BM25 retrieval, prompt building,
 Ollama streaming, transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /youtube, /news, /mdn, /britanica,
 /stackoverflow, /reddit, /tablelog, /stock, /googlenews, /gkg, /medium,
-/gutenberg, /openlibrary, /changelog, /wikivoyage, /map, /game, /wiki,
+/gutenberg, /openlibrary, /internet_archive, /changelog, /wikivoyage, /map,
+/game, /wiki,
 /wiki_article, /deepresearch, /write_a_book, /books, /robinhood,
 /article, /dict, /dictionary_history, and /ask. The browser is a
 pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
@@ -344,6 +345,7 @@ WEB_COMMANDS = {
     "/ai_news_podcast": "show the top five stories from the last 12 hours and create a two-voice AI news podcast",
     "/gutenberg": "search Project Gutenberg books: /gutenberg search <keywords>; click a book to read it and ask questions",
     "/openlibrary": "search inside Open Library books: /openlibrary search <keywords>",
+    "/internet_archive": "search Internet Archive digitized texts and catalogue metadata: /internet_archive <keywords>",
     "/article": "open an article URL in the reader popup or use a local article file as context (/article <url|path>; --simple disables the local-file evidence loop)",
     "/mathtutor": "upload Microsoft Word test papers and practice similar math problems with detailed answers",
     "/changelog": "list completed-task summaries from .logs (newest first); click one to read it",
@@ -8972,6 +8974,7 @@ COMMAND_ARGUMENTS = {
     "/medium",
     "/gutenberg",
     "/openlibrary",
+    "/internet_archive",
     "/stackoverflow",
     "/deepresearch",
     "/research_with_the_news",
@@ -9016,6 +9019,27 @@ OPENLIBRARY_HIGHLIGHT_LIMIT = 3
 OPENLIBRARY_DESCRIPTION_LIMIT = 520
 OPENLIBRARY_DESCRIPTION_CACHE: dict[str, str] = {}
 OPENLIBRARY_DESCRIPTION_CACHE_LOCK = threading.Lock()
+
+# Internet Archive search. The beta full-text search endpoint powers the
+# site's "Search text contents" mode and returns matching OCR passages plus
+# item metadata without an API key. The Advanced Search endpoint is the
+# catalogue fallback. Both are queried with an explicit JSON Accept header:
+# the beta endpoint answers some requests with a flat 404 without it.
+INTERNET_ARCHIVE_FTS_URL = "https://archive.org/services/search/beta/page_production/"
+INTERNET_ARCHIVE_SEARCH_URL = "https://archive.org/advancedsearch.php"
+INTERNET_ARCHIVE_DETAILS_URL = "https://archive.org/details/{identifier}"
+INTERNET_ARCHIVE_SEARCH_FIELDS = (
+    "identifier,title,creator,year,date,description,downloads,"
+    "language,subject,mediatype"
+)
+INTERNET_ARCHIVE_RESULT_LIMIT = 20
+INTERNET_ARCHIVE_HIGHLIGHT_LIMIT = 3
+INTERNET_ARCHIVE_DESCRIPTION_LIMIT = 520
+INTERNET_ARCHIVE_HEADERS = {
+    **chat.HTTP_HEADERS,
+    "User-Agent": "Mozilla/5.0 (compatible; personal-chatbot/1.0)",
+    "Accept": "application/json",
+}
 GUTENBERG_SEARCH_URL = "https://www.gutenberg.org/ebooks/search/"
 GUTENBERG_SEARCH_BLOCK_RE = re.compile(
     r'<li class="booklink">(.*?)</li>', re.IGNORECASE | re.DOTALL
@@ -17540,6 +17564,229 @@ def search_openlibrary_inside(
     return cards
 
 
+def _internet_archive_first_text(value: object) -> str:
+    """Return the first meaningful text from an Internet Archive field."""
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            text = _openlibrary_plain_text(item)
+            if text:
+                return text
+        return ""
+    return _openlibrary_plain_text(value)
+
+
+def _internet_archive_values(value: object, limit: int = 0) -> list[str]:
+    """Normalize a possibly multi-valued Internet Archive metadata field."""
+    if isinstance(value, (list, tuple)):
+        values = [_openlibrary_plain_text(item) for item in value]
+    else:
+        values = [_openlibrary_plain_text(value)]
+    unique: list[str] = []
+    for text in values:
+        if text and text not in unique:
+            unique.append(text)
+        if limit > 0 and len(unique) >= limit:
+            break
+    return unique
+
+
+def _internet_archive_year(fields: dict) -> int:
+    """Extract a four-digit publication year from the available fields."""
+    for name in ("year", "date", "publicdate", "addeddate"):
+        match = re.search(r"\b(\d{4})\b", _internet_archive_first_text(fields.get(name)))
+        if match:
+            return int(match.group(1))
+    return 0
+
+
+def _internet_archive_related_text(hit: dict) -> list[str]:
+    """Collect and clean the highlighted OCR passages from one FTS hit."""
+    highlight = hit.get("highlight") if isinstance(hit.get("highlight"), dict) else {}
+    raw_texts = highlight.get("text")
+    if not isinstance(raw_texts, (list, tuple)):
+        raw_texts = [raw_texts] if raw_texts else []
+    snippets: list[str] = []
+    for raw in raw_texts:
+        text = _openlibrary_plain_text(raw, limit=480)
+        if text and text not in snippets:
+            snippets.append(text)
+        if len(snippets) >= INTERNET_ARCHIVE_HIGHLIGHT_LIMIT:
+            break
+    return snippets
+
+
+def _internet_archive_card(
+    fields: dict,
+    keyword: str,
+    snippets: list[str] | None = None,
+    source: str = "fts",
+) -> dict | None:
+    """Normalize one Internet Archive hit or catalogue document into a card."""
+    if not isinstance(fields, dict):
+        return None
+    identifier = _internet_archive_first_text(fields.get("identifier"))
+    if not identifier:
+        return None
+    title = _internet_archive_first_text(fields.get("title")) or identifier
+    authors = ", ".join(_internet_archive_values(fields.get("creator"), limit=5))
+    subjects = _internet_archive_values(fields.get("subject"), limit=5)
+    languages = _internet_archive_values(fields.get("language"), limit=5)
+    first_publish_year = _internet_archive_year(fields)
+    try:
+        download_count = int(fields.get("downloads") or 0)
+    except (TypeError, ValueError):
+        download_count = 0
+    description = _openlibrary_plain_text(
+        fields.get("description"), limit=INTERNET_ARCHIVE_DESCRIPTION_LIMIT
+    )
+    if not description:
+        description = _openlibrary_metadata_description(
+            authors, first_publish_year, "", subjects
+        )
+    href = str(fields.get("__href__") or "").strip()
+    if href.startswith("/"):
+        url = "https://archive.org" + href
+    else:
+        url = INTERNET_ARCHIVE_DETAILS_URL.format(identifier=quote(identifier))
+    return {
+        "id": identifier,
+        "title": title,
+        "authors": authors,
+        "description": description,
+        "related_text": list(snippets or []),
+        "languages": languages,
+        "subjects": subjects,
+        "first_publish_year": first_publish_year,
+        "download_count": download_count,
+        "url": url,
+        "text_url": "",
+        "source": "internet_archive",
+        "search_source": source,
+    }
+
+
+def _fetch_internet_archive_fulltext(keyword: str, limit: int) -> list[dict]:
+    """Fetch full-text search hits from the Internet Archive beta API."""
+    params = {
+        "service_backend": "fts",
+        "user_query": keyword,
+        "hits_per_page": max(20, limit * 3),
+        "page": 1,
+        "aggregations": "false",
+    }
+    try:
+        response = requests.get(
+            INTERNET_ARCHIVE_FTS_URL,
+            params=params,
+            headers=INTERNET_ARCHIVE_HEADERS,
+            timeout=(10, 60),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"Internet Archive full-text search failed: {exc}") from exc
+    result = data.get("response") if isinstance(data, dict) else None
+    body = result.get("body") if isinstance(result, dict) else None
+    hits = body.get("hits") if isinstance(body, dict) else None
+    raw_hits = hits.get("hits") if isinstance(hits, dict) else None
+    if not isinstance(raw_hits, list):
+        raise RuntimeError("Internet Archive returned an unexpected full-text response.")
+
+    cards: list[dict] = []
+    by_id: dict[str, dict] = {}
+    for hit in raw_hits:
+        if not isinstance(hit, dict):
+            continue
+        fields = hit.get("fields") if isinstance(hit.get("fields"), dict) else {}
+        card = _internet_archive_card(
+            fields, keyword, _internet_archive_related_text(hit), source="fts"
+        )
+        if card is None:
+            continue
+        existing = by_id.get(card["id"])
+        if existing is None:
+            by_id[card["id"]] = card
+            cards.append(card)
+        else:
+            # FTS returns one hit per matching page; merge their passages so
+            # each book appears once with up to three excerpts.
+            seen = set(existing.get("related_text") or [])
+            for snippet in card.get("related_text") or []:
+                if snippet not in seen and len(existing["related_text"]) < INTERNET_ARCHIVE_HIGHLIGHT_LIMIT:
+                    existing["related_text"].append(snippet)
+                    seen.add(snippet)
+    return cards
+
+
+def _fetch_internet_archive_metadata(keyword: str, limit: int) -> list[dict]:
+    """Fetch catalogue metadata from the Internet Archive Advanced Search API."""
+    escaped = keyword.replace("\\", "\\\\").replace('"', '\\"')
+    params = {
+        "q": f'"{escaped}" AND mediatype:(texts)',
+        "fl[]": INTERNET_ARCHIVE_SEARCH_FIELDS.split(","),
+        "rows": max(20, limit * 2),
+        "page": 1,
+        "output": "json",
+        "sort[]": "downloads desc",
+    }
+    try:
+        response = requests.get(
+            INTERNET_ARCHIVE_SEARCH_URL,
+            params=params,
+            headers=INTERNET_ARCHIVE_HEADERS,
+            timeout=(10, 40),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f"Internet Archive catalogue search failed: {exc}") from exc
+    response_data = data.get("response") if isinstance(data, dict) else None
+    docs = response_data.get("docs") if isinstance(response_data, dict) else None
+    if not isinstance(docs, list):
+        raise RuntimeError("Internet Archive returned an unexpected catalogue response.")
+    cards: list[dict] = []
+    seen: set[str] = set()
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        card = _internet_archive_card(doc, keyword, source="metadata")
+        if card is None or card["id"] in seen:
+            continue
+        seen.add(card["id"])
+        cards.append(card)
+    return cards
+
+
+def search_internet_archive(
+    keyword: str, limit: int = INTERNET_ARCHIVE_RESULT_LIMIT
+) -> list[dict]:
+    """Search Internet Archive texts and return clickable result cards.
+
+    The beta full-text API matches phrases inside OCR text, which is the main
+    use case. When it fails or finds nothing, fall back to catalogue metadata
+    (title, creator, description) so a known book can still be located.
+    """
+    keyword = " ".join(str(keyword or "").split())
+    if not keyword:
+        return []
+    limit = max(1, min(int(limit), 50))
+
+    errors: list[str] = []
+    try:
+        cards = _fetch_internet_archive_fulltext(keyword, limit)
+    except RuntimeError as exc:
+        errors.append(str(exc))
+        cards = []
+    if not cards:
+        try:
+            cards = _fetch_internet_archive_metadata(keyword, limit)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+    if not cards and errors and len(errors) > 1:
+        raise RuntimeError("; ".join(errors))
+    return cards[:limit]
+
+
 def _search_gutenberg_openlibrary(
     keyword: str, limit: int = GUTENBERG_BOOK_RESULT_LIMIT
 ) -> list[dict]:
@@ -21622,6 +21869,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_gutenberg(argument)
         elif name == "/openlibrary":
             self._command_openlibrary(argument)
+        elif name in {"/internet_archive", "/internet_artchive"}:
+            self._command_internet_archive(argument)
         elif name == "/changelog":
             self._command_changelog(argument)
         elif name == "/wiki":
@@ -24983,6 +25232,62 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._sse_text(
                 "output",
                 f"\n/openlibrary: no books matched {keyword!r}.\n",
+            )
+
+    def _command_internet_archive(self, argument: str) -> None:
+        """Search Internet Archive texts and stream clickable result cards.
+
+        Usage: /internet_archive <keywords>
+        The beta full-text search matches inside the OCR text of digitized
+        books and returns the passages where the query appeared. When the
+        full-text index has no match, the command falls back to the Internet
+        Archive catalogue so known titles can still be found.
+        """
+        keyword = argument.strip()
+        if keyword.lower().startswith("search "):
+            keyword = keyword[7:].strip()
+        if not keyword:
+            self._sse_text(
+                "output",
+                "\nUsage: /internet_archive <keywords>\n"
+                "Example: /internet_archive the spice must flow\n",
+            )
+            return
+
+        heading = f"Internet Archive · {keyword}"
+        self._sse_text(
+            "log",
+            f"[internet_archive: searching digitized texts for {keyword!r}]",
+        )
+        try:
+            items = search_internet_archive(keyword)
+        except RuntimeError as exc:
+            self._sse_text("error", f"\n{exc}\n")
+            return
+
+        has_excerpts = any(item.get("related_text") for item in items)
+        note = (
+            f"{len(items)} match{'' if len(items) == 1 else 'es'} · "
+            + (
+                "full-text matches · open on Internet Archive"
+                if has_excerpts
+                else "catalogue matches · open on Internet Archive"
+            )
+        )
+        self._sse(
+            "books",
+            {
+                "keyword": keyword,
+                "heading": heading,
+                "note": note,
+                "source": "internet_archive",
+                "items": items,
+            },
+        )
+        if not items:
+            self._sse_text(
+                "output",
+                f"\n/internet_archive: no texts matched {keyword!r}.\n",
             )
 
     def _stream_news_events(

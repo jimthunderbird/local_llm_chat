@@ -7095,6 +7095,7 @@ function makeEntry(kind, options = {}) {
     books: [],
     booksKeyword: "",
     booksHeading: "",
+    booksNote: "",
     booksError: "",
     bookLibraryItems: [],
     bookLibraryDirectory: "",
@@ -11070,6 +11071,7 @@ function normalizeBookItems(rawItems) {
         : [],
       url: String(item?.url || "").trim(),
       textUrl: String(item?.text_url || "").trim(),
+      source: String(item?.source || "").trim(),
     }))
     .filter((item) => item.id && item.title);
 }
@@ -11092,9 +11094,9 @@ function renderBookResults(entry) {
   const note = document.createElement("span");
   note.className = "book-list-note";
   const canRead = items.some((item) => item.textUrl);
-  note.textContent = canRead
+  note.textContent = entry.booksNote || (canRead
     ? `${items.length} book${items.length === 1 ? "" : "s"} · click to read and ask questions`
-    : `${items.length} book${items.length === 1 ? "" : "s"} · full-text matches · open on Open Library`;
+    : `${items.length} book${items.length === 1 ? "" : "s"} · full-text matches · open on Open Library`);
   head.appendChild(label);
   head.appendChild(note);
   container.appendChild(head);
@@ -11108,6 +11110,9 @@ function renderBookResults(entry) {
     const cardTitle = item.authors
       ? `${item.title} · ${item.authors}`
       : item.title;
+    const externalLabel = item.source === "internet_archive"
+      ? "Open on Internet Archive ↗"
+      : "Open on Open Library ↗";
     if (readable) {
       card.tabIndex = 0;
       card.setAttribute("role", "button");
@@ -11123,7 +11128,7 @@ function renderBookResults(entry) {
       card.href = item.url || "#";
       card.target = "_blank";
       card.rel = "noopener noreferrer";
-      card.title = `${cardTitle} · open on Open Library`;
+      card.title = `${cardTitle} · ${externalLabel.replace(" ↗", "")}`;
     }
 
     const title = document.createElement("div");
@@ -11177,7 +11182,7 @@ function renderBookResults(entry) {
 
     const action = document.createElement("span");
     action.className = "book-action";
-    action.textContent = readable ? "Read & ask →" : "Open on Open Library ↗";
+    action.textContent = readable ? "Read & ask →" : externalLabel;
     card.appendChild(action);
     cards.appendChild(card);
   }
@@ -18063,6 +18068,7 @@ function submitText(text, fromChoice = false) {
       entry.books = normalizeBookItems(data?.items);
       entry.booksKeyword = String(data?.keyword || "").trim();
       entry.booksHeading = String(data?.heading || "").trim();
+      entry.booksNote = String(data?.note || "").trim();
       entry.booksError = "";
       scheduleRender(entry);
     },
