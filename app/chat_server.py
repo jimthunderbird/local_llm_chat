@@ -20926,6 +20926,27 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._sse_text("delta", message)
             response = message
 
+        research_sources = []
+        for article in articles:
+            link = str(article.get("link") or "").strip()
+            title = " ".join(str(article.get("title") or "").split())
+            if not link and not title:
+                continue
+            research_sources.append(
+                {
+                    "title": title or link,
+                    "url": link,
+                    "source": str(article.get("source") or "").strip(),
+                    "published": str(
+                        article.get("published") or ""
+                    ).strip(),
+                    "question": " ".join(
+                        str(article.get("question") or "").split()
+                    ),
+                }
+            )
+        self._sse("research_sources", {"items": research_sources})
+
         state.latest_answer = response
         state.latest_sources = []
         state.latest_benchmark = {

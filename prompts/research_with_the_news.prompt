@@ -4,6 +4,16 @@ hospital_map {
   UCSF: ucsf.edu, ucsfhealth.org
 }
 
+task.sources_of_the_answer (completed) {
+  - below each answer, show an icon for sources of news article the answer is based on, when click {
+    - show a popup modal showing list of related article urls
+  }
+}
+
+task.dictionary_searchable (completed) {
+  - make each word in the answer dictionary searchable
+}
+
 task.question_source_fine_tuning.doctors (completed) {
   - if <topic> is about a specific Dr, do the following:
     hospitals: find the doctor's hospital based on {hospital_map}

@@ -3432,6 +3432,103 @@
   #line-help-loading { color: var(--warn); font-size: 12px; margin-bottom: 8px; }
   #line-help-loading[hidden] { display: none; }
 
+  /* Sources used by one /research_with_the_news answer. The icon sits below
+     the answer and opens a compact list of the article URLs it was built
+     from, keeping the answer itself free of per-paragraph citation noise. */
+  .research-sources {
+    margin-top: 9px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .research-sources[hidden] { display: none; }
+  .research-sources-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: var(--accent-2);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .03em;
+    cursor: pointer;
+  }
+  .research-sources-btn:hover { color: #fff; }
+  .research-sources-btn svg {
+    width: 13px;
+    height: 13px;
+    fill: currentColor;
+  }
+
+  #research-sources-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 56;
+    background: rgba(2, 6, 10, .72);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  #research-sources-panel[hidden] { display: none; }
+  .research-sources-card {
+    width: min(760px, 100%);
+    max-height: 82vh;
+    display: flex;
+    flex-direction: column;
+    background: #0d151e;
+    border: 1px solid #2b4056;
+    border-radius: 10px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.7);
+    overflow: hidden;
+  }
+  #research-sources-close {
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+    user-select: none;
+  }
+  #research-sources-close:hover { color: var(--text); }
+  #research-sources-list {
+    padding: 12px 16px 16px;
+    overflow-y: auto;
+    font-size: 12.5px;
+  }
+  .research-sources-item {
+    margin: 0 0 13px;
+    padding: 0 0 13px;
+    border-bottom: 1px solid #1d2e3e;
+  }
+  .research-sources-item:last-child {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: 0;
+  }
+  .research-sources-item a {
+    color: var(--accent);
+    word-break: break-all;
+    text-decoration: none;
+    border-bottom: 1px dotted #3d6b8f;
+  }
+  .research-sources-item a:hover { border-bottom-style: solid; }
+  .research-sources-item .research-sources-url {
+    margin-top: 3px;
+    color: var(--dim);
+    font-size: 11px;
+    word-break: break-all;
+  }
+  .research-sources-item .research-sources-meta {
+    margin-top: 4px;
+    color: var(--dim);
+    font-size: 11px;
+  }
+
   #help-panel {
     position: fixed;
     inset: 0;
@@ -4373,6 +4470,18 @@
   </div>
 </div>
 
+<div id="research-sources-panel" hidden>
+  <div class="research-sources-card" role="dialog" aria-modal="true" aria-labelledby="research-sources-title">
+    <div class="line-help-head">
+      <span id="research-sources-title" class="line-help-title">News article sources</span>
+      <span id="research-sources-meta" class="line-help-lang"></span>
+      <span class="line-help-spacer"></span>
+      <button id="research-sources-close" type="button" title="Close (Esc)">×</button>
+    </div>
+    <div id="research-sources-list"></div>
+  </div>
+</div>
+
 <div id="help-panel" hidden>
   <div class="help-card" role="dialog" aria-modal="true" aria-label="Help">
     <h2>Personal Chatbot</h2>
@@ -4562,6 +4671,9 @@ const lineHelpModelEl = $("#line-help-model");
 const lineHelpSourceEl = $("#line-help-source");
 const lineHelpLoadingEl = $("#line-help-loading");
 const lineHelpContentEl = $("#line-help-content");
+const researchSourcesPanelEl = $("#research-sources-panel");
+const researchSourcesMetaEl = $("#research-sources-meta");
+const researchSourcesListEl = $("#research-sources-list");
 const helpPanel = $("#help-panel");
 const helpCommands = $("#help-commands");
 const toastEl = $("#toast");
@@ -6900,6 +7012,7 @@ function makeEntry(kind, options = {}) {
     complete: false,
     clickable: Boolean(options.clickable),
     annotations: [],
+    researchSources: [],
     renderPending: false,
     renderDeferred: false,
     translationText: "",
@@ -7021,6 +7134,12 @@ function makeEntry(kind, options = {}) {
   wordCountEl.title = "Word count of this answer";
   entry.wordCountEl = wordCountEl;
   entry.bodyEl.appendChild(wordCountEl);
+
+  const researchSourcesEl = document.createElement("div");
+  researchSourcesEl.className = "research-sources";
+  researchSourcesEl.hidden = true;
+  entry.researchSourcesEl = researchSourcesEl;
+  entry.bodyEl.appendChild(researchSourcesEl);
 
   const translationEl = document.createElement("div");
   translationEl.className = "translation";
@@ -7167,6 +7286,7 @@ function renderEntry(entry) {
   }
 
   renderAnswerWordCount(entry);
+  renderResearchSources(entry);
 
   entry.choicesEl.textContent = "";
   renderNewsList(entry);
@@ -16887,6 +17007,84 @@ function renderAnswerWordCount(entry) {
     : "Words so far in this answer";
 }
 
+function renderResearchSources(entry) {
+  const el = entry.researchSourcesEl;
+  if (!el) return;
+  const items = Array.isArray(entry.researchSources)
+    ? entry.researchSources.filter(
+      (item) => item && (item.url || item.title)
+    )
+    : [];
+  el.textContent = "";
+  el.hidden = !items.length;
+  if (!items.length) return;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "research-sources-btn";
+  button.title = "Show the news articles this answer is based on";
+  button.setAttribute("aria-label", button.title);
+  button.innerHTML = NEWS_ICON_SVG;
+  const label = document.createElement("span");
+  label.textContent = `Sources (${items.length})`;
+  button.appendChild(label);
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openResearchSources(items);
+  });
+  el.appendChild(button);
+}
+
+function openResearchSources(items) {
+  researchSourcesListEl.textContent = "";
+  const list = Array.isArray(items) ? items : [];
+  researchSourcesMetaEl.textContent = `${list.length} article${list.length === 1 ? "" : "s"}`;
+  for (const item of list) {
+    const row = document.createElement("div");
+    row.className = "research-sources-item";
+    const title = String(item.title || "").trim()
+      || String(item.url || "").trim()
+      || "Untitled article";
+    const url = String(item.url || "").trim();
+    if (/^https?:\/\//i.test(url)) {
+      const link = document.createElement("a");
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = title;
+      row.appendChild(link);
+      const urlEl = document.createElement("div");
+      urlEl.className = "research-sources-url";
+      urlEl.textContent = url;
+      row.appendChild(urlEl);
+    } else {
+      const titleEl = document.createElement("div");
+      titleEl.textContent = title;
+      row.appendChild(titleEl);
+    }
+    const meta = [item.source, item.published, item.question]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .join(" · ");
+    if (meta) {
+      const metaEl = document.createElement("div");
+      metaEl.className = "research-sources-meta";
+      metaEl.textContent = meta;
+      row.appendChild(metaEl);
+    }
+    researchSourcesListEl.appendChild(row);
+  }
+  researchSourcesPanelEl.hidden = false;
+  const closeButton = $("#research-sources-close");
+  if (closeButton) closeButton.focus({ preventScroll: true });
+}
+
+function closeResearchSources() {
+  researchSourcesPanelEl.hidden = true;
+  researchSourcesListEl.textContent = "";
+  researchSourcesMetaEl.textContent = "";
+}
+
 function renderAnswerSource(entry) {
   const el = entry.sourceEl;
   if (!el) return;
@@ -17591,8 +17789,18 @@ function submitText(text, fromChoice = false) {
   const isCommand = question.startsWith("/");
   // /ask answers are plain text like a regular assistant reply: keep every
   // word clickable for /dict and omit the command "Output" heading.
+  // /research_with_the_news <topic> likewise streams an answer, not a command
+  // log, so its words must be dictionary-searchable too. The on/off and usage
+  // forms stay non-clickable.
+  const researchWithNewsAnswer = commandName === "research_with_the_news"
+    && commandArgs.length > 0
+    && !["off", "stop", "disable", "disabled"].includes(
+      String(commandArgs[0] || "").toLowerCase()
+    );
   const entry = makeEntry(isCommand ? "command" : "assistant", {
-    clickable: !isCommand || commandName === "ask",
+    clickable: !isCommand
+      || commandName === "ask"
+      || researchWithNewsAnswer,
     language: appState?.code_language || "",
     wikiArticle: commandName === "wiki_article",
     label: image
@@ -17708,6 +17916,10 @@ function submitText(text, fromChoice = false) {
     },
     annotations: (data) => {
       entry.annotations = Array.isArray(data?.items) ? data.items : [];
+      scheduleRender(entry);
+    },
+    research_sources: (data) => {
+      entry.researchSources = Array.isArray(data?.items) ? data.items : [];
       scheduleRender(entry);
     },
     reset: () => {
@@ -18423,6 +18635,12 @@ function handleKeyDown(event) {
     return;
   }
 
+  if (!researchSourcesPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeResearchSources();
+    return;
+  }
+
   if (!stockCompanyPanelEl.hidden && key === "Escape") {
     event.preventDefault();
     closeStockCompanyModal();
@@ -18862,6 +19080,11 @@ document.addEventListener("keydown", (event) => {
     closeLineHelp();
     return;
   }
+  if (!researchSourcesPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeResearchSources();
+    return;
+  }
   if (!stockCompanyPanelEl.hidden && key === "Escape") {
     event.preventDefault();
     closeStockCompanyModal();
@@ -18952,6 +19175,7 @@ inputEl.addEventListener("blur", () => {
       !popupEl.hidden ||
       !helpPanel.hidden ||
       !lineHelpPanel.hidden ||
+      !researchSourcesPanelEl.hidden ||
       !bookOptionsPanelEl.hidden ||
       !stockCompanyPanelEl.hidden ||
       !drivingPanelEl.hidden ||
@@ -19741,6 +19965,14 @@ function closeLineHelp() {
 $("#line-help-close").addEventListener("click", closeLineHelp);
 lineHelpPanel.addEventListener("click", (event) => {
   if (event.target === lineHelpPanel) closeLineHelp();
+});
+
+/* ------------------------------------------------------------------ *
+ *  News-research source list modal
+ * ------------------------------------------------------------------ */
+$("#research-sources-close").addEventListener("click", closeResearchSources);
+researchSourcesPanelEl.addEventListener("click", (event) => {
+  if (event.target === researchSourcesPanelEl) closeResearchSources();
 });
 
 /* ------------------------------------------------------------------ *
