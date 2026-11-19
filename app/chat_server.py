@@ -392,9 +392,8 @@ NEWS_SOURCE_USAGE = "|".join(NEWS_SOURCES)
 RESEARCH_WITH_NEWS_MODEL = os.environ.get(
     "OLLAMA_RESEARCH_WITH_NEWS_MODEL", "ornith-1.5:35b"
 )
-RESEARCH_WITH_NEWS_QUESTIONS = 2
-RESEARCH_WITH_NEWS_ARTICLES_PER_QUESTION = 3
-RESEARCH_WITH_NEWS_INITIAL_ARTICLES = 4
+RESEARCH_WITH_NEWS_QUESTIONS = 1
+RESEARCH_WITH_NEWS_ARTICLES_PER_QUESTION = 4
 RESEARCH_WITH_NEWS_DOCTOR_TITLE_CANDIDATES = 20
 # The hospital_map in prompts/research_with_the_news.prompt. A doctor's
 # articles can live on either the university site or the hospital site, so a
@@ -438,21 +437,21 @@ RESEARCH_WITH_NEWS_QUESTION_PROMPT = """You are planning a news search about a t
 {topic}
 </new_question>
 
-Write exactly two questions that would find the most relevant news about this
+Write exactly one question that would find the most relevant news about this
 question. Follow these rules:
-- Each question must focus tightly on the new question.
+- The question must focus tightly on the new question.
 - When the new question is a follow-up (for example it uses "he", "she",
   "it", "they", "that company", or an elliptical phrase), resolve the
-  reference from the accumulated research context and make each search
+  reference from the accumulated research context and make the search
   question standalone.
-- Keep each search question related to the current accumulated context; do not
+- Keep the search question related to the current accumulated context; do not
   jump to an unrelated subject.
 - Do not mention any time, date, year, month, week, season, or clock time.
 - Do not use recency words such as latest, newest, recent, current, today, or
   now.
 - Do not answer the question and do not add outside facts.
-- Do not number the questions.
-- Return only the two questions, one per line.
+- Do not number the question.
+- Return only the one question.
 """
 RESEARCH_WITH_NEWS_SOURCE_PROMPT = """Decide where a research question should look for evidence.
 
@@ -534,7 +533,7 @@ News context:
 Use the accumulated research context only to understand what the current
 question refers to. The factual evidence must come from the news context.
 
-Write a coherent briefing {length_instruction}. Synthesize the relevant stories
+Write a coherent briefing in 100 to 150 words. Synthesize the relevant stories
 instead of listing them mechanically. When reports disagree, prefer the more
 specific and more recent report. Do not mention chunk numbers, citations, or
 the names of these instructions. If the context leaves part of the topic
@@ -13051,11 +13050,11 @@ def plan_research_with_news_questions(
     log: Callable[[str], None],
     accumulated_context: str = "",
 ) -> list[str]:
-    """Ask the research model for two focused, time-neutral news questions.
+    """Ask the research model for one focused, time-neutral news question.
 
     ``accumulated_context`` is the conversation built by earlier turns in
     RESEARCH_WITH_NEWS_MODE. Passing it lets a follow-up such as "what does he
-    think about AI?" become concrete search questions instead of an isolated,
+    think about AI?" become a concrete search question instead of an isolated,
     ambiguous query.
     """
     context = accumulated_context.strip() or "(no previous research context)"
@@ -13091,7 +13090,7 @@ def plan_research_with_news_questions(
                     topic=topic, accumulated_context=context
                 )
                 + "\nDo not include a year, month, weekday, season, clock "
-                "time, or any word about recency. Return two questions only.\n"
+                "time, or any word about recency. Return one question only.\n"
             )
 
     # The fallbacks are deliberately plain and contain no time reference, so
@@ -21366,10 +21365,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         state = self.state
         if state.research_with_news_mode:
             # In this mode every question continues the current research
-            # thread. The first researched question starts a clean context;
-            # later questions keep the earlier briefings so their search
-            # queries can resolve follow-up references.
-            self._run_research_with_the_news(question)
+            # thread. The first researched question uses the direct initial
+            # search (no related-question planning); later questions keep the
+            # earlier briefings so their search queries can resolve follow-up
+            # references.
+            initial = not state.conversation and not state.conversation_summary
+            self._run_research_with_the_news(question, initial=initial)
             return
         article_mode = state.article_path is not None
         # Iterative evidence is reused within this question.
@@ -22612,14 +22613,15 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         Usage: /research_with_the_news <topic>
                /research_with_the_news on
                /research_with_the_news off
-        The explicit /research_with_the_news <topic> command now searches that
-        topic directly, uses the top four news stories, and writes a shorter
-        100-150 word briefing. While the mode is on, ordinary follow-up
-        questions are added to the current research context; for those, the
-        server asks the research model for two time-neutral search questions,
-        pulls the top three full articles for each question from Google News,
-        and writes a 100-250 word briefing. Turning the mode on starts a clean
-        context; turning it off returns to normal chat.
+        The explicit /research_with_the_news <topic> command and the first
+        ordinary question after the mode is enabled search the topic directly,
+        use the top four news stories, and write a 100-150 word briefing.
+        Later ordinary questions are added to the current research context;
+        for those, the server asks the research model for one time-neutral
+        search question, pulls the top four full articles for it from Google
+        News, and writes a 100-150 word briefing.
+        Turning the mode on starts a clean context; turning it off returns to
+        normal chat.
         """
         topic = " ".join(argument.split())
         state = self.state
@@ -22717,11 +22719,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         """Research one question in the current accumulated news context.
 
         ``initial`` is used for the explicit /research_with_the_news <topic>
-        command. That path searches the topic directly instead of asking the
-        planner for related questions, uses the top four news stories, and
-        writes a shorter 100-150 word briefing. Ordinary follow-up questions
-        while the mode is on keep the related-question planner and the longer
-        briefing.
+        command and for the first ordinary question after the mode is enabled
+        (when there is no accumulated conversation yet). That path searches the
+        topic directly instead of asking the planner for related questions,
+        uses the top four news stories, and writes a 100-150 word briefing.
+        Later follow-up questions while the mode is on keep the related-question
+        planner, but that planner now returns one question and also uses the
+        top four news stories and the 100-150 word briefing.
         """
         topic = " ".join(topic.split())
         if not topic:
@@ -22786,14 +22790,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         else:
             if accumulated_context:
                 log(
-                    "[research_with_the_news: planning two time-neutral "
-                    f"search questions about {topic!r} in the accumulated "
+                    "[research_with_the_news: planning one time-neutral "
+                    f"search question about {topic!r} in the accumulated "
                     "research context]"
                 )
             else:
                 log(
-                    "[research_with_the_news: planning two time-neutral "
-                    f"search questions about {topic!r}]"
+                    "[research_with_the_news: planning one time-neutral "
+                    f"search question about {topic!r}]"
                 )
             questions = plan_research_with_news_questions(
                 topic, log, accumulated_context=accumulated_context
@@ -22827,11 +22831,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             "doctor": "doctor article",
         }.get(source, "news article")
         wikipedia_fallback = ""
-        per_question_limit = (
-            RESEARCH_WITH_NEWS_INITIAL_ARTICLES
-            if initial
-            else RESEARCH_WITH_NEWS_ARTICLES_PER_QUESTION
-        )
+        per_question_limit = RESEARCH_WITH_NEWS_ARTICLES_PER_QUESTION
 
         def collect_articles(
             results: list[dict], question: str, noun: str
@@ -23079,7 +23079,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         else:
             detail = (
                 f"answer synthesized from {len(articles)} recent news "
-                "article(s) gathered by the two generated search questions"
+                "article(s) gathered by the generated search question"
             )
         self._sse_answer_source(
             source=SOURCE_OLLAMA,
@@ -23097,11 +23097,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         prompt = RESEARCH_WITH_NEWS_ANSWER_PROMPT.format(
             topic=topic,
             context=context,
-            length_instruction=(
-                "in 100 to 150 words"
-                if initial
-                else "in 100 to 250 words"
-            ),
             accumulated_context=(
                 accumulated_context.strip()
                 or "(no previous research context)"

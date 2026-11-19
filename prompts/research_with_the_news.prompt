@@ -4,6 +4,15 @@ hospital_map {
   UCSF: ucsf.edu, ucsfhealth.org
 }
 
+task.followup_question_logic_refactor (completed) {
+  for follow up question, we should plan for only 1 related question only, and pick top 4 search results, answer should be 100-150 words
+}
+
+task.bug.task.refactor.initial_command_logic (completed) {
+  reference task.refactor.initial_command_logic:
+  - seems like it is still asking related questions of <topic>, please, do not ask related questions, simply use /news search <topic> and pick the top 4 results and add them to context
+}
+
 task.refactor.initial_command_logic (completed) {
   reference task.initial_command_logic:
   change logic.fetch_news_and_produce_answer {
