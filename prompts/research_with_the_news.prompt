@@ -4,6 +4,15 @@ hospital_map {
   UCSF: ucsf.edu, ucsfhealth.org
 }
 
+task.question_source_fine_tuning.no_context_fall_back_to_news_search (completed) {
+  - if a <topic> is about general facts, and even though there are matching wikipedia articles, but if the provided article does not have enough information to answer the <topic>, fall back to news search
+}
+
+
+task.question_source_fine_tuning.fallback (completed) {
+  - if a <topic> is about general facts and there are no related information in wikipedia, fall back to news search
+}
+
 task.news_source_timeline (completed) {
   reference task.sources_of_the_answer:
   - next to the "Sources" icon, show me a from and to time of the related articles, format: From <from_time> To <to_time>

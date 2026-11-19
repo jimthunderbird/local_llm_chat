@@ -1,3 +1,11 @@
+task.youtube_transcript_refactor (completed) {
+  - for /youtube transcript <transcript>
+    - if <transcriipt> is not being learned yet, do: /youtube learn <transcript>
+    - else:
+      - clearn all accumulated context, load all trunks related to this transcript into the context
+      - switch the chat mode to Local
+}
+
 task.relearn_youtube_videos (completed) {
   please allow relearning a youtube video both in UI and also in related cli scripts
   relearn means we remove all the trunk files and meta data generated for a specific youtube video and rebuild them again, but keep in mind that, we need to keep the youtube transcript file untouched

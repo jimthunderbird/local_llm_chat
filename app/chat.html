@@ -4302,6 +4302,7 @@
       <div class="status-line"><strong>depth</strong><span id="status-depth">…</span></div>
       <div class="status-line"><strong>trunks</strong><span id="status-chunks">…</span></div>
       <div class="status-line"><strong>context size</strong><span id="status-context-size">…</span></div>
+      <div class="status-line"><strong>accumulated context</strong><span id="status-accumulated-context">…</span></div>
       <div class="status-line"><strong>conversation</strong><span id="status-conversation">0 turns</span></div>
       <div class="status-line"><strong>model</strong><span id="status-model">…</span></div>
       <div class="status-line"><strong>source</strong><span id="status-answer-source">—</span></div>
@@ -4740,6 +4741,7 @@ const imageDropHintEl = $("#image-drop-hint");
 const modeBadge = $("#mode-badge");
 const statusMode = $("#status-mode");
 const statusContextSize = $("#status-context-size");
+const statusAccumulatedContext = $("#status-accumulated-context");
 const researchModeSelect = $("#research-mode-select");
 const statusResearch = $("#status-research");
 const statusPanelEl = $("#status-panel");
@@ -17655,7 +17657,23 @@ function applyState(state, loadHistory = false) {
     ? `${usedContext} / ${maxContextTokens.toLocaleString()} tokens`
     : `${usedContext} tokens`;
   statusContextSize.title =
-    "Estimated size of the latest answer's context / maximum context window";
+    "Estimated tokens in the latest answer's retrieved evidence / retrieval context budget (not the model's full context window)";
+  const accumulatedContextTokens = Number(
+    state.conversation_context_tokens ?? 0
+  );
+  const summaryContextTokens = Number(
+    state.conversation_summary_tokens ?? 0
+  );
+  const recentContextTokens = Number(
+    state.conversation_recent_tokens ?? 0
+  );
+  statusAccumulatedContext.textContent = accumulatedContextTokens > 0
+    ? `~${accumulatedContextTokens.toLocaleString()} tokens ` +
+      `(summary ~${summaryContextTokens.toLocaleString()} + ` +
+      `recent ~${recentContextTokens.toLocaleString()})`
+    : "—";
+  statusAccumulatedContext.title =
+    "Estimated conversation memory currently carried: rolling summary + recent verbatim turns";
   const statusModelEl = $("#status-model");
   statusModelEl.textContent = displayModelName(state.models?.chat);
   statusModelEl.title = "";
