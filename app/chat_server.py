@@ -330,6 +330,7 @@ def english_corner_vocabulary(spec: str) -> tuple[tuple[str, ...], str]:
 WEB_COMMANDS = {
     **chat.COMMANDS,
     "/help": "show commands and keyboard shortcuts",
+    "/compact": "summarize older conversation turns and keep only a short recent tail",
     "/youtube": "YouTube commands: learn <hash|url> | relearn <hash|url> | "
     "learn_topic <topic> | learn_playlist <playlist> | search <keyword> | bookmark list",
     "/news": "list the latest news from wsj, cnn, cbslite, nprtext, yahoo_finance, medium, kqed, sfgate, sfbayview, mission_local, richmond_sunset, techcrunch, krasia, wccftech, or hackernews (optionally /news [source ...] [count]); /news search <keywords> [website] searches Google News, optionally only that website",
@@ -9458,21 +9459,31 @@ def normalize_attachment_image(value) -> str:
     return encoded
 
 
-def image_conversation_context(conversation: list[dict]) -> str:
+def image_conversation_context(
+    conversation: list[dict], summary: str = ""
+) -> str:
     """Render a short recent-conversation transcript for an image question."""
-    if not conversation:
-        return "(no previous turns)"
+    summary = "\n".join(
+        " ".join(line.split())
+        for line in str(summary or "").splitlines()
+        if line.strip()
+    )
     lines: list[str] = []
-    for turn in conversation[-4:]:
-        question = str(turn.get("resolved_question") or turn.get("question") or "").strip()
-        answer = str(turn.get("answer") or "").strip()
-        if question:
-            lines.append(f"User: {question}")
-        if answer:
-            compact = re.sub(r"\s+", " ", answer)
-            if len(compact) > 700:
-                compact = compact[:700].rsplit(" ", 1)[0] + " ..."
-            lines.append(f"Assistant: {compact}")
+    if summary:
+        lines.append("Earlier conversation summary:")
+        lines.append(summary)
+        lines.append("")
+    if conversation:
+        for turn in conversation[-4:]:
+            question = str(turn.get("resolved_question") or turn.get("question") or "").strip()
+            answer = str(turn.get("answer") or "").strip()
+            if question:
+                lines.append(f"User: {question}")
+            if answer:
+                compact = re.sub(r"\s+", " ", answer)
+                if len(compact) > 700:
+                    compact = compact[:700].rsplit(" ", 1)[0] + " ..."
+                lines.append(f"Assistant: {compact}")
     text = "\n".join(lines) or "(no previous turns)"
     if len(text) > MAX_IMAGE_CONTEXT_CHARS:
         text = text[-MAX_IMAGE_CONTEXT_CHARS:]
@@ -9552,8 +9563,16 @@ def format_youtube_duration(seconds: int) -> str:
 # conversation so a question such as "what does he think about AI?" or
 # "when does it open" can be rewritten into a standalone retrieval question
 # before BM25 runs. A completely unrelated question starts a fresh context.
-CONVERSATION_MAX_TURNS = 8
-CONVERSATION_ANSWER_CHARS = 900
+CONVERSATION_MAX_TURNS = 6
+CONVERSATION_ANSWER_CHARS = 600
+# Long sessions are compacted instead of growing the prompt. The newest turns
+# stay verbatim; older turns are folded into a compact running summary by the
+# small helper model. Compaction is deliberately infrequent: it triggers a few
+# turns after the verbatim window is full, then keeps only a short recent tail.
+CONVERSATION_COMPACT_AFTER_TURNS = 12
+CONVERSATION_RECENT_TURNS_AFTER_COMPACT = 4
+CONVERSATION_SUMMARY_MAX_CHARS = 2800  # roughly 700 English tokens
+CONVERSATION_SUMMARY_NUM_PREDICT = 320
 # One model handles follow-up rewriting as well; keeping it identical to the
 # answer model avoids loading a second model for a short classification call.
 CONVERSATION_MODEL = chat.CHAT_MODEL
@@ -11763,6 +11782,26 @@ Output only the standalone question on one line, or the single word UNRELATED, w
 
 Standalone question:"""
 
+CONVERSATION_SUMMARY_PROMPT = """Maintain a compact running summary of an ongoing chat for future follow-up questions.
+
+<existing_summary>
+{summary}
+</existing_summary>
+
+<new_turns>
+{turns}
+</new_turns>
+
+Rules:
+- Merge the new turns into the existing summary. Do not repeat the same fact twice.
+- Preserve names, places, dates, entities, user preferences and constraints, decisions, conclusions, open questions, and references (IDs, URLs, section names) needed to look details up again.
+- Drop greetings, acknowledgements, repeated facts, raw tool output, duplicate retrieved chunks, and abandoned speculation.
+- Do not add facts that are not stated in the existing summary or the new turns.
+- Use short bullet points and at most 250 words.
+- Output only the updated summary, with no heading, label, or explanation.
+
+Updated summary:"""
+
 CONVERSATION_UNRELATED = "unrelated"
 # A short question is ambiguous: it may be an elliptical follow-up even when it
 # contains no pronoun. Content words are counted without the words that almost
@@ -11811,7 +11850,7 @@ def conversation_overlap_ratio(question: str, turns: list[dict]) -> float:
     if not question_terms:
         return 1.0
     best = 0.0
-    for turn in turns[-CONVERSATION_MAX_TURNS:]:
+    for turn in turns:
         asked = str(
             turn.get("resolved_question") or turn.get("question") or ""
         )
@@ -11827,19 +11866,36 @@ def conversation_overlap_ratio(question: str, turns: list[dict]) -> float:
     return best
 
 
-def question_relates_to_conversation(question: str, turns: list[dict]) -> bool:
-    """Return True when a question shares a substantial topic with recent turns.
+def question_relates_to_conversation(
+    question: str, turns: list[dict], summary: str = ""
+) -> bool:
+    """Return True when a question shares a substantial topic with memory.
 
-    The comparison deliberately uses the previous *questions*, not the previous
-    answers. Answers are long, so almost any new question shares some word with
-    them (for example a Nijo Market answer mentions "Japan", which would make a
-    later visa question look related). A question starts a fresh context unless
-    it shares more than half of the smaller side of the comparison with one of
-    the last asked questions, which keeps genuine same-topic questions (for
-    example "is nijo market open on sunday?" after "where is nijo market?") in
-    the same context while a different subject refreshes it.
+    The comparison deliberately uses the previous *questions* and the curated
+    running summary, not the previous answers. Answers are long, so almost any
+    new question shares some word with them (for example a Nijo Market answer
+    mentions "Japan", which would make a later visa question look related). A
+    question starts a fresh context unless it shares more than half of the
+    smaller side of the comparison with one of the last asked questions, which
+    keeps genuine same-topic questions in the same context while a different
+    subject refreshes it. A summary match is deliberately stricter: it needs at
+    least two content terms and half of the question's terms, so a generic word
+    in a compacted summary cannot keep a stale topic alive.
     """
-    return conversation_overlap_ratio(question, turns) > 0.5
+    if conversation_overlap_ratio(question, turns) > 0.5:
+        return True
+    summary = " ".join(str(summary or "").split())
+    if not summary:
+        return False
+    question_terms = conversation_content_terms(question)
+    summary_terms = conversation_content_terms(summary)
+    if not question_terms or not summary_terms:
+        return False
+    shared = question_terms & summary_terms
+    required = 1 if len(question_terms) == 1 else max(
+        2, math.ceil(len(question_terms) * 0.5)
+    )
+    return len(shared) >= required
 
 
 def is_unrelated_response(response: str) -> bool:
@@ -11878,10 +11934,24 @@ def question_needs_context(question: str, turns: list[dict]) -> bool:
     return len(conversation_content_terms(text)) <= FOLLOW_UP_MAX_CONTENT_WORDS
 
 
-def format_conversation(turns: list[dict]) -> str:
-    """Format recent turns for the follow-up rewrite prompt."""
+def format_conversation(
+    turns: list[dict],
+    summary: str = "",
+    limit: int | None = CONVERSATION_MAX_TURNS,
+) -> str:
+    """Format the running summary and recent turns for a conversation prompt."""
     lines: list[str] = []
-    for turn in turns[-CONVERSATION_MAX_TURNS:]:
+    summary = "\n".join(
+        " ".join(line.split())
+        for line in str(summary or "").splitlines()
+        if line.strip()
+    )
+    if summary:
+        lines.append("Earlier conversation summary:")
+        lines.append(summary)
+        lines.append("")
+    selected = list(turns) if limit is None else turns[-limit:]
+    for turn in selected:
         asked = " ".join(str(turn.get("question", "")).split())
         resolved = " ".join(str(turn.get("resolved_question", "")).split())
         if resolved and resolved != asked:
@@ -11892,6 +11962,71 @@ def format_conversation(turns: list[dict]) -> str:
         lines.append(f"User: {asked}")
         lines.append(f"Assistant: {answer}")
     return "\n".join(lines)
+
+
+def conversation_answer_prefix(summary: str) -> str:
+    """Render the running summary for the answer prompt.
+
+    The summary is not retrieved evidence. It is included only so the writer
+    can interpret references, respect user constraints, and maintain continuity
+    after older turns have been compacted. The prompt template still requires
+    factual claims to come from the current context chunks.
+    """
+    summary = "\n".join(
+        " ".join(line.split())
+        for line in str(summary or "").splitlines()
+        if line.strip()
+    )
+    if not summary:
+        return ""
+    return (
+        "<conversation_memory>\n"
+        "Earlier conversation memory. Use it only to interpret the user's "
+        "question, resolve references, and respect user constraints. It is "
+        "not retrieved evidence; factual claims must still come from the "
+        "context chunks.\n"
+        f"{summary}\n"
+        "</conversation_memory>\n\n"
+    )
+
+
+def clean_conversation_summary(text: str) -> str:
+    """Normalize one model-written running summary."""
+    text = chat.THINK_PATTERN.sub("", str(text or "")).strip()
+    text = re.sub(r"^```(?:markdown)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text).strip()
+    text = re.sub(
+        r"^(?:updated\s+)?summary\s*[::]\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    lines = [" ".join(line.split()) for line in text.splitlines() if line.strip()]
+    return "\n".join(lines).strip()
+
+
+def clamp_conversation_summary(text: str) -> str:
+    """Keep the running summary below the configured character budget."""
+    text = text.strip()
+    if len(text) <= CONVERSATION_SUMMARY_MAX_CHARS:
+        return text
+    shortened = text[:CONVERSATION_SUMMARY_MAX_CHARS].rsplit(" ", 1)[0].rstrip()
+    return shortened + " ..."
+
+
+def fallback_conversation_summary(evicted: list[dict], existing: str) -> str:
+    """Deterministic summary used when the helper model cannot summarize."""
+    parts: list[str] = []
+    if existing.strip():
+        parts.append(existing.strip())
+    questions: list[str] = []
+    for turn in evicted:
+        question = " ".join(str(turn.get("question") or "").split())
+        if question and question not in questions:
+            questions.append(question)
+    if questions:
+        parts.append("Earlier questions: " + "; ".join(questions))
+    return clamp_conversation_summary("\n".join(parts))
 
 
 def clean_standalone_question(response: str) -> str | None:
@@ -11918,12 +12053,13 @@ def clean_standalone_question(response: str) -> str | None:
 def rewrite_follow_up(
     question: str,
     turns: list[dict],
+    summary: str = "",
 ) -> ConversationResolution | None:
     """Resolve references in a follow-up or detect a completely new topic."""
-    if not turns:
+    if not turns and not summary.strip():
         return None
     prompt = CONVERSATION_REWRITE_PROMPT.format(
-        conversation=format_conversation(turns),
+        conversation=format_conversation(turns, summary),
         question=question,
     )
     unchanged: str | None = None
@@ -11944,7 +12080,7 @@ def rewrite_follow_up(
             # topic. Keep the conversation when the question still shares its
             # subject with an earlier question; there is nothing to rewrite,
             # but a later follow-up must still be able to refer back to it.
-            if question_relates_to_conversation(question, turns):
+            if question_relates_to_conversation(question, turns, summary):
                 return ConversationResolution(question, is_follow_up=False)
             return ConversationResolution(
                 question, is_follow_up=False, is_unrelated=True
@@ -11962,13 +12098,13 @@ def rewrite_follow_up(
         # The model returned the question unchanged. It is a follow-up only
         # when it still shares a topic with the recent questions; otherwise it
         # is a fresh question and the stale context must be dropped.
-        related = question_relates_to_conversation(question, turns)
+        related = question_relates_to_conversation(question, turns, summary)
         return ConversationResolution(
             question, is_follow_up=related, is_unrelated=not related
         )
     # No conversation model was available. Fall back to a lexical decision so
     # an unrelated question still gets a fresh context.
-    related = question_relates_to_conversation(question, turns)
+    related = question_relates_to_conversation(question, turns, summary)
     return ConversationResolution(
         question, is_follow_up=related, is_unrelated=not related
     )
@@ -18505,6 +18641,8 @@ class ChatState:
         # Mode selector defaults to Online, so the browser starts in this mode.
         self.research_with_news_mode = True
         self.conversation: list[dict] = []
+        self.conversation_summary: str = ""
+        self.conversation_summary_turns: int = 0
         self.conversation_revision = 0
         # English Corner: corpus band highlighted in article readers. Shared
         # through .chat/english_corner_settings.json so a server restart keeps
@@ -18561,6 +18699,8 @@ class ChatState:
     # ---- conversation ------------------------------------------------
     def reset_conversation(self) -> None:
         self.conversation.clear()
+        self.conversation_summary = ""
+        self.conversation_summary_turns = 0
         self.conversation_revision += 1
 
     def resolve_question(self, question: str) -> ConversationResolution:
@@ -18577,7 +18717,7 @@ class ChatState:
             overlap = conversation_overlap_ratio(question, self.conversation)
             if overlap > 0.5:
                 return ConversationResolution(question)
-            if overlap == 0.0:
+            if overlap == 0.0 and not self.conversation_summary:
                 # No shared topic at all: confidently a fresh question.
                 self.reset_conversation()
                 return ConversationResolution(
@@ -18586,12 +18726,71 @@ class ChatState:
             # Partial overlap is ambiguous: ask the conversation model instead
             # of guessing, so a longer follow-up is not dropped and a longer
             # unrelated question does not inherit stale context.
-        resolution = rewrite_follow_up(question, self.conversation)
+        resolution = rewrite_follow_up(
+            question, self.conversation, self.conversation_summary
+        )
         if resolution is None:
             return ConversationResolution(question)
         if resolution.is_unrelated:
             self.reset_conversation()
         return resolution
+
+    def compact_conversation(self, force: bool = False) -> bool:
+        """Fold older turns into a compact running summary.
+
+        The newest turns stay verbatim. Compaction triggers only after the
+        conversation has grown past ``CONVERSATION_COMPACT_AFTER_TURNS``; a
+        manual ``/compact`` can force it earlier. The summary model is the small
+        helper that is already resident, so this does not add an answer-model
+        call. If summarization fails, a deterministic question list is kept so
+        no history is silently lost.
+        """
+        if len(self.conversation) <= 1:
+            return False
+        if (
+            not force
+            and len(self.conversation) <= CONVERSATION_COMPACT_AFTER_TURNS
+        ):
+            return False
+        keep_count = min(
+            CONVERSATION_RECENT_TURNS_AFTER_COMPACT,
+            len(self.conversation) - 1,
+        )
+        if keep_count < 1:
+            return False
+        evicted = self.conversation[:-keep_count]
+        recent = self.conversation[-keep_count:]
+        if not evicted:
+            return False
+
+        summary = ""
+        try:
+            prompt = CONVERSATION_SUMMARY_PROMPT.format(
+                summary=self.conversation_summary or "(none)",
+                turns=format_conversation(evicted, limit=None),
+            )
+            summary = chat.generate_text(
+                prompt,
+                model=CONVERSATION_MODEL,
+                temperature=0.0,
+                num_predict=CONVERSATION_SUMMARY_NUM_PREDICT,
+                num_ctx=chat.ANSWER_NUM_CTX,
+                stop=["</summary>"],
+            )
+        except Exception:
+            # A summarization failure must never block the chat. The fallback
+            # below keeps the questions and any existing summary.
+            summary = ""
+        summary = clean_conversation_summary(summary)
+        if not summary:
+            summary = fallback_conversation_summary(
+                evicted, self.conversation_summary
+            )
+        self.conversation_summary = clamp_conversation_summary(summary)
+        self.conversation = recent
+        self.conversation_summary_turns += len(evicted)
+        self.conversation_revision += 1
+        return True
 
     def record_turn(
         self, question: str, resolved_question: str, answer: str
@@ -18603,8 +18802,8 @@ class ChatState:
                 "answer": answer,
             }
         )
-        if len(self.conversation) > CONVERSATION_MAX_TURNS:
-            del self.conversation[:-CONVERSATION_MAX_TURNS]
+        if len(self.conversation) > CONVERSATION_COMPACT_AFTER_TURNS:
+            self.compact_conversation()
         self.conversation_revision += 1
 
     # ---- state -------------------------------------------------------
@@ -18694,6 +18893,13 @@ class ChatState:
             "history_count": len(self.history),
             "conversation_turns": len(self.conversation),
             "conversation_max_turns": CONVERSATION_MAX_TURNS,
+            "conversation_summary_tokens": (
+                chat.estimate_tokens(self.conversation_summary)
+                if self.conversation_summary
+                else 0
+            ),
+            "conversation_summary_turns": self.conversation_summary_turns,
+            "conversation_compact_after_turns": CONVERSATION_COMPACT_AFTER_TURNS,
             "commands": [
                 {"name": name, "description": description}
                 for name, description in sorted(WEB_COMMANDS.items())
@@ -18716,6 +18922,7 @@ class ChatState:
         language: str | None = None,
         coding_mode: bool = False,
         prompt_variant: str = "",
+        memory_revision: int = 0,
     ) -> tuple:
         key = chat.make_cache_key(
             self.transcript,
@@ -18729,6 +18936,10 @@ class ChatState:
             # Context-dependent questions must not hit an answer cached for a
             # different "he", "that book", etc.
             key += (conversation_revision,)
+        if memory_revision:
+            # The running summary is part of the answer prompt. Invalidate a
+            # cached answer when compaction changes that memory block.
+            key += ("conversation-memory", memory_revision)
         if self.article_path is not None:
             # Article answers depend on the section map and route, not only on
             # the scope that happened to be active when /article was entered.
@@ -20970,7 +21181,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         self._sse_text("log", "[image: examining the attached image]")
         prompt = IMAGE_QUESTION_PROMPT.format(
             question=resolved_question,
-            conversation=image_conversation_context(state.conversation),
+            conversation=image_conversation_context(
+                state.conversation, state.conversation_summary
+            ),
         )
 
         models = image_model_candidates()
@@ -21497,6 +21710,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     else language_coding_directive(code_language)
                 )
             )
+            memory_prefix = conversation_answer_prefix(
+                state.conversation_summary
+            )
+            if memory_prefix:
+                prompt_prefix = memory_prefix + prompt_prefix
             if (
                 chat.question_is_time_sensitive(retrieval_question)
                 and not article_mode
@@ -21540,6 +21758,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         language=code_language,
                         coding_mode=coding_mode,
                         prompt_variant=iterative_variant,
+                        memory_revision=(
+                            state.conversation_summary_turns
+                            if state.conversation_summary
+                            else 0
+                        ),
                     )
                 ) is not None
                 if iterative_cached:
@@ -21634,6 +21857,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         language=code_language,
                         coding_mode=coding_mode,
                         prompt_variant=cache_variant,
+                        memory_revision=(
+                            state.conversation_summary_turns
+                            if state.conversation_summary
+                            else 0
+                        ),
                     ),
                     stats=attempt_stats,
                     progressive=state.progressive,
@@ -22155,6 +22383,26 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_settings(argument)
         elif name == "/depth":
             self._command_depth(argument)
+        elif name == "/compact":
+            state = self.state
+            if state.compact_conversation(force=True):
+                summary_tokens = (
+                    chat.estimate_tokens(state.conversation_summary)
+                    if state.conversation_summary
+                    else 0
+                )
+                self._sse_text(
+                    "output",
+                    "\nCompacted conversation: "
+                    f"summary ~{summary_tokens:,} token(s), "
+                    f"{len(state.conversation)} recent turn(s) kept.\n",
+                )
+            else:
+                self._sse_text(
+                    "output",
+                    "\nNothing to compact yet; the conversation has only "
+                    "one turn or is already compact.\n",
+                )
         elif name == "/status":
             state = self.state
             report = chat.chat_status_report(
@@ -22166,9 +22414,20 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 article=state.article_path,
             )
             report += (
-                f"\n  conversation: {len(state.conversation)} turn(s) "
-                f"(kept: last {CONVERSATION_MAX_TURNS})"
+                f"\n  conversation: {len(state.conversation)} recent turn(s) "
+                f"(verbatim window: {CONVERSATION_MAX_TURNS})"
             )
+            if state.conversation_summary:
+                summary_tokens = chat.estimate_tokens(
+                    state.conversation_summary
+                )
+                report += (
+                    f"\n  conversation summary: ~{summary_tokens:,} token(s) "
+                    f"across {state.conversation_summary_turns} compacted "
+                    "turn(s)"
+                )
+            else:
+                report += "\n  conversation summary: none"
             self._sse_text("output", "\n" + report + "\n")
         elif name == "/sources":
             self._command_sources()
@@ -22380,7 +22639,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         # Earlier research turns stay in state.conversation. They are used to
         # resolve follow-up questions, but they are never mixed into the
         # factual context: only the freshly fetched sources supply facts.
-        accumulated_context = format_conversation(state.conversation)
+        accumulated_context = format_conversation(
+            state.conversation, state.conversation_summary
+        )
         started = time.monotonic()
         log = lambda text: self._sse_text("log", text)
         source = classify_research_with_news_source(

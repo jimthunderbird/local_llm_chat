@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Best Context Window for the Local Chat</title>
+<style>
+  :root {
+    --fg: #1b1f23;
+    --muted: #57606a;
+    --line: #d0d7de;
+    --bg: #ffffff;
+    --soft: #f6f8fa;
+    --accent: #0969da;
+    --warn: #9a6700;
+    --good: #1a7f37;
+    --bad: #cf222e;
+    --code-bg: #0d1117;
+    --code-fg: #e6edf3;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto;
+    max-width: 1120px;
+    padding: 40px 28px 100px;
+    color: var(--fg);
+    background: var(--bg);
+    font: 16px/1.62 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  h1, h2, h3, h4 { line-height: 1.25; margin-top: 2em; }
+  h1 { margin-top: 0; font-size: 2rem; border-bottom: 1px solid var(--line); padding-bottom: .35em; }
+  h2 { font-size: 1.42rem; border-bottom: 1px solid var(--line); padding-bottom: .25em; }
+  h3 { font-size: 1.14rem; }
+  h4 { font-size: 1rem; }
+  p, li { max-width: 92ch; }
+  a { color: var(--accent); }
+  code {
+    font: .88em/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--soft);
+    border: 1px solid #eaeef2;
+    border-radius: 4px;
+    padding: .1em .3em;
+  }
+  pre {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font: .84rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre code { background: none; border: 0; padding: 0; color: inherit; }
+  table { border-collapse: collapse; width: 100%; margin: 1.1em 0; font-size: .93rem; }
+  th, td { border: 1px solid var(--line); padding: 8px 10px; vertical-align: top; text-align: left; }
+  th { background: var(--soft); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .muted { color: var(--muted); }
+  .small { font-size: .9rem; }
+  .callout {
+    border-left: 4px solid var(--accent);
+    background: #f0f6ff;
+    padding: 12px 16px;
+    margin: 1.2em 0;
+    border-radius: 0 6px 6px 0;
+  }
+  .callout.warn { border-left-color: var(--warn); background: #fff8e5; }
+  .callout.good { border-left-color: var(--good); background: #eefbf1; }
+  .callout.bad { border-left-color: var(--bad); background: #fff0f0; }
+  .pill {
+    display: inline-block;
+    font-size: .75rem;
+    font-weight: 600;
+    letter-spacing: .02em;
+    padding: .14em .55em;
+    border-radius: 999px;
+    background: var(--soft);
+    border: 1px solid var(--line);
+    color: var(--muted);
+    vertical-align: middle;
+  }
+  .pill.good { background: #eefbf1; border-color: #b7e4c7; color: var(--good); }
+  .pill.warn { background: #fff8e5; border-color: #f0d58c; color: var(--warn); }
+  .pill.bad { background: #fff0f0; border-color: #f5b8b8; color: var(--bad); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin: 1.1em 0; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; background: var(--soft); }
+  .card h3 { margin-top: 0; }
+  .toc { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 14px 20px; }
+  .toc ol { margin: .3em 0 0; padding-left: 1.4em; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 2.5em 0; }
+</style>
+</head>
+<body>
+
+<h1>Best Context Window for the Local Chat</h1>
+<p class="muted">
+  Research for <code>task.research.best_context_window_for_chat</code> in
+  <code>prompts/chat_common.prompt</code>.
+  Date: 2026-11-18. Scope: the current local setup
+  (<code>app/chat_server.py</code>, <code>chat.py</code>, Ollama,
+  <code>ornith-1.5:35b</code>).
+</p>
+
+<div class="callout good">
+  <strong>Bottom line.</strong>
+  Use a <strong>32,768-token model context window</strong> for chat, while keeping the
+  retrieved answer context at <strong>8,192 tokens</strong>. The designed maximum
+  working set for a turn is roughly 10–12k prompt tokens (8k of evidence plus
+  instructions and output budget); default-depth turns are usually much smaller.
+  So 32k is useful headroom, not a target to fill. On the 36&nbsp;GB M3 Pro,
+  a 32k window should cost about <strong>22.3&nbsp;GB</strong> resident (weights + KV
+  cache), leaving roughly 6–7&nbsp;GB for macOS and other applications. The current
+  16,384-token window already works; 32k is recommended because it gives room for long
+  user questions and code without a meaningful quality or latency penalty. Do
+  <strong>not</strong> raise chat to 64k or 128k: the memory benefit is small, the
+  quality benefit is unproven, and the machine becomes memory-constrained.
+  For long conversations, do not grow the window. Keep a
+  <strong>rolling summary plus the last 4–6 turns</strong>, store durable facts in a
+  small searchable memory, and retrieve only what the current question needs.
+</div>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#current">What the current system actually uses</a></li>
+    <li><a href="#three-limits">Three different “context” numbers</a></li>
+    <li><a href="#memory">How large a window fits on this machine</a></li>
+    <li><a href="#quality">Why a larger window is not automatically better</a></li>
+    <li><a href="#conversations">Managing long conversations</a></li>
+    <li><a href="#implementation">Concrete implementation plan for this repo</a></li>
+    <li><a href="#settings">Recommended settings</a></li>
+    <li><a href="#verification">Verification and benchmarks</a></li>
+    <li><a href="#references">References</a></li>
+    <li><a href="#appendix">Appendix: calculations</a></li>
+  </ol>
+</div>
+
+<h2 id="current">1. What the current system actually uses</h2>
+
+<h3>Models</h3>
+<table>
+  <thead>
+    <tr><th>Role</th><th>Model</th><th>Details</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Answer writer / code / tutor / dictionary</td>
+      <td><code>ornith-1.5:35b</code></td>
+      <td>qwen35moe, 35.5B parameters, Q4_K_M, native context length
+          <strong>262,144</strong> tokens, 41 blocks, 2 KV heads, key/value
+          length 256. Runs with thinking disabled by default in the answer path.</td>
+    </tr>
+    <tr>
+      <td>Helper: query expansion, candidate filter, follow-up rewriting, translation</td>
+      <td><code>milodule3/LFM3-1.7B-aura-grounded:latest</code></td>
+      <td>1.7B parameter helper. Kept resident beside the answer model.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Current context constants</h3>
+<table>
+  <thead>
+    <tr><th>Constant</th><th>Value</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>ANSWER_NUM_CTX</code></td><td class="num">16,384</td><td>Model context window requested from Ollama for every answer and helper call.</td></tr>
+    <tr><td><code>MAX_CONTEXT_TOKENS</code></td><td class="num">8,192</td><td>Estimated token budget for retrieved evidence in adaptive retrieval.</td></tr>
+    <tr><td><code>LIST_CONTEXT_TOKENS</code></td><td class="num">8,192</td><td>Same budget for list/aggregation questions.</td></tr>
+    <tr><td><code>DEFAULT_DEPTH</code></td><td class="num">12</td><td>Default number of BM25 trunks before filtering. <code>/depth auto</code> switches to adaptive selection.</td></tr>
+    <tr><td><code>CONVERSATION_MAX_TURNS</code></td><td class="num">8</td><td>Server-side turns retained for follow-up interpretation.</td></tr>
+    <tr><td><code>CONVERSATION_ANSWER_CHARS</code></td><td class="num">900</td><td>Each prior answer is truncated to 900 characters when formatted for the follow-up model.</td></tr>
+    <tr><td>Answer output budget</td><td class="num">~900 / 1,600</td><td>Small model helper output / long answer budget (code, article, detailed, list, math).</td></tr>
+  </tbody>
+</table>
+
+<h3>What the conversation actually contributes</h3>
+<p>
+  The browser keeps the visible transcript, but the answer prompt does <strong>not</strong>
+  receive the full transcript. On each question the server:
+</p>
+<ol>
+  <li>Compares the question with the last up-to-8 turns.</li>
+  <li>If it looks like a follow-up, a small model rewrites it into a standalone
+      retrieval question (for example “when does it open?” becomes
+      “When are the opening hours of Nijo Market?”).</li>
+  <li>Runs BM25 retrieval for that standalone question.</li>
+  <li>Writes the answer from the current retrieved evidence, not from the entire
+      chat history.</li>
+</ol>
+<p>
+  This is an important design choice: conversation length does not make the answer
+  prompt grow linearly. It also means the current 16k window is mostly spent on
+  retrieval + instructions + output, not on chat history.
+</p>
+
+<h3>Measured memory at the time of writing</h3>
+<pre><code>$ ollama ps
+NAME                                        SIZE      PROCESSOR    CONTEXT
+ornith-1.5:35b                              21 GB     100% GPU     16384
+milodule3/LFM3-1.7B-aura-grounded:latest    2.0 GB    100% GPU     16384
+
+$ ollama list
+ornith-1.5:35b    9f3b89b25219    22 GB
+
+Hardware: MacBook Pro, Apple M3 Pro, 12 cores, 36 GB unified memory.</code></pre>
+<p>
+  At 16k the answer model is about <strong>21&nbsp;GB resident</strong>, 100% GPU.
+  The model file is 22&nbsp;GB; the resident weight portion is roughly 19.7&nbsp;GB,
+  and the rest is KV cache and runtime overhead.
+</p>
+
+<div class="callout good">
+  <strong>Post-implementation check (2026-11-18).</strong>
+  After applying the 32,768-token setting, <code>ollama ps</code> reported
+  <code>ornith-1.5:35b</code> at <strong>21&nbsp;GB, 100% GPU, CONTEXT 32768</strong>
+  (Ollama rounds the size display). The 22.3&nbsp;GB estimate in the table below
+  was conservative; the 32k recommendation still stands and the model remains
+  fully GPU-resident. The helper model also loaded at 32,768 and stayed on the
+  GPU.
+</div>
+
+<h2 id="three-limits">2. Three different “context” numbers</h2>
+
+<p>
+  Most confusion about context windows comes from treating three separate limits as
+  one. In this application they are:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Limit</th><th>Current value</th><th>What it controls</th><th>Should it grow with conversation length?</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Model context window</strong> (<code>num_ctx</code>)</td>
+      <td class="num">16,384</td>
+      <td>Total tokens the model can see in one call: instructions, retrieved
+          evidence, conversation material (if any), and generated answer.</td>
+      <td>No. It should be sized to the largest single-turn working set, not to
+          the number of turns.</td>
+    </tr>
+    <tr>
+      <td><strong>Retrieved answer context</strong></td>
+      <td class="num">8,192</td>
+      <td>Estimated tokens of BM25 trunks selected as evidence.</td>
+      <td>No. It is a relevance budget; more evidence eventually hurts precision.</td>
+    </tr>
+    <tr>
+      <td><strong>Conversation memory</strong></td>
+      <td>8 turns × 900 answer chars</td>
+      <td>Material used to resolve pronouns and follow-ups; not inserted wholesale
+          into the answer prompt.</td>
+      <td>Only the summary/fact store should grow, and it should be compacted.</td>
+    </tr>
+    <tr>
+      <td><strong>Answer output budget</strong></td>
+      <td class="num">~1,600 max</td>
+      <td>Tokens reserved for the generated answer.</td>
+      <td>No. Long answers are a separate decision.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>Rule of thumb.</strong>
+  A good chat window is
+  <em>prompt + retrieved evidence + output budget + safety margin</em>.
+  It is not “one window per conversation turn”. If conversation history is needed,
+  compress it; do not multiply the window by the number of turns.
+</div>
+
+<h2 id="memory">3. How large a window fits on this machine</h2>
+
+<h3>KV-cache cost of this model</h3>
+<p>
+  Ollama reserves the KV cache for the entire configured window when it loads the
+  model. For a conventional transformer:
+</p>
+<pre><code>KV bytes per token =
+  2 (key and value)
+  × layers
+  × KV heads
+  × (key length + value length)
+  × bytes per element
+
+For ornith-1.5:35b:
+  2 × 41 × 2 × (256 + 256) × 2 bytes
+  = 83,968 bytes/token
+  ≈ 82 KiB/token
+  ≈ 1.28 GiB at 16,384 tokens</code></pre>
+<p>
+  That estimate matches the observed 21&nbsp;GB: roughly 19.7&nbsp;GB of weights plus
+  1.3&nbsp;GiB of KV cache. The model metadata also exposes a hybrid/MoE/SSM
+  architecture (<code>full_attention_interval = 4</code>), but the measured total is
+  consistent with the full 41-layer KV estimate, so this document uses the
+  conservative figure.
+</p>
+
+<h3>Estimated resident memory by window</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Configured window</th>
+      <th class="num">KV cache (est.)</th>
+      <th class="num">Approx. resident total</th>
+      <th class="num">Headroom on 36 GB</th>
+      <th>Verdict for chat</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="num">8,192</td><td class="num">0.64 GiB</td><td class="num">~20.3 GB</td><td class="num">~15.7 GB</td>
+      <td>Too small for the current 8k retrieval budget plus instructions and output.</td>
+    </tr>
+    <tr>
+      <td class="num">16,384 (current)</td><td class="num">1.28 GiB</td><td class="num">~21.0 GB</td><td class="num">~15.0 GB</td>
+      <td><span class="pill good">Works</span> Safe and efficient. Slightly tight if prompts or answers are unusually long.</td>
+    </tr>
+    <tr>
+      <td class="num">32,768</td><td class="num">2.56 GiB</td><td class="num">~22.3 GB</td><td class="num">~13.7 GB</td>
+      <td><span class="pill good">Recommended</span> Best balance of headroom, memory, and quality on this machine.</td>
+    </tr>
+    <tr>
+      <td class="num">65,536</td><td class="num">5.12 GiB</td><td class="num">~24.8 GB</td><td class="num">~11.2 GB</td>
+      <td><span class="pill warn">Feasible, not advised</span> Leaves less room for macOS and other apps; prefill cost rises; no proven quality gain for chat.</td>
+    </tr>
+    <tr>
+      <td class="num">131,072</td><td class="num">10.25 GiB</td><td class="num">~30.0 GB</td><td class="num">~6.0 GB</td>
+      <td><span class="pill bad">Too tight</span> With macOS and normal applications, memory pressure or CPU spill is likely.</td>
+    </tr>
+    <tr>
+      <td class="num">262,144 (native max)</td><td class="num">20.50 GiB</td><td class="num">~40.2 GB</td><td class="num">negative</td>
+      <td><span class="pill bad">Not viable</span> Exceeds physical memory before accounting for the OS.</td>
+    </tr>
+  </tbody>
+</table>
+<p class="small muted">
+  “Resident total” uses ~19.7&nbsp;GB for weights and ignores small runtime buffers;
+  the 16k row is calibrated to the measured 21&nbsp;GB. Headroom assumes 36&nbsp;GB
+  total minus resident total; macOS and other applications also need several GB.
+  Figures are estimates, not measured at 32k/64k.
+</p>
+
+<div class="callout warn">
+  <strong>Ollama charges for the whole window.</strong>
+  A 64k setting reserves roughly 5.1&nbsp;GiB of KV cache even if every question is
+  short. This is why “set it to the model maximum” is not free. Verify the actual
+  allocation with <code>ollama ps</code> (<code>CONTEXT</code> and
+  <code>PROCESSOR</code> columns), not just the model card.
+</div>
+
+<h3>Why 32k is the sweet spot here</h3>
+<ul>
+  <li><strong>It is enough.</strong> The designed maximum working set is about 8k of
+      evidence plus roughly 2–3k of instructions and prompt scaffolding plus up to
+      ~1.6k of output. That is ~12–13k, leaving substantial room for a long user
+      question, code, or a larger retrieved set. Default-depth turns use much less
+      evidence and are smaller still.</li>
+  <li><strong>It is cheap.</strong> Moving from 16k to 32k adds about 1.3&nbsp;GiB
+      of KV cache, less than 6% of the current resident footprint.</li>
+  <li><strong>It does not slow normal answers much.</strong> The model only attends
+      to the tokens actually present in the prompt. A 32k window with a 12k prompt
+      costs the same attention work as a 32k window with a 12k prompt; the larger
+      window mainly reserves memory and permits longer prompts. Prefill grows with
+      the prompt, not with the reservation.</li>
+  <li><strong>It stays on the GPU.</strong> At roughly 22&nbsp;GB on a 36&nbsp;GB
+      unified-memory machine, the model remains fully GPU-resident with room for
+      macOS and normal applications. Crossing into CPU spill destroys generation
+      speed.</li>
+</ul>
+
+<h3>When 16k is still the right answer</h3>
+<p>
+  If the priority is minimum memory and maximum stability, keep 16,384. The current
+  application is designed around an 8,192-token evidence budget, and 16k is enough
+  for that plus prompt and output. The practical difference between 16k and 32k is
+  headroom, not baseline answer quality. A reasonable policy is:
+</p>
+<ul>
+  <li><strong>16k</strong> on a 24–32&nbsp;GB machine or when other applications are memory-heavy.</li>
+  <li><strong>32k</strong> on this 36&nbsp;GB machine (recommended).</li>
+  <li><strong>24,576</strong> as a conservative middle ground if 32k shows memory pressure.</li>
+</ul>
+
+<h2 id="quality">4. Why a larger window is not automatically better</h2>
+
+<p>
+  The model advertises 262,144 tokens, but advertised maximum context and
+  <em>useful</em> context are different quantities. Recent research consistently
+  finds that models use long contexts unevenly and that longer inputs can degrade
+  reasoning even when retrieval is perfect.
+</p>
+
+<h3>Evidence from the literature</h3>
+<ul>
+  <li>
+    <strong>Effective context is often much shorter than the advertised window.</strong>
+    “Why Does the Effective Context Length of LLMs Fall Short?” finds that many
+    open models have effective context lengths below half of their training length,
+    driven by a left-skewed distribution of relative positions seen during training
+    (arXiv:2410.18745).
+  </li>
+  <li>
+    <strong>RULER</strong> measured effective context lengths well below claimed
+    lengths across many long-context models (Hsieh et al., 2024,
+    arXiv:2404.06654).
+  </li>
+  <li>
+    <strong>“Context length alone hurts.”</strong> A 2025 controlled study found
+    13.9%–85% performance degradation as input length increased, even when the
+    model could retrieve all relevant evidence perfectly and even when distractor
+    tokens were masked. The authors recommend a retrieve-then-solve pattern that
+    turns a long-context task into a short-context one (arXiv:2510.05381).
+  </li>
+  <li>
+    <strong>Lost in the middle.</strong> Models often attend more reliably to the
+    beginning and end of a long input than to the middle (Liu et al., 2023,
+    arXiv:2307.03172). Later work shows the effect is strongest while inputs occupy
+    up to about 50% of the window, after which a distance-based bias dominates
+    (arXiv:2508.07479).
+  </li>
+  <li>
+    <strong>Context rot / attention budget.</strong> Anthropic’s 2025 context
+    engineering guidance describes context as a finite resource: as tokens grow,
+    recall degrades, and the best strategy is the smallest set of high-signal
+    tokens. It recommends compaction, structured note-taking, and sub-agents for
+    long-horizon work rather than stuffing everything into one window
+    (Anthropic, “Effective context engineering for AI agents”, 2025-09-29).
+  </li>
+  <li>
+    <strong>Maximum effective context is task-dependent.</strong> A 2025 study
+    (“Context Is What You Need”, arXiv:2509.21361) found that maximum effective
+    context windows were drastically smaller than advertised and shifted by
+    problem type; some top models degraded with as little as a few hundred tokens
+    of context.
+  </li>
+</ul>
+
+<div class="callout">
+  <strong>Implication for this application.</strong>
+  The current design is already aligned with the research: it retrieves a focused
+  evidence set, writes from that evidence, and uses the conversation only to resolve
+  references. The correct response to long conversations is not “make the window
+  128k”; it is “keep the per-turn working set small and curate memory”.
+</div>
+
+<h3>What “32k” should mean in practice</h3>
+<ul>
+  <li><strong>32k is the ceiling, not the target.</strong> Keep the evidence budget
+      at 8k. Do not increase depth just because the window is larger.</li>
+  <li><strong>Place high-value evidence near the end of the prompt.</strong>
+      Retrieval results should be immediately before the question. The system
+      prompt and stable instructions belong at the beginning.</li>
+  <li><strong>Keep the answer request short.</strong> A verbose prompt consumes the
+      same attention budget as evidence.</li>
+  <li><strong>Use list mode only for genuine list questions.</strong> List answers
+      may use the full 8k evidence budget; normal questions should stay smaller.</li>
+</ul>
+
+<h2 id="conversations">5. Managing long conversations</h2>
+
+<h3>Assessment of the current approach</h3>
+<p>
+  The current server-side 8-turn conversation with follow-up rewriting is a good
+  foundation. It avoids the most common failure mode of naive chat applications,
+  where the entire transcript is pasted into every prompt and prompt size grows
+  linearly with session length.
+</p>
+<p>
+  Its limitations are:
+</p>
+<ul>
+  <li>After 8 turns, older facts are simply dropped. A user who said “my trip is in
+      Sapporo in February” twenty turns ago may have to repeat it.</li>
+  <li>Each prior answer is truncated to 900 characters, which can drop a crucial
+      detail.</li>
+  <li>There is no persistent memory across server restarts or sessions.</li>
+  <li>There is no explicit summary or “known facts” block, so follow-up rewriting
+      is the only consumer of history.</li>
+</ul>
+
+<h3>Recommended memory architecture</h3>
+<table>
+  <thead>
+    <tr><th>Tier</th><th>What it contains</th><th>Approx. budget</th><th>How it is used</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Tier 0: current turn</strong></td>
+      <td>The user's question, rewritten into a standalone retrieval question.</td>
+      <td>&lt; 200 tokens</td>
+      <td>Drives BM25 retrieval and the answer prompt.</td>
+    </tr>
+    <tr>
+      <td><strong>Tier 1: recent turns</strong></td>
+      <td>Last 4–6 user/assistant turns, answers truncated to ~400–600 characters.</td>
+      <td>400–1,000 tokens</td>
+      <td>Resolve pronouns, ellipsis, and near-term follow-ups.</td>
+    </tr>
+    <tr>
+      <td><strong>Tier 2: running summary</strong></td>
+      <td>A compact, structured summary of older turns: entities, decisions,
+          preferences, unresolved questions, references.</td>
+      <td>300–800 tokens</td>
+      <td>Preserves continuity without replaying the transcript.</td>
+    </tr>
+    <tr>
+      <td><strong>Tier 3: long-term memory</strong></td>
+      <td>Durable facts stored outside the window (SQLite FTS5, JSONL, or a small
+          vector index). Retrieved on demand.</td>
+      <td>Top 2–3 entries, &lt; 500 tokens</td>
+      <td>Cross-session recall: user preferences, recurring topics, saved decisions.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout good">
+  <strong>Recommended shape.</strong>
+  For each answer, build the prompt from:
+  <code>stable system instructions</code> + <code>retrieved evidence (8k)</code> +
+  <code>recent 4–6 turns or summary (≤1k)</code> + <code>current question</code>.
+  Keep total input around 10–12k at most (usually less at the default depth).
+  Reserve the remaining 32k window as headroom,
+  not as a reason to add more history.
+</div>
+
+<h3>Compaction policy</h3>
+<p>
+  Summarization research converges on a two-threshold design: compact when the
+  session crosses a “fill line”, and reduce to a lower “drain line” so compaction
+  is not triggered on every turn. Factory’s 2025 write-up describes this as
+  <code>T_max</code> (compression threshold) and <code>T_retained</code> (target
+  after compression), and recommends updating the summary incrementally rather than
+  re-summarizing the whole transcript each time. LangMem’s
+  <code>summarize_messages</code> follows the same pattern: a running summary plus
+  recent messages.
+</p>
+<p>
+  A practical policy for this application:
+</p>
+<ul>
+  <li><strong>Keep the last 4–6 turns verbatim.</strong></li>
+  <li><strong>Compact when</strong> the conversation has more than 12 turns, or
+      when the estimated conversation-memory block exceeds 1,200 tokens.</li>
+  <li><strong>After compaction, keep</strong> the running summary plus the last
+      4 turns. Do not repeatedly summarize the entire history; summarize only the
+      newly evicted turns and merge them into the existing summary.</li>
+  <li><strong>Cap the summary</strong> at 600–800 tokens. If it grows beyond that,
+      move durable facts to Tier 3 and drop procedural chatter from the summary.</li>
+  <li><strong>Never summarize away</strong> explicit user requirements, names,
+      dates, locations, preferences, decisions, or open questions.</li>
+</ul>
+
+<h3>What the summary should preserve</h3>
+<table>
+  <thead>
+    <tr><th>Keep</th><th>Drop</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Entities and aliases (“Terence Tao”, “Nijo Market”, “the Sapporo trip”)</td>
+      <td>Small talk and acknowledgements (“thanks”, “okay”)</td>
+    </tr>
+    <tr>
+      <td>User constraints and preferences (“no shellfish”, “prefer trains”)</td>
+      <td>Repeated restatements of the same fact</td>
+    </tr>
+    <tr>
+      <td>Decisions and conclusions (“we chose the 90-day visa”)</td>
+      <td>Raw tool output and duplicate retrieved chunks</td>
+    </tr>
+    <tr>
+      <td>Open questions and next steps</td>
+      <td>Speculative reasoning that was not adopted</td>
+    </tr>
+    <tr>
+      <td>References needed to re-retrieve details (URLs, IDs, section names)</td>
+      <td>Exact wording of long answers</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Summarization model choice</h3>
+<p>
+  Use the small helper model (<code>chat.CHAT_MODEL</code>, the 1.7B LFM3 artifact)
+  for compaction. It is already resident, fast, and cheap. Reserve
+  <code>ornith-1.5:35b</code> for the answer. Summarize with a strict prompt:
+</p>
+<pre><code>Summarize the conversation turns below for future retrieval.
+Preserve only:
+- names, places, dates, and entities
+- user preferences and constraints
+- decisions and conclusions
+- open questions
+- references needed to look up details again
+Do not add facts. Do not add commentary.
+Output at most 250 words, as short bullets.</code></pre>
+
+<h3>Retrieval over memory, not transcript stuffing</h3>
+<p>
+  For long-term memory (Tier 3), store each compact memory as a short record and
+  retrieve the top 2–3 records by BM25 or a small embedding index. This is the same
+  principle as the application's existing evidence retrieval. It keeps the prompt
+  bounded and makes memory scale with the number of relevant facts, not the number
+  of turns.
+</p>
+<p>
+  Related research: MemGPT treats the context window as “main memory” and pages
+  information to external storage (arXiv:2310.08560); MemoryBank applies
+  forgetting-curve and importance-based retention (arXiv:2305.10250); the
+  Context Engineering survey catalogues memory hierarchies, compression, and
+  retrieval as the main tools for long-horizon interactions
+  (arXiv:2507.13334).
+</p>
+
+<h3>Prompt caching and layout</h3>
+<p>
+  Ollama reuses the KV cache for an identical prompt prefix. Keep the stable
+  instructions at the very beginning and put variable content (retrieved evidence,
+  current question) at the end. Avoid changing the system prompt or the order of
+  static sections per turn; that invalidates the cache and raises time-to-first-token.
+</p>
+<p>
+  Do not put the entire conversation at the beginning of the prompt. It is both
+  expensive and the least useful material for the current question.
+</p>
+
+<h3>Anti-patterns</h3>
+<ul>
+  <li><strong>“Just use 128k and keep everything.”</strong> Memory cost, prefill
+      cost, and context-rot risk all rise; answer quality does not improve
+      proportionally.</li>
+  <li><strong>Re-summarizing the entire history every turn.</strong> Cost grows
+      linearly and the summary drifts. Summarize only newly evicted turns.</li>
+  <li><strong>Over-compression.</strong> Dropping details too aggressively forces
+      the model to re-ask or re-fetch; keep breadcrumbs (IDs, names, URLs).</li>
+  <li><strong>Putting raw retrieved chunks into the permanent summary.</strong>
+      Retrieve them again when needed.</li>
+  <li><strong>Using a large window as a substitute for retrieval quality.</strong>
+      A larger window with irrelevant evidence is worse than a smaller window with
+      the right evidence.</li>
+</ul>
+
+<h2 id="implementation">6. Concrete implementation plan for this repo</h2>
+<p class="muted">
+  This section is a research recommendation. The task asks for research only; the
+  code is not changed by this document.
+</p>
+
+<h3>Configuration changes</h3>
+<pre><code># chat.py
+ANSWER_NUM_CTX = 32768          # was 16384
+MAX_CONTEXT_TOKENS = 8192       # keep
+LIST_CONTEXT_TOKENS = 8192      # keep
+DEFAULT_DEPTH = 12              # keep
+
+# app/chat_server.py
+CONVERSATION_MAX_TURNS = 6                  # was 8; recent verbatim turns
+CONVERSATION_ANSWER_CHARS = 600             # was 900
+CONVERSATION_SUMMARY_MAX_TOKENS = 700
+CONVERSATION_COMPACT_AFTER_TURNS = 12
+CONVERSATION_RECENT_TURNS_AFTER_COMPACT = 4
+CONVERSATION_MEMORY_TOP_K = 3</code></pre>
+
+<h3>State additions</h3>
+<pre><code>class ChatState:
+    ...
+    self.conversation: list[dict] = []
+    self.conversation_summary: str = ""
+    self.conversation_summary_tokens: int = 0
+    self.memory_facts: list[dict] = []      # durable Tier 3 records
+    self.memory_index = None                # SQLite FTS5 handle, optional</code></pre>
+
+<h3>Compaction flow</h3>
+<pre><code>def record_turn(question, resolved_question, answer):
+    self.conversation.append({...})
+    if len(self.conversation) &gt; CONVERSATION_COMPACT_AFTER_TURNS:
+        self.compact_conversation()
+
+def compact_conversation():
+    keep = self.conversation[-CONVERSATION_RECENT_TURNS_AFTER_COMPACT:]
+    evicted = self.conversation[:-len(keep)]
+    new_summary = summarize_turns(evicted, existing=self.conversation_summary)
+    self.conversation_summary = clamp_tokens(new_summary,
+                                             CONVERSATION_SUMMARY_MAX_TOKENS)
+    self.conversation = keep
+    self.persist_memory(self.conversation_summary, keep)</code></pre>
+
+<h3>Prompt assembly</h3>
+<pre><code>prompt_parts = [
+    STABLE_SYSTEM_INSTRUCTIONS,
+    "&lt;conversation_summary&gt;...&lt;/conversation_summary&gt;",
+    "&lt;recent_turns&gt;...&lt;/recent_turns&gt;",
+    "&lt;retrieved_evidence&gt;...&lt;/retrieved_evidence&gt;",
+    "&lt;question&gt;...&lt;/question&gt;",
+]
+# Stable content first, variable content last, for Ollama prefix caching.</code></pre>
+
+<h3>Commands and observability</h3>
+<ul>
+  <li><code>/status</code>: show <code>num_ctx</code>, estimated prompt tokens,
+      evidence tokens, summary tokens, recent-turn tokens, and output budget.</li>
+  <li><code>/compact</code>: force compaction and print the new summary length.</li>
+  <li><code>/memory</code>: show Tier 3 records; allow delete/clear.</li>
+  <li><code>/new</code>: reset conversation, summary, and memory scope.</li>
+  <li>Log compaction events and token counts to the existing benchmark stream.</li>
+</ul>
+
+<h3>Persistence</h3>
+<p>
+  Store summaries and durable facts in a small SQLite database or JSONL file under
+  <code>.chat/</code>, keyed by session. The existing corpus already uses SQLite
+  FTS5 for BM25, so a second FTS5 table for memory is a natural fit. A memory record
+  should be small:
+</p>
+<pre><code>{
+  "session": "browser-session-id",
+  "created": "2026-11-18T19:00:00Z",
+  "kind": "fact | preference | decision | open_question",
+  "text": "User is planning a February trip to Sapporo.",
+  "source_turn": 17,
+  "tokens": 12
+}</code></pre>
+
+<h2 id="settings">7. Recommended settings</h2>
+
+<table>
+  <thead>
+    <tr><th>Setting</th><th>Recommendation</th><th>Reason</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>ANSWER_NUM_CTX</code></td><td><strong>32,768</strong></td><td>Fits fully on GPU (~22.3 GB), gives headroom for long questions/code, costs only ~1.3 GiB more than 16k.</td></tr>
+    <tr><td><code>MAX_CONTEXT_TOKENS</code></td><td><strong>8,192</strong></td><td>Keep evidence focused; larger windows do not justify more evidence.</td></tr>
+    <tr><td><code>LIST_CONTEXT_TOKENS</code></td><td><strong>8,192</strong></td><td>List questions get the same budget; no need to grow with the window.</td></tr>
+    <tr><td><code>DEFAULT_DEPTH</code></td><td><strong>12</strong> (or <code>auto</code>)</td><td>12 chunks is the current quality/latency sweet spot; auto is useful for variable questions.</td></tr>
+    <tr><td>Conversation recent turns</td><td><strong>4–6</strong></td><td>Enough for pronoun/ellipsis resolution; older material belongs in the summary.</td></tr>
+    <tr><td>Conversation summary</td><td><strong>≤700 tokens</strong></td><td>Keeps continuity cheaply and prevents summary drift.</td></tr>
+    <tr><td>Compaction trigger</td><td><strong>&gt;12 turns</strong></td><td>Avoids summarizing on every turn; keeps recent context verbatim.</td></tr>
+    <tr><td>Long-term memory retrieval</td><td><strong>top 2–3</strong></td><td>Bounded prompt growth; relevance beats volume.</td></tr>
+    <tr><td>Ollama KV cache</td><td><strong>f16</strong> at 32k</td><td>Plenty of memory. Use <code>q8_0</code> only if moving to 64k or under memory pressure; it roughly halves KV memory with minor quality risk.</td></tr>
+    <tr><td><code>OLLAMA_NUM_PARALLEL</code></td><td><strong>1</strong></td><td>Single-user desktop chat; parallelism multiplies KV reservations.</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <strong>Do not set 64k “just in case”.</strong>
+  Ollama allocates the whole KV cache at load time. The machine has 36&nbsp;GB total;
+  64k puts the answer model near 24.8&nbsp;GB before other applications, and 128k
+  near 30&nbsp;GB. If you ever need a one-off very long document, use article mode,
+  retrieval, or a temporary dedicated session instead of permanently enlarging the
+  chat window.
+</div>
+
+<h2 id="verification">8. Verification and benchmarks</h2>
+
+<h3>Memory and latency checks</h3>
+<ol>
+  <li>After changing <code>ANSWER_NUM_CTX</code> to 32768, restart the server and
+      run <code>ollama ps</code>. Confirm <code>CONTEXT = 32768</code> and
+      <code>PROCESSOR = 100% GPU</code>. Expected resident size: ~22–23&nbsp;GB.</li>
+  <li>Ask one short question and check <code>/benchmark</code>: prompt tokens should
+      remain near the current value (the retrieval budget did not change);
+      time-to-first-token should be within roughly 10% of the 16k baseline.</li>
+  <li>Ask a long, 3,000–4,000-token question or paste a long code block. Confirm the
+      prompt fits without truncation and the answer still streams.</li>
+  <li>Run a 30-minute session and watch memory and swap. If macOS memory pressure
+      rises or <code>ollama ps</code> shows a CPU/GPU split, fall back to 24,576 or
+      16,384.</li>
+</ol>
+
+<h3>Conversation-quality tests</h3>
+<table>
+  <thead>
+    <tr><th>Test</th><th>What to check</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Long-range fact recall</strong></td>
+      <td>State a fact in turn 1 (“my trip is in Sapporo in February”), talk about
+          something else for 15–20 turns, then ask “what did I say about my trip?”.
+          The summary/memory should recover it without the full transcript.</td>
+    </tr>
+    <tr>
+      <td><strong>Pronoun resolution across compaction</strong></td>
+      <td>Use “he/she/it/that place” after the original turn has been summarized.
+          The rewritten standalone question should still name the correct entity.</td>
+    </tr>
+    <tr>
+      <td><strong>Topic switch</strong></td>
+      <td>Ask about an unrelated subject after a long thread. The existing
+          unrelated-question reset should still fire and not inherit stale context.</td>
+    </tr>
+    <tr>
+      <td><strong>Summary drift</strong></td>
+      <td>After several compactions, ask about an early decision. The summary
+          should preserve the decision even if wording changes.</td>
+    </tr>
+    <tr>
+      <td><strong>Memory budget</strong></td>
+      <td>Verify summary tokens stay ≤700 and recent turns stay ≤1,000. Total
+          conversation material should stay around 1–2k, not grow with turn count.</td>
+    </tr>
+    <tr>
+      <td><strong>Retrieval quality</strong></td>
+      <td>Compare answer correctness at depth 12 and 8k evidence before and after
+          adding memory. Memory must not displace evidence.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Suggested A/B benchmark</h3>
+<p>
+  Compare <code>num_ctx = 16384</code>, <code>32768</code>, and
+  <code>65536</code> on the same prompts. Record:
+</p>
+<ul>
+  <li>resident memory and whether the model stayed 100% GPU;</li>
+  <li>prompt tokens, prefill time, TTFT, and total answer time;</li>
+  <li>answer correctness on 20–30 representative questions (including list and
+      code questions);</li>
+  <li>long-conversation fact recall and topic-switch behavior.</li>
+</ul>
+<p>
+  Expected result: 16k and 32k should be nearly identical on normal questions;
+  32k should be strictly better only when the prompt genuinely exceeds 16k.
+  64k is unlikely to improve normal chat and will cost memory and some latency.
+</p>
+
+<h2 id="references">9. References</h2>
+<ol class="small">
+  <li>Anthropic. “Effective context engineering for AI agents.” 2025-09-29.
+      <a href="https://www.anthropic.com/research/effective-context-engineering-for-ai-agents">anthropic.com/research/effective-context-engineering-for-ai-agents</a>.</li>
+  <li>AWS Well-Architected, Agentic AI Lens. “AGENTPERF03-BP02 Optimize context window utilization and prompt management.”
+      <a href="https://docs.aws.amazon.com/wellarchitected/latest/agentic-ai-lens/agentperf03-bp02.html">docs.aws.amazon.com</a>.</li>
+  <li>LangChain / LangMem. “How to Manage Long Context with Summarization.”
+      <a href="https://langchain-ai.github.io/langmem/guides/summarization/">langchain-ai.github.io/langmem/guides/summarization</a>.</li>
+  <li>Factory. “Compressing Context.” 2025-07-21.
+      <a href="https://factory.com/news/compressing-context">factory.com/news/compressing-context</a>.</li>
+  <li>Gantz. “The Sliding Window vs Summarization Trade-off.” 2025-11-24.
+      <a href="https://gantz.ai/blog/post/sliding-vs-summarization/">gantz.ai/blog/post/sliding-vs-summarization</a>.</li>
+  <li>Mei et al. “A Survey of Context Engineering for Large Language Models.” arXiv:2507.13334.
+      <a href="https://arxiv.org/abs/2507.13334">arxiv.org/abs/2507.13334</a>.</li>
+  <li>An et al. “Why Does the Effective Context Length of LLMs Fall Short?” arXiv:2410.18745.
+      <a href="https://arxiv.org/abs/2410.18745">arxiv.org/abs/2410.18745</a>.</li>
+  <li>Du et al. “Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.” arXiv:2510.05381.
+      <a href="https://arxiv.org/abs/2510.05381">arxiv.org/abs/2510.05381</a>.</li>
+  <li>Paulsen. “Context Is What You Need: The Maximum Effective Context Window for Real World Limits of LLMs.” arXiv:2509.21361.
+      <a href="https://arxiv.org/abs/2509.21361">arxiv.org/abs/2509.21361</a>.</li>
+  <li>Veseli et al. “Positional Biases Shift as Inputs Approach Context Window Limits.” arXiv:2508.07479.
+      <a href="https://arxiv.org/abs/2508.07479">arxiv.org/abs/2508.07479</a>.</li>
+  <li>Liu et al. “Lost in the Middle: How Language Models Use Long Contexts.” arXiv:2307.03172.
+      <a href="https://arxiv.org/abs/2307.03172">arxiv.org/abs/2307.03172</a>.</li>
+  <li>Hsieh et al. “RULER: What’s the Real Context Size of Your Long-Context Language Models?” arXiv:2404.06654.
+      <a href="https://arxiv.org/abs/2404.06654">arxiv.org/abs/2404.06654</a>.</li>
+  <li>Packer et al. “MemGPT: Towards LLMs as Operating Systems.” arXiv:2310.08560.
+      <a href="https://arxiv.org/abs/2310.08560">arxiv.org/abs/2310.08560</a>.</li>
+  <li>Zhong et al. “MemoryBank: Enhancing Large Language Models with Long-Term Memory.” arXiv:2305.10250.
+      <a href="https://arxiv.org/abs/2305.10250">arxiv.org/abs/2305.10250</a>.</li>
+  <li>Ollama documentation. “Context length.”
+      <a href="https://docs.ollama.com/context-length">docs.ollama.com/context-length</a>.</li>
+  <li>Ollama FAQ. “How can I specify the context window size?”, “How can I set the quantization type for the K/V cache?”, “How do I keep a model loaded?”
+      <a href="https://docs.ollama.com/faq">docs.ollama.com/faq</a>.</li>
+  <li>Fisher. “What a longer context costs on 4 GB.” 2026-09-23.
+      <a href="https://jeremiahfisher.net/blog/context-length-vs-vram-4gb/">jeremiahfisher.net/blog/context-length-vs-vram-4gb</a>.</li>
+  <li>llamaperf. “Why a longer context needs more memory.” 2025-11-06.
+      <a href="https://llamaperf.com/blog/context-length-kv-cache-memory">llamaperf.com/blog/context-length-kv-cache-memory</a>.</li>
+  <li>Glukhov. “KV Cache on 16 GB GPUs: Making Long Context Actually Fit.”
+      <a href="https://www.glukhov.org/llm-performance/optimization/kv-cache-16gb-long-context/">glukhov.org</a>.</li>
+</ol>
+
+<h2 id="appendix">Appendix: calculations and current code references</h2>
+
+<h3>KV-cache formula</h3>
+<pre><code>bytes_per_token = 2 × layers × kv_heads × (key_len + value_len) × bytes_per_element
+              = 2 × 41 × 2 × (256 + 256) × 2
+              = 83,968 bytes
+              ≈ 82.0 KiB
+
+16,384 × 82 KiB  ≈ 1.28 GiB
+32,768 × 82 KiB  ≈ 2.56 GiB
+65,536 × 82 KiB  ≈ 5.12 GiB
+131,072 × 82 KiB ≈ 10.25 GiB
+262,144 × 82 KiB ≈ 20.50 GiB</code></pre>
+
+<h3>Where the current behavior lives</h3>
+<table>
+  <thead>
+    <tr><th>File / symbol</th><th>Relevant behavior</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>chat.py:ANSWER_NUM_CTX</code></td><td>Ollama <code>num_ctx</code> for answer and helper calls.</td></tr>
+    <tr><td><code>chat.py:MAX_CONTEXT_TOKENS</code></td><td>Adaptive retrieval token budget.</td></tr>
+    <tr><td><code>chat.py:answer()</code></td><td>Retrieves evidence, builds prompt, streams answer; does not inject full conversation history.</td></tr>
+    <tr><td><code>app/chat_server.py:CONVERSATION_MAX_TURNS</code></td><td>Eight-turn server-side follow-up memory.</td></tr>
+    <tr><td><code>app/chat_server.py:format_conversation()</code></td><td>Formats recent turns for the follow-up rewrite model; answers truncated to 900 chars.</td></tr>
+    <tr><td><code>app/chat_server.py:resolve_question()</code></td><td>Detects follow-ups vs. unrelated questions; resets conversation on a new topic.</td></tr>
+    <tr><td><code>app/chat_server.py:snapshot()</code></td><td>Exposes <code>max_context_tokens</code>, benchmark <code>context_tokens</code>, and conversation turn count to the UI.</td></tr>
+  </tbody>
+</table>
+
+<h3>Notes on estimates and uncertainty</h3>
+<ul>
+  <li>The 32k/64k/128k memory figures are calculated from the model metadata and
+      calibrated against the 16k measurement; they are not direct measurements.</li>
+  <li>macOS memory accounting includes compression, file cache, and other
+      applications, so “headroom” is approximate. Watch memory pressure and
+      <code>ollama ps</code> rather than relying only on arithmetic.</li>
+  <li>Effective context length depends on the task and the model. The research
+      cited above is not specific to <code>ornith-1.5:35b</code>, but the direction
+      is consistent across models: advertised maximum is not the same as useful
+      working context.</li>
+  <li>Quality and speed can change with Ollama versions, quantization, and
+      hardware. Re-run the A/B benchmark after upgrades.</li>
+</ul>
+
+</body>
+</html>

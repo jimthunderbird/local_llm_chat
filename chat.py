@@ -234,11 +234,13 @@ LLM_FILTER_ENABLED = True
 # Query expansion is deliberately tiny: a single line, at most 32 tokens.
 EXPANSION_NUM_PREDICT = 32
 # Context window requested from Ollama. Every call uses this one value.
-# The answer context budget is 8,192 tokens; the extra 8,192 tokens leave room
-# for the writer prompt and up to ~1,600 output tokens. A 32k KV cache adds no
-# useful capacity here and the model reloads whenever the requested context
-# length changes.
-ANSWER_NUM_CTX = 16384
+# The answer context budget is 8,192 tokens; the remaining 24,576 tokens leave
+# room for the writer prompt, conversation memory, and up to ~1,600 output
+# tokens. On the 36 GB development machine this keeps the answer model fully
+# GPU-resident (~22.3 GB estimated) while giving long questions useful headroom.
+# Larger windows are not useful for this RAG path and increase memory pressure;
+# 64k/128k are intentionally avoided on this hardware.
+ANSWER_NUM_CTX = 32768
 # Helper calls use the answer context for the same reason.
 EXPANSION_NUM_CTX = ANSWER_NUM_CTX
 # Fuzzy query-term correction. Proper nouns are frequently misspelled in

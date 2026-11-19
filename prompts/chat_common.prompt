@@ -1,3 +1,14 @@
+task.action.best_context_window_for_chat (completed) {
+  based on task.research.best_context_window_for_chat, perform the recommended optimization
+}
+
+task.research.best_context_window_for_chat (completed) {
+  research only, save the research result into {directory_of_this_prompt}/../research/best_context_window_for_chat.html {
+    - What will be the best context window for chat given my current local llm?
+    - If I have a lot of conversations in the chat, what will be the best way to manage the context window? 
+  }
+}
+
 task.increase_context_size (completed) {
   please increase the context size to 8192
 }
