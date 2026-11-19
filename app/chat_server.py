@@ -394,6 +394,7 @@ RESEARCH_WITH_NEWS_MODEL = os.environ.get(
 )
 RESEARCH_WITH_NEWS_QUESTIONS = 2
 RESEARCH_WITH_NEWS_ARTICLES_PER_QUESTION = 3
+RESEARCH_WITH_NEWS_INITIAL_ARTICLES = 4
 RESEARCH_WITH_NEWS_DOCTOR_TITLE_CANDIDATES = 20
 # The hospital_map in prompts/research_with_the_news.prompt. A doctor's
 # articles can live on either the university site or the hospital site, so a
@@ -533,7 +534,7 @@ News context:
 Use the accumulated research context only to understand what the current
 question refers to. The factual evidence must come from the news context.
 
-Write a coherent briefing in 100 to 250 words. Synthesize the relevant stories
+Write a coherent briefing {length_instruction}. Synthesize the relevant stories
 instead of listing them mechanically. When reports disagree, prefer the more
 specific and more recent report. Do not mention chunk numbers, citations, or
 the names of these instructions. If the context leaves part of the topic
@@ -22611,12 +22612,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         Usage: /research_with_the_news <topic>
                /research_with_the_news on
                /research_with_the_news off
-        While the mode is on, every ordinary question is added to the current
-        research context. The server asks the research model for two
-        time-neutral search questions that resolve any follow-up references,
+        The explicit /research_with_the_news <topic> command now searches that
+        topic directly, uses the top four news stories, and writes a shorter
+        100-150 word briefing. While the mode is on, ordinary follow-up
+        questions are added to the current research context; for those, the
+        server asks the research model for two time-neutral search questions,
         pulls the top three full articles for each question from Google News,
-        and writes a 100-250 word briefing from that context. Turning the mode
-        on starts a clean context; turning it off returns to normal chat.
+        and writes a 100-250 word briefing. Turning the mode on starts a clean
+        context; turning it off returns to normal chat.
         """
         topic = " ".join(argument.split())
         state = self.state
@@ -22696,7 +22699,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "[research_with_the_news: continuing the accumulated "
                 "research context]",
             )
-        self._run_research_with_the_news(topic)
+        self._run_research_with_the_news(topic, initial=True)
 
     def _reset_research_with_the_news_context(self) -> None:
         """Start the news-research mode from a clean conversational context."""
@@ -22708,8 +22711,18 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         state.latest_benchmark = None
         state.code_language = ""
 
-    def _run_research_with_the_news(self, topic: str) -> None:
-        """Research one question in the current accumulated news context."""
+    def _run_research_with_the_news(
+        self, topic: str, initial: bool = False
+    ) -> None:
+        """Research one question in the current accumulated news context.
+
+        ``initial`` is used for the explicit /research_with_the_news <topic>
+        command. That path searches the topic directly instead of asking the
+        planner for related questions, uses the top four news stories, and
+        writes a shorter 100-150 word briefing. Ordinary follow-up questions
+        while the mode is on keep the related-question planner and the longer
+        briefing.
+        """
         topic = " ".join(topic.split())
         if not topic:
             return
@@ -22764,20 +22777,27 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "[research_with_the_news: could not identify the "
                     "doctor's hospital; using the news index]"
                 )
-        if accumulated_context:
+        if initial:
             log(
-                "[research_with_the_news: planning two time-neutral search "
-                f"questions about {topic!r} in the accumulated research "
-                "context]"
+                "[research_with_the_news: using /news search with the topic "
+                f"{topic!r} directly; no related-question planning]"
             )
+            questions = [topic]
         else:
-            log(
-                "[research_with_the_news: planning two time-neutral search "
-                f"questions about {topic!r}]"
+            if accumulated_context:
+                log(
+                    "[research_with_the_news: planning two time-neutral "
+                    f"search questions about {topic!r} in the accumulated "
+                    "research context]"
+                )
+            else:
+                log(
+                    "[research_with_the_news: planning two time-neutral "
+                    f"search questions about {topic!r}]"
+                )
+            questions = plan_research_with_news_questions(
+                topic, log, accumulated_context=accumulated_context
             )
-        questions = plan_research_with_news_questions(
-            topic, log, accumulated_context=accumulated_context
-        )
         if not questions:
             message = (
                 f"Could not plan a search for {topic!r}. "
@@ -22807,6 +22827,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             "doctor": "doctor article",
         }.get(source, "news article")
         wikipedia_fallback = ""
+        per_question_limit = (
+            RESEARCH_WITH_NEWS_INITIAL_ARTICLES
+            if initial
+            else RESEARCH_WITH_NEWS_ARTICLES_PER_QUESTION
+        )
 
         def collect_articles(
             results: list[dict], question: str, noun: str
@@ -22823,7 +22848,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 article["question"] = question
                 articles.append(article)
                 added += 1
-                if added >= RESEARCH_WITH_NEWS_ARTICLES_PER_QUESTION:
+                if added >= per_question_limit:
                     break
             log(
                 "[research_with_the_news: using "
@@ -22833,7 +22858,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         def collect_news_fallback() -> None:
             for question in questions:
                 try:
-                    results = search_research_with_news(question)
+                    results = search_research_with_news(
+                        question, limit=per_question_limit
+                    )
                 except RuntimeError as exc:
                     log(
                         "[research_with_the_news: fallback news search failed "
@@ -22853,7 +22880,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         question, doctor_profile, log=log
                     )
                 else:
-                    results = search_research_with_news(question)
+                    results = search_research_with_news(
+                        question, limit=per_question_limit
+                    )
             except RuntimeError as exc:
                 log(
                     "[research_with_the_news: search failed for "
@@ -23042,6 +23071,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 f"answer synthesized from {len(articles)} recent news "
                 "article(s) after no readable Wikipedia article was found"
             )
+        elif initial:
+            detail = (
+                f"answer synthesized from {len(articles)} recent news "
+                "article(s) gathered by the direct /news search for the topic"
+            )
         else:
             detail = (
                 f"answer synthesized from {len(articles)} recent news "
@@ -23063,6 +23097,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         prompt = RESEARCH_WITH_NEWS_ANSWER_PROMPT.format(
             topic=topic,
             context=context,
+            length_instruction=(
+                "in 100 to 150 words"
+                if initial
+                else "in 100 to 250 words"
+            ),
             accumulated_context=(
                 accumulated_context.strip()
                 or "(no previous research context)"

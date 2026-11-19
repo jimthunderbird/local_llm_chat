@@ -4,6 +4,15 @@ hospital_map {
   UCSF: ucsf.edu, ucsfhealth.org
 }
 
+task.refactor.initial_command_logic (completed) {
+  reference task.initial_command_logic:
+  change logic.fetch_news_and_produce_answer {
+    - DO NOT NEED TO find out related questions for <topic>
+    - learn from /news search <topic>, we are going to use /news search <topic>, get the top 4 news and put them into context
+    - based on context: tell me about the <topic> in 100-150 words 
+  }
+}
+
 task.question_source_fine_tuning.no_context_fall_back_to_news_search (completed) {
   - if a <topic> is about general facts, and even though there are matching wikipedia articles, but if the provided article does not have enough information to answer the <topic>, fall back to news search
 }
@@ -23,9 +32,9 @@ task.online_knowledge_mode_and_local_knowledge_mode (completed) {
     label: Mode
     options {
       - Online (default):
-        - This will essentially equas to running /research_with_the_news on
+      - This will essentially equas to running /research_with_the_news on
       - Local:
-        - This will essentially equas to running /research_with_the_news off
+      - This will essentially equas to running /research_with_the_news off
     }
   }
   - in the chat status bar, indict whethere is research mode is on or not
@@ -48,17 +57,17 @@ task.dictionary_searchable (completed) {
 
 task.question_source_fine_tuning.doctors (completed) {
   - if <topic> is about a specific Dr, do the following:
-    hospitals: find the doctor's hospital based on {hospital_map}
-    titles: get all related articles's titles by searching <the doctor's name> in each one of <hospitals>
-    articles: baed on the {titles}, try to pick the articles that with the title containing <the doctor's name>
-    add {articles} to the context and answer the question
+  hospitals: find the doctor's hospital based on {hospital_map}
+  titles: get all related articles's titles by searching <the doctor's name> in each one of <hospitals>
+  articles: baed on the {titles}, try to pick the articles that with the title containing <the doctor's name>
+  add {articles} to the context and answer the question
 }
 
 task.question_source_fine_tuning (completed) {
   - if a <topic> is about general facts, for example:
-    - what is donald trump's birthday?
-    - what does nvidia do?
-    restrict the news search to en.wikipedia.org, get the wikipedia article and add to the context
+  - what is donald trump's birthday?
+  - what does nvidia do?
+  restrict the news search to en.wikipedia.org, get the wikipedia article and add to the context
 
 }
 
@@ -73,7 +82,7 @@ task.keep_track_of_previous_context (completed) {
   }
 }
 
-task (completed) {
+task.initial_command_logic (completed) {
   create command /research_with_the_news <topic> {
     - starting RESEARCH_WITH_NEWS_MODE, and it will be set to be "on"
     when RESEARCH_WITH_NEWS_MODE is on {
