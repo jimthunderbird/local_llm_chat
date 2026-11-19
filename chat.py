@@ -180,8 +180,8 @@ FALLBACK_TOP_N = 8
 DEFAULT_DEPTH = 12
 # Estimated-token budgets for adaptive (auto) retrieval only. List-style
 # questions get a larger budget because they need broader coverage.
-MAX_CONTEXT_TOKENS = 4096
-LIST_CONTEXT_TOKENS = 6144
+MAX_CONTEXT_TOKENS = 8192
+LIST_CONTEXT_TOKENS = 8192
 # Deterministic stopping rules for auto retrieval (no extra model call).
 AUTO_CANDIDATE_LIMIT = 50
 SCORE_ELBOW_RATIO = 0.35
@@ -234,10 +234,11 @@ LLM_FILTER_ENABLED = True
 # Query expansion is deliberately tiny: a single line, at most 32 tokens.
 EXPANSION_NUM_PREDICT = 32
 # Context window requested from Ollama. Every call uses this one value.
-# LFM3-aura needs 8,192 tokens to cover the 4,096-token answer context plus
-# the writer prompt and output; a 32k KV cache adds no useful capacity here
-# and the model reloads whenever the requested context length changes.
-ANSWER_NUM_CTX = 8192
+# The answer context budget is 8,192 tokens; the extra 8,192 tokens leave room
+# for the writer prompt and up to ~1,600 output tokens. A 32k KV cache adds no
+# useful capacity here and the model reloads whenever the requested context
+# length changes.
+ANSWER_NUM_CTX = 16384
 # Helper calls use the answer context for the same reason.
 EXPANSION_NUM_CTX = ANSWER_NUM_CTX
 # Fuzzy query-term correction. Proper nouns are frequently misspelled in

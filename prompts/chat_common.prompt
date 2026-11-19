@@ -1,3 +1,17 @@
+task.increase_context_size (completed) {
+  please increase the context size to 8192
+}
+
+task.satus_detail_cutoff (completed) {
+  currently, in the main chat, the numbers on status bar is cut off:
+  - please refactor:
+    - in the status bar, just present a "Status" button {
+      - when clicked {
+        show all of the existing status in a modal, present them line by line 
+      }
+    }
+}
+
 task.update_make_file (completed) {
   in the make file:
   we should be able to do: make start {

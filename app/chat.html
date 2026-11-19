@@ -835,6 +835,79 @@
   #popup-restore:hover { border-color: var(--accent-2); color: #fff; }
   #popup-restore .dict-icon { color: var(--accent-2); }
   #popup-restore-word { overflow: hidden; text-overflow: ellipsis; }
+  #status-btn {
+    flex: 0 0 auto;
+    background: #10243a;
+    color: var(--accent);
+    border: 1px solid #214868;
+    border-radius: 4px;
+    padding: 1px 9px;
+    font-family: var(--mono);
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #status-btn:hover { border-color: var(--accent-2); color: #fff; }
+  #status-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 64;
+    background: rgba(2, 6, 10, .72);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  #status-panel[hidden] { display: none; }
+  .status-card {
+    width: min(620px, 100%);
+    max-height: 84vh;
+    display: flex;
+    flex-direction: column;
+    background: #0d151e;
+    border: 1px solid #2b4056;
+    border-radius: 10px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.7);
+    overflow: hidden;
+  }
+  .status-body {
+    min-height: 0;
+    padding: 8px 18px 16px;
+    overflow-y: auto;
+    color: #e2edf7;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .status-line {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    padding: 7px 0;
+    border-bottom: 1px solid #182636;
+  }
+  .status-line:last-child { border-bottom: 0; }
+  .status-line strong {
+    flex: 0 0 118px;
+    color: var(--dim);
+    font-weight: 600;
+  }
+  .status-line span {
+    min-width: 0;
+    word-break: break-word;
+  }
+  #status-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+    user-select: none;
+  }
+  #status-close:hover { color: var(--text); }
 
   #promptline {
     display: flex;
@@ -4185,15 +4258,7 @@
     </div>
     <div id="completion-box" hidden></div>
     <div id="statusbar">
-      <span class="status-item"><strong>scope</strong> <span id="status-scope">…</span></span>
-      <span class="status-item"><strong>depth</strong> <span id="status-depth">…</span></span>
-      <span class="status-item"><strong>trunks</strong> <span id="status-chunks">…</span></span>
-      <span class="status-item"><strong>context size</strong> <span id="status-context-size">…</span></span>
-      <span class="status-item"><strong>conversation</strong> <span id="status-conversation">0 turns</span></span>
-      <span class="status-item"><strong>model</strong> <span id="status-model">…</span></span>
-      <span class="status-item"><strong>source</strong> <span id="status-answer-source">—</span></span>
-      <span class="status-item"><strong>edit mode</strong> <span id="status-mode">INSERT</span></span>
-      <span class="status-item"><strong>chat mode</strong> <span id="status-research">…</span></span>
+      <button id="status-btn" type="button" title="Show all chat status details">Status</button>
       <span class="grow"></span>
       <span id="busy-indicator" hidden><span class="pulse">●</span> streaming — Ctrl+C cancels</span>
       <button id="popup-restore" hidden title="Restore dictionary popup">
@@ -4219,6 +4284,29 @@
       <button id="image-btn" type="button" title="Attach an image (you can also drag or paste one here)">Image</button>
       <button id="send-btn" type="button" title="Send question (Ctrl/⌘+Enter)">Send</button>
       <span id="prompt-hint">Esc normal · Tab complete · ⏎ newline · ⌘/Ctrl+⏎ send · drag image</span>
+    </div>
+  </div>
+</div>
+
+<div id="status-panel" hidden>
+  <div class="status-card" role="dialog" aria-modal="true" aria-labelledby="status-title">
+    <div class="news-head">
+      <div class="news-head-main">
+        <div id="status-title" class="news-modal-title">Status</div>
+        <div class="news-modal-meta">Current chat session</div>
+      </div>
+      <button id="status-close" type="button" title="Close (Esc)">×</button>
+    </div>
+    <div class="status-body">
+      <div class="status-line"><strong>scope</strong><span id="status-scope">…</span></div>
+      <div class="status-line"><strong>depth</strong><span id="status-depth">…</span></div>
+      <div class="status-line"><strong>trunks</strong><span id="status-chunks">…</span></div>
+      <div class="status-line"><strong>context size</strong><span id="status-context-size">…</span></div>
+      <div class="status-line"><strong>conversation</strong><span id="status-conversation">0 turns</span></div>
+      <div class="status-line"><strong>model</strong><span id="status-model">…</span></div>
+      <div class="status-line"><strong>source</strong><span id="status-answer-source">—</span></div>
+      <div class="status-line"><strong>edit mode</strong><span id="status-mode">INSERT</span></div>
+      <div class="status-line"><strong>chat mode</strong><span id="status-research">…</span></div>
     </div>
   </div>
 </div>
@@ -4654,6 +4742,9 @@ const statusMode = $("#status-mode");
 const statusContextSize = $("#status-context-size");
 const researchModeSelect = $("#research-mode-select");
 const statusResearch = $("#status-research");
+const statusPanelEl = $("#status-panel");
+const statusBtnEl = $("#status-btn");
+const statusCloseEl = $("#status-close");
 const busyEl = $("#busy-indicator");
 const completionBox = $("#completion-box");
 const newsSourcePicker = $("#news-source-picker");
@@ -7864,6 +7955,16 @@ function closeChangelogModal() {
   changelogPanelEl.hidden = true;
   changelogFrameEl.src = "about:blank";
   changelogItem = null;
+}
+
+function openStatusModal() {
+  if (!statusPanelEl) return;
+  statusPanelEl.hidden = false;
+}
+
+function closeStatusModal() {
+  if (!statusPanelEl || statusPanelEl.hidden) return;
+  statusPanelEl.hidden = true;
 }
 
 function newsTitleTranslationState(item) {
@@ -17152,6 +17253,19 @@ changelogCloseEl.addEventListener("click", (event) => {
   event.stopPropagation();
   closeChangelogModal();
 });
+statusBtnEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  openStatusModal();
+});
+statusPanelEl.addEventListener("click", (event) => {
+  if (event.target === statusPanelEl) closeStatusModal();
+});
+statusCloseEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  closeStatusModal();
+});
 
 /* News words (in the story body and the modal title) open the same
  * streaming /dict popup as answer words. */
@@ -18831,6 +18945,11 @@ function handleKeyDown(event) {
   if (event.isComposing) return;
 
   const key = event.key;
+  if (!statusPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeStatusModal();
+    return;
+  }
 
   // Global keys that work in every mode.
   if (event.metaKey && !event.ctrlKey && !event.altKey && key.toLowerCase() === "k") {
@@ -19320,6 +19439,11 @@ sendBtn.addEventListener("click", () => {
 document.addEventListener("keydown", (event) => {
   if (event.defaultPrevented || event.isComposing) return;
   const key = event.key;
+  if (!statusPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeStatusModal();
+    return;
+  }
 
   if (key === "F1") {
     event.preventDefault();
@@ -19438,6 +19562,7 @@ inputEl.addEventListener("blur", () => {
       !gamePanelEl.hidden ||
       !newsPanelEl.hidden ||
       !changelogPanelEl.hidden ||
+      !statusPanelEl.hidden ||
       !videoPanelEl.hidden
     ) return;
     if (outputPointerDown || selectionInsideOutput()) return;
