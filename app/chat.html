@@ -18262,7 +18262,7 @@ function dragHasFiles(event) {
   return Array.from(transfer.items || []).some((item) => item.kind === "file");
 }
 
-function addUserEcho(text, image = null) {
+function addUserEcho(text, image = null, scroll = true) {
   const line = document.createElement("div");
   line.className = "user-line";
   const who = document.createElement("span");
@@ -18284,7 +18284,7 @@ function addUserEcho(text, image = null) {
     line.appendChild(wrap);
   }
   outputEl.appendChild(line);
-  scrollToBottom();
+  if (scroll) scrollToBottom();
 }
 
 function submitText(text, fromChoice = false) {
@@ -18335,9 +18335,9 @@ function submitText(text, fromChoice = false) {
   const commandArgs = question.startsWith("/")
     ? question.slice(1).split(/\s+/).slice(1)
     : [];
-  // /news search, /mdn, /britanica, /wikivoyage, /map, /reddit, /tablelog,
-  // /stock, /changelog, and /dictionary_history stream their result lists;
-  // anchor each list at the top so new results do not drag the viewport down.
+  // Commands that stream result lists are anchored at the top so new results
+  // do not drag the viewport down. The isCommand check below applies the same
+  // no-follow behavior to every command result, not just this allowlist.
   const pinsNewsSearch = (
     commandName === "news"
       && String(commandArgs[0] || "").toLowerCase() === "search"
@@ -18347,8 +18347,14 @@ function submitText(text, fromChoice = false) {
     || commandName === "tablelog" || commandName === "stock"
     || commandName === "changelog" || commandName === "dictionary_history";
 
-  addUserEcho(question, image);
   const isCommand = question.startsWith("/");
+  if (isCommand) {
+    // Command results should stay where they are while they stream. The
+    // command entry is anchored once below, but the viewport must not follow
+    // every log/output update to the bottom.
+    stickToBottom = false;
+  }
+  addUserEcho(question, image, !isCommand);
   // /ask answers are plain text like a regular assistant reply: keep every
   // word clickable for /dict and omit the command "Output" heading.
   // /research_with_the_news <topic> likewise streams an answer, not a command
@@ -18405,7 +18411,9 @@ function submitText(text, fromChoice = false) {
   resetAnswerSourceStatus();
   if (image) clearPendingImage();
 
-  if (commandName === "wiki_article" || pinsNewsSearch) {
+  if (isCommand || commandName === "wiki_article" || pinsNewsSearch) {
+    // Every command result is anchored at its start and never follows the
+    // stream. This replaces the old per-command allowlist.
     pinEntryToTop(entry);
   } else {
     stickToBottom = true;

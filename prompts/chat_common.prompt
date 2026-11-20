@@ -1,3 +1,7 @@
+task.no_auto_scrolling_for_all_command_results (completed) {
+  - for all the results of the commands, do not auto scroll 
+}
+
 task.show_accumulated_context (completed) {
   in the status modal, can we also print the current accumulated context size?
 }
