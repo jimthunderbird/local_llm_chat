@@ -1,0 +1,37 @@
+knowledge {
+  rentcast_mcp_server (deprecated){
+    RentCast MCP Server (robcerda/rentcast-mcp-server): Supports true latitude, longitude, and radius (in miles) parameters natively on both search_sale_listings and search_rental_listings.
+
+    github: https://github.com/robcerda/rentcast-mcp-server
+  }
+
+  zillow_official_mcp_server {
+    mcp server location: https://mcp.zillow.com/api/v2](https://mcp.zillow.com/api/v2
+    latitude and longitude search:
+    You can achieve it with a lightweight two-step wrapper (reverse-geocode → query Zillow MCP by ZIP/neighborhood → Haversine filter).
+
+    Zillow’s official MCP server ([https://mcp.zillow.com/api/v2](https://mcp.zillow.com/api/v2)) does not accept latitude, longitude, or radius as input parameters—only named locations (city, ZIP code, neighborhood, or address). However, because every listing it returns includes exact latitude and longitude coordinates, you can wrap it to emulate a radius search at $0 cost.
+
+    How the 3-Step Pipeline Works
+    Reverse-Geocode (lat, lng) → ZIP Code(s) / Neighborhood:
+    Query OpenStreetMap Nominatim ([https://nominatim.openstreetmap.org/reverse?format=json&lat=...&lon=](https://nominatim.openstreetmap.org/reverse?format=json&lat=...&lon=)...) to turn your target coordinates into a ZIP code and neighborhood name. (Tip: If your radius crosses a ZIP boundary—common in dense areas like SF or the Peninsula—grab adjacent ZIP codes via Overpass or a local ZIP-centroid lookup table so you don't clip results at the border.)
+
+    Fetch Candidate Listings from Zillow MCP:
+    Call Zillow’s search tool using that ZIP code (or city/neighborhood) and your price/bed/bath filters.
+
+    Post-Filter by Exact Haversine Distance:
+    Loop over the returned listings, compute the distance between your target (lat, lng) and each listing’s (listing.lat, listing.lon), and drop anything outside your radius.
+  } 
+}
+
+task (completed) {
+  - remove any logic related to knowledge.rentcast_mcp_server
+  - learn from {knowledge.zillow_official_mcp_server}
+}
+
+task (completed) {
+  create command: /zillow <latitude,longitude> {
+    - learn from {knowledge.rentcast_mcp_server}:
+    return me: 1. nearby sale listing 2. nearby rental listing 
+  }
+}

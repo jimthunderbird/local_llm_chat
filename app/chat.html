@@ -14930,6 +14930,7 @@ function renderNewsModal(item) {
   renderMapPlaceLocation(item);
   renderMapVideos(item);
   renderGamePlaceLocalNews(item);
+  renderGamePlaceProperties(item);
   renderMapNearbyPlaces(item);
   renderNewsPodcast(item);
   syncNewsTtsButton();
@@ -15026,6 +15027,7 @@ function openNewsModal(item, options = {}) {
   if (item.map) ensureMapVideos(item);
   if (String(item.articleApi || "") === "/api/game_place") {
     ensureGamePlaceNews(item);
+    ensureGamePlaceProperties(item);
   }
   if (item.osm) ensureOsmDetails(item);
   if (item.yelp) ensureYelpDetails(item);
@@ -15289,6 +15291,53 @@ function ensureGamePlaceNews(item) {
     })
     .finally(() => {
       item.localNewsLoading = false;
+      if (newsItem === item) renderNewsModal(item);
+    });
+}
+
+/* The explorer place modal also lists nearby for-sale and rental properties.
+ * The server reverse-geocodes the coordinate to a Zillow region, calls the
+ * official Zillow MCP property search, and filters results by exact distance.
+ * Results are lazy-loaded when the place modal opens. */
+function ensureGamePlaceProperties(item) {
+  if (!item || String(item.articleApi || "") !== "/api/game_place") return;
+  if (item.propertiesFetched || item.propertiesLoading) return;
+  const latitude = Number(item.latitude);
+  const longitude = Number(item.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+
+  item.propertiesLoading = true;
+  item.propertiesError = "";
+  if (newsItem === item) renderNewsModal(item);
+  const params = new URLSearchParams({
+    lat: String(latitude),
+    lon: String(longitude),
+    radius: "1",
+    limit: "5",
+  });
+  fetch(`/api/game_place_properties?${params.toString()}`, { cache: "no-store" })
+    .then((response) => response.json().then((data) => {
+      if (!response.ok) {
+        throw new Error(data?.error || `HTTP ${response.status}`);
+      }
+      return data;
+    }))
+    .then((data) => {
+      item.propertiesFetched = true;
+      item.propertiesConfigured = data?.configured !== false;
+      item.propertiesSource = String(data?.source || "Zillow").trim();
+      item.propertiesRadius = Number(data?.radius ?? 1);
+      item.saleListings = Array.isArray(data?.sale) ? data.sale : [];
+      item.rentalListings = Array.isArray(data?.rental) ? data.rental : [];
+      item.propertiesSaleError = String(data?.sale_error || "").trim();
+      item.propertiesRentalError = String(data?.rental_error || "").trim();
+      item.propertiesError = String(data?.error || "").trim();
+    })
+    .catch((error) => {
+      item.propertiesError = error?.message || String(error);
+    })
+    .finally(() => {
+      item.propertiesLoading = false;
       if (newsItem === item) renderNewsModal(item);
     });
 }
@@ -16535,6 +16584,150 @@ function renderGamePlaceLocalNews(item) {
   }
 
   newsBodyEl.appendChild(section);
+}
+
+/* Nearby property sections for the explorer place modal. The two sections
+ * sit below Local News and share the /zillow/Zillow data path. */
+function retryGamePlaceProperties(item) {
+  item.propertiesFetched = false;
+  item.propertiesLoading = false;
+  item.propertiesError = "";
+  item.propertiesSaleError = "";
+  item.propertiesRentalError = "";
+  item.saleListings = [];
+  item.rentalListings = [];
+  ensureGamePlaceProperties(item);
+}
+
+function renderGamePlacePropertiesSection(item, key, title) {
+  if (!item || String(item.articleApi || "") !== "/api/game_place") return;
+  const isSale = key === "sale";
+  const listings = Array.isArray(
+    isSale ? item.saleListings : item.rentalListings
+  )
+    ? (isSale ? item.saleListings : item.rentalListings)
+    : [];
+  const error = String(
+    (isSale ? item.propertiesSaleError : item.propertiesRentalError) || ""
+  ).trim();
+  const source = String(item.propertiesSource || "Zillow").trim();
+
+  const section = document.createElement("section");
+  section.className = "video-results map-videos map-local-news map-properties";
+  const head = document.createElement("div");
+  head.className = "video-list-head";
+  const label = document.createElement("span");
+  label.textContent = title;
+  const note = document.createElement("span");
+  note.className = "video-list-note";
+  if (item.propertiesLoading) {
+    note.textContent = "searching Zillow…";
+  } else if (item.propertiesConfigured === false) {
+    note.textContent = "Zillow data unavailable";
+  } else if (item.propertiesFetched) {
+    const count = listings.length;
+    note.textContent = count
+      ? `${count} listing${count === 1 ? "" : "s"} · ${source}`
+      : `no listings · ${source}`;
+  } else {
+    note.textContent = source;
+  }
+  head.appendChild(label);
+  head.appendChild(note);
+  section.appendChild(head);
+
+  if (item.propertiesLoading) {
+    const loading = document.createElement("div");
+    loading.className = "news-loading";
+    loading.textContent = `Searching Zillow for nearby ${
+      isSale ? "for-sale" : "rental"
+    } listings…`;
+    section.appendChild(loading);
+  } else if (item.propertiesConfigured === false) {
+    const help = document.createElement("div");
+    help.className = "map-yelp-note-body";
+    help.textContent = isSale
+      ? (item.propertiesError || "Zillow data is unavailable.")
+      : "Zillow data is unavailable.";
+    section.appendChild(help);
+  } else if (error) {
+    const errorEl = document.createElement("div");
+    errorEl.className = "video-more-error";
+    errorEl.textContent = error;
+    section.appendChild(errorEl);
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "video-more-btn";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      retryGamePlaceProperties(item);
+    });
+    section.appendChild(retry);
+  } else if (listings.length) {
+    const list = document.createElement("ol");
+    list.className = "news-list-items";
+    for (const listing of listings) {
+      const li = document.createElement("li");
+      li.className = "news-item";
+      const main = document.createElement("div");
+      main.className = "news-item-main";
+
+      const titleRow = document.createElement("div");
+      titleRow.className = "news-title-row";
+      let listingTitle;
+      if (listing.zillow_url) {
+        listingTitle = document.createElement("a");
+        listingTitle.href = listing.zillow_url;
+        listingTitle.target = "_blank";
+        listingTitle.rel = "noopener noreferrer";
+        listingTitle.title = "Open this address on Zillow";
+      } else {
+        listingTitle = document.createElement("div");
+      }
+      listingTitle.className = "news-title";
+      listingTitle.textContent = listing.summary || listing.address || "Listing";
+      titleRow.appendChild(listingTitle);
+      main.appendChild(titleRow);
+
+      const meta = document.createElement("div");
+      meta.className = "news-meta";
+      const metaBits = [
+        listing.address,
+        listing.status,
+        listing.listed_date ? `listed ${listing.listed_date}` : "",
+        listing.days_on_market != null
+          ? `${listing.days_on_market} days on market`
+          : "",
+      ].filter(Boolean);
+      meta.textContent = metaBits.join(" · ");
+      if (meta.textContent) main.appendChild(meta);
+
+      li.appendChild(main);
+      list.appendChild(li);
+    }
+    section.appendChild(list);
+  } else if (item.propertiesFetched) {
+    const empty = document.createElement("div");
+    empty.className = "map-yelp-note-body";
+    empty.textContent = `No nearby ${
+      isSale ? "for-sale" : "rental"
+    } listings found.`;
+    section.appendChild(empty);
+  }
+
+  newsBodyEl.appendChild(section);
+}
+
+function renderGamePlaceProperties(item) {
+  if (!item || String(item.articleApi || "") !== "/api/game_place") return;
+  renderGamePlacePropertiesSection(
+    item, "sale", "Nearby Properties For Sale"
+  );
+  renderGamePlacePropertiesSection(
+    item, "rental", "Nearby Property For Rent"
+  );
 }
 
 /* Under a place's YouTube results, list the other Wikipedia places from the

@@ -100,6 +100,9 @@ Endpoints:
                                   the place name with Nominatim and list its
                                   recent Google News stories for the explorer
                                   place modal's Local News section
+    GET  /api/game_place_properties ?lat=<latitude>&lon=<longitude> list nearby
+                                  for-sale and rental properties from the
+                                  Zillow MCP server for the place modal
     POST /api/game_current_location
                                   {"game":..., "latitude":..., "longitude":...}
                                   persist the explorer's chosen starting point
@@ -355,6 +358,7 @@ WEB_COMMANDS = {
     "/tablelog": "japan food and restaurant guide for travelers - search Tabelog restaurant pages by keywords: /tablelog <keywords>",
     "/stock": "show a stock symbol profile, financial details, and related news articles: /stock <stock_symbol>",
     "/robinhood": "show your Robinhood holdings, pending orders, and recent transactions for a symbol through the Robinhood MCP server: /robinhood <stock_symbol>",
+    "/zillow": "show nearby for-sale and rental listings from Zillow's official MCP server: /zillow <latitude,longitude> [radius_miles]",
     "/deepresearch": "run a bounded multi-round research report on <topic>: /deepresearch <topic>",
     "/research_with_the_news": "research a topic from recent news, Wikipedia, or a doctor's hospital website, then keep doing so for each follow-up: /research_with_the_news <topic>; /research_with_the_news on; /research_with_the_news off",
     "/write_a_book": "ask for every book setting (model, directory, words, chapters, sub-questions, articles per sub-question), then research recent news and write a book: /write_a_book [<subject>]",
@@ -2180,11 +2184,28 @@ def _stock_cache_store(key: str, value: dict) -> None:
 # ---------------------------------------------------------------------------
 
 ROBINHOOD_MCP_DEFAULT_URL = "https://agent.robinhood.com/mcp/trading"
-ROBINHOOD_MCP_PROTOCOL_VERSIONS = ("2025-06-18", "2024-11-05")
+ROBINHOOD_MCP_PROTOCOL_VERSIONS = (
+    "2025-11-25",
+    "2025-06-18",
+    "2024-11-05",
+)
 ROBINHOOD_MCP_TIMEOUT = 90.0
 ROBINHOOD_MCP_PENDING_LIMIT = 20
 ROBINHOOD_MCP_HISTORY_LIMIT = 10
 ROBINHOOD_MCP_CONFIG_FILE = SCRIPT_DIR / ".chat" / "robinhood_mcp.json"
+
+# /zillow -- nearby for-sale and rental listings from Zillow's official MCP
+# server. The server is a public streamable-HTTP endpoint and needs no auth.
+# The MCP search API takes named regions, not latitude/longitude, so the flow
+# is: reverse-geocode the coordinate to a city/neighborhood with Nominatim,
+# request nearby-sorted Zillow listings for that region, then filter the
+# results by exact Haversine distance.
+ZILLOW_MCP_DEFAULT_URL = "https://mcp.zillow.com/api/v2"
+ZILLOW_MCP_TIMEOUT = 90.0
+ZILLOW_MCP_RADIUS_MILES = 1.0
+ZILLOW_MCP_LIMIT = 5
+ZILLOW_MCP_CACHE_TTL_SECONDS = 300
+ZILLOW_MCP_REGION_CACHE_TTL_SECONDS = 86400
 # Placeholder values shipped in the sample config.  They must be treated as
 # "not configured" so the caller gets setup instructions instead of a failed
 # Robinhood login or a 401 from the official endpoint.
@@ -2206,6 +2227,10 @@ ROBINHOOD_MCP_PLACEHOLDERS = {
 
 class RobinhoodMCPError(RuntimeError):
     """A configuration, transport, or tool error from the Robinhood MCP."""
+
+
+class ZillowMCPError(RuntimeError):
+    """A transport, region-resolution, or tool error from the Zillow MCP."""
 
 
 _POSITION_TOOL_CANDIDATES = (
@@ -2360,10 +2385,56 @@ def _robinhood_mcp_setup_help(
     return "\n".join(lines)
 
 
+def _zillow_mcp_config() -> dict:
+    """Resolve the public Zillow MCP endpoint."""
+    try:
+        timeout = max(
+            10.0,
+            float(os.environ.get("ZILLOW_MCP_TIMEOUT", ZILLOW_MCP_TIMEOUT)),
+        )
+    except (TypeError, ValueError):
+        timeout = ZILLOW_MCP_TIMEOUT
+    return {
+        "command": [],
+        "url": str(
+            os.environ.get("ZILLOW_MCP_URL") or ZILLOW_MCP_DEFAULT_URL
+        ).strip(),
+        "token": "",
+        "env": dict(os.environ),
+        "config_path": "",
+        "file_found": False,
+        "credentials_missing": [],
+        "timeout": timeout,
+        "allow_no_token": True,
+    }
+
+
+def _zillow_mcp_setup_help(
+    config_path: str = "", missing: list[str] | None = None
+) -> str:
+    return (
+        "Zillow MCP is unavailable. The official endpoint is "
+        f"{ZILLOW_MCP_DEFAULT_URL} and needs no sign-in. "
+        "Check network access, or set ZILLOW_MCP_URL to a compatible endpoint."
+    )
+
+
 class _RobinhoodMCPClient:
     """A minimal MCP client for stdio and streamable-HTTP servers."""
 
-    def __init__(self, config: dict, timeout: float = ROBINHOOD_MCP_TIMEOUT):
+    def __init__(
+        self,
+        config: dict,
+        timeout: float = ROBINHOOD_MCP_TIMEOUT,
+        label: str = "Robinhood",
+        error_type: type[Exception] = RobinhoodMCPError,
+        setup_help: Callable[[str, list[str] | None], str] | None = None,
+        allow_no_token: bool = False,
+    ):
+        self.label = label
+        self.error_type = error_type
+        self.setup_help = setup_help or _robinhood_mcp_setup_help
+        self.allow_no_token = allow_no_token
         self.command = list(config.get("command") or [])
         self.url = str(config.get("url") or "")
         self.token = str(config.get("token") or "")
@@ -2405,13 +2476,13 @@ class _RobinhoodMCPClient:
                 pass
 
     def connect(self) -> None:
-        if (not self.command and not self.token) or (
-            self.transport == "stdio" and self.credentials_missing
+        if (
+            (not self.command and not self.token and not self.allow_no_token)
+            or (not self.command and not self.url)
+            or (self.transport == "stdio" and self.credentials_missing)
         ):
-            raise RobinhoodMCPError(
-                _robinhood_mcp_setup_help(
-                    self.config_path, self.credentials_missing
-                )
+            raise self.error_type(
+                self.setup_help(self.config_path, self.credentials_missing)
             )
         if self.transport == "stdio":
             self._start_stdio()
@@ -2433,7 +2504,7 @@ class _RobinhoodMCPClient:
                     self.protocol_version = str(negotiated)
                 last_error = None
                 break
-            except RobinhoodMCPError as exc:
+            except self.error_type as exc:
                 last_error = exc
                 if self.transport == "http" and "401" in str(exc):
                     break
@@ -2441,7 +2512,7 @@ class _RobinhoodMCPClient:
             raise last_error
         try:
             self._notify("notifications/initialized", {})
-        except RobinhoodMCPError:
+        except self.error_type:
             # Some servers do not implement notifications; initialization has
             # already succeeded, so continue to the tool list.
             pass
@@ -2470,8 +2541,8 @@ class _RobinhoodMCPClient:
                 env=self.env,
             )
         except (OSError, ValueError) as exc:
-            raise RobinhoodMCPError(
-                f"could not start the Robinhood MCP command {self.command!r}: {exc}"
+            raise self.error_type(
+                f"could not start the {self.label} MCP command {self.command!r}: {exc}"
             ) from exc
 
         def read_stdout() -> None:
@@ -2497,14 +2568,14 @@ class _RobinhoodMCPClient:
     def _stdio_write(self, message: dict) -> None:
         proc = self._proc
         if proc is None or proc.stdin is None:
-            raise RobinhoodMCPError("the Robinhood MCP process is not running")
+            raise self.error_type(f"the {self.label} MCP process is not running")
         try:
             proc.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
             proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
             detail = self._stdio_stderr()
-            raise RobinhoodMCPError(
-                "the Robinhood MCP process exited"
+            raise self.error_type(
+                f"the {self.label} MCP process exited"
                 + (f":\n{detail}" if detail else "")
             ) from exc
 
@@ -2522,8 +2593,8 @@ class _RobinhoodMCPClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 detail = self._stdio_stderr()
-                raise RobinhoodMCPError(
-                    f"Robinhood MCP timed out waiting for {method}"
+                raise self.error_type(
+                    f"{self.label} MCP timed out waiting for {method}"
                     + (f":\n{detail}" if detail else "")
                 )
             try:
@@ -2532,8 +2603,8 @@ class _RobinhoodMCPClient:
                 continue
             if line is None:
                 detail = self._stdio_stderr()
-                raise RobinhoodMCPError(
-                    "the Robinhood MCP process exited"
+                raise self.error_type(
+                    f"the {self.label} MCP process exited"
                     + (f":\n{detail}" if detail else "")
                 )
             try:
@@ -2544,7 +2615,7 @@ class _RobinhoodMCPClient:
                 continue
             error = message.get("error")
             if isinstance(error, dict):
-                raise RobinhoodMCPError(
+                raise self.error_type(
                     str(error.get("message") or error.get("code") or error)
                 )
             result = message.get("result")
@@ -2559,10 +2630,11 @@ class _RobinhoodMCPClient:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
-            "Authorization": f"Bearer {self.token}",
             "MCP-Protocol-Version": self.protocol_version,
             "User-Agent": "personal-chatbot/1.0",
         }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
         try:
@@ -2570,22 +2642,22 @@ class _RobinhoodMCPClient:
                 self.url, json=message, headers=headers, timeout=self.timeout
             )
         except requests.RequestException as exc:
-            raise RobinhoodMCPError(
-                f"could not reach Robinhood MCP at {self.url}: {exc}"
+            raise self.error_type(
+                f"could not reach {self.label} MCP at {self.url}: {exc}"
             ) from exc
         session_id = response.headers.get("Mcp-Session-Id")
         if session_id:
             self.session_id = session_id
         if response.status_code == 401:
-            raise RobinhoodMCPError(
-                "Robinhood MCP rejected the token (HTTP 401). "
+            raise self.error_type(
+                f"{self.label} MCP rejected the token (HTTP 401). "
                 "Refresh ROBINHOOD_MCP_TOKEN or reconnect the server in your "
                 "MCP client. See /help for the supported setup."
             )
         if response.status_code >= 400:
             body = (response.text or "").strip()[:800]
-            raise RobinhoodMCPError(
-                f"Robinhood MCP returned HTTP {response.status_code}"
+            raise self.error_type(
+                f"{self.label} MCP returned HTTP {response.status_code}"
                 + (f": {body}" if body else "")
             )
         if message_id is None:
@@ -2625,7 +2697,7 @@ class _RobinhoodMCPClient:
                 if item.get("id") == message_id:
                     error = item.get("error")
                     if isinstance(error, dict):
-                        raise RobinhoodMCPError(
+                        raise self.error_type(
                             str(error.get("message") or error.get("code") or error)
                         )
                     result = item.get("result")
@@ -2634,12 +2706,12 @@ class _RobinhoodMCPClient:
         if fallback is not None:
             error = fallback.get("error")
             if isinstance(error, dict):
-                raise RobinhoodMCPError(
+                raise self.error_type(
                     str(error.get("message") or error.get("code") or error)
                 )
             result = fallback.get("result")
             return result if isinstance(result, dict) else {"result": result}
-        raise RobinhoodMCPError(f"Robinhood MCP returned no response for {method}")
+        raise self.error_type(f"{self.label} MCP returned no response for {method}")
 
     def _rpc(self, method: str, params: dict) -> dict:
         self._next_id += 1
@@ -2689,7 +2761,9 @@ def _mcp_parse_text(text: str):
         return text
 
 
-def _mcp_result_payload(result: dict) -> tuple[object, str]:
+def _mcp_result_payload(
+    result: dict, error_type: type[Exception] = RobinhoodMCPError
+) -> tuple[object, str]:
     """Turn one tools/call result into structured data and its raw text."""
     parts: list[str] = []
     content = result.get("content") if isinstance(result, dict) else None
@@ -2699,7 +2773,7 @@ def _mcp_result_payload(result: dict) -> tuple[object, str]:
                 parts.append(str(item.get("text") or ""))
     raw_text = "\n".join(part for part in parts if part).strip()
     if isinstance(result, dict) and result.get("isError"):
-        raise RobinhoodMCPError(raw_text or "the Robinhood MCP tool returned an error")
+        raise error_type(raw_text or "the MCP tool returned an error")
     structured = result.get("structuredContent") if isinstance(result, dict) else None
     if structured not in (None, "", [], {}):
         return structured, raw_text
@@ -2860,13 +2934,13 @@ def _mcp_call_tool(
     arguments = _mcp_arguments_for_tool(tool, symbol, account)
     try:
         result = client.call_tool(name, arguments)
-    except RobinhoodMCPError as exc:
+    except client.error_type as exc:
         # Some servers only reveal a required argument when the call fails.
         if "symbol" not in arguments and re.search(r"symbol", str(exc), re.I):
             result = client.call_tool(name, {**arguments, "symbol": symbol})
         else:
             raise
-    payload, raw_text = _mcp_result_payload(result)
+    payload, raw_text = _mcp_result_payload(result, client.error_type)
     return payload, raw_text, name
 
 
@@ -3349,6 +3423,442 @@ def robinhood_holdings_report(symbol: str) -> str:
                 + ")",
             ]
         )
+    return "\n".join(lines)
+
+
+_ZILLOW_CACHE: dict[tuple, tuple[float, dict]] = {}
+_ZILLOW_CACHE_LOCK = threading.Lock()
+_ZILLOW_REGION_CACHE: dict[tuple, tuple[float, dict]] = {}
+_ZILLOW_REGION_CACHE_LOCK = threading.Lock()
+
+
+def _haversine_miles(
+    latitude1: float, longitude1: float, latitude2: float, longitude2: float
+) -> float:
+    """Return the great-circle distance between two coordinates in miles."""
+    radius = 3958.7613
+    lat1 = math.radians(latitude1)
+    lat2 = math.radians(latitude2)
+    delta_lat = lat2 - lat1
+    delta_lon = math.radians(longitude2 - longitude1)
+    a = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+    )
+    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _zillow_region_for_coordinate(latitude: float, longitude: float) -> dict:
+    """Resolve a coordinate to a Zillow search region with Nominatim."""
+    cache_key = (round(latitude, 5), round(longitude, 5))
+    now = time.monotonic()
+    with _ZILLOW_REGION_CACHE_LOCK:
+        cached = _ZILLOW_REGION_CACHE.get(cache_key)
+        if (
+            cached
+            and now - cached[0] <= ZILLOW_MCP_REGION_CACHE_TTL_SECONDS
+        ):
+            return dict(cached[1])
+
+    try:
+        response = requests.get(
+            NOMINATIM_REVERSE_URL,
+            params={
+                "lat": f"{latitude:.6f}",
+                "lon": f"{longitude:.6f}",
+                "format": "jsonv2",
+                "zoom": 18,
+                "addressdetails": 1,
+            },
+            headers={
+                **chat.HTTP_HEADERS,
+                "User-Agent": MAP_USER_AGENT,
+                "Accept-Language": "en",
+            },
+            timeout=(10, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise ZillowMCPError(
+            f"Could not resolve the place at these coordinates: {exc}"
+        ) from exc
+    if not isinstance(data, dict) or data.get("error"):
+        raise ZillowMCPError(
+            "OpenStreetMap could not name the place at these coordinates."
+        )
+    address = data.get("address")
+    address = address if isinstance(address, dict) else {}
+
+    def first(*keys: str) -> str:
+        for key in keys:
+            value = str(address.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    city = first("city", "town", "village", "municipality", "county")
+    state = first("state")
+    state_code = first("ISO3166-2-lvl4")
+    if state_code.upper().startswith("US-"):
+        state_code = state_code[3:]
+    state_label = state_code or state
+    neighborhood = first("neighbourhood", "suburb", "quarter")
+    if not city or not state_label:
+        raise ZillowMCPError(
+            "OpenStreetMap could not resolve these coordinates to a "
+            "Zillow city and state."
+        )
+    pivot = f"{city}, {state_label}"
+    if neighborhood and neighborhood.casefold() != city.casefold():
+        region_name = f"{neighborhood}, {city}, {state_label}"
+        display_name = neighborhood
+    else:
+        region_name = pivot
+        display_name = city
+    result = {
+        "name": region_name,
+        "regionDisplayName": display_name,
+        "description": f"Nearby listings around {latitude:.5f}, {longitude:.5f}",
+        "pivot": pivot,
+        "city": city,
+        "state": state_label,
+    }
+    with _ZILLOW_REGION_CACHE_LOCK:
+        if len(_ZILLOW_REGION_CACHE) >= 200:
+            _ZILLOW_REGION_CACHE.pop(next(iter(_ZILLOW_REGION_CACHE)), None)
+        _ZILLOW_REGION_CACHE[cache_key] = (time.monotonic(), dict(result))
+    return result
+
+
+def _zillow_listing_records(payload: object) -> list[dict]:
+    """Flatten Zillow search results, including apartment groups."""
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list):
+        results = _mcp_collect_dicts(payload)
+    records: list[dict] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        result = item.get("result")
+        result = result if isinstance(result, dict) else item
+        is_group = str(item.get("type") or "").lower() == "group"
+        if is_group and isinstance(result.get("summary"), dict):
+            record = dict(result["summary"])
+        else:
+            record = dict(result)
+        record["_zillow_group"] = is_group
+        record["_zillow_home_url"] = str(
+            result.get("homeDetailsPageUrl") or record.get("homeDetailsPageUrl") or ""
+        ).strip()
+        records.append(record)
+    return records
+
+
+def _zillow_range_text(
+    value: object,
+    formatter: Callable[[float], str],
+    collapse_wide: bool = False,
+) -> str:
+    """Format a number or min/max range for display."""
+    if isinstance(value, dict):
+        minimum = _mcp_number(value.get("min"))
+        maximum = _mcp_number(value.get("max"))
+        if minimum is not None and maximum is not None:
+            if collapse_wide and maximum > minimum * 5:
+                return f"From {formatter(minimum)}"
+            if maximum == minimum:
+                return formatter(minimum)
+            return f"{formatter(minimum)}–{formatter(maximum)}"
+        if minimum is not None:
+            return formatter(minimum)
+        return ""
+    number = _mcp_number(value)
+    return formatter(number) if number is not None else ""
+
+
+def _zillow_format_address(record: dict) -> str:
+    address = record.get("formattedAddress")
+    if isinstance(address, dict):
+        line1 = " ".join(str(address.get("line1") or "").split())
+        line2 = " ".join(str(address.get("line2") or "").split())
+        if line1 and line2:
+            return f"{line1}, {line2}"
+        if line1 or line2:
+            return line1 or line2
+        city = " ".join(str(address.get("city") or "").split())
+        state = " ".join(str(address.get("stateOrProvince") or "").split())
+        postal = " ".join(str(address.get("postalCode") or "").split())
+        tail = " ".join(part for part in (state, postal) if part)
+        return ", ".join(part for part in (city, tail) if part)
+    direct = _mcp_field(
+        record, ("address", "fullAddress", "formattedAddressString")
+    )
+    return " ".join(str(direct or "").split())
+
+
+def _zillow_listing_item(record: dict, rental: bool) -> dict:
+    def range_min(value: object) -> float | None:
+        if isinstance(value, dict):
+            return _mcp_number(value.get("min"))
+        return _mcp_number(value)
+
+    price_value = record.get("price")
+    if isinstance(price_value, dict):
+        price_value = price_value.get("filteredPrice")
+    price_number = range_min(price_value)
+
+    def money(value: float) -> str:
+        return f"${value:,.0f}" + ("/mo" if rental else "")
+
+    price_text = _zillow_range_text(price_value, money, collapse_wide=True)
+    beds_text = _zillow_range_text(
+        record.get("bedroomCount"), lambda value: f"{value:g} bd"
+    )
+    baths_text = _zillow_range_text(
+        record.get("bathroomCount"), lambda value: f"{value:g} ba"
+    )
+    sqft_text = _zillow_range_text(
+        record.get("livingAreaSquareFeet"), lambda value: f"{value:,.0f} sqft"
+    )
+    title = " ".join(str(record.get("title") or "").split())
+    home_type = " ".join(str(record.get("homeType") or "").split())
+    if not home_type and record.get("_zillow_group"):
+        home_type = "Apartment building"
+    details = [
+        part
+        for part in (price_text, beds_text, baths_text, sqft_text, home_type, title)
+        if part
+    ]
+    summary = " · ".join(details)
+    address = _zillow_format_address(record)
+
+    geo = record.get("geoRegion")
+    geo = geo if isinstance(geo, dict) else {}
+    lat_long = geo.get("latLong")
+    lat_long = lat_long if isinstance(lat_long, dict) else {}
+    latitude = _mcp_number(lat_long.get("latitude"))
+    longitude = _mcp_number(lat_long.get("longitude"))
+
+    home_url = str(
+        record.get("_zillow_home_url") or record.get("homeDetailsPageUrl") or ""
+    ).strip()
+    zillow_url = home_url
+    if not zillow_url and address:
+        zillow_url = (
+            "https://www.zillow.com/homes/" + quote_plus(address) + "_rb/"
+        )
+    return {
+        "id": str(record.get("zpid") or record.get("id") or ""),
+        "address": address,
+        "title": title,
+        "price": price_number,
+        "price_text": price_text,
+        "bedrooms": range_min(record.get("bedroomCount")),
+        "bathrooms": range_min(record.get("bathroomCount")),
+        "square_footage": range_min(record.get("livingAreaSquareFeet")),
+        "property_type": home_type,
+        "status": str(
+            record.get("homeStatus") or record.get("listingStatus") or ""
+        ).strip(),
+        "listed_date": str(record.get("listDate") or "").strip(),
+        "days_on_market": _mcp_number(
+            record.get("daysOnZillow") or record.get("daysOnMarket")
+        ),
+        "latitude": latitude,
+        "longitude": longitude,
+        "summary": summary,
+        "zillow_url": zillow_url,
+    }
+
+
+def zillow_nearby_listings(
+    latitude: float,
+    longitude: float,
+    radius: float = ZILLOW_MCP_RADIUS_MILES,
+    limit: int = ZILLOW_MCP_LIMIT,
+) -> dict:
+    """Return nearby Zillow for-sale and rental listings for a coordinate."""
+    latitude = float(latitude)
+    longitude = float(longitude)
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        raise ValueError("Missing or invalid place coordinates")
+    radius = max(0.1, min(float(radius), 25.0))
+    limit = max(1, min(int(limit), 20))
+
+    cache_key = (round(latitude, 5), round(longitude, 5), round(radius, 2), limit)
+    now = time.monotonic()
+    with _ZILLOW_CACHE_LOCK:
+        cached = _ZILLOW_CACHE.get(cache_key)
+        if cached and now - cached[0] <= ZILLOW_MCP_CACHE_TTL_SECONDS:
+            return {
+                **cached[1],
+                "sale": [dict(item) for item in cached[1].get("sale", [])],
+                "rental": [dict(item) for item in cached[1].get("rental", [])],
+            }
+
+    region = _zillow_region_for_coordinate(latitude, longitude)
+    result = {
+        "configured": True,
+        "source": "Zillow",
+        "region": region["name"],
+        "latitude": latitude,
+        "longitude": longitude,
+        "radius": radius,
+        "limit": limit,
+        "sale": [],
+        "rental": [],
+        "sale_error": "",
+        "rental_error": "",
+    }
+    config = _zillow_mcp_config()
+    with _RobinhoodMCPClient(
+        config,
+        timeout=float(config.get("timeout") or ZILLOW_MCP_TIMEOUT),
+        label="Zillow",
+        error_type=ZillowMCPError,
+        setup_help=_zillow_mcp_setup_help,
+        allow_no_token=True,
+    ) as client:
+        tools = client.tools()
+        search_tool = _mcp_pick_tool(tools, ("zillow_property_search",))
+        if not search_tool:
+            available = ", ".join(
+                str(tool.get("name"))
+                for tool in tools[:20]
+                if tool.get("name")
+            )
+            raise ZillowMCPError(
+                "The Zillow MCP server has no property search tool. "
+                "Available tools: " + (available or "(none)")
+            )
+        for key, rental in (("sale", False), ("rental", True)):
+            try:
+                filters: dict = {
+                    "sortSelection": "nearby",
+                    "locationForNearbySort": {
+                        "latitude": latitude,
+                        "longitude": longitude,
+                    },
+                }
+                if rental:
+                    filters["homeStatuses"] = ["forRent"]
+                else:
+                    filters["forSaleListingStatuses"] = ["active"]
+                arguments = {
+                    "request": {
+                        "propertySearchRegionFiltersRequest": {
+                            "propertySearchRegions": [
+                                {
+                                    "name": region["name"],
+                                    "regionDisplayName": region[
+                                        "regionDisplayName"
+                                    ],
+                                    "description": region["description"],
+                                }
+                            ],
+                            "userSpecifiedPivotArea": region["pivot"],
+                        },
+                        "propertyFiltersRequest": filters,
+                        "displayLimit": max(limit * 4, 20),
+                    }
+                }
+                tool_result = client.call_tool(
+                    "zillow_property_search", arguments
+                )
+                payload, _raw_text = _mcp_result_payload(
+                    tool_result, ZillowMCPError
+                )
+                records = _zillow_listing_records(payload)
+                items: list[dict] = []
+                for record in records:
+                    item = _zillow_listing_item(record, rental)
+                    item_latitude = item.get("latitude")
+                    item_longitude = item.get("longitude")
+                    if item_latitude is None or item_longitude is None:
+                        continue
+                    distance = _haversine_miles(
+                        latitude,
+                        longitude,
+                        float(item_latitude),
+                        float(item_longitude),
+                    )
+                    if distance > radius:
+                        continue
+                    item["distance_miles"] = round(distance, 2)
+                    items.append(item)
+                items.sort(key=lambda item: item.get("distance_miles", 0.0))
+                result[key] = items[:limit]
+            except ZillowMCPError as exc:
+                result[f"{key}_error"] = str(exc)
+
+    if result["sale"] or result["rental"]:
+        with _ZILLOW_CACHE_LOCK:
+            _ZILLOW_CACHE[cache_key] = (time.monotonic(), dict(result))
+    return result
+
+
+def zillow_listings_report(
+    latitude: float,
+    longitude: float,
+    radius: float = ZILLOW_MCP_RADIUS_MILES,
+    limit: int = ZILLOW_MCP_LIMIT,
+) -> str:
+    """Render the /zillow report for one coordinate."""
+    result = zillow_nearby_listings(latitude, longitude, radius, limit)
+    lines = [
+        "Zillow · nearby listings",
+        f"Location: {result['latitude']:.5f}, {result['longitude']:.5f} "
+        f"· radius {result['radius']:.1f} mi",
+        f"Region: {result.get('region') or '(unknown)'}",
+        "",
+    ]
+    sections = (
+        ("Nearby Properties For Sale", "sale", "sale_error"),
+        ("Nearby Property For Rent", "rental", "rental_error"),
+    )
+    for heading, key, error_key in sections:
+        items = result.get(key) or []
+        lines.append(f"{heading} ({len(items)})")
+        if items:
+            for index, item in enumerate(items):
+                if index:
+                    lines.append("")
+                lines.append(
+                    "  "
+                    + (
+                        item.get("summary")
+                        or item.get("price_text")
+                        or "Listing"
+                    )
+                )
+                if item.get("address"):
+                    lines.append("    " + str(item["address"]))
+                extra = []
+                if item.get("distance_miles") is not None:
+                    extra.append(f"{item['distance_miles']:.2f} mi away")
+                if item.get("status"):
+                    extra.append(str(item["status"]))
+                if item.get("listed_date"):
+                    extra.append("listed " + str(item["listed_date"]))
+                if item.get("days_on_market") is not None:
+                    extra.append(f"{item['days_on_market']:g} days on Zillow")
+                if extra:
+                    lines.append("    " + " · ".join(extra))
+        elif result.get(error_key):
+            lines.append("  " + str(result[error_key]))
+        else:
+            lines.append("  No nearby listings found within the radius.")
+        lines.append("")
+    if not result["sale"] and not result["rental"]:
+        errors = [
+            str(result.get(key) or "").strip()
+            for key in ("sale_error", "rental_error")
+            if str(result.get(key) or "").strip()
+        ]
+        if errors:
+            lines.append("Errors: " + " | ".join(dict.fromkeys(errors)))
+    lines.append("Source: Zillow MCP")
     return "\n".join(lines)
 
 
@@ -8988,6 +9498,7 @@ COMMAND_ARGUMENTS = {
     "/tablelog",
     "/stock",
     "/robinhood",
+    "/zillow",
     "/medium",
     "/gutenberg",
     "/openlibrary",
@@ -19882,110 +20393,65 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"items": items})
             return
-        if path == "/api/game_nearby":
+        if path == "/api/game_place_properties":
             params = parse_qs(parsed.query)
             try:
                 latitude = float((params.get("lat") or [""])[0])
                 longitude = float((params.get("lon") or [""])[0])
             except (TypeError, ValueError):
-                self._send_error_json("Missing or invalid game coordinates", 400)
+                self._send_error_json(
+                    "Missing or invalid place coordinates", 400
+                )
                 return
             if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
-                self._send_error_json("Missing or invalid game coordinates", 400)
+                self._send_error_json(
+                    "Missing or invalid place coordinates", 400
+                )
                 return
             raw_radius = (params.get("radius") or [""])[0]
-            raw_limit = (params.get("limit") or [""])[0]
             try:
                 radius = (
-                    int(float(raw_radius))
+                    float(raw_radius)
                     if raw_radius
-                    else GAME_NEARBY_RADIUS_METERS
+                    else ZILLOW_MCP_RADIUS_MILES
                 )
             except (TypeError, ValueError):
-                radius = GAME_NEARBY_RADIUS_METERS
+                radius = ZILLOW_MCP_RADIUS_MILES
+            radius = max(0.1, min(radius, 25.0))
+            raw_limit = (params.get("limit") or [""])[0]
             try:
                 limit = (
-                    int(float(raw_limit))
-                    if raw_limit
-                    else GAME_NEARBY_LIMIT
+                    int(float(raw_limit)) if raw_limit else ZILLOW_MCP_LIMIT
                 )
             except (TypeError, ValueError):
-                limit = GAME_NEARBY_LIMIT
-            restaurant_radius = min(radius, 5_000)
-            cache_key = _game_nearby_cache_key(
-                latitude,
-                longitude,
-                radius,
-                limit,
-                GAME_NEARBY_RESTAURANT_LIMIT,
-            )
-            cached = cached_game_nearby(cache_key)
-            if cached is not None:
-                cached["cached"] = True
-                self._send_json(cached)
+                limit = ZILLOW_MCP_LIMIT
+            limit = max(1, min(limit, 20))
+            try:
+                result = zillow_nearby_listings(
+                    latitude, longitude, radius, limit
+                )
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
                 return
-            # The two Overpass queries used to share one failure path: if the
-            # place query raised, the endpoint returned 502 and the browser
-            # showed neither places nor restaurants. Run them independently and
-            # treat either group as useful on its own, then retry a failed side
-            # once sequentially before giving up.
-            places_failed = False
-            restaurants_failed = False
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                places_future = executor.submit(
-                    search_game_places, latitude, longitude, radius, limit
-                )
-                restaurants_future = executor.submit(
-                    search_nearby_restaurants,
-                    latitude,
-                    longitude,
-                    restaurant_radius,
-                    GAME_NEARBY_RESTAURANT_LIMIT,
-                )
-                try:
-                    items = places_future.result()
-                except Exception:
-                    items = []
-                    places_failed = True
-                try:
-                    restaurants = restaurants_future.result()
-                except Exception:
-                    restaurants = []
-                    restaurants_failed = True
-            if places_failed:
-                try:
-                    items = search_game_places(
-                        latitude, longitude, radius, limit
-                    )
-                    places_failed = False
-                except Exception:
-                    items = []
-            if restaurants_failed:
-                try:
-                    restaurants = search_nearby_restaurants(
-                        latitude,
-                        longitude,
-                        restaurant_radius,
-                        GAME_NEARBY_RESTAURANT_LIMIT,
-                    )
-                    restaurants_failed = False
-                except Exception:
-                    restaurants = []
-            payload = {"items": items, "restaurants": restaurants}
-            if not places_failed and not restaurants_failed:
-                store_game_nearby(cache_key, payload)
-            elif places_failed and restaurants_failed:
-                self._send_error_json(
-                    "OpenStreetMap nearby search is temporarily unavailable; "
-                    "please try again in a moment.",
-                    502,
+            except ZillowMCPError as exc:
+                message = str(exc)
+                self._send_json(
+                    {
+                        "configured": True,
+                        "source": "Zillow",
+                        "latitude": latitude,
+                        "longitude": longitude,
+                        "radius": radius,
+                        "limit": limit,
+                        "sale": [],
+                        "rental": [],
+                        "sale_error": message,
+                        "rental_error": message,
+                        "error": message,
+                    }
                 )
                 return
-            elif places_failed:
-                payload["places_unavailable"] = True
-            elif restaurants_failed:
-                payload["restaurants_unavailable"] = True
-            self._send_json(payload)
+            self._send_json(result)
             return
         if path == "/api/game_place_news":
             params = parse_qs(parsed.query)
@@ -22415,6 +22881,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_stock(argument)
         elif name == "/robinhood":
             self._command_robinhood(argument)
+        elif name == "/zillow":
+            self._command_zillow(argument)
         elif name == "/wikivoyage":
             self._command_wikivoyage(argument)
         elif name == "/map":
@@ -25617,6 +26085,59 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             report = robinhood_holdings_report(symbol)
         except RobinhoodMCPError as exc:
             self._sse("error", {"message": f"\n/robinhood: {exc}\n"})
+            return
+        self._sse_text("output", "\n" + report + "\n")
+
+    def _command_zillow(self, argument: str) -> None:
+        """Show nearby for-sale and rental listings from Zillow's MCP.
+
+        Usage: /zillow <latitude,longitude> [radius_miles]
+        The official Zillow MCP server accepts named regions. The command
+        reverse-geocodes the coordinate to a city/neighborhood, requests
+        nearby-sorted for-sale and rental searches, then filters the returned
+        listings by exact Haversine distance. No account or API key is needed.
+        """
+        parts = [part for part in re.split(r"[\s,]+", argument.strip()) if part]
+        if len(parts) < 2:
+            self._sse_text(
+                "output",
+                "\nUsage: /zillow <latitude,longitude> [radius_miles]\n"
+                "Example: /zillow 37.7749,-122.4194 1\n"
+                "Uses the official Zillow MCP server; no account or API key "
+                "is needed.\n",
+            )
+            return
+        try:
+            latitude = float(parts[0])
+            longitude = float(parts[1])
+            radius = (
+                float(parts[2])
+                if len(parts) >= 3
+                else ZILLOW_MCP_RADIUS_MILES
+            )
+        except ValueError:
+            self._sse_text(
+                "output",
+                "\n/zillow: latitude, longitude, and radius must be numbers.\n",
+            )
+            return
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+            self._sse_text(
+                "output", "\n/zillow: invalid latitude or longitude.\n"
+            )
+            return
+        self._sse_text(
+            "log",
+            f"[zillow: searching Zillow around {latitude:.5f}, "
+            f"{longitude:.5f} within {radius:g} mile(s)]",
+        )
+        try:
+            report = zillow_listings_report(latitude, longitude, radius)
+        except ValueError as exc:
+            self._sse_text("output", f"\n/zillow: {exc}\n")
+            return
+        except ZillowMCPError as exc:
+            self._sse_text("output", f"\n/zillow: {exc}\n")
             return
         self._sse_text("output", "\n" + report + "\n")
 
