@@ -20453,6 +20453,108 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(result)
             return
+        if path == "/api/game_nearby":
+            params = parse_qs(parsed.query)
+            try:
+                latitude = float((params.get("lat") or [""])[0])
+                longitude = float((params.get("lon") or [""])[0])
+            except (TypeError, ValueError):
+                self._send_error_json("Missing or invalid game coordinates", 400)
+                return
+            if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+                self._send_error_json("Missing or invalid game coordinates", 400)
+                return
+            raw_radius = (params.get("radius") or [""])[0]
+            raw_limit = (params.get("limit") or [""])[0]
+            try:
+                radius = (
+                    int(float(raw_radius))
+                    if raw_radius
+                    else GAME_NEARBY_RADIUS_METERS
+                )
+            except (TypeError, ValueError):
+                radius = GAME_NEARBY_RADIUS_METERS
+            try:
+                limit = (
+                    int(float(raw_limit))
+                    if raw_limit
+                    else GAME_NEARBY_LIMIT
+                )
+            except (TypeError, ValueError):
+                limit = GAME_NEARBY_LIMIT
+            restaurant_radius = min(radius, 5_000)
+            cache_key = _game_nearby_cache_key(
+                latitude,
+                longitude,
+                radius,
+                limit,
+                GAME_NEARBY_RESTAURANT_LIMIT,
+            )
+            cached = cached_game_nearby(cache_key)
+            if cached is not None:
+                cached["cached"] = True
+                self._send_json(cached)
+                return
+            # Run places and restaurants independently so one Overpass failure
+            # does not hide the other result group.
+            places_failed = False
+            restaurants_failed = False
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                places_future = executor.submit(
+                    search_game_places, latitude, longitude, radius, limit
+                )
+                restaurants_future = executor.submit(
+                    search_nearby_restaurants,
+                    latitude,
+                    longitude,
+                    restaurant_radius,
+                    GAME_NEARBY_RESTAURANT_LIMIT,
+                )
+                try:
+                    items = places_future.result()
+                except Exception:
+                    items = []
+                    places_failed = True
+                try:
+                    restaurants = restaurants_future.result()
+                except Exception:
+                    restaurants = []
+                    restaurants_failed = True
+            if places_failed:
+                try:
+                    items = search_game_places(
+                        latitude, longitude, radius, limit
+                    )
+                    places_failed = False
+                except Exception:
+                    items = []
+            if restaurants_failed:
+                try:
+                    restaurants = search_nearby_restaurants(
+                        latitude,
+                        longitude,
+                        restaurant_radius,
+                        GAME_NEARBY_RESTAURANT_LIMIT,
+                    )
+                    restaurants_failed = False
+                except Exception:
+                    restaurants = []
+            payload = {"items": items, "restaurants": restaurants}
+            if not places_failed and not restaurants_failed:
+                store_game_nearby(cache_key, payload)
+            elif places_failed and restaurants_failed:
+                self._send_error_json(
+                    "OpenStreetMap nearby search is temporarily unavailable; "
+                    "please try again in a moment.",
+                    502,
+                )
+                return
+            elif places_failed:
+                payload["places_unavailable"] = True
+            elif restaurants_failed:
+                payload["restaurants_unavailable"] = True
+            self._send_json(payload)
+            return
         if path == "/api/game_place_news":
             params = parse_qs(parsed.query)
             try:
