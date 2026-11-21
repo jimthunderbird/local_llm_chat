@@ -8,6 +8,10 @@ question_llm: ornith-1.5:35b
 
 group unit_tests {
   task (completed) {
+    the In Network or Out of Network information should show in the list of results
+  }
+
+  task (completed) {
     when i click on Johannes Kratz, MD:
     expect: in "Education & Training" and "Awards & Recognition", it should have good information
     actural: Not found in the retrieved public records
@@ -46,6 +50,10 @@ group unit_tests {
 }
 
 group application {
+  task.feature.in_network_confirmation (completed) {
+    for each doctor or provider in the result list, please add a flag to mention if the provider is in Anthem PPO Plan
+  }
+
   task.feature.follow_up_question_on_doctor (completed) {
     - type: /anthem
     - type "find list of lung cancer specialists only in ucsf"

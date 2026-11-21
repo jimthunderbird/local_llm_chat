@@ -7644,6 +7644,9 @@ function makeNewsItem(entry, data) {
     source: data.source || entry.newsSource || "News",
     section: data.section || "",
     academicTitle: String(data.academic_title || ""),
+    anthemPpo: String(data.anthem_ppo || ""),
+    anthemPpoLabel: String(data.anthem_ppo_label || ""),
+    anthemPpoFlag: String(data.anthem_ppo_flag || ""),
     npi: String(data.npi || ""),
     institution: String(data.institution || ""),
     providerSpecialty: String(data.specialty || ""),
@@ -8560,6 +8563,9 @@ function renderNewsList(entry) {
       const meta = document.createElement("div");
       meta.className = "news-meta";
       const metaParts = [];
+      if (item.anthemPpoLabel) {
+        metaParts.push(item.anthemPpoLabel);
+      }
       if (item.academicTitle) {
         metaParts.push(`Academic title: ${item.academicTitle}`);
       }
