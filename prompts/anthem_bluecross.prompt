@@ -1,0 +1,52 @@
+knowledge {
+  anthem {
+    Anthem's Underlying Provider Directory FHIR APIAnthem serves its public Provider Directory API via Elevance Health's totalview.healthos.elevancehealth.com gateway (documented at [anthem.com/developers](https://anthem.com/developers) and [totalview.healthos.elevancehealth.com/fhir/documentation](https://totalview.healthos.elevancehealth.com/fhir/documentation)):Base Endpoint Pattern: [https://totalview.healthos.elevancehealth.com/resources/registered/](https://totalview.healthos.elevancehealth.com/resources/registered/){Brand}/api/v1/fhir (where {Brand} corresponds to the regional/plan brand such as AnthemBlueCross or Anthem)Authentication: None required for the public Provider Directory endpoints (unlike the Patient Access API, which requires SMART on FHIR / OAuth 2.0).   Supported FHIR Resources for Doctor Search:Practitioner — Search by name, family, given, or identifier (NPI).   PractitionerRole — Links a doctor to their specialty, location, organization, and network.   Location — Search by address, city, state, or postal code.   Organization & InsurancePlan — Filter by hospital/clinic group and specific Anthem plan network.   
+  }
+}
+
+question_llm: ornith-1.5:35b
+
+group unit_tests {
+  task (completed) {
+    question: pediatric otolaryngology in UCSF
+    expect: the provider's name (such as doctor's name) should appear
+    actual: doctor's name is not presented
+  }
+}
+
+group application {
+  task.feature.show_providers_result_instantly (completed) {
+    - currrently, when presenting list of results, it uses {question_llm} to generate the list
+      DO NOT do that, instead, just use related apis or mcps to give me the result ASAP 
+  }
+
+  task.feature.provider_detail_modal (completed) {
+    each one of the provider's result should be an url, when clicked {
+      - open up a modal, similar to the /article command's article loader
+      - the modal should {
+        - show the provider's detail, for example if it's a doctor, show his or her background introduction, research interest, education background, awards...etc
+      }
+    }  
+  }
+
+  task.initial_spec (completed) {
+
+    create command: /anthem <question> {
+      logic.question(<question>) {
+        - a specific doctor's name
+        - a specific doctor's name in a specific medical facility (hospital, clinics, lab.. etc)
+        - a list of doctors in a specific specialty (head and neck, lung, heart...)
+        - a list of doctors in a specific hospital, medical university (UCSF, Standford, MD Anderson... etc)
+
+        requirement:
+        - it should use {question_llm} 
+        - it should allow follow up questions and maintain question to question context similar to the main chat
+      }
+      - if <question> is presented, it should allow me to search:
+      perform logic.question(<question>)
+      - if <question> is not presented:
+      - clear all existing accumulated context in the chat
+      - perform logic.question(<question>)
+    }
+  }
+}

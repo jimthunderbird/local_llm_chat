@@ -7686,6 +7686,7 @@ function addNewsEvent(entry, data) {
   const type = String(data.type || "");
   if (data.ai_news_podcast) entry.aiNewsPodcast = true;
   if (type === "start") {
+    if (data.reset) entry.newsItems = [];
     entry.newsSource = data.source || "News";
     entry.newsDescription = String(data.description || "");
     entry.newsFeed = data.feed || "";
@@ -18394,10 +18395,16 @@ function submitText(text, fromChoice = false) {
     && !["on", "start", "enable", "enabled", "off", "stop", "disable", "disabled"].includes(
       String(commandArgs[0] || "").toLowerCase()
     );
+  const anthemAnswer = commandName === "anthem"
+    && commandArgs.length > 0
+    && !["on", "start", "enable", "enabled", "off", "stop", "disable", "disabled"].includes(
+      String(commandArgs[0] || "").toLowerCase()
+    );
   const entry = makeEntry(isCommand ? "command" : "assistant", {
     clickable: !isCommand
       || commandName === "ask"
-      || researchWithNewsAnswer,
+      || researchWithNewsAnswer
+      || anthemAnswer,
     language: appState?.code_language || "",
     wikiArticle: commandName === "wiki_article",
     label: image

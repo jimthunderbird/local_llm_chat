@@ -361,6 +361,7 @@ WEB_COMMANDS = {
     "/zillow": "show nearby for-sale and rental listings from Zillow's official MCP server: /zillow <latitude,longitude> [radius_miles]",
     "/deepresearch": "run a bounded multi-round research report on <topic>: /deepresearch <topic>",
     "/research_with_the_news": "research a topic from recent news, Wikipedia, or a doctor's hospital website, then keep doing so for each follow-up: /research_with_the_news <topic>; /research_with_the_news on; /research_with_the_news off",
+    "/anthem": "search the Anthem Provider Directory for doctors by name, specialty, hospital, or location; each result opens a provider profile; follow-up questions keep the provider context: /anthem <question>; /anthem off",
     "/write_a_book": "ask for every book setting (model, directory, words, chapters, sub-questions, articles per sub-question), then research recent news and write a book: /write_a_book [<subject>]",
     "/books": "list the books written by /write_a_book in .chat/books: /books [keyword]",
     "/settings": "set English Corner options: /settings english_words_to_learn <range> (3k, 5k, 10k, 20k, 30k, 50k, 100k, or a range such as 10k..50k; default 10k..50k; off disables highlighting)",
@@ -9506,6 +9507,7 @@ COMMAND_ARGUMENTS = {
     "/stackoverflow",
     "/deepresearch",
     "/research_with_the_news",
+    "/anthem",
     "/write_a_book",
     "/settings",
 }
@@ -19166,6 +19168,2747 @@ def ensure_gutenberg_book(
         return text, rag_path
 
 
+# ---------------------------------------------------------------------------
+# /anthem -- Anthem/Elevance Provider Directory FHIR search
+# ---------------------------------------------------------------------------
+#
+# The public Provider Directory base below is the shared Elevance endpoint
+# documented for CMS-mandated provider-directory access.  A registered app can
+# set ANTHEM_FHIR_BASE_URL (or ANTHEM_FHIR_TOKEN / ANTHEM_FHIR_TOKEN_URL) to
+# use a brand-specific registered endpoint instead.  The public shared endpoint
+# has been returning HTTP 500 for resource searches, so the command keeps a
+# CMS NPPES fallback: it can still identify doctors, specialties, and practice
+# addresses, but it cannot claim Anthem network participation.
+
+ANTHEM_FHIR_PUBLIC_BASE = os.environ.get(
+    "ANTHEM_FHIR_BASE_URL",
+    "https://totalview.healthos.elevancehealth.com/resources/unregistered/"
+    "api/v1/fhir/cms_mandate/mcd",
+).rstrip("/")
+ANTHEM_FHIR_BRAND = os.environ.get("ANTHEM_FHIR_BRAND", "AnthemBlueCross")
+ANTHEM_FHIR_REGISTERED_BASE = os.environ.get(
+    "ANTHEM_FHIR_REGISTERED_BASE_URL",
+    "https://totalview.healthos.elevancehealth.com/resources/registered/"
+    f"{ANTHEM_FHIR_BRAND}/api/v1/fhir",
+).rstrip("/")
+ANTHEM_FHIR_TOKEN_URL = os.environ.get("ANTHEM_FHIR_TOKEN_URL", "").strip()
+ANTHEM_FHIR_CLIENT_ID = os.environ.get("ANTHEM_FHIR_CLIENT_ID", "").strip()
+ANTHEM_FHIR_CLIENT_SECRET = os.environ.get(
+    "ANTHEM_FHIR_CLIENT_SECRET", ""
+).strip()
+ANTHEM_NPPES_URL = "https://npiregistry.cms.hhs.gov/api/"
+ANTHEM_MODEL = os.environ.get("OLLAMA_ANTHEM_MODEL", "ornith-1.5:35b")
+ANTHEM_MAX_PROVIDERS = 12
+ANTHEM_CONTEXT_CHARS = 20000
+
+# NPPES taxonomy search matches the official taxonomy description, not the
+# everyday specialty word a patient uses. Keep a small bridge for the common
+# requests so "cardiologist" does not come back empty just because the
+# registry calls the specialty "Cardiovascular Disease".
+_NPPES_TAXONOMY_ALIASES = {
+    "cardiology": "Cardiovascular Disease",
+    "cardiologist": "Cardiovascular Disease",
+    "heart": "Cardiovascular Disease",
+    "pulmonology": "Pulmonary Disease",
+    "pulmonologist": "Pulmonary Disease",
+    "lung": "Pulmonary Disease",
+    "head and neck": "Otolaryngology",
+    "ent": "Otolaryngology",
+    "ear nose and throat": "Otolaryngology",
+    "orthopedics": "Orthopaedic Surgery",
+    "orthopedic": "Orthopaedic Surgery",
+    "dermatology": "Dermatology",
+    "neurology": "Neurology",
+    "oncologist": "Medical Oncology",
+    "oncology": "Medical Oncology",
+    "pediatrician": "Pediatrics",
+    "pediatrics": "Pediatrics",
+    "urologist": "Urology",
+    "urology": "Urology",
+    "surgeon": "Surgery",
+    "surgery": "Surgery",
+}
+
+# NUCC provider-taxonomy codes used by Plan-Net ProviderRole.specialty.
+# Trying a code search first is more reliable than sending a free-text word to
+# a FHIR token search parameter.
+_ANTHEM_FHIR_SPECIALTY_CODES = {
+    "cardiology": "207RC0000X",
+    "cardiologist": "207RC0000X",
+    "heart": "207RC0000X",
+    "dermatology": "207N00000X",
+    "neurology": "2084N0400X",
+    "medical oncology": "207QX0050X",
+    "oncologist": "207QX0050X",
+    "oncology": "207QX0050X",
+    "otolaryngology": "207Y00000X",
+    "head and neck": "207Y00000X",
+    "orthopaedic surgery": "207X00000X",
+    "orthopedics": "207X00000X",
+    "pediatrics": "208000000X",
+    "pediatrician": "208000000X",
+    "pulmonary disease": "207RP1001X",
+    "pulmonology": "207RP1001X",
+    "lung": "207RP1001X",
+    "surgery": "208600000X",
+    "surgeon": "208600000X",
+    "urology": "208800000X",
+    "urologist": "208800000X",
+}
+
+ANTHEM_PLAN_PROMPT = """You extract search parameters for the Anthem Provider Directory.
+Return only one JSON object, with no prose and no markdown fences.
+
+Fields:
+- "doctor_name": a specific doctor's full name, or an empty string.
+- "specialty": a medical specialty, such as "cardiology", "head and neck", or "lung", or an empty string.
+- "facility": a hospital, clinic, lab, medical group, or medical school name, or an empty string.
+- "location": a city, state, ZIP code, or street address, or an empty string.
+- "plan": an Anthem plan or network name if the user names one, or an empty string.
+- "keywords": any remaining useful search words, or an empty string.
+
+Rules:
+- Use the earlier conversation to resolve follow-up references such as "him", "her", "there", or "that hospital".
+- If the user asks for a doctor by name, put the full name in doctor_name.
+- If the user asks for doctors in a specialty, put the specialty in specialty.
+- Preserve the user's exact specialty wording. For example, "pediatric otolaryngology" must stay "pediatric otolaryngology"; do not replace it with a broader category such as "head and neck".
+- If the user asks for doctors at a hospital or clinic, put its name in facility. Do not also copy that facility into location unless the user separately gave a city or state.
+- Put qualifiers such as "pediatric", "adult", or "interventional" in specialty when they describe the specialty, not in keywords.
+- Do not invent a doctor, facility, specialty, or location that the user did not mention or imply.
+- A question such as "find cardiologists in San Francisco" should produce specialty=cardiology and location=San Francisco.
+
+<conversation>
+{{CONVERSATION}}
+</conversation>
+
+<question>
+{{QUESTION}}
+</question>
+
+JSON:
+"""
+
+ANTHEM_PROVIDER_PROFILE_PROMPT = """You are preparing a concise provider profile for a patient.
+
+<verified_directory_facts>
+{{FACTS}}
+</verified_directory_facts>
+
+<publications>
+{{PUBLICATIONS}}
+</publications>
+
+<institution_profile>
+{{PROFILE_PAGE}}
+</institution_profile>
+
+Return only one JSON object with these keys:
+- "background": a 2-4 sentence introduction to the provider.
+- "research_interests": the provider's research interests, based on the publication list and institution profile when available.
+- "education": education and training.
+- "awards": awards, board certifications, and recognition.
+- "clinical_focus": the provider's clinical focus.
+
+Rules:
+- The verified directory facts are authoritative for name, NPI, specialty, address, phone, status, and publication list.
+- If an institution profile is provided, prefer it for background, research interests, education, awards, and clinical focus. Summarize it accurately; do not copy it verbatim.
+- If the institution profile lists education or training, include it in "education".
+- If the institution profile lists board certifications, licenses, awards, or honors, include them in "awards".
+- Use the publication titles to describe research interests when they are available.
+- For education and awards, use only details found in the institution profile or details you are confident are public. If you are not confident, write exactly "Not found in the retrieved public records."
+- Do not invent publications, degrees, dates, awards, or affiliations.
+- Do not add a sources section; the application adds one.
+- Keep each section to 1-3 sentences.
+
+JSON:
+"""
+
+_ANTHEM_TOKEN_LOCK = threading.Lock()
+_ANTHEM_TOKEN_CACHE: dict[str, object] = {
+    "value": "",
+    "expires_at": 0.0,
+}
+_ANTHEM_PROVIDER_DETAIL_LOCK = threading.Lock()
+_ANTHEM_PROVIDER_DETAIL_CACHE: dict[str, dict] = {}
+_PUBMED_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+
+_US_STATE_NAMES = {
+    "alabama": "AL",
+    "alaska": "AK",
+    "arizona": "AZ",
+    "arkansas": "AR",
+    "california": "CA",
+    "colorado": "CO",
+    "connecticut": "CT",
+    "delaware": "DE",
+    "florida": "FL",
+    "georgia": "GA",
+    "hawaii": "HI",
+    "idaho": "ID",
+    "illinois": "IL",
+    "indiana": "IN",
+    "iowa": "IA",
+    "kansas": "KS",
+    "kentucky": "KY",
+    "louisiana": "LA",
+    "maine": "ME",
+    "maryland": "MD",
+    "massachusetts": "MA",
+    "michigan": "MI",
+    "minnesota": "MN",
+    "mississippi": "MS",
+    "missouri": "MO",
+    "montana": "MT",
+    "nebraska": "NE",
+    "nevada": "NV",
+    "new hampshire": "NH",
+    "new jersey": "NJ",
+    "new mexico": "NM",
+    "new york": "NY",
+    "north carolina": "NC",
+    "north dakota": "ND",
+    "ohio": "OH",
+    "oklahoma": "OK",
+    "oregon": "OR",
+    "pennsylvania": "PA",
+    "rhode island": "RI",
+    "south carolina": "SC",
+    "south dakota": "SD",
+    "tennessee": "TN",
+    "texas": "TX",
+    "utah": "UT",
+    "vermont": "VT",
+    "virginia": "VA",
+    "washington": "WA",
+    "west virginia": "WV",
+    "wisconsin": "WI",
+    "wyoming": "WY",
+    "district of columbia": "DC",
+}
+
+
+class AnthemFHIRError(RuntimeError):
+    """A provider-directory request failed before usable records arrived."""
+
+    def __init__(
+        self, message: str, status: int = 0, url: str = ""
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.url = url
+
+
+def _anthem_access_token() -> str:
+    """Return an OAuth bearer token for a registered Anthem FHIR app."""
+    token = os.environ.get("ANTHEM_FHIR_TOKEN", "").strip()
+    if token:
+        return token
+    if not (
+        ANTHEM_FHIR_TOKEN_URL
+        and ANTHEM_FHIR_CLIENT_ID
+        and ANTHEM_FHIR_CLIENT_SECRET
+    ):
+        return ""
+    with _ANTHEM_TOKEN_LOCK:
+        cached = str(_ANTHEM_TOKEN_CACHE.get("value") or "")
+        expires_at = float(_ANTHEM_TOKEN_CACHE.get("expires_at") or 0.0)
+        if cached and expires_at > time.time() + 60:
+            return cached
+        try:
+            response = requests.post(
+                ANTHEM_FHIR_TOKEN_URL,
+                data={"grant_type": "client_credentials"},
+                auth=(
+                    ANTHEM_FHIR_CLIENT_ID,
+                    ANTHEM_FHIR_CLIENT_SECRET,
+                ),
+                headers={"Accept": "application/json"},
+                timeout=(10, 30),
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError):
+            return ""
+        value = str(data.get("access_token") or "").strip()
+        if not value:
+            return ""
+        try:
+            expires_in = int(data.get("expires_in") or 3600)
+        except (TypeError, ValueError):
+            expires_in = 3600
+        _ANTHEM_TOKEN_CACHE["value"] = value
+        _ANTHEM_TOKEN_CACHE["expires_at"] = time.time() + expires_in
+        return value
+
+
+def _anthem_fhir_bases() -> list[tuple[str, str]]:
+    """Return candidate FHIR base URLs, most specific first."""
+    override = os.environ.get("ANTHEM_FHIR_BASE_URL", "").strip()
+    if override:
+        return [("configured", override.rstrip("/"))]
+    bases: list[tuple[str, str]] = []
+    if _anthem_access_token():
+        bases.append(
+            (
+                "registered " + ANTHEM_FHIR_BRAND,
+                ANTHEM_FHIR_REGISTERED_BASE,
+            )
+        )
+    bases.append(("public", ANTHEM_FHIR_PUBLIC_BASE))
+    return bases
+
+
+def _anthem_json_object(raw: str) -> dict:
+    """Parse a JSON object from a model reply, tolerating fences/prose."""
+    text = str(raw or "").strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+    candidates = [text]
+    start, end = text.find("{"), text.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(text[start : end + 1])
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def _anthem_split_name(name: str) -> tuple[str, str]:
+    """Split a person name into given and family parts for NPPES."""
+    value = str(name or "")
+    value = re.sub(
+        r"\b(?:M\.?\s?D\.?|D\.?\s?O\.?|P\.?\s?h\.?\s?D\.?|"
+        r"M\.?\s?P\.?\s?H\.?|M\.?\s?S\.?|M\.?\s?A\.?|"
+        r"R\.?\s?N\.?|N\.?\s?P\.?|P\.?\s?A\.?-?C\.?|"
+        r"F\.?\s?A\.?\s?C\.?\s?P\.?|F\.?\s?A\.?\s?C\.?\s?S\.?|"
+        r"Inc\.?|LLC|Ltd\.?)\b\.?",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"^\s*(?:dr\.?|doctor)\s+", "", value, flags=re.IGNORECASE
+    )
+    value = re.sub(r"^[\s,]+", "", value)
+    value = re.sub(r"[\s,]+$", "", value)
+    value = " ".join(value.replace(",", " , ").split())
+    if not value:
+        return "", ""
+    if " , " in value:
+        family, given = value.split(" , ", 1)
+        return given.strip(" ,"), family.strip(" ,")
+    parts = [part for part in value.split() if part]
+    if len(parts) == 1:
+        return "", parts[0]
+    return " ".join(parts[:-1]), parts[-1]
+
+
+def _anthem_parse_location(location: str) -> tuple[str, str, str]:
+    """Return (city, state, postal code) from a free-form location string."""
+    text = " ".join(str(location or "").split())
+    if not text:
+        return "", "", ""
+    postal = ""
+    match = re.search(r"\b(\d{5}(?:-\d{4})?)\b", text)
+    if match:
+        postal = match.group(1)
+        text = (text[: match.start()] + " " + text[match.end() :]).strip()
+    state = ""
+    lower = text.casefold()
+    for full, abbreviation in _US_STATE_NAMES.items():
+        if re.search(rf"\b{re.escape(full)}\b", lower):
+            state = abbreviation
+            text = re.sub(
+                rf"\b{re.escape(full)}\b",
+                " ",
+                text,
+                flags=re.IGNORECASE,
+            ).strip()
+            break
+    if not state:
+        match = re.search(r"(?:,\s*|\b)([A-Z]{2})\s*$", text)
+        if match:
+            candidate = match.group(1).upper()
+            if candidate in set(_US_STATE_NAMES.values()):
+                state = candidate
+                text = text[: match.start()].strip()
+    city = text.strip(" ,")
+    return city, state, postal
+
+
+def _anthem_clean_plan(data: dict, question: str) -> dict[str, str]:
+    """Normalize the model's search plan and fill harmless defaults."""
+    keys = (
+        "doctor_name",
+        "specialty",
+        "facility",
+        "location",
+        "plan",
+        "keywords",
+    )
+    plan = {
+        key: " ".join(str(data.get(key, "") or "").split()) for key in keys
+    }
+    plan["doctor_name"] = re.sub(
+        r"^\s*(?:dr\.?|doctor)\s+",
+        "",
+        plan["doctor_name"],
+        flags=re.IGNORECASE,
+    )
+    if not any(
+        plan[key]
+        for key in ("doctor_name", "specialty", "facility", "location")
+    ):
+        plan["keywords"] = plan["keywords"] or question
+    return plan
+
+
+def _anthem_plan_fallback(question: str) -> dict[str, str]:
+    """A small deterministic plan used when the planning model is unavailable."""
+    plan = {key: "" for key in (
+        "doctor_name",
+        "specialty",
+        "facility",
+        "location",
+        "plan",
+        "keywords",
+    )}
+    match = re.search(
+        r"\b(?:dr\.?|doctor)\s+([A-Z][A-Za-z'.-]+"
+        r"(?:\s+[A-Z][A-Za-z'.-]+){0,3})",
+        question,
+    )
+    if match:
+        plan["doctor_name"] = match.group(1)
+    specialties = {
+        "cardiologist": "Cardiology",
+        "cardiology": "Cardiology",
+        "dermatologist": "Dermatology",
+        "dermatology": "Dermatology",
+        "neurologist": "Neurology",
+        "neurology": "Neurology",
+        "oncologist": "Oncology",
+        "oncology": "Oncology",
+        "pediatrician": "Pediatrics",
+        "pediatrics": "Pediatrics",
+        "surgeon": "Surgery",
+        "surgery": "Surgery",
+        "urologist": "Urology",
+        "urology": "Urology",
+        "head and neck": "Head and Neck",
+        "lung": "Pulmonology",
+        "heart": "Cardiology",
+    }
+    lower = question.casefold()
+    for term, canonical in specialties.items():
+        if term in lower:
+            plan["specialty"] = canonical
+            break
+    match = re.search(
+        r"\b(?:in|near|around)\s+([A-Z][A-Za-z .'-]+"
+        r"(?:,\s*[A-Z]{2})?)",
+        question,
+    )
+    if match:
+        plan["location"] = match.group(1).strip(" ,.")
+    if not any(
+        plan[key]
+        for key in ("doctor_name", "specialty", "facility", "location")
+    ):
+        plan["keywords"] = question
+    return plan
+
+
+_ANTHEM_SPECIALTY_PHRASES = [
+    ("pediatric otolaryngology", "pediatric otolaryngology"),
+    ("paediatric otolaryngology", "pediatric otolaryngology"),
+    ("pediatric cardiology", "pediatric cardiology"),
+    ("interventional cardiology", "Interventional Cardiology"),
+    (
+        "advanced heart failure",
+        "Advanced Heart Failure and Transplant Cardiology",
+    ),
+    ("head and neck", "head and neck"),
+    ("ear nose and throat", "Otolaryngology"),
+    ("otolaryngology", "Otolaryngology"),
+    ("otorhinolaryngology", "Otolaryngology"),
+    ("ent", "Otolaryngology"),
+    ("cardiology", "Cardiology"),
+    ("cardiologist", "Cardiology"),
+    ("heart", "Cardiology"),
+    ("pulmonology", "Pulmonology"),
+    ("pulmonologist", "Pulmonology"),
+    ("lung", "Pulmonology"),
+    ("dermatology", "Dermatology"),
+    ("dermatologist", "Dermatology"),
+    ("neurology", "Neurology"),
+    ("neurologist", "Neurology"),
+    ("oncology", "Oncology"),
+    ("oncologist", "Oncology"),
+    ("pediatrics", "Pediatrics"),
+    ("pediatrician", "Pediatrics"),
+    ("pediatric", "Pediatrics"),
+    ("urology", "Urology"),
+    ("urologist", "Urology"),
+    ("orthopedics", "Orthopedics"),
+    ("orthopedic", "Orthopedics"),
+    ("gastroenterology", "Gastroenterology"),
+    ("gastroenterologist", "Gastroenterology"),
+    ("endocrinology", "Endocrinology"),
+    ("endocrinologist", "Endocrinology"),
+    ("psychiatry", "Psychiatry"),
+    ("psychiatrist", "Psychiatry"),
+    ("ophthalmology", "Ophthalmology"),
+    ("ophthalmologist", "Ophthalmology"),
+    ("obstetrics", "Obstetrics"),
+    ("gynecology", "Gynecology"),
+    ("anesthesiology", "Anesthesiology"),
+    ("radiology", "Radiology"),
+    ("pathology", "Pathology"),
+    ("family medicine", "Family Medicine"),
+    ("internal medicine", "Internal Medicine"),
+    ("infectious disease", "Infectious Disease"),
+    ("immunology", "Immunology"),
+    ("rheumatology", "Rheumatology"),
+    ("nephrology", "Nephrology"),
+    ("hematology", "Hematology"),
+    ("emergency medicine", "Emergency Medicine"),
+    ("physical therapy", "Physical Therapy"),
+    ("chiropractic", "Chiropractic"),
+    ("dentistry", "Dentistry"),
+    ("podiatry", "Podiatry"),
+    ("surgery", "Surgery"),
+    ("surgeon", "Surgery"),
+    ("vascular", "Vascular Surgery"),
+]
+_ANTHEM_SPECIALTY_PHRASES.sort(
+    key=lambda item: len(item[0]), reverse=True
+)
+
+_ANTHEM_FACILITY_NAMES = [
+    ("ucsf benioff children's", "UCSF Benioff Children's"),
+    ("ucsf benioff childrens", "UCSF Benioff Children's"),
+    ("university of california san francisco", "UCSF"),
+    ("stanford health care", "Stanford Health Care"),
+    ("massachusetts general", "Massachusetts General"),
+    ("brigham and women's", "Brigham and Women's"),
+    ("brigham and womens", "Brigham and Women's"),
+    ("memorial sloan kettering", "Memorial Sloan Kettering"),
+    ("johns hopkins", "Johns Hopkins"),
+    ("cleveland clinic", "Cleveland Clinic"),
+    ("mayo clinic", "Mayo Clinic"),
+    ("md anderson", "MD Anderson"),
+    ("kaiser permanente", "Kaiser Permanente"),
+    ("cedars-sinai", "Cedars-Sinai"),
+    ("cedars sinai", "Cedars-Sinai"),
+    ("mount sinai", "Mount Sinai"),
+    ("nyu langone", "NYU Langone"),
+    ("dana-farber", "Dana-Farber"),
+    ("dana farber", "Dana-Farber"),
+    ("city of hope", "City of Hope"),
+    ("sutter health", "Sutter Health"),
+    ("dignity health", "Dignity Health"),
+    ("children's hospital", "Children's Hospital"),
+    ("childrens hospital", "Children's Hospital"),
+    ("ucsf", "UCSF"),
+    ("stanford", "Stanford"),
+    ("providence", "Providence"),
+    ("scripps", "Scripps"),
+    ("sharp", "Sharp"),
+]
+_ANTHEM_FACILITY_NAMES.sort(
+    key=lambda item: len(item[0]), reverse=True
+)
+
+_ANTHEM_CITY_STATES = {
+    "san francisco": "San Francisco, CA",
+    "los angeles": "Los Angeles, CA",
+    "san diego": "San Diego, CA",
+    "san jose": "San Jose, CA",
+    "palo alto": "Palo Alto, CA",
+    "mountain view": "Mountain View, CA",
+    "redwood city": "Redwood City, CA",
+    "san mateo": "San Mateo, CA",
+    "long beach": "Long Beach, CA",
+    "santa monica": "Santa Monica, CA",
+    "new york": "New York, NY",
+    "washington dc": "Washington, DC",
+    "salt lake city": "Salt Lake City, UT",
+    "las vegas": "Las Vegas, NV",
+    "little rock": "Little Rock, AR",
+    "des moines": "Des Moines, IA",
+    "oklahoma city": "Oklahoma City, OK",
+    "new orleans": "New Orleans, LA",
+    "virginia beach": "Virginia Beach, VA",
+    "colorado springs": "Colorado Springs, CO",
+    "fort worth": "Fort Worth, TX",
+    "san antonio": "San Antonio, TX",
+    "charlotte": "Charlotte, NC",
+    "raleigh": "Raleigh, NC",
+    "nashville": "Nashville, TN",
+    "minneapolis": "Minneapolis, MN",
+    "detroit": "Detroit, MI",
+    "philadelphia": "Philadelphia, PA",
+    "baltimore": "Baltimore, MD",
+    "pittsburgh": "Pittsburgh, PA",
+    "boston": "Boston, MA",
+    "chicago": "Chicago, IL",
+    "houston": "Houston, TX",
+    "dallas": "Dallas, TX",
+    "austin": "Austin, TX",
+    "seattle": "Seattle, WA",
+    "portland": "Portland, OR",
+    "phoenix": "Phoenix, AZ",
+    "denver": "Denver, CO",
+    "atlanta": "Atlanta, GA",
+    "miami": "Miami, FL",
+    "orlando": "Orlando, FL",
+    "tampa": "Tampa, FL",
+    "sacramento": "Sacramento, CA",
+    "oakland": "Oakland, CA",
+    "berkeley": "Berkeley, CA",
+    "fremont": "Fremont, CA",
+    "sunnyvale": "Sunnyvale, CA",
+    "irvine": "Irvine, CA",
+    "pasadena": "Pasadena, CA",
+    "torrance": "Torrance, CA",
+    "greenbrae": "Greenbrae, CA",
+    "honolulu": "Honolulu, HI",
+    "anchorage": "Anchorage, AK",
+}
+_ANTHEM_CITY_NAMES = sorted(
+    _ANTHEM_CITY_STATES, key=len, reverse=True
+)
+_ANTHEM_QUALIFIER_WORDS = [
+    "pediatric",
+    "paediatric",
+    "adult",
+    "interventional",
+    "transplant",
+    "sports",
+    "spine",
+    "head",
+    "neck",
+    "heart",
+    "lung",
+    "breast",
+    "cardiac",
+    "vascular",
+    "robotic",
+    "minimally invasive",
+]
+
+
+def _anthem_fast_facility(question: str) -> str:
+    """Return a named facility from a question without calling a model."""
+    text = " ".join(str(question or "").split())
+    lower = text.casefold()
+    for phrase, display in _ANTHEM_FACILITY_NAMES:
+        if re.search(rf"\b{re.escape(phrase)}\b", lower):
+            return display
+    match = re.search(
+        r"\b((?:[A-Z][A-Za-z'&.-]+\s+){0,4}"
+        r"(?:Hospital|Medical Center|Health System|Clinic|"
+        r"Cancer Center|Children's|Childrens))\b",
+        text,
+    )
+    if match:
+        value = match.group(1).strip()
+        value = re.sub(
+            r"^(?:At|In|Near|The)\s+", "", value
+        ).strip()
+        return value
+    return ""
+
+
+def _anthem_fast_specialty(question: str) -> str:
+    """Return a known specialty phrase without calling a model."""
+    lower = " ".join(str(question or "").casefold().split())
+    for phrase, canonical in _ANTHEM_SPECIALTY_PHRASES:
+        if re.search(
+            rf"\b{re.escape(phrase)}(?:s|es)?\b", lower
+        ):
+            return canonical
+    return ""
+
+
+def _anthem_fast_location(
+    question: str,
+    facility: str = "",
+    specialty: str = "",
+) -> str:
+    """Return a city/state from a question without calling a model."""
+    text = " ".join(str(question or "").split())
+    lower = text.casefold()
+    for city in _ANTHEM_CITY_NAMES:
+        if re.search(rf"\b{re.escape(city)}\b", lower):
+            return _ANTHEM_CITY_STATES[city]
+    for full_name, abbreviation in _US_STATE_NAMES.items():
+        if re.search(rf"\b{re.escape(full_name)}\b", lower):
+            return abbreviation
+    match = re.search(r"(?:,\s*|\bin\s+)([A-Z]{2})\b", text)
+    if match:
+        candidate = match.group(1).upper()
+        if candidate in set(_US_STATE_NAMES.values()):
+            return candidate
+    match = re.search(
+        r"\b(?:in|near|around)\s+"
+        r"([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){0,3})",
+        text,
+    )
+    if not match:
+        return ""
+    value = match.group(1).strip(" ,.")
+    value = re.sub(
+        r"\s+(?:at|near|with)$", "", value, flags=re.IGNORECASE
+    ).strip()
+    lowered = value.casefold()
+    if lowered in {"the", "a", "an", "my", "area", "me", "network"}:
+        return ""
+    if facility and (
+        lowered in facility.casefold()
+        or facility.casefold() in lowered
+    ):
+        return ""
+    if specialty and lowered in specialty.casefold():
+        return ""
+    if any(
+        lowered == phrase for phrase, _canonical in _ANTHEM_SPECIALTY_PHRASES
+    ):
+        return ""
+    return value
+
+
+def _anthem_fast_plan(question: str) -> dict[str, str]:
+    """Build a provider search plan with fast local rules.
+
+    This is the primary path for the result list: it avoids a model call so
+    the API results can appear immediately. The slower question model is only
+    used as a fallback when these rules find no search fields.
+    """
+    text = " ".join(str(question or "").split())
+    lower = text.casefold()
+    plan = {
+        "doctor_name": "",
+        "specialty": "",
+        "facility": "",
+        "location": "",
+        "plan": "",
+        "keywords": "",
+    }
+    doctor_match = re.search(
+        r"\b(?i:dr\.?|doctor)\s+"
+        r"([A-Z][A-Za-z'.-]+(?:\s+[A-Z][A-Za-z'.-]+){0,3})",
+        text,
+    )
+    if not doctor_match:
+        doctor_match = re.search(
+            r"\b(?i:named|called)\s+"
+            r"([A-Z][A-Za-z'.-]+(?:\s+[A-Z][A-Za-z'.-]+){0,3})",
+            text,
+        )
+    if doctor_match:
+        plan["doctor_name"] = doctor_match.group(1)
+    plan["facility"] = _anthem_fast_facility(text)
+    plan["specialty"] = _anthem_fast_specialty(text)
+    plan["location"] = _anthem_fast_location(
+        text, plan["facility"], plan["specialty"]
+    )
+    qualifiers = []
+    for qualifier in _ANTHEM_QUALIFIER_WORDS:
+        if (
+            re.search(rf"\b{re.escape(qualifier)}\b", lower)
+            and qualifier not in plan["specialty"].casefold()
+        ):
+            qualifiers.append(qualifier)
+    plan["keywords"] = " ".join(dict.fromkeys(qualifiers))
+    return _anthem_clean_plan(plan, question)
+
+
+def _anthem_select_provider(
+    question: str,
+    providers: list[dict],
+) -> dict | None:
+    """Pick the provider a follow-up refers to, when possible."""
+    if not providers:
+        return None
+    lower = " ".join(str(question or "").casefold().split())
+    for word, index in (
+        ("first", 0),
+        ("1st", 0),
+        ("second", 1),
+        ("2nd", 1),
+        ("third", 2),
+        ("3rd", 2),
+        ("last", len(providers) - 1),
+    ):
+        if re.search(rf"\b{word}\b", lower) and index < len(providers):
+            return providers[index]
+    for provider in providers:
+        name = str(
+            provider.get("name")
+            or provider.get("title")
+            or ""
+        ).casefold()
+        parts = [
+            part
+            for part in re.findall(r"[a-z]+", name)
+            if len(part) > 2 and part not in {"md", "do", "dr"}
+        ]
+        if not parts:
+            continue
+        if parts[-1] in lower:
+            return provider
+        if all(part in lower for part in parts[:2]):
+            return provider
+    if len(providers) == 1:
+        return providers[0]
+    return None
+
+
+def _anthem_follow_up_answer(
+    question: str,
+    providers: list[dict],
+) -> str | None:
+    """Answer a simple provider follow-up directly from stored API records."""
+    if not providers:
+        return None
+    lower = " ".join(str(question or "").casefold().split())
+    target = _anthem_select_provider(question, providers)
+
+    def label(provider: dict) -> str:
+        return str(
+            provider.get("name")
+            or provider.get("title")
+            or "Provider"
+        )
+
+    def values(field: str, empty: str) -> str:
+        if target is not None:
+            value = str(target.get(field) or "").strip()
+            return f"{label(target)}: {value or empty}"
+        lines = []
+        for provider in providers:
+            value = str(provider.get(field) or "").strip()
+            lines.append(f"{label(provider)}: {value or empty}")
+        return "\n".join(lines)
+
+    if any(
+        word in lower
+        for word in ("phone", "telephone", "call", "fax", "contact")
+    ):
+        if "fax" in lower:
+            return values("fax", "fax not listed")
+        return values("phone", "phone not listed")
+    if any(
+        word in lower
+        for word in ("address", "where", "location", "located")
+    ):
+        return values("address", "address not listed")
+    if "specialty" in lower or "special" in lower:
+        return values("specialty", "specialty not listed")
+    if "network" in lower or "accepting" in lower or "accept" in lower:
+        return (
+            "The current provider records do not confirm Anthem network "
+            "participation or whether a provider is accepting new patients."
+        )
+    if "how many" in lower or "count" in lower:
+        return (
+            f"{len(providers)} provider(s) are in the current result set."
+        )
+    if "list" in lower and any(
+        word in lower for word in ("name", "doctor", "provider")
+    ):
+        return "\n".join(
+            f"{index}. {label(provider)}"
+            for index, provider in enumerate(providers, start=1)
+        )
+    if target is not None:
+        summary = str(
+            target.get("summary")
+            or target.get("address")
+            or ""
+        ).strip()
+        return f"{label(target)} — {summary}" if summary else label(target)
+    return None
+
+
+def _anthem_search_plan(question: str, conversation: str) -> dict[str, str]:
+    """Ask the question model to turn a provider question into search fields."""
+    prompt = ANTHEM_PLAN_PROMPT.replace(
+        "{{CONVERSATION}}", conversation or "(none)"
+    ).replace("{{QUESTION}}", question)
+    try:
+        raw = chat.generate_text(
+            prompt,
+            model=ANTHEM_MODEL,
+            temperature=0.0,
+            num_predict=320,
+            num_ctx=chat.ANSWER_NUM_CTX,
+        )
+    except RuntimeError:
+        return _anthem_plan_fallback(question)
+    parsed = _anthem_json_object(raw)
+    if not parsed:
+        return _anthem_plan_fallback(question)
+    return _anthem_clean_plan(parsed, question)
+
+
+def _fhir_bundle_resources(bundle) -> list[dict]:
+    """Return resources from a FHIR Bundle or a single resource."""
+    if not isinstance(bundle, dict):
+        return []
+    if bundle.get("resourceType") == "Bundle":
+        items = []
+        for entry in bundle.get("entry") or []:
+            if isinstance(entry, dict):
+                resource = entry.get("resource")
+                if isinstance(resource, dict):
+                    items.append(resource)
+        return items
+    if bundle.get("resourceType"):
+        return [bundle]
+    return []
+
+
+def _fhir_human_name(resource: dict) -> str:
+    """Render a FHIR HumanName, preferring the official name."""
+    direct = resource.get("name")
+    if isinstance(direct, str) and direct.strip():
+        # Organization, Location, and HealthcareService use a plain string
+        # name, while Practitioner uses a list of HumanName objects.
+        return direct.strip()
+    names = resource.get("name") or []
+    if isinstance(names, dict):
+        names = [names]
+    names = [name for name in names if isinstance(name, dict)]
+    names.sort(key=lambda name: 0 if name.get("use") == "official" else 1)
+    for name in names:
+        text = str(name.get("text") or "").strip()
+        if text:
+            return text
+        parts: list[str] = []
+        for key in ("prefix", "given"):
+            value = name.get(key) or []
+            if isinstance(value, str):
+                value = [value]
+            parts.extend(str(item).strip() for item in value if str(item).strip())
+        family = str(name.get("family") or "").strip()
+        if family:
+            parts.append(family)
+        value = name.get("suffix") or []
+        if isinstance(value, str):
+            value = [value]
+        parts.extend(str(item).strip() for item in value if str(item).strip())
+        label = " ".join(parts)
+        if label:
+            return label
+    return ""
+
+
+def _fhir_address(address) -> str:
+    """Render a FHIR Address as one comma-separated line."""
+    if not isinstance(address, dict):
+        return ""
+    parts: list[str] = []
+    lines = address.get("line") or []
+    if isinstance(lines, str):
+        lines = [lines]
+    parts.extend(str(line).strip() for line in lines if str(line).strip())
+    for key in ("city", "state", "postalCode"):
+        value = str(address.get(key) or "").strip()
+        if value:
+            parts.append(value)
+    country = str(address.get("country") or "").strip()
+    if country and country.upper() not in {"US", "USA"}:
+        parts.append(country)
+    return ", ".join(parts)
+
+
+def _fhir_telecom(telecom) -> str:
+    """Render phone/fax/email contact points."""
+    if isinstance(telecom, dict):
+        telecom = [telecom]
+    values: list[str] = []
+    for item in telecom or []:
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get("value") or "").strip()
+        if not value:
+            continue
+        system = str(item.get("system") or "").strip().lower()
+        if system == "phone":
+            values.append(value)
+        elif system in {"fax", "email", "url"}:
+            values.append(f"{system}: {value}")
+    return "; ".join(dict.fromkeys(values))
+
+
+def _fhir_codeable(value) -> str:
+    """Render one FHIR CodeableConcept."""
+    if not isinstance(value, dict):
+        return ""
+    text = str(value.get("text") or "").strip()
+    if text:
+        return text
+    for coding in value.get("coding") or []:
+        if not isinstance(coding, dict):
+            continue
+        display = str(
+            coding.get("display") or coding.get("code") or ""
+        ).strip()
+        if display:
+            return display
+    return ""
+
+
+def _fhir_codeables(values) -> list[str]:
+    """Render a list of CodeableConcepts without duplicates."""
+    if isinstance(values, dict):
+        values = [values]
+    result: list[str] = []
+    for value in values or []:
+        label = _fhir_codeable(value)
+        if label and label not in result:
+            result.append(label)
+    return result
+
+
+def _fhir_npi(resource: dict) -> str:
+    """Return the resource's US NPI, when present."""
+    for identifier in resource.get("identifier") or []:
+        if not isinstance(identifier, dict):
+            continue
+        system = str(identifier.get("system") or "").lower()
+        if "us-npi" in system or "npi" in system:
+            value = str(identifier.get("value") or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _fhir_reference_id(reference) -> str:
+    """Return a stable ``ResourceType/id`` key from a FHIR reference."""
+    if isinstance(reference, list):
+        for item in reference:
+            key = _fhir_reference_id(item)
+            if key:
+                return key
+        return ""
+    if isinstance(reference, dict):
+        reference = reference.get("reference") or ""
+    text = str(reference or "").strip()
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    path = parsed.path if parsed.path else text
+    parts = [part for part in path.rstrip("/").split("/") if part]
+    if len(parts) >= 2:
+        return f"{parts[-2]}/{parts[-1]}"
+    return parts[-1] if parts else ""
+
+
+def _fhir_reference_display(reference) -> str:
+    if isinstance(reference, list):
+        for item in reference:
+            label = _fhir_reference_display(item)
+            if label:
+                return label
+        return ""
+    if isinstance(reference, dict):
+        return str(reference.get("display") or "").strip()
+    return ""
+
+
+def _anthem_newpatients(role: dict) -> str:
+    """Read the Da Vinci Plan-Net new-patient extension."""
+    for extension in role.get("extension") or []:
+        if not isinstance(extension, dict):
+            continue
+        if not str(extension.get("url", "")).endswith("/newpatients"):
+            continue
+        for item in extension.get("extension") or []:
+            if not isinstance(item, dict):
+                continue
+            concept = item.get("valueCodeableConcept") or {}
+            for coding in concept.get("coding") or []:
+                code = str(coding.get("code") or "").lower()
+                if code == "newpt":
+                    return "yes"
+                if code == "existptonly":
+                    return "no"
+    return ""
+
+
+def _anthem_network(role: dict) -> str:
+    """Read a Plan-Net network reference."""
+    for extension in role.get("extension") or []:
+        if not isinstance(extension, dict):
+            continue
+        if "network-reference" not in str(extension.get("url", "")):
+            continue
+        reference = extension.get("valueReference") or {}
+        label = str(reference.get("display") or "").strip()
+        if label:
+            return label
+        return _fhir_reference_id(reference)
+    networks = role.get("network") or []
+    if isinstance(networks, dict):
+        networks = [networks]
+    labels = []
+    for reference in networks:
+        label = (
+            _fhir_reference_display(reference)
+            or _fhir_reference_id(reference)
+        )
+        if label:
+            labels.append(label)
+    return ", ".join(dict.fromkeys(labels))
+
+
+def _anthem_fhir_request(
+    base: str,
+    resource: str,
+    params,
+    token: str,
+) -> dict:
+    """Fetch one FHIR resource path and return the decoded body."""
+    url = f"{base.rstrip('/')}/{resource.lstrip('/')}"
+    headers = {
+        "Accept": "application/fhir+json, application/json",
+        "User-Agent": "local-llm-chat-anthem/1.0",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        response = requests.get(
+            url,
+            params=params or [],
+            headers=headers,
+            timeout=(5, 30),
+        )
+    except requests.RequestException as exc:
+        raise AnthemFHIRError(f"request failed: {exc}", url=url) from exc
+    if response.status_code >= 400:
+        detail = " ".join(response.text.split())[:240]
+        raise AnthemFHIRError(
+            f"HTTP {response.status_code}: {detail}",
+            status=response.status_code,
+            url=response.url,
+        )
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise AnthemFHIRError(
+            "the FHIR server returned invalid JSON",
+            status=response.status_code,
+            url=response.url,
+        ) from exc
+
+
+def _anthem_resolve_references(
+    base: str,
+    token: str,
+    resources: dict[tuple[str, str], dict],
+    log: Callable[[str], None],
+) -> None:
+    """Fetch referenced Practitioner/Organization/Location resources."""
+    wanted = {"Practitioner", "Organization", "Location", "HealthcareService"}
+    fields = ("practitioner", "organization", "location", "healthcareService")
+    for _ in range(2):
+        missing: list[tuple[str, str]] = []
+        for resource in list(resources.values()):
+            for field in fields:
+                references = resource.get(field) or []
+                if isinstance(references, dict):
+                    references = [references]
+                for reference in references:
+                    key = _fhir_reference_id(reference)
+                    if "/" not in key:
+                        continue
+                    resource_type, resource_id = key.split("/", 1)
+                    if resource_type not in wanted or not resource_id:
+                        continue
+                    if (resource_type, resource_id) in resources:
+                        continue
+                    if (resource_type, resource_id) not in missing:
+                        missing.append((resource_type, resource_id))
+        if not missing:
+            return
+        for resource_type, resource_id in missing[:40]:
+            try:
+                bundle = _anthem_fhir_request(
+                    base,
+                    f"{resource_type}/{resource_id}",
+                    [],
+                    token,
+                )
+            except AnthemFHIRError as exc:
+                log(
+                    "[anthem: could not read referenced "
+                    f"{resource_type}/{resource_id}: {exc}]"
+                )
+                continue
+            for item in _fhir_bundle_resources(bundle):
+                key = (
+                    str(item.get("resourceType") or ""),
+                    str(item.get("id") or ""),
+                )
+                if key[0] and key[1]:
+                    resources.setdefault(key, item)
+
+
+def _anthem_fhir_search(
+    base: str,
+    token: str,
+    plan: dict[str, str],
+    log: Callable[[str], None],
+) -> dict[tuple[str, str], dict]:
+    """Search the FHIR directory for the providers described by ``plan``."""
+    resources: dict[tuple[str, str], dict] = {}
+    errors: list[str] = []
+    role_includes = [
+        ("_include", "PractitionerRole:practitioner"),
+        ("_include", "PractitionerRole:organization"),
+        ("_include", "PractitionerRole:location"),
+        ("_include", "PractitionerRole:healthcare-service"),
+    ]
+
+    def add(resource) -> None:
+        if not isinstance(resource, dict):
+            return
+        resource_type = str(resource.get("resourceType") or "").strip()
+        if not resource_type:
+            return
+        resource_id = str(resource.get("id") or "").strip()
+        key = (
+            resource_type,
+            resource_id or f"anonymous-{len(resources)}",
+        )
+        resources.setdefault(key, resource)
+
+    def fetch(resource: str, params) -> list[dict]:
+        try:
+            bundle = _anthem_fhir_request(base, resource, params, token)
+        except AnthemFHIRError as exc:
+            errors.append(f"{resource}: {exc}")
+            return []
+        items = _fhir_bundle_resources(bundle)
+        for item in items:
+            add(item)
+        return items
+
+    doctor_name = plan.get("doctor_name", "")
+    specialty = plan.get("specialty", "")
+    facility = plan.get("facility", "")
+    location = plan.get("location", "")
+    practitioners: list[dict] = []
+    organizations: list[dict] = []
+    locations: list[dict] = []
+
+    if doctor_name:
+        practitioners = [
+            item
+            for item in fetch(
+                "Practitioner",
+                [("name", doctor_name), ("_count", str(ANTHEM_MAX_PROVIDERS))],
+            )
+            if item.get("resourceType") == "Practitioner"
+        ]
+        for practitioner in practitioners[:ANTHEM_MAX_PROVIDERS]:
+            practitioner_id = str(practitioner.get("id") or "").strip()
+            if practitioner_id:
+                fetch(
+                    "PractitionerRole",
+                    [
+                        (
+                            "practitioner",
+                            f"Practitioner/{practitioner_id}",
+                        ),
+                        ("_count", "50"),
+                        *role_includes,
+                    ],
+                )
+
+    if facility:
+        organizations = [
+            item
+            for item in fetch(
+                "Organization",
+                [("name", facility), ("_count", "8")],
+            )
+            if item.get("resourceType") == "Organization"
+        ]
+        for organization in organizations[:8]:
+            organization_id = str(organization.get("id") or "").strip()
+            if organization_id:
+                fetch(
+                    "PractitionerRole",
+                    [
+                        (
+                            "organization",
+                            f"Organization/{organization_id}",
+                        ),
+                        ("_count", "50"),
+                        *role_includes,
+                    ],
+                )
+
+    if location:
+        locations = [
+            item
+            for item in fetch(
+                "Location",
+                [("address", location), ("_count", "10")],
+            )
+            if item.get("resourceType") == "Location"
+        ]
+        if not locations:
+            city, state, postal = _anthem_parse_location(location)
+            params = [("_count", "10")]
+            if city:
+                params.append(("address-city", city))
+            if state:
+                params.append(("address-state", state))
+            if postal:
+                params.append(("address-postalcode", postal))
+            if len(params) > 1:
+                locations = [
+                    item
+                    for item in fetch("Location", params)
+                    if item.get("resourceType") == "Location"
+                ]
+        for location_resource in locations[:8]:
+            location_id = str(
+                location_resource.get("id") or ""
+            ).strip()
+            if location_id:
+                fetch(
+                    "PractitionerRole",
+                    [
+                        ("location", f"Location/{location_id}"),
+                        ("_count", "50"),
+                        *role_includes,
+                    ],
+                )
+
+    if specialty:
+        specialty_queries = []
+        code = _ANTHEM_FHIR_SPECIALTY_CODES.get(specialty.casefold())
+        if code:
+            specialty_queries.append(
+                f"http://nucc.org/provider-taxonomy|{code}"
+            )
+        specialty_queries.append(specialty)
+        roles: list[dict] = []
+        for query in specialty_queries:
+            roles = fetch(
+                "PractitionerRole",
+                [
+                    ("specialty", query),
+                    ("_count", "50"),
+                    *role_includes,
+                ],
+            )
+            if roles:
+                break
+        if not roles:
+            services = fetch(
+                "HealthcareService",
+                [("specialty", specialty), ("_count", "20")],
+            )
+            if not services:
+                services = fetch(
+                    "HealthcareService",
+                    [("name", specialty), ("_count", "20")],
+                )
+            for service in services[:10]:
+                service_id = str(service.get("id") or "").strip()
+                if service_id:
+                    fetch(
+                        "PractitionerRole",
+                        [
+                            (
+                                "service",
+                                f"HealthcareService/{service_id}",
+                            ),
+                            ("_count", "50"),
+                            *role_includes,
+                        ],
+                    )
+
+    if not resources:
+        if not any((doctor_name, specialty, facility, location)):
+            fetch(
+                "PractitionerRole",
+                [("_count", "20"), *role_includes],
+            )
+
+    if not resources:
+        detail = "; ".join(errors[-3:]) or "no matching providers"
+        raise AnthemFHIRError(detail)
+    if errors:
+        log(
+            "[anthem: some directory queries failed: "
+            + "; ".join(errors[-3:])
+            + "]"
+        )
+    _anthem_resolve_references(base, token, resources, log)
+    return resources
+
+
+def _anthem_format_fhir(
+    resources: dict[tuple[str, str], dict],
+    plan: dict[str, str],
+) -> str:
+    """Turn FHIR resources into a compact provider-directory context."""
+    by_type: dict[str, list[dict]] = {}
+    for resource in resources.values():
+        resource_type = str(resource.get("resourceType") or "")
+        by_type.setdefault(resource_type, []).append(resource)
+
+    practitioners = {
+        str(item.get("id")): item
+        for item in by_type.get("Practitioner", [])
+        if item.get("id")
+    }
+    organizations = {
+        str(item.get("id")): item
+        for item in by_type.get("Organization", [])
+        if item.get("id")
+    }
+    locations = {
+        str(item.get("id")): item
+        for item in by_type.get("Location", [])
+        if item.get("id")
+    }
+    roles = by_type.get("PractitionerRole", [])
+    role_practitioner_ids: set[str] = set()
+    blocks: list[str] = []
+
+    def add_block(lines: list[str]) -> None:
+        text = "\n".join(line for line in lines if line)
+        if text and text not in blocks:
+            blocks.append(text)
+
+    for role in roles:
+        practitioner_ref = _fhir_reference_id(role.get("practitioner"))
+        practitioner_id = practitioner_ref.split("/", 1)[-1]
+        practitioner = practitioners.get(practitioner_id, {})
+        if practitioner_id:
+            role_practitioner_ids.add(practitioner_id)
+        organization_ref = _fhir_reference_id(role.get("organization"))
+        organization = organizations.get(
+            organization_ref.split("/", 1)[-1], {}
+        )
+        location_ref = _fhir_reference_id(role.get("location"))
+        location = locations.get(location_ref.split("/", 1)[-1], {})
+
+        name = (
+            _fhir_human_name(practitioner)
+            or _fhir_reference_display(role.get("practitioner"))
+            or "Name not listed"
+        )
+        specialties = _fhir_codeables(role.get("specialty"))
+        if not specialties:
+            specialties = _fhir_codeables(
+                practitioner.get("qualification")
+            )
+        organization_name = (
+            _fhir_human_name(organization)
+            or _fhir_reference_display(role.get("organization"))
+        )
+        location_name = (
+            _fhir_human_name(location)
+            or _fhir_reference_display(role.get("location"))
+        )
+        address = _fhir_address(location.get("address"))
+        phone = (
+            _fhir_telecom(role.get("telecom"))
+            or _fhir_telecom(location.get("telecom"))
+            or _fhir_telecom(practitioner.get("telecom"))
+        )
+        npi = _fhir_npi(practitioner)
+        newpatients = _anthem_newpatients(role)
+        network = _anthem_network(role)
+        lines = [f"Provider: {name}"]
+        if npi:
+            lines.append(f"NPI: {npi}")
+        if specialties:
+            lines.append("Specialty: " + "; ".join(specialties))
+        if organization_name:
+            lines.append(f"Organization: {organization_name}")
+        if location_name:
+            lines.append(f"Location: {location_name}")
+        if address:
+            lines.append(f"Address: {address}")
+        if phone:
+            lines.append(f"Phone/contact: {phone}")
+        if network:
+            lines.append(f"Network: {network}")
+        if newpatients:
+            lines.append(f"Accepting new patients: {newpatients}")
+        add_block(lines)
+
+    for practitioner_id, practitioner in practitioners.items():
+        if practitioner_id in role_practitioner_ids:
+            continue
+        name = _fhir_human_name(practitioner) or "Name not listed"
+        lines = [f"Provider: {name}"]
+        npi = _fhir_npi(practitioner)
+        if npi:
+            lines.append(f"NPI: {npi}")
+        specialties = _fhir_codeables(
+            [
+                qualification.get("code")
+                for qualification in practitioner.get("qualification")
+                or []
+                if isinstance(qualification, dict)
+            ]
+        )
+        if specialties:
+            lines.append("Specialty: " + "; ".join(specialties))
+        phone = _fhir_telecom(practitioner.get("telecom"))
+        if phone:
+            lines.append(f"Phone/contact: {phone}")
+        lines.append("No practice location was returned for this provider.")
+        add_block(lines)
+
+    if not blocks:
+        for resource_type, items in by_type.items():
+            for item in items:
+                name = _fhir_human_name(item) or str(item.get("id") or "")
+                lines = [f"{resource_type}: {name}"]
+                address = _fhir_address(item.get("address"))
+                if address:
+                    lines.append(f"Address: {address}")
+                phone = _fhir_telecom(item.get("telecom"))
+                if phone:
+                    lines.append(f"Phone/contact: {phone}")
+                add_block(lines)
+
+    text = "\n\n".join(blocks)
+    return text[:ANTHEM_CONTEXT_CHARS]
+
+
+def _anthem_format_nppes(
+    results: list[dict],
+    preferred_city: str = "",
+    preferred_state: str = "",
+    preferred_postal: str = "",
+) -> str:
+    """Turn NPPES API results into a compact provider context."""
+    blocks: list[str] = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        basic = result.get("basic") or {}
+        if result.get("enumeration_type") == "NPI-2":
+            name = str(basic.get("organization_name") or "").strip()
+        else:
+            name = " ".join(
+                part
+                for part in (
+                    str(basic.get(key) or "").strip()
+                    for key in ("first_name", "middle_name", "last_name")
+                )
+                if part
+            ).strip()
+        if not name:
+            name = "Name not listed"
+        credential = str(basic.get("credential") or "").strip()
+        if credential:
+            name = f"{name}, {credential}"
+        lines = [f"Provider: {name}"]
+        npi = str(result.get("number") or "").strip()
+        if npi:
+            lines.append(f"NPI: {npi}")
+        gender = str(basic.get("gender") or "").strip()
+        if gender:
+            lines.append(f"Gender: {gender}")
+        status = str(basic.get("status") or "").strip()
+        if status:
+            lines.append(f"Status: {status}")
+
+        specialties: list[str] = []
+        for taxonomy in result.get("taxonomies") or []:
+            if not isinstance(taxonomy, dict):
+                continue
+            desc = str(taxonomy.get("desc") or "").strip()
+            if not desc:
+                continue
+            if taxonomy.get("primary"):
+                desc += " (primary)"
+            license_number = str(taxonomy.get("license") or "").strip()
+            state = str(taxonomy.get("state") or "").strip()
+            if license_number:
+                suffix = f" license {license_number}"
+                if state:
+                    suffix += f" ({state})"
+                desc += suffix
+            if desc not in specialties:
+                specialties.append(desc)
+        if specialties:
+            lines.append("Specialty: " + "; ".join(specialties))
+
+        addresses = [
+            item
+            for item in result.get("addresses") or []
+            if isinstance(item, dict)
+        ]
+
+        def address_rank(item: dict) -> tuple[int, int]:
+            city_value = str(item.get("city") or "").strip().casefold()
+            state_value = str(item.get("state") or "").strip().upper()
+            postal_value = str(item.get("postal_code") or "").strip()
+            location_rank = 0
+            if preferred_state and state_value == preferred_state.upper():
+                location_rank -= 2
+            if preferred_city and city_value == preferred_city.casefold():
+                location_rank -= 4
+            if preferred_postal and postal_value.startswith(
+                preferred_postal[:5]
+            ):
+                location_rank -= 8
+            purpose_rank = (
+                0 if item.get("address_purpose") == "LOCATION" else 1
+            )
+            return (location_rank, purpose_rank)
+
+        addresses.sort(key=address_rank)
+        if addresses:
+            address = addresses[0]
+            street = ", ".join(
+                part
+                for part in (
+                    str(address.get("address_1") or "").strip(),
+                    str(address.get("address_2") or "").strip(),
+                )
+                if part
+            )
+            locality = " ".join(
+                part
+                for part in (
+                    str(address.get("state") or "").strip(),
+                    str(address.get("postal_code") or "").strip(),
+                )
+                if part
+            )
+            label = ", ".join(
+                part
+                for part in (
+                    street,
+                    str(address.get("city") or "").strip(),
+                    locality,
+                )
+                if part
+            )
+            if label:
+                lines.append(f"Address: {label}")
+            phone = str(address.get("telephone_number") or "").strip()
+            if phone:
+                lines.append(f"Phone: {phone}")
+            fax = str(address.get("fax_number") or "").strip()
+            if fax:
+                lines.append(f"Fax: {fax}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)[:ANTHEM_CONTEXT_CHARS]
+
+
+def _anthem_nppes_request(
+    params: list[tuple[str, str]],
+    log: Callable[[str], None],
+) -> list[dict]:
+    """Run one NPPES API request and return its result list."""
+    try:
+        response = requests.get(
+            ANTHEM_NPPES_URL,
+            params=params,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "local-llm-chat-anthem/1.0",
+            },
+            timeout=(5, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        log(f"[anthem: NPPES fallback failed: {exc}]")
+        return []
+    results = data.get("results") or []
+    if not isinstance(results, list):
+        return []
+    return [item for item in results if isinstance(item, dict)]
+
+
+_ANTHEM_GENERIC_KEYWORDS = {
+    "phone",
+    "number",
+    "address",
+    "location",
+    "insurance",
+    "network",
+    "accepting",
+    "patient",
+    "patients",
+    "doctor",
+    "doctors",
+    "physician",
+    "physicians",
+    "provider",
+    "providers",
+    "list",
+    "find",
+    "show",
+    "me",
+    "the",
+    "a",
+    "an",
+    "in",
+    "at",
+    "near",
+    "for",
+    "with",
+    "and",
+    "or",
+    "of",
+    "to",
+    "is",
+    "are",
+    "who",
+    "what",
+    "where",
+    "how",
+    "good",
+    "best",
+    "new",
+    "current",
+    "please",
+    "can",
+    "you",
+    "give",
+    "tell",
+    "about",
+    "contact",
+    "office",
+    "clinic",
+    "hospital",
+    "medical",
+    "center",
+    "department",
+    "division",
+    "specialist",
+    "specialists",
+    "practice",
+    "practices",
+    "care",
+}
+
+
+def _anthem_nppes_taxonomy_candidates(
+    specialty: str,
+    keywords: str,
+) -> list[str]:
+    """Return NPPES taxonomy search terms, most specific first."""
+    candidates: list[str] = []
+
+    def add(value: str) -> None:
+        value = " ".join(str(value or "").split())
+        if not value:
+            return
+        if value.casefold() in {
+            candidate.casefold() for candidate in candidates
+        }:
+            return
+        candidates.append(value)
+
+    mapped = _NPPES_TAXONOMY_ALIASES.get(
+        specialty.casefold(), specialty
+    )
+    qualifier_words = [
+        word
+        for word in re.split(r"[^A-Za-z]+", str(keywords or ""))
+        if word and word.casefold() not in _ANTHEM_GENERIC_KEYWORDS
+    ]
+    if mapped and qualifier_words:
+        # "pediatric" plus "Otolaryngology" is more specific than the generic
+        # taxonomy and matches "Otolaryngology, Pediatric Otolaryngology".
+        add(" ".join(qualifier_words + [mapped]))
+    add(mapped)
+    add(specialty)
+    if not specialty and qualifier_words:
+        add(" ".join(qualifier_words))
+    return candidates
+
+
+def _anthem_nppes_facility_location(
+    facility: str,
+    log: Callable[[str], None],
+) -> tuple[str, str, str]:
+    """Find the city/state of a named facility through NPPES."""
+    facility = " ".join(str(facility or "").split())
+    names = [facility]
+    simplified = re.sub(
+        r"\b(?:medical|center|centre|hospital|clinic|health|healthcare|"
+        r"system|university|institute|group|inc|llc)\b",
+        " ",
+        facility,
+        flags=re.IGNORECASE,
+    )
+    simplified = " ".join(simplified.split())
+    if simplified and simplified.casefold() != facility.casefold():
+        names.append(simplified)
+    for name in names:
+        if not name:
+            continue
+        results = _anthem_nppes_request(
+            [
+                ("version", "2.1"),
+                ("limit", "20"),
+                ("organization_name", name),
+            ],
+            log,
+        )
+        for result in results:
+            addresses = [
+                address
+                for address in result.get("addresses") or []
+                if isinstance(address, dict)
+            ]
+            addresses.sort(
+                key=lambda address: 0
+                if address.get("address_purpose") == "LOCATION"
+                else 1
+            )
+            for address in addresses:
+                city = str(address.get("city") or "").strip()
+                state = str(address.get("state") or "").strip().upper()
+                postal = str(address.get("postal_code") or "").strip()
+                if city and state:
+                    log(
+                        "[anthem: NPPES located facility "
+                        f"{facility!r} in {city}, {state}]"
+                    )
+                    return city, state, postal
+    return "", "", ""
+
+
+def _anthem_nppes_search(
+    plan: dict[str, str],
+    log: Callable[[str], None],
+) -> tuple[str, int]:
+    """Search CMS NPPES as a fallback when the Anthem FHIR API fails."""
+    first_name, last_name = _anthem_split_name(
+        plan.get("doctor_name", "")
+    )
+    facility = plan.get("facility", "")
+    specialty = plan.get("specialty", "")
+    keywords = plan.get("keywords", "")
+    city, state, postal = _anthem_parse_location(plan.get("location", ""))
+    facility_only = bool(
+        facility and not (first_name or last_name or specialty)
+    )
+    if facility and not facility_only and not (city or state or postal):
+        # NPPES organization names are not reliable in a practitioner query.
+        # Resolve the facility to a city/state first, then search providers
+        # around that location.
+        inferred_city, inferred_state, _inferred_postal = (
+            _anthem_nppes_facility_location(facility, log)
+        )
+        if inferred_city or inferred_state:
+            # Use the facility's city/state to search nearby providers, but do
+            # not keep its ZIP: providers at the same hospital often list a
+            # different practice ZIP code.
+            city, state, postal = inferred_city, inferred_state, ""
+    taxonomies = _anthem_nppes_taxonomy_candidates(
+        specialty, keywords
+    )
+
+    def build(
+        taxonomy: str = "",
+        include_location: bool = True,
+        include_facility: bool = False,
+    ) -> list[tuple[str, str]]:
+        broad = bool(
+            taxonomy and not (first_name or last_name or facility_only)
+        )
+        params: list[tuple[str, str]] = [
+            ("version", "2.1"),
+            (
+                "limit",
+                str(200 if broad else ANTHEM_MAX_PROVIDERS),
+            ),
+        ]
+        if first_name:
+            # NPPES matches the first-name field literally; a middle initial
+            # such as "Maria R." would return no rows, so search the first
+            # token.
+            params.append(("first_name", first_name.split()[0]))
+        if last_name:
+            params.append(("last_name", last_name))
+        if include_facility and facility:
+            params.append(("organization_name", facility))
+        if include_location:
+            if city:
+                params.append(("city", city))
+            if state:
+                params.append(("state", state))
+            if postal:
+                params.append(("postal_code", postal))
+        if taxonomy:
+            params.append(("taxonomy_description", taxonomy))
+        return params
+
+    attempts: list[list[tuple[str, str]]] = []
+
+    def add_attempt(params: list[tuple[str, str]]) -> None:
+        search_terms = [
+            name
+            for name, _value in params
+            if name not in {"version", "limit"}
+        ]
+        if not search_terms:
+            return
+        if params not in attempts:
+            attempts.append(params)
+
+    if facility_only:
+        add_attempt(build(include_facility=True, include_location=True))
+        add_attempt(build(include_facility=True, include_location=False))
+    for taxonomy in taxonomies:
+        add_attempt(build(taxonomy, include_location=True))
+    if taxonomies:
+        # Last resort: keep the name/location filters and filter the taxonomy
+        # client-side, then try the specialty without a location constraint.
+        add_attempt(build("", include_location=True))
+        add_attempt(build(taxonomies[0], include_location=False))
+    else:
+        add_attempt(build("", include_location=True))
+
+    results: list[dict] = []
+    for params in attempts:
+        results = _anthem_nppes_request(params, log)
+        if results:
+            used_taxonomy = dict(params).get("taxonomy_description", "")
+            if used_taxonomy:
+                log(
+                    "[anthem: NPPES matched taxonomy "
+                    f"{used_taxonomy!r}]"
+                )
+            break
+    if not results:
+        return "", 0
+
+    if specialty:
+        tokens = [
+            token
+            for token in re.split(
+                r"[^a-z0-9]+",
+                " ".join([specialty, *taxonomies]).casefold(),
+            )
+            if len(token) > 2
+            and token not in _ANTHEM_GENERIC_KEYWORDS
+        ]
+
+        def matches_specialty(result: dict) -> bool:
+            text = " ".join(
+                str(taxonomy.get("desc") or "")
+                for taxonomy in result.get("taxonomies") or []
+                if isinstance(taxonomy, dict)
+            ).casefold()
+            return any(token in text for token in tokens)
+
+        filtered = [
+            result for result in results if matches_specialty(result)
+        ]
+        if filtered:
+            results = filtered
+        else:
+            log(
+                "[anthem: NPPES taxonomy did not match the requested "
+                "specialty; showing the name/location matches instead]"
+            )
+
+    if city or state or postal:
+        def matches_location(result: dict) -> bool:
+            for address in result.get("addresses") or []:
+                if not isinstance(address, dict):
+                    continue
+                state_value = str(address.get("state") or "").upper()
+                city_value = (
+                    str(address.get("city") or "").strip().casefold()
+                )
+                postal_value = str(
+                    address.get("postal_code") or ""
+                ).strip()
+                if state and state_value != state.upper():
+                    continue
+                if city and city_value != city.casefold():
+                    continue
+                if postal and not postal_value.startswith(postal[:5]):
+                    continue
+                return True
+            return False
+
+        located = [
+            result for result in results if matches_location(result)
+        ]
+        if located:
+            results = located
+        else:
+            log(
+                "[anthem: NPPES returned records, but none listed an "
+                "address matching the requested location]"
+            )
+
+    if first_name or last_name or specialty:
+        # A provider-name or specialty answer should lead with individual
+        # practitioners; organizations are kept only when no person remains.
+        results.sort(
+            key=lambda result: 0
+            if result.get("enumeration_type") == "NPI-1"
+            else 1
+        )
+    results = results[:ANTHEM_MAX_PROVIDERS]
+    if not results:
+        return "", 0
+    log(
+        f"[anthem: NPPES fallback returned {len(results)} record(s)]"
+    )
+    return (
+        _anthem_format_nppes(results, city, state, postal),
+        len(results),
+    )
+
+
+def _anthem_provider_record_name(
+    record: dict,
+    fallback: str = "",
+) -> str:
+    """Return a display name from one NPPES result."""
+    basic = record.get("basic") or {}
+    if record.get("enumeration_type") == "NPI-2":
+        name = str(basic.get("organization_name") or "").strip()
+    else:
+        name = " ".join(
+            part
+            for part in (
+                str(basic.get(key) or "").strip()
+                for key in ("first_name", "middle_name", "last_name")
+            )
+            if part
+        ).strip()
+    credential = str(basic.get("credential") or "").strip()
+    if credential:
+        name = f"{name}, {credential}" if name else credential
+    return name or " ".join(str(fallback or "").split())
+
+
+def _anthem_nppes_record_for_provider(
+    npi: str,
+    name: str,
+) -> dict | None:
+    """Look up one provider in NPPES by NPI, then by name."""
+    npi = str(npi or "").strip()
+    name = " ".join(str(name or "").split())
+    silent = lambda _text: None
+    if npi:
+        results = _anthem_nppes_request(
+            [
+                ("version", "2.1"),
+                ("number", npi),
+                ("limit", "1"),
+            ],
+            silent,
+        )
+        for result in results:
+            if str(result.get("number") or "") == npi:
+                return result
+        if results:
+            return results[0]
+    first_name, last_name = _anthem_split_name(name)
+    if not (first_name or last_name):
+        return None
+    params: list[tuple[str, str]] = [
+        ("version", "2.1"),
+        ("limit", "5"),
+    ]
+    if first_name:
+        params.append(("first_name", first_name.split()[0]))
+    if last_name:
+        params.append(("last_name", last_name))
+    results = _anthem_nppes_request(params, silent)
+    return results[0] if results else None
+
+
+def _anthem_pubmed_get(resource: str, params: dict[str, str]) -> dict:
+    """Fetch one PubMed E-utilities JSON response."""
+    try:
+        response = requests.get(
+            f"{_PUBMED_BASE}{resource}",
+            params=params,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "local-llm-chat-anthem/1.0",
+            },
+            timeout=(5, 20),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+_PUBMED_SPECIALTY_TERMS = {
+    "otolaryng": [
+        "otolaryngology",
+        "laryngology",
+        "otology",
+        "rhinology",
+        "airway",
+        "tonsil",
+        "sinus",
+        "neck",
+    ],
+    "head and neck": [
+        "head and neck",
+        "otolaryngology",
+        "laryngology",
+        "airway",
+        "neck",
+    ],
+    "cardio": ["cardiology", "cardiovascular", "cardiac", "heart"],
+    "pulmon": ["pulmonology", "pulmonary", "lung", "respiratory"],
+    "oncol": ["oncology", "cancer", "tumor", "carcinoma", "neoplasm"],
+    "neurol": ["neurology", "neurologic", "brain", "stroke", "epilepsy"],
+    "dermat": ["dermatology", "skin"],
+    "pediatr": ["pediatric", "paediatric", "children", "child"],
+    "surg": ["surgery", "surgical", "operative"],
+    "urol": ["urology", "urologic", "prostate", "bladder", "kidney"],
+    "orthop": ["orthopedic", "orthopaedic", "bone", "joint", "spine"],
+    "gastro": [
+        "gastroenterology",
+        "gastrointestinal",
+        "liver",
+        "colon",
+    ],
+    "endocr": ["endocrinology", "diabetes", "thyroid", "hormone"],
+    "psych": ["psychiatry", "psychiatric", "mental", "depression"],
+    "ophthalm": ["ophthalmology", "eye", "retina", "glaucoma"],
+    "obstet": ["obstetrics", "gynecology", "pregnancy", "women"],
+    "gyne": ["gynecology", "obstetrics", "pregnancy", "women"],
+    "anesthes": ["anesthesiology", "anesthesia"],
+    "radiol": ["radiology", "imaging", "radiologic"],
+    "pathol": ["pathology", "pathologic"],
+    "family medicine": ["family medicine", "primary care"],
+    "internal medicine": ["internal medicine"],
+    "infect": ["infectious", "infection", "virology", "microbiology"],
+    "immun": ["immunology", "immune"],
+    "rheum": ["rheumatology", "arthritis", "autoimmune"],
+    "nephro": ["nephrology", "kidney", "renal"],
+    "hemat": ["hematology", "blood", "leukemia", "lymphoma"],
+    "emergency": ["emergency medicine", "emergency"],
+}
+
+
+def _anthem_pubmed_topic_terms(specialty: str) -> list[str]:
+    """Return PubMed title/abstract terms implied by a specialty."""
+    text = " ".join(str(specialty or "").casefold().split())
+    terms: set[str] = set()
+    for key, values in _PUBMED_SPECIALTY_TERMS.items():
+        if key in text:
+            terms.update(values)
+    generic = {
+        "internal",
+        "medicine",
+        "primary",
+        "license",
+        "medical",
+        "health",
+        "care",
+        "center",
+        "clinic",
+        "department",
+        "division",
+        "specialist",
+        "specialists",
+        "practice",
+        "practices",
+        "student",
+        "program",
+        "training",
+        "certified",
+    }
+    for word in re.findall(r"[a-z]{4,}", text):
+        if word not in generic:
+            terms.add(word)
+    return sorted(terms, key=lambda term: (len(term), term))[:10]
+
+
+def _anthem_pubmed_publications(
+    name: str,
+    specialty: str = "",
+    institution: str = "",
+    limit: int = 8,
+) -> list[dict]:
+    """Return PubMed publications that match the provider's identity.
+
+    Author-only PubMed searches are highly ambiguous: many people share the
+    same last name and initials. The query therefore combines the author with
+    specialty-derived title/abstract terms, or with the institution when no
+    specialty is known. Results are then checked against the returned author
+    list so a same-name publication is not attributed to this provider.
+    """
+    first_name, last_name = _anthem_split_name(name)
+    if not last_name:
+        return []
+    initials = "".join(
+        part[0]
+        for part in re.findall(r"[A-Za-z]+", first_name)
+        if part
+    ).upper()
+    author = f"{last_name} {initials}".strip()
+    topic_terms = _anthem_pubmed_topic_terms(specialty)
+    queries: list[str] = []
+    if topic_terms:
+        topic_query = " OR ".join(
+            f"{term}[Title/Abstract]" for term in topic_terms
+        )
+        queries.append(f"{author}[Author] AND ({topic_query})")
+    if institution:
+        queries.append(f"{author}[Author] AND {institution}[Affiliation]")
+    if not queries:
+        queries.append(f"{author}[Author]")
+
+    ids: list[str] = []
+    for term in queries:
+        data = _anthem_pubmed_get(
+            "esearch.fcgi",
+            {
+                "db": "pubmed",
+                "term": term,
+                "retmode": "json",
+                "retmax": str(limit),
+                "sort": "date",
+            },
+        )
+        ids = list(
+            (data.get("esearchresult") or {}).get("idlist") or []
+        )
+        if ids:
+            break
+    if not ids:
+        return []
+    summary = _anthem_pubmed_get(
+        "esummary.fcgi",
+        {
+            "db": "pubmed",
+            "id": ",".join(ids),
+            "retmode": "json",
+        },
+    )
+    result = summary.get("result") or {}
+    target = f"{last_name} {initials}".casefold().strip()
+
+    def author_matches(item: dict) -> bool:
+        if not target:
+            return False
+        for author_entry in item.get("authors") or []:
+            if not isinstance(author_entry, dict):
+                continue
+            name_value = str(
+                author_entry.get("name") or ""
+            ).casefold().strip()
+            if not name_value:
+                continue
+            if name_value == target or name_value.startswith(
+                target + " "
+            ):
+                return True
+        return False
+
+    publications: list[dict] = []
+    for pmid in ids:
+        item = result.get(pmid) or {}
+        if not isinstance(item, dict) or not author_matches(item):
+            continue
+        title = re.sub(
+            r"<[^>]+>", "", str(item.get("title") or "")
+        )
+        title = " ".join(html.unescape(title).split())
+        if not title:
+            continue
+        publications.append(
+            {
+                "pmid": pmid,
+                "title": title,
+                "journal": str(item.get("source") or "").strip(),
+                "date": str(item.get("pubdate") or "").strip(),
+                "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+            }
+        )
+    return publications[:limit]
+
+
+def _anthem_provider_profile_page(
+    name: str,
+    institution: str,
+    specialty: str = "",
+) -> dict | None:
+    """Try to fetch an institution profile page for a provider.
+
+    Only institution families with predictable public profile URLs are
+    attempted. The result is passed to the profile model as additional
+    evidence, especially for education, awards, and research interests.
+    """
+    first_name, last_name = _anthem_split_name(name)
+    if not last_name:
+        return None
+
+    def slug(value: str) -> str:
+        return re.sub(
+            r"[^a-z0-9]+", "-", str(value or "").casefold()
+        ).strip("-")
+
+    first_slug = slug(first_name.split()[0]) if first_name else ""
+    last_slug = slug(last_name)
+    if not last_slug:
+        return None
+    dotted = f"{first_slug}.{last_slug}" if first_slug else last_slug
+    hyphenated = f"{first_slug}-{last_slug}" if first_slug else last_slug
+    institution_key = " ".join(str(institution or "").casefold().split())
+    candidates: list[str] = []
+    if "ucsf" in institution_key:
+        candidates.extend(
+            [
+                f"https://profiles.ucsf.edu/{dotted}",
+                f"https://www.ucsfhealth.org/providers/{hyphenated}",
+                "https://www.ucsfbenioffchildrens.org/providers/"
+                f"{hyphenated}",
+            ]
+        )
+    elif "stanford" in institution_key:
+        candidates.extend(
+            [
+                f"https://profiles.stanford.edu/{hyphenated}",
+                f"https://med.stanford.edu/profiles/{hyphenated}",
+            ]
+        )
+    candidates = list(dict.fromkeys(candidates))
+    if not candidates or trafilatura is None:
+        return None
+
+    name_words = [
+        word.casefold()
+        for word in re.findall(r"[A-Za-z]{3,}", name)
+        if word.casefold() not in {"md", "do", "dr"}
+    ]
+    for url in candidates:
+        try:
+            response = requests.get(
+                url,
+                headers={
+                    **chat.HTTP_HEADERS,
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "text/html,application/xhtml+xml",
+                },
+                timeout=(5, 20),
+                allow_redirects=True,
+            )
+        except requests.RequestException:
+            continue
+        if response.status_code != 200:
+            continue
+        content_type = str(
+            response.headers.get("Content-Type") or ""
+        ).split(";", 1)[0].strip().lower()
+        if content_type and "html" not in content_type:
+            continue
+        try:
+            text = trafilatura.extract(
+                response.text,
+                url=str(response.url or url),
+                include_comments=False,
+                include_tables=False,
+                favor_precision=True,
+            )
+        except Exception:
+            continue
+        if not text or len(text) < 300:
+            continue
+        lowered = text.casefold()
+        if name_words and not any(
+            word in lowered for word in name_words
+        ):
+            continue
+        return {
+            "url": str(response.url or url),
+            "text": " ".join(text.split())[:8000],
+        }
+    return None
+
+
+def _anthem_generate_provider_profile(
+    name: str,
+    facts: str,
+    publications: list[dict],
+    profile_text: str = "",
+) -> dict[str, str]:
+    """Generate the narrative profile sections for the detail modal."""
+    publication_text = "\n".join(
+        f"- {publication['title']} "
+        f"({publication['journal']} {publication['date']})".strip()
+        for publication in publications
+    ) or "(none found)"
+    prompt = (
+        ANTHEM_PROVIDER_PROFILE_PROMPT
+        .replace("{{FACTS}}", facts)
+        .replace("{{PUBLICATIONS}}", publication_text)
+        .replace(
+            "{{PROFILE_PAGE}}", profile_text or "(none found)"
+        )
+    )
+    keys = (
+        "background",
+        "research_interests",
+        "education",
+        "awards",
+        "clinical_focus",
+    )
+    try:
+        raw = chat.generate_text(
+            prompt,
+            model=ANTHEM_MODEL,
+            temperature=0.0,
+            num_predict=900,
+            num_ctx=chat.ANSWER_NUM_CTX,
+        )
+    except RuntimeError as exc:
+        return {
+            "background": f"Could not generate a profile: {exc}",
+            "research_interests": "",
+            "education": "",
+            "awards": "",
+            "clinical_focus": "",
+        }
+    parsed = _anthem_json_object(raw)
+    if not parsed:
+        return {
+            "background": " ".join(str(raw or "").split()),
+            "research_interests": "",
+            "education": "",
+            "awards": "",
+            "clinical_focus": "",
+        }
+    result: dict[str, str] = {}
+    marker = "Not found in the retrieved public records."
+    for key in keys:
+        text = " ".join(str(parsed.get(key) or "").split())
+        if marker in text:
+            remainder = text.replace(marker, "").strip()
+            if len(remainder) > 80:
+                text = remainder
+        result[key] = text
+    return result
+
+
+def _anthem_provider_detail(
+    npi: str,
+    name: str,
+    specialty: str = "",
+    institution: str = "",
+    source_label: str = "",
+) -> dict:
+    """Build one provider's detail modal payload.
+
+    Directory facts come from NPPES, publications from PubMed, and the
+    narrative sections from the configured Anthem model. The modal shows a
+    source note so education/award details are not mistaken for verified
+    directory data.
+    """
+    npi = str(npi or "").strip()
+    name = " ".join(str(name or "").split())
+    institution = " ".join(str(institution or "").split())
+    cache_key = (
+        f"{npi or name.casefold()}|{institution.casefold()}"
+    )
+    with _ANTHEM_PROVIDER_DETAIL_LOCK:
+        cached = _ANTHEM_PROVIDER_DETAIL_CACHE.get(cache_key)
+        if cached:
+            return dict(cached)
+
+    record = _anthem_nppes_record_for_provider(npi, name)
+    record_specialty = ""
+    if record:
+        npi = str(record.get("number") or npi)
+        display_name = _anthem_provider_record_name(record, name)
+        facts = _anthem_format_nppes([record])
+        record_specialty = " ".join(
+            str(taxonomy.get("desc") or "")
+            for taxonomy in record.get("taxonomies") or []
+            if isinstance(taxonomy, dict)
+        )
+    else:
+        display_name = name or "Provider"
+        facts = f"Provider: {display_name}\n"
+        if specialty:
+            facts += f"Specialty: {specialty}\n"
+    lookup_specialty = specialty or record_specialty
+    profile_page = _anthem_provider_profile_page(
+        display_name, institution, lookup_specialty
+    )
+    publications = _anthem_pubmed_publications(
+        display_name,
+        specialty=lookup_specialty,
+        institution=institution,
+    )
+    profile = _anthem_generate_provider_profile(
+        display_name,
+        facts,
+        publications,
+        profile_page["text"] if profile_page else "",
+    )
+
+    blocks: list[dict] = []
+    directory_items = [
+        line.strip() for line in facts.splitlines() if line.strip()
+    ]
+    if directory_items:
+        blocks.append(
+            {"type": "heading", "text": "Directory Record", "level": 2}
+        )
+        blocks.append({"type": "list", "items": directory_items})
+
+    sections = (
+        ("Background", "background"),
+        ("Research Interests", "research_interests"),
+        ("Education & Training", "education"),
+        ("Awards & Recognition", "awards"),
+        ("Clinical Focus", "clinical_focus"),
+    )
+    for heading, key in sections:
+        text = str(profile.get(key) or "").strip()
+        if not text:
+            continue
+        blocks.append(
+            {"type": "heading", "text": heading, "level": 2}
+        )
+        for paragraph in re.split(r"\n\s*\n", text):
+            paragraph = " ".join(paragraph.split())
+            if paragraph:
+                blocks.append({"type": "paragraph", "text": paragraph})
+
+    if publications:
+        blocks.append(
+            {
+                "type": "heading",
+                "text": "Selected Publications",
+                "level": 2,
+            }
+        )
+        blocks.append(
+            {
+                "type": "list",
+                "items": [
+                    f"{publication['title']} — "
+                    f"{publication['journal']} ({publication['date']})"
+                    for publication in publications
+                ],
+            }
+        )
+
+    first_name, last_name = _anthem_split_name(display_name)
+    nppes_link = (
+        f"https://npiregistry.cms.hhs.gov/provider-view/{npi}"
+        if npi
+        else "https://npiregistry.cms.hhs.gov/search?q="
+        + quote_plus(display_name)
+    )
+    notes = []
+    if npi:
+        notes.append(f"CMS NPPES record: {nppes_link}")
+    if profile_page:
+        notes.append(
+            f"Institution profile: {profile_page['url']}"
+        )
+    if publications:
+        query = quote_plus(f"{last_name} {first_name}".strip())
+        notes.append(
+            "PubMed author search: "
+            f"https://pubmed.ncbi.nlm.nih.gov/?term={query}"
+        )
+    notes.append(
+        "Directory facts come from CMS NPPES. Institution profile and "
+        "publication data come from the linked public pages. Verify "
+        "education, awards, and network participation with the provider "
+        "or institution."
+    )
+    blocks.append(
+        {"type": "heading", "text": "Sources & Notes", "level": 2}
+    )
+    blocks.append({"type": "list", "items": notes})
+
+    item = {
+        "title": display_name,
+        "source": "Anthem Provider Directory · CMS NPPES",
+        "link": nppes_link,
+        "docs": True,
+        "docs_label": "NPPES",
+        "learnable": False,
+        "findable": True,
+        "complete": True,
+        "blocks": blocks,
+        "paragraphs": [],
+        "images": [],
+        "profile_source": source_label,
+        "institution": institution,
+    }
+    with _ANTHEM_PROVIDER_DETAIL_LOCK:
+        _ANTHEM_PROVIDER_DETAIL_CACHE[cache_key] = item
+    return dict(item)
+
+
+def _anthem_provider_items_from_context(
+    context: str,
+    source_label: str = "",
+    institution: str = "",
+) -> list[dict]:
+    """Turn formatted provider blocks into clickable reader cards."""
+    items: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    institution = " ".join(str(institution or "").split())
+    for block in str(context or "").split("\n\n"):
+        record: dict[str, str] = {}
+        for line in block.splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            record[key.strip().casefold()] = value.strip()
+        name = record.get("provider", "")
+        if not name:
+            continue
+        npi = record.get("npi", "")
+        specialty = record.get("specialty", "")
+        organization = record.get("organization", "")
+        address = record.get("address", "")
+        phone = record.get("phone/contact", "") or record.get("phone", "")
+        fax = record.get("fax", "")
+        contact = phone
+        if fax and "fax" not in contact.casefold():
+            contact = (
+                f"{contact} · fax {fax}" if contact else f"fax {fax}"
+            )
+        identity = (npi or name.casefold(), address.casefold())
+        if identity in seen:
+            continue
+        seen.add(identity)
+        summary = " · ".join(
+            part
+            for part in (specialty, organization, address, contact)
+            if part
+        )
+        link_specialty = specialty.split(";", 1)[0]
+        link_specialty = re.sub(
+            r"\s+license\b.*$", "", link_specialty, flags=re.IGNORECASE
+        ).strip(" ;,")
+        if link_specialty.endswith("(primary)"):
+            link_specialty = link_specialty[: -len("(primary)")].strip()
+        query_parts = []
+        if link_specialty:
+            query_parts.append(
+                "specialty=" + quote_plus(link_specialty)
+            )
+        if institution:
+            query_parts.append(
+                "institution=" + quote_plus(institution)
+            )
+        query = "&".join(query_parts)
+        if npi:
+            link = (
+                "https://npiregistry.cms.hhs.gov/provider-view/"
+                f"{npi}"
+            )
+        else:
+            link = (
+                "https://npiregistry.cms.hhs.gov/search?q="
+                + quote_plus(name)
+            )
+        if query:
+            separator = "?" if npi else "&"
+            link += separator + query
+        items.append(
+            {
+                "title": name,
+                "name": name,
+                "npi": npi,
+                "organization": organization,
+                "specialty": specialty,
+                "address": address,
+                "phone": phone,
+                "fax": fax,
+                "link": link,
+                "source": "Anthem Provider Directory",
+                "section": specialty,
+                "summary": summary,
+                "paragraphs": [summary] if summary else [],
+                "docs": True,
+                "docs_label": "NPPES",
+                "learnable": False,
+                "findable": True,
+                "learn_noun": "provider",
+                "article_api": "/api/anthem_provider",
+                "complete": True,
+                "profile_source": source_label,
+                "institution": institution,
+            }
+        )
+    return items
+
+
+def _anthem_lookup(
+    plan: dict[str, str],
+    log: Callable[[str], None],
+) -> tuple[str, str, list[str], int]:
+    """Try the Anthem FHIR API, then the CMS NPPES fallback.
+
+    Returns ``(context, source_label, errors, record_count)``.
+    """
+    errors: list[str] = []
+    token = _anthem_access_token()
+    for label, base in _anthem_fhir_bases():
+        if label.startswith("registered") and not token:
+            continue
+        try:
+            resources = _anthem_fhir_search(base, token, plan, log)
+        except AnthemFHIRError as exc:
+            errors.append(f"{label} ({base}): {exc}")
+            continue
+        context = _anthem_format_fhir(resources, plan)
+        if context.strip():
+            return (
+                context,
+                f"Anthem Provider Directory FHIR API ({label})",
+                errors,
+                len(resources),
+            )
+        errors.append(f"{label} ({base}): no matching providers")
+    nppes_context, nppes_count = _anthem_nppes_search(plan, log)
+    if nppes_context.strip():
+        return (
+            nppes_context,
+            "CMS NPPES registry (fallback; Anthem directory unavailable)",
+            errors,
+            nppes_count,
+        )
+    return "", "", errors, 0
+
+
+
 class ChatState:
     """The server-side equivalent of chat.py's interactive session state."""
 
@@ -19209,6 +21952,17 @@ class ChatState:
         self.latest_sources: list[tuple[chat.Chunk, float]] = []
         self.latest_benchmark: dict | None = None
         self.benchmark_mode = False
+        # /anthem keeps a provider-directory thread. While the mode is on,
+        # ordinary questions are answered by the Anthem search path until
+        # the user enters /anthem off. The last directory context is retained
+        # so a follow-up such as "what is his phone number?" can be answered.
+        self.anthem_mode = False
+        self.anthem_context = ""
+        self.anthem_plan: dict[str, str] = {}
+        self.anthem_providers: list[dict] = []
+        self.anthem_source = ""
+        self.anthem_records = 0
+        self.anthem_items_sent = False
         # /research_with_the_news keeps answering every following question in
         # the accumulated research context until the user turns it off. The
         # Mode selector defaults to Online, so the browser starts in this mode.
@@ -19466,6 +22220,8 @@ class ChatState:
                 "dict": chat.DICT_MODEL,
             },
             "benchmark_mode": self.benchmark_mode,
+            "anthem_mode": self.anthem_mode,
+            "anthem_has_context": bool(self.anthem_context),
             "research_with_news_mode": self.research_with_news_mode,
             "english_words_to_learn": self.english_words_to_learn,
             "english_words_label": self.english_words_label,
@@ -20276,6 +23032,46 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 self._send_error_json(str(exc), 502)
                 return
             self._send_json(article)
+            return
+        if path == "/api/anthem_provider":
+            params = parse_qs(parsed.query)
+            npi = (params.get("npi") or [""])[0].strip()
+            url = (params.get("url") or [""])[0].strip()
+            name = (params.get("title") or [""])[0].strip()
+            specialty = (params.get("specialty") or [""])[0].strip()
+            institution = (params.get("institution") or [""])[0].strip()
+            if not npi:
+                match = re.search(
+                    r"/provider-view/(\d{10})", url
+                )
+                if match:
+                    npi = match.group(1)
+            if not specialty and url:
+                url_params = parse_qs(urlparse(url).query)
+                specialty = (url_params.get("specialty") or [""])[0]
+                specialty = specialty.strip()
+            if not institution and url:
+                url_params = parse_qs(urlparse(url).query)
+                institution = (url_params.get("institution") or [""])[0]
+                institution = institution.strip()
+            if not (npi or name):
+                self._send_error_json(
+                    "Missing provider NPI or name", 400
+                )
+                return
+            try:
+                item = _anthem_provider_detail(
+                    npi,
+                    name,
+                    specialty=specialty,
+                    institution=institution,
+                )
+            except Exception as exc:
+                self._send_error_json(
+                    f"Could not load provider detail: {exc}", 502
+                )
+                return
+            self._send_json(item)
             return
         if path == "/api/reddit_article":
             params = parse_qs(parsed.query)
@@ -21952,6 +24748,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
     def _run_question(self, question: str) -> None:
         state = self.state
+        if state.anthem_mode:
+            # /anthem keeps its own provider-directory thread. Every ordinary
+            # question stays in that thread, with the recent provider results
+            # available for follow-up references, until /anthem off.
+            self._run_anthem_question(question)
+            return
         if state.research_with_news_mode:
             # In this mode every question continues the current research
             # thread. The first researched question uses the direct initial
@@ -23099,6 +25901,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 f"token(s) (summary ~{summary_tokens:,} + recent "
                 f"~{recent_tokens:,})"
             )
+            if state.anthem_mode:
+                report += (
+                    "\n  provider search: Anthem mode on "
+                    f"({state.anthem_records} record(s) in context)"
+                )
             self._sse_text("output", "\n" + report + "\n")
         elif name == "/sources":
             self._command_sources()
@@ -23108,6 +25915,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_deepresearch(argument)
         elif name == "/research_with_the_news":
             self._command_research_with_the_news(argument)
+        elif name == "/anthem":
+            self._command_anthem(argument)
         elif name == "/write_a_book":
             self._command_write_a_book(argument)
         elif name == "/books":
@@ -23140,6 +25949,329 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             ]
         )
         self._sse_text("output", "\n".join(lines))
+
+    def _command_anthem(self, argument: str) -> None:
+        """Start, stop, or query the Anthem provider-directory mode.
+
+        Usage: /anthem <question>
+               /anthem
+               /anthem on|off
+        Follow-up questions are answered in the same provider-directory
+        context until /anthem off is entered.
+        """
+        state = self.state
+        value = " ".join(argument.split())
+        normalized = value.casefold()
+        if normalized in {"off", "stop", "exit", "disable", "disabled"}:
+            if not state.anthem_mode:
+                self._sse_text(
+                    "output",
+                    "\nAnthem provider search is already off; normal chat "
+                    "is active.\n",
+                )
+                return
+            state.anthem_mode = False
+            self._reset_anthem_context()
+            self._sse("meta", state.snapshot())
+            self._sse_text(
+                "output",
+                "\nAnthem provider search is off; normal chat is back.\n",
+            )
+            return
+        if normalized in {"on", "start", "enable", "enabled"}:
+            if state.anthem_mode:
+                self._sse_text(
+                    "output",
+                    "\nAnthem provider search is already on.\n",
+                )
+                return
+            state.anthem_mode = True
+            state.research_with_news_mode = False
+            self._reset_anthem_context()
+            self._sse("meta", state.snapshot())
+            self._sse_text(
+                "output",
+                "\nAnthem provider search is on. Ask about a doctor, "
+                "specialty, hospital, or clinic; follow-up questions keep "
+                "the same provider context. Use /anthem off to return to "
+                "normal chat.\n",
+            )
+            return
+        if not value:
+            state.anthem_mode = True
+            state.research_with_news_mode = False
+            self._reset_anthem_context()
+            self._sse("meta", state.snapshot())
+            self._sse_text(
+                "output",
+                "\nAnthem provider search is ready. Ask about a doctor, "
+                "specialty, hospital, or clinic. Follow-up questions keep "
+                "the same provider context; /anthem off returns to normal "
+                "chat.\n",
+            )
+            return
+        was_on = state.anthem_mode
+        state.anthem_mode = True
+        state.research_with_news_mode = False
+        if not was_on:
+            self._reset_anthem_context()
+        self._sse("meta", state.snapshot())
+        self._run_anthem_question(value)
+
+    def _reset_anthem_context(self) -> None:
+        """Clear the accumulated provider-search thread and its caches."""
+        state = self.state
+        state.reset_conversation()
+        state.anthem_context = ""
+        state.anthem_plan = {}
+        state.anthem_providers = []
+        state.anthem_source = ""
+        state.anthem_records = 0
+        state.anthem_items_sent = False
+        state.cache.clear()
+        state.latest_answer = None
+        state.latest_sources = []
+        state.latest_benchmark = None
+        state.code_language = ""
+
+    def _run_anthem_question(self, question: str) -> None:
+        """Search the Anthem directory and stream API results directly."""
+        question = " ".join((question or "").split())
+        if not question:
+            return
+        state = self.state
+        previous_context = state.anthem_context
+        search_keys = ("doctor_name", "specialty", "facility", "location")
+
+        # Fast local parsing is the primary path. The question model is only
+        # used if these rules find no search fields, and it is never used to
+        # write the result list itself.
+        plan = _anthem_fast_plan(question)
+        has_search_fields = any(plan.get(key) for key in search_keys)
+        self._sse_text(
+            "log",
+            "[anthem: fast search parameters: "
+            + (
+                ", ".join(
+                    f"{key}={value}"
+                    for key, value in plan.items()
+                    if value
+                )
+                or "none"
+            )
+            + "]",
+        )
+
+        if not has_search_fields and state.anthem_providers:
+            answer = _anthem_follow_up_answer(
+                question, state.anthem_providers
+            )
+            if answer is None:
+                answer = (
+                    f"I have {len(state.anthem_providers)} provider(s) in "
+                    "the current result set. Click a provider for the full "
+                    "profile, or ask for a phone number, address, or "
+                    "specialty."
+                )
+            self._sse_text("delta", answer)
+            state.latest_answer = answer
+            state.latest_sources = []
+            state.latest_benchmark = {
+                "anthem_source": (
+                    state.anthem_source or "current provider results"
+                ),
+                "anthem_records": len(state.anthem_providers),
+                "model": "direct API records",
+            }
+            state.record_turn(question, question, answer)
+            self._sse("annotations", {"items": []})
+            return
+
+        if not has_search_fields:
+            conversation_text = format_conversation(
+                state.conversation, state.conversation_summary
+            )
+            try:
+                plan = _anthem_search_plan(
+                    question, conversation_text
+                )
+            except Exception as exc:
+                self._sse_text(
+                    "log",
+                    f"[anthem: could not parse the search plan: {exc}]",
+                )
+                plan = _anthem_plan_fallback(question)
+            plan = _anthem_clean_plan(plan, question)
+            has_search_fields = any(
+                plan.get(key) for key in search_keys
+            )
+            self._sse_text(
+                "log",
+                "[anthem: model search parameters: "
+                + (
+                    ", ".join(
+                        f"{key}={value}"
+                        for key, value in plan.items()
+                        if value
+                    )
+                    or "none"
+                )
+                + "]",
+            )
+
+        if not has_search_fields:
+            message = (
+                "Tell me a doctor's name, a specialty, a hospital or "
+                "clinic, or a city/state to search."
+            )
+            self._sse_text("delta", message)
+            state.latest_answer = message
+            state.latest_sources = []
+            state.latest_benchmark = {
+                "anthem_source": "none",
+                "anthem_records": 0,
+                "model": "direct API records",
+            }
+            state.record_turn(question, question, message)
+            self._sse("annotations", {"items": []})
+            return
+
+        self._sse_text(
+            "log", "[anthem: querying the provider directory APIs]"
+        )
+        context, source_label, errors, record_count = _anthem_lookup(
+            plan, lambda text: self._sse_text("log", text)
+        )
+        if not context:
+            message = (
+                "I could not retrieve provider records from the Anthem "
+                "Provider Directory or the CMS NPPES fallback.\n"
+            )
+            if errors:
+                message += "\nWhat failed:\n" + "\n".join(
+                    f"- {error}" for error in errors[-4:]
+                )
+            if state.anthem_providers:
+                message += (
+                    "\nThe previous provider results are still available."
+                )
+            else:
+                state.anthem_context = ""
+                state.anthem_plan = {}
+                state.anthem_providers = []
+                state.anthem_source = ""
+                state.anthem_records = 0
+                state.anthem_items_sent = False
+            message += (
+                "\nTo use a registered Anthem provider-directory app, set "
+                "ANTHEM_FHIR_TOKEN or ANTHEM_FHIR_TOKEN_URL together with "
+                "ANTHEM_FHIR_CLIENT_ID and ANTHEM_FHIR_CLIENT_SECRET, and "
+                "optionally ANTHEM_FHIR_BASE_URL.\n"
+            )
+            self._sse_text("delta", message)
+            state.latest_answer = message
+            state.latest_sources = []
+            state.latest_benchmark = {
+                "anthem_source": "none",
+                "anthem_errors": errors,
+                "model": "direct API records",
+            }
+            state.record_turn(question, question, message)
+            self._sse("annotations", {"items": []})
+            return
+
+        # The API response itself is the result list. Parse it into clickable
+        # cards and keep the same records for follow-up questions.
+        institution = plan.get("facility", "")
+        provider_items = _anthem_provider_items_from_context(
+            context, source_label, institution=institution
+        )
+        state.anthem_context = context
+        state.anthem_plan = plan
+        state.anthem_providers = provider_items
+        state.anthem_source = source_label
+        state.anthem_records = record_count
+        state.anthem_items_sent = bool(provider_items)
+
+        if provider_items:
+            self._sse(
+                "news",
+                {
+                    "type": "start",
+                    "source": "Anthem Provider Directory",
+                    "description": (
+                        f"{source_label} · "
+                        f"{len(provider_items)} provider record(s); "
+                        "click a result to open its profile"
+                    ),
+                    "docs": True,
+                    "docs_label": "NPPES",
+                    "reset": True,
+                },
+            )
+            for provider_item in provider_items:
+                self._sse(
+                    "news", {"type": "item", **provider_item}
+                )
+
+        # Build the answer text directly from the API records. No question
+        # model is asked to write or reformat the list.
+        lines: list[str] = []
+        if "fallback" in source_label.lower():
+            lines.append(
+                "Note: the Anthem Provider Directory FHIR API did not "
+                "return usable records. These results come from the CMS "
+                "NPPES registry and do not confirm Anthem network "
+                "participation."
+            )
+        if provider_items:
+            lines.append(
+                f"Found {len(provider_items)} provider(s) from "
+                f"{source_label}."
+            )
+            for index, provider in enumerate(
+                provider_items, start=1
+            ):
+                details = " · ".join(
+                    part
+                    for part in (
+                        provider.get("specialty"),
+                        provider.get("organization"),
+                        provider.get("address"),
+                        provider.get("phone"),
+                    )
+                    if part
+                )
+                title = (
+                    provider.get("title")
+                    or provider.get("name")
+                    or "Provider"
+                )
+                lines.append(
+                    f"{index}. {title}"
+                    + (f" — {details}" if details else "")
+                )
+            lines.append(
+                "Click a provider card below to open the full profile."
+            )
+        else:
+            lines.append(
+                f"Found directory records from {source_label}, but they "
+                "could not be formatted as provider cards."
+            )
+            lines.append(context[:2000])
+        response = "\n".join(lines)
+        self._sse_text("delta", response)
+
+        state.latest_answer = response
+        state.latest_sources = []
+        state.latest_benchmark = {
+            "anthem_source": source_label,
+            "anthem_records": record_count,
+            "model": "direct API records",
+        }
+        state.record_turn(question, question, response)
+        self._sse("annotations", {"items": []})
 
     def _command_deepresearch(self, topic: str) -> None:
         """Run the bounded research loop and stream its process and report."""
@@ -23216,6 +26348,16 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         """
         topic = " ".join(argument.split())
         state = self.state
+        if state.anthem_mode:
+            # Switching the knowledge mode must not leave the Anthem provider
+            # thread in front of every subsequent question.
+            state.anthem_mode = False
+            self._reset_anthem_context()
+            self._sse("meta", state.snapshot())
+            self._sse_text(
+                "log",
+                "[anthem: mode off because the knowledge mode changed]",
+            )
         if not topic:
             self._sse_text(
                 "output",

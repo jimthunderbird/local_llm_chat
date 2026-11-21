@@ -13,6 +13,10 @@ Transcript providers, tried in order:
     1. youtube-transcript-api (fast when YouTube is not blocking this IP)
     2. yt-dlp (works through different player clients, so it still succeeds
        when the transcript API is IP-blocked)
+    3. An original-language caption track translated to English with the
+       local Ollama model. This handles videos whose only English option is
+       a YouTube translated track (for example en-zh) that YouTube refuses to
+       serve.
 
 Optional environment variables:
     YT_PROXY_URL              http(s)/socks proxy for both providers
@@ -162,12 +166,129 @@ def _make_api():
     return YouTubeTranscriptApi()
 
 
-def _fetch_with_api(video_id: str) -> str:
-    """Fetch with youtube-transcript-api, retrying only when a proxy is set.
+def _is_english_language(code: str) -> bool:
+    """Return True for English language codes, including en-xx variants."""
+    normalized = str(code or "").strip().lower().replace("_", "-")
+    return normalized == "en" or normalized.startswith("en-")
 
-    Without a proxy every retry leaves from the same blocked IP, so it only
-    adds latency.  With a rotating proxy a fresh client per attempt can move
-    to a different exit.
+
+def _looks_non_english(text: str) -> bool:
+    """Detect a cached transcript that is mostly a non-Latin script."""
+    sample = str(text or "")[:6000]
+    latin = sum(
+        1 for char in sample if "a" <= char.lower() <= "z"
+    )
+    non_latin = sum(
+        1
+        for char in sample
+        if char.isalpha() and ord(char) > 0x2FF
+    )
+    return non_latin > 20 and non_latin > latin * 0.2
+
+
+def _chunk_text(text: str, max_chars: int = 1600) -> list[str]:
+    """Split a transcript into translation-sized sentence chunks."""
+    text = " ".join(str(text or "").split())
+    if not text:
+        return []
+    pieces = re.split(r"(?<=[。！？.!?])\s*", text)
+    chunks: list[str] = []
+    current = ""
+    for piece in pieces:
+        piece = piece.strip()
+        if not piece:
+            continue
+        while len(piece) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(piece[:max_chars].strip())
+            piece = piece[max_chars:].strip()
+        if not piece:
+            continue
+        if current and len(current) + 1 + len(piece) <= max_chars:
+            current = f"{current} {piece}"
+        else:
+            if current:
+                chunks.append(current)
+            current = piece
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _translate_segment(segment: str) -> str:
+    """Translate one transcript segment into English with the local model."""
+    if requests is None:
+        raise RuntimeError(
+            "requests is not installed; cannot call Ollama for translation"
+        )
+    prompt = (
+        "Translate the following YouTube transcript segment into natural "
+        "English. Translate every sentence completely. Do not summarize, "
+        "shorten, explain, or add commentary. Preserve names, numbers, and "
+        "examples. Return only the English translation.\n\n"
+        f"<segment>\n{segment}\n</segment>\n"
+    )
+    payload = {
+        "model": MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "think": False,
+        "options": {
+            "temperature": 0.1,
+            "num_predict": 2600,
+            "num_ctx": 16384,
+        },
+    }
+    try:
+        response = requests.post(
+            f"{OLLAMA_HOST}/api/generate",
+            json=payload,
+            timeout=(10, 900),
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Could not reach Ollama at {OLLAMA_HOST} for transcript "
+            f"translation: {exc}"
+        ) from exc
+    translation = str(response.json().get("response") or "").strip()
+    translation = re.sub(
+        r"^(?:translation|english)\s*:\s*",
+        "",
+        translation,
+        flags=re.IGNORECASE,
+    ).strip()
+    translation = translation.strip("\"'“”").strip()
+    if not translation:
+        raise RuntimeError("The translation model returned an empty segment")
+    return translation
+
+
+def _translate_transcript(text: str, language_name: str) -> str:
+    """Translate a non-English transcript into English, segment by segment."""
+    chunks = _chunk_text(text)
+    if not chunks:
+        raise RuntimeError("The source transcript is empty")
+    _log(
+        f"no English transcript; translating {language_name or 'the original'} "
+        f"transcript in {len(chunks)} segment(s)"
+    )
+    translated: list[str] = []
+    for index, chunk in enumerate(chunks, start=1):
+        _log(f"translating segment {index}/{len(chunks)}…")
+        translated.append(_translate_segment(chunk))
+    result = " ".join(translated).strip()
+    if not result:
+        raise RuntimeError("Transcript translation produced no text")
+    return result
+
+def _fetch_with_api_any(video_id: str) -> tuple[str, str, str]:
+    """Fetch any available transcript, preferring English.
+
+    Returns ``(text, language_code, language_name)``.  When the video has no
+    English track, the caller translates the original-language transcript.
     """
     if YouTubeTranscriptApi is None:
         raise RuntimeError("youtube-transcript-api is not installed")
@@ -178,30 +299,45 @@ def _fetch_with_api(video_id: str) -> str:
     for attempt in range(tries):
         try:
             api = _make_api()
-            try:
-                fetched = api.fetch(video_id, languages=ENGLISH_LANGUAGES)
-            except Exception:
-                # Fall back to any available English transcript (e.g.
-                # auto-generated variants whose language code is not exactly
-                # "en").
-                available = list(api.list(video_id))
-                english = [
-                    transcript
-                    for transcript in available
-                    if transcript.language_code.lower().startswith("en")
-                ]
-                if not english:
-                    raise RuntimeError(
-                        f"No English transcript available for {video_id}"
-                    )
-                fetched = english[0].fetch()
+            transcripts = list(api.list(video_id))
+            if not transcripts:
+                raise RuntimeError(f"No transcripts are available for {video_id}")
+
+            english = [
+                transcript
+                for transcript in transcripts
+                if str(transcript.language_code).lower().startswith("en")
+            ]
+            ordered = english + [
+                transcript
+                for transcript in transcripts
+                if transcript not in english
+            ]
+            chosen = None
+            fetched = None
+            for transcript in ordered:
+                try:
+                    fetched = transcript.fetch()
+                except Exception as exc:
+                    last_error = exc
+                    continue
+                chosen = transcript
+                break
+            if chosen is None or fetched is None:
+                if last_error is not None:
+                    raise last_error
+                raise RuntimeError(f"Could not fetch a transcript for {video_id}")
 
             text = " ".join(
                 " ".join(snippet.text.split()) for snippet in fetched
             )
             if not text.strip():
                 raise RuntimeError(f"Transcript for {video_id} is empty")
-            return text.strip()
+            return (
+                text.strip(),
+                str(chosen.language_code),
+                str(getattr(chosen, "language", "") or chosen.language_code),
+            )
         except Exception as exc:
             last_error = exc
             if attempt == tries - 1 or _classify_error(exc) != "blocked":
@@ -292,18 +428,68 @@ def _extract_subtitle_text(directory: Path) -> str:
     return ""
 
 
-def _fetch_with_ytdlp(video_id: str) -> str:
-    """Fetch captions with yt-dlp, trying player clients that dodge IP blocks."""
+def _ytdlp_original_languages(video_id: str) -> list[str]:
+    """Return original (non-translated) subtitle languages from yt-dlp."""
+    command = _ytdlp_command()
+    if command is None:
+        return []
+    argv = [
+        *command,
+        "--no-warnings",
+        "--no-playlist",
+        "--list-subs",
+        f"https://www.youtube.com/watch?v={video_id}",
+    ]
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    languages: list[str] = []
+    for line in (result.stdout or "").splitlines():
+        if " from " in line.casefold():
+            # Translated tracks such as "en-zh English from Chinese" are
+            # derived from an original track; translate the original locally
+            # instead of relying on YouTube's translated caption endpoint.
+            continue
+        match = re.match(r"^([A-Za-z0-9_-]+)\s{2,}\S", line)
+        if not match:
+            continue
+        code = match.group(1)
+        if code.casefold() in {
+            "language",
+            "available",
+            "automatic",
+            "subtitles",
+            "format",
+        }:
+            continue
+        if code not in languages:
+            languages.append(code)
+    return languages
+
+
+def _fetch_with_ytdlp_languages(
+    video_id: str,
+    sub_langs: str,
+    *,
+    clients: tuple[str, ...] | None = None,
+    label: str = "English",
+) -> str:
+    """Fetch captions for one language pattern with yt-dlp."""
     command = _ytdlp_command()
     if command is None:
         raise RuntimeError("yt-dlp is not installed")
 
-    last_error = "no English captions were found"
+    last_error = f"no {label} captions were found"
     proxy = os.environ.get("YT_PROXY_URL")
     cookies_browser = os.environ.get("YT_COOKIES_FROM_BROWSER")
     cookies_file = os.environ.get("YT_COOKIES_FILE")
-
-    for client in YT_DLP_CLIENTS:
+    for client in clients or YT_DLP_CLIENTS:
         with tempfile.TemporaryDirectory(prefix="yt-transcript-") as tmp:
             output_template = str(Path(tmp) / "%(id)s.%(ext)s")
             argv = [
@@ -315,7 +501,7 @@ def _fetch_with_ytdlp(video_id: str) -> str:
                 "--write-subs",
                 "--write-auto-subs",
                 "--sub-langs",
-                "en.*",
+                sub_langs,
                 "--sub-format",
                 "json3/vtt",
                 "-o",
@@ -348,7 +534,7 @@ def _fetch_with_ytdlp(video_id: str) -> str:
 
             text = _extract_subtitle_text(Path(tmp))
             if text:
-                _log(f"fetched with yt-dlp (client={client})")
+                _log(f"fetched {label} captions with yt-dlp (client={client})")
                 return text
 
             details = " ".join(
@@ -361,7 +547,42 @@ def _fetch_with_ytdlp(video_id: str) -> str:
             )
             time.sleep(random.uniform(0.2, 0.8))
 
-    raise RuntimeError(f"yt-dlp could not fetch an English transcript: {last_error}")
+    raise RuntimeError(
+        f"yt-dlp could not fetch a {label} transcript: {last_error}"
+    )
+
+
+def _fetch_with_ytdlp(video_id: str) -> str:
+    """Fetch English captions with yt-dlp, trying alternate player clients."""
+    return _fetch_with_ytdlp_languages(video_id, "en.*")
+
+
+def _fetch_with_ytdlp_any(video_id: str) -> tuple[str, str, str]:
+    """Fetch an original-language transcript when English is unavailable."""
+    languages = _ytdlp_original_languages(video_id)
+    if not languages:
+        raise RuntimeError(
+            "yt-dlp found no original-language subtitle tracks"
+        )
+    for language in languages:
+        try:
+            text = _fetch_with_ytdlp_languages(
+                video_id,
+                language,
+                clients=("visionos", "android_vr", "default"),
+                label=language,
+            )
+        except Exception as exc:
+            _log(
+                f"yt-dlp could not fetch {language} captions: "
+                f"{_short_error(exc, 240)}"
+            )
+            continue
+        if text.strip():
+            return text.strip(), language, language
+    raise RuntimeError(
+        "yt-dlp could not download any original-language caption track"
+    )
 
 
 def fetch_transcript(video_id: str, use_cache: bool = True) -> str:
@@ -369,6 +590,11 @@ def fetch_transcript(video_id: str, use_cache: bool = True) -> str:
 
     A previously downloaded transcript is reused so retries and the learn
     pipeline are idempotent and do not hit YouTube again.
+
+    When the video has no English caption track, the original-language
+    transcript is fetched and translated locally with Ollama. This handles
+    videos whose only English option is a YouTube translated track (for
+    example ``en-zh``) that YouTube's caption endpoint refuses to serve.
     """
     if use_cache:
         cached = _transcript_path(video_id)
@@ -378,19 +604,45 @@ def fetch_transcript(video_id: str, use_cache: bool = True) -> str:
             except OSError:
                 text = ""
             if text:
+                if _looks_non_english(text):
+                    _log(
+                        "cached transcript is not English; translating it "
+                        "to English"
+                    )
+                    translated = _translate_transcript(
+                        text, "cached"
+                    )
+                    try:
+                        cached.write_text(
+                            translated + "\n", encoding="utf-8"
+                        )
+                    except OSError:
+                        pass
+                    return translated
                 _log("using cached transcript")
                 return text
 
     errors: list[str] = []
 
     try:
-        text = _fetch_with_api(video_id)
-        _log("fetched with youtube-transcript-api")
-        return text
+        text, language_code, language_name = _fetch_with_api_any(video_id)
+        if _is_english_language(language_code):
+            _log(
+                "fetched English transcript with youtube-transcript-api "
+                f"({language_code})"
+            )
+            return text
+        _log(
+            f"youtube-transcript-api returned {language_name or language_code}; "
+            "translating it to English"
+        )
+        return _translate_transcript(
+            text, language_name or language_code
+        )
     except Exception as exc:
         errors.append(
             f"youtube-transcript-api: {_classify_error(exc)} "
-            f"({_short_error(exc, 240)})"
+            f"({_short_error(exc, 300)})"
         )
         _log(
             f"youtube-transcript-api failed ({_classify_error(exc)}); "
@@ -399,14 +651,43 @@ def fetch_transcript(video_id: str, use_cache: bool = True) -> str:
 
     try:
         text = _fetch_with_ytdlp(video_id)
+        _log("fetched English transcript with yt-dlp")
         return text
     except Exception as exc:
-        errors.append(f"yt-dlp: {_short_error(exc, 360)}")
-        _log(f"yt-dlp failed ({_short_error(exc, 240)})")
+        errors.append(f"yt-dlp English: {_short_error(exc, 360)}")
+        _log(f"yt-dlp English failed ({_short_error(exc, 240)})")
+
+    try:
+        text, language_code, language_name = _fetch_with_ytdlp_any(
+            video_id
+        )
+        if _is_english_language(language_code):
+            _log(
+                "fetched English transcript with yt-dlp "
+                f"({language_code})"
+            )
+            return text
+        _log(
+            f"yt-dlp returned {language_name or language_code}; "
+            "translating it to English"
+        )
+        return _translate_transcript(
+            text, language_name or language_code
+        )
+    except Exception as exc:
+        errors.append(
+            f"yt-dlp original language: {_short_error(exc, 360)}"
+        )
+        _log(
+            "yt-dlp original-language fallback failed "
+            f"({_short_error(exc, 240)})"
+        )
 
     raise RuntimeError(
-        f"Could not fetch an English transcript for {video_id}. "
-        "YouTube may be blocking this network; set YT_PROXY_URL (or "
+        f"Could not fetch an English transcript for {video_id}. The "
+        "pipeline also tried translating the original-language transcript "
+        f"with the local {MODEL} model. YouTube may be blocking this "
+        "network; set YT_PROXY_URL (or "
         "WEBSHARE_PROXY_USERNAME/WEBSHARE_PROXY_PASSWORD), or "
         "YT_COOKIES_FROM_BROWSER=chrome as a last resort, then retry. "
         f"Details: {'; '.join(errors)}"

@@ -1,3 +1,9 @@
+task.support_multi_language_transcript_download (completed) {
+  I want to use youtube_video_learn.py to learn the english transcript of this video but it does not work:
+  https://www.youtube.com/watch?v=eAuansMuUwQ
+  please find a systematic way to get the english transcript of it
+}
+
 task.youtube_transcript_refactor (completed) {
   - for /youtube transcript <transcript>
     - if <transcriipt> is not being learned yet, do: /youtube learn <transcript>
