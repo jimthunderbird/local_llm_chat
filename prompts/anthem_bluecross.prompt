@@ -8,6 +8,13 @@ question_llm: ornith-1.5:35b
 
 group unit_tests {
   task (completed) {
+    refer to task.ucsf_only_doctors:
+    question: find list of head and neck cancer specialists only in ucsf
+    expect: the result should contain a list of doctors in UCSF only
+    actual: Patrick Carpenter MD is in the list
+  }
+
+  task.ucsf_only_doctors (completed) {
     after typing the command /anthem {
       question: find list of head and neck cancer specialists only in ucsf
       expect: the result should contain a list of doctors in UCSF only
@@ -24,6 +31,11 @@ group unit_tests {
 }
 
 group application {
+  task.feature.specialist_title (completed) {
+    in the list of results, if the entry is a specalist, add the specialist's academic title, for example:
+    - YEW SONG CHENG, MD's Academic title is "Clinical Professor"
+  }
+
   task.feature.show_providers_result_instantly (completed) {
     - currrently, when presenting list of results, it uses {question_llm} to generate the list
       DO NOT do that, instead, just use related apis or mcps to give me the result ASAP 

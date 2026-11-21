@@ -21780,31 +21780,190 @@ def _anthem_provider_profile_urls(
             r"[^a-z0-9]+", "-", str(value or "").casefold()
         ).strip("-")
 
-    first_slug = slug(first_name.split()[0]) if first_name else ""
+    first_slug_variants: list[str] = []
+
+    def add_given(value: str) -> None:
+        value_slug = slug(value)
+        if value_slug and value_slug not in first_slug_variants:
+            first_slug_variants.append(value_slug)
+
+    if first_name:
+        add_given(first_name.split()[0])
+        add_given(first_name)
+        add_given("".join(re.findall(r"[A-Za-z0-9]+", first_name)))
     last_slug = slug(last_name)
     if not last_slug:
         return []
-    dotted = f"{first_slug}.{last_slug}" if first_slug else last_slug
-    hyphenated = f"{first_slug}-{last_slug}" if first_slug else last_slug
     institution_key = " ".join(str(institution or "").casefold().split())
     candidates: list[str] = []
     if "ucsf" in institution_key:
-        candidates.extend(
-            [
-                f"https://profiles.ucsf.edu/{dotted}",
-                f"https://www.ucsfhealth.org/providers/{hyphenated}",
+        for given_slug in first_slug_variants:
+            candidates.append(
+                f"https://profiles.ucsf.edu/{given_slug}.{last_slug}"
+            )
+        for given_slug in first_slug_variants:
+            candidates.append(
+                "https://www.ucsfhealth.org/providers/"
+                f"{given_slug}-{last_slug}"
+            )
+        for given_slug in first_slug_variants:
+            candidates.append(
                 "https://www.ucsfbenioffchildrens.org/providers/"
-                f"{hyphenated}",
-            ]
-        )
+                f"{given_slug}-{last_slug}"
+            )
     elif "stanford" in institution_key:
-        candidates.extend(
-            [
-                f"https://profiles.stanford.edu/{hyphenated}",
-                f"https://med.stanford.edu/profiles/{hyphenated}",
-            ]
-        )
+        for given_slug in first_slug_variants:
+            candidates.append(
+                f"https://profiles.stanford.edu/{given_slug}-{last_slug}"
+            )
+            candidates.append(
+                "https://med.stanford.edu/profiles/"
+                f"{given_slug}-{last_slug}"
+            )
     return list(dict.fromkeys(candidates))
+
+
+def _anthem_provider_title_urls(
+    name: str,
+    institution: str,
+) -> list[str]:
+    """Return the profile URLs most likely to list an academic title."""
+    urls = _anthem_provider_profile_urls(name, institution)
+
+    def rank(url: str) -> int:
+        if "ucsfhealth.org/providers" in url:
+            return 0
+        if "ucsfbenioffchildrens.org/providers" in url:
+            return 1
+        if (
+            "profiles.stanford.edu" in url
+            or "med.stanford.edu/profiles" in url
+        ):
+            return 0
+        return 2
+
+    return sorted(urls, key=lambda url: (rank(url), urls.index(url)))
+
+
+def _anthem_extract_academic_title(text: str) -> str:
+    """Extract an academic rank from an institution profile page."""
+    if not text:
+        return ""
+    lines = [
+        " ".join(line.split())
+        for line in str(text).splitlines()
+        if line.strip()
+    ]
+    labels = {
+        "academic title",
+        "academic titles",
+        "academic appointment",
+        "academic appointments",
+    }
+    skip = {
+        "on this page",
+        "locations",
+        "my research",
+        "education & training",
+        "board certification",
+    }
+    for index, line in enumerate(lines):
+        stripped = line.casefold().rstrip(":")
+        value = ""
+        if stripped in labels:
+            for following in lines[index + 1 : index + 5]:
+                candidate = following.lstrip("-–—•: ").strip()
+                if (
+                    candidate
+                    and candidate.casefold() not in skip
+                    and len(candidate) <= 120
+                ):
+                    value = candidate
+                    break
+        else:
+            match = re.match(
+                r"(?i)^academic titles?\s*[:\-–—]\s*(.+)$", line
+            )
+            if match:
+                value = match.group(1).strip()[:120]
+        if value:
+            return value
+    flat = " ".join(lines)
+    match = re.search(
+        r"\b((?:Clinical |Associate |Assistant |Adjunct |Volunteer )*"
+        r"(?:Professor|Instructor|Lecturer)(?: of [A-Za-z&'’,. -]{2,90})?)\b",
+        flat,
+    )
+    if match:
+        value = re.split(
+            r"\s+(?:at|in the|and)\s+", match.group(1)
+        )[0]
+        return value.strip(" ,.-")[:120]
+    return ""
+
+
+_ANTHEM_TITLE_CACHE: dict[tuple[str, str], str] = {}
+_ANTHEM_TITLE_LOCK = threading.Lock()
+
+
+def _anthem_academic_title(name: str, institution: str) -> str:
+    """Return a provider's academic title from an institution profile."""
+    name = " ".join(str(name or "").split())
+    institution = " ".join(str(institution or "").split())
+    if not name or not institution:
+        return ""
+    key = (institution.casefold(), name.casefold())
+    with _ANTHEM_TITLE_LOCK:
+        if key in _ANTHEM_TITLE_CACHE:
+            return _ANTHEM_TITLE_CACHE[key]
+    _first_name, last_name = _anthem_split_name(name)
+    last_key = last_name.casefold()
+    title = ""
+    for url in _anthem_provider_title_urls(name, institution):
+        try:
+            response = requests.get(
+                url,
+                headers={
+                    **chat.HTTP_HEADERS,
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "text/html,application/xhtml+xml",
+                },
+                timeout=(4, 10),
+                allow_redirects=True,
+            )
+        except requests.RequestException:
+            continue
+        if response.status_code != 200:
+            continue
+        content_type = str(
+            response.headers.get("Content-Type") or ""
+        ).split(";", 1)[0].strip().lower()
+        if content_type and "html" not in content_type:
+            continue
+        if trafilatura is None:
+            text = response.text
+        else:
+            try:
+                text = trafilatura.extract(
+                    response.text,
+                    url=str(response.url or url),
+                    include_comments=False,
+                    include_tables=False,
+                    favor_precision=True,
+                ) or ""
+            except Exception:
+                text = ""
+        if not text:
+            continue
+        if last_key and last_key not in text.casefold():
+            continue
+        candidate = _anthem_extract_academic_title(text)
+        if candidate:
+            title = candidate
+            break
+    with _ANTHEM_TITLE_LOCK:
+        _ANTHEM_TITLE_CACHE[key] = title
+    return title
 
 
 _ANTHEM_AFFILIATION_CACHE: dict[tuple[str, str], bool] = {}
@@ -22040,6 +22199,12 @@ def _anthem_provider_detail(
         facts = f"Provider: {display_name}\n"
         if specialty:
             facts += f"Specialty: {specialty}\n"
+    academic_title = _anthem_academic_title(display_name, institution)
+    if academic_title:
+        facts = (
+            facts.rstrip()
+            + f"\nAcademic title: {academic_title}\n"
+        )
     lookup_specialty = specialty or record_specialty
     profile_page = _anthem_provider_profile_page(
         display_name, institution, lookup_specialty
@@ -22230,6 +22395,7 @@ def _anthem_provider_items_from_context(
                 "npi": npi,
                 "organization": organization,
                 "specialty": specialty,
+                "academic_title": "",
                 "address": address,
                 "phone": phone,
                 "fax": fax,
@@ -22249,6 +22415,28 @@ def _anthem_provider_items_from_context(
                 "institution": institution,
             }
         )
+    if items and _anthem_facility_profile_supported(institution):
+        def load_title(item: dict) -> tuple[dict, str]:
+            return item, _anthem_academic_title(item["name"], institution)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [
+                pool.submit(load_title, item) for item in items
+            ]
+            for future in as_completed(futures):
+                try:
+                    item, title = future.result()
+                except Exception:
+                    continue
+                if not title:
+                    continue
+                item["academic_title"] = title
+                base = str(item.get("summary") or "")
+                item["summary"] = (
+                    f"Academic title: {title}"
+                    + (f" · {base}" if base else "")
+                )
+                item["paragraphs"] = [item["summary"]]
     return items
 
 
@@ -26614,9 +26802,17 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             for index, provider in enumerate(
                 provider_items, start=1
             ):
+                academic_title = str(
+                    provider.get("academic_title") or ""
+                ).strip()
                 details = " · ".join(
                     part
                     for part in (
+                        (
+                            f"Academic title: {academic_title}"
+                            if academic_title
+                            else ""
+                        ),
                         provider.get("specialty"),
                         provider.get("organization"),
                         provider.get("address"),

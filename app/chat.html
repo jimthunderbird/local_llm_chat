@@ -7643,6 +7643,7 @@ function makeNewsItem(entry, data) {
     published: data.published || "",
     source: data.source || entry.newsSource || "News",
     section: data.section || "",
+    academicTitle: String(data.academic_title || ""),
     summary: data.summary || "",
     paragraphs: Array.isArray(data.paragraphs)
       ? data.paragraphs.map((text) => String(text || "")).filter(Boolean)
@@ -8556,6 +8557,9 @@ function renderNewsList(entry) {
       const meta = document.createElement("div");
       meta.className = "news-meta";
       const metaParts = [];
+      if (item.academicTitle) {
+        metaParts.push(`Academic title: ${item.academicTitle}`);
+      }
       if (item.section && item.section !== itemSource) {
         metaParts.push(item.section);
       }
