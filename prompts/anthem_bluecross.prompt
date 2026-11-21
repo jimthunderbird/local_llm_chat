@@ -46,6 +46,15 @@ group unit_tests {
 }
 
 group application {
+  task.feature.follow_up_question_on_doctor (completed) {
+    - type: /anthem
+    - type "find list of lung cancer specialists only in ucsf"
+    - now, type: tell me more about Johannes Kratz, MD
+    - requirement: 
+    it should return me the detail of Johannes Kratz, MD
+    the context should be aware of the list of doctors in UCSF
+  }
+
   task.feature.specialist_title (completed) {
     in the list of results, if the entry is a specalist, add the specialist's academic title, for example:
     - YEW SONG CHENG, MD's Academic title is "Clinical Professor"

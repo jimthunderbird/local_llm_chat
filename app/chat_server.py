@@ -20078,6 +20078,46 @@ def _anthem_select_provider(
     return None
 
 
+_ANTHEM_DETAIL_REQUEST_RE = re.compile(
+    r"\b(?:"
+    r"tell me more|more about|details?|profile|background|biography|bio|"
+    r"education|training|awards?|recognition|publications?|research|"
+    r"who is|experience|qualifications?"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _anthem_is_detail_request(question: str) -> bool:
+    """Return whether a follow-up asks for a provider's full profile."""
+    return bool(_ANTHEM_DETAIL_REQUEST_RE.search(str(question or "")))
+
+
+def _anthem_provider_detail_text(item: dict) -> str:
+    """Render provider-detail blocks as readable chat text."""
+    lines: list[str] = []
+    for block in item.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        kind = str(block.get("type") or "")
+        if kind == "heading":
+            text = str(block.get("text") or "").strip()
+            if text:
+                if lines:
+                    lines.append("")
+                lines.append(text)
+        elif kind == "paragraph":
+            text = " ".join(str(block.get("text") or "").split())
+            if text:
+                lines.append(text)
+        elif kind == "list":
+            for value in block.get("items") or []:
+                text = " ".join(str(value or "").split())
+                if text:
+                    lines.append(f"- {text}")
+    return "\n".join(lines).strip()
+
+
 def _anthem_follow_up_answer(
     question: str,
     providers: list[dict],
@@ -27127,6 +27167,63 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             + "]",
         )
 
+        target = (
+            _anthem_select_provider(question, state.anthem_providers)
+            if (
+                state.anthem_providers
+                and _anthem_is_detail_request(question)
+            )
+            else None
+        )
+        if target is not None:
+            target_name = str(
+                target.get("name") or target.get("title") or ""
+            ).strip()
+            self._sse_text(
+                "log",
+                "[anthem: loading the full profile for "
+                f"{target_name or 'the selected provider'}]",
+            )
+            try:
+                detail = _anthem_provider_detail(
+                    str(target.get("npi") or ""),
+                    target_name,
+                    specialty=str(target.get("specialty") or ""),
+                    institution=str(
+                        target.get("institution")
+                        or state.anthem_plan.get("facility")
+                        or ""
+                    ),
+                    source_label=state.anthem_source,
+                )
+                answer = _anthem_provider_detail_text(detail)
+            except Exception as exc:
+                self._sse_text(
+                    "log",
+                    f"[anthem: could not load provider detail: {exc}]",
+                )
+                answer = ""
+            if not answer:
+                answer = _anthem_follow_up_answer(
+                    question, state.anthem_providers
+                ) or (
+                    f"Could not load the full profile for "
+                    f"{target_name or 'the selected provider'}."
+                )
+            self._sse_text("delta", answer)
+            state.latest_answer = answer
+            state.latest_sources = []
+            state.latest_benchmark = {
+                "anthem_source": (
+                    state.anthem_source or "current provider results"
+                ),
+                "anthem_records": len(state.anthem_providers),
+                "model": "direct API records + provider profile",
+            }
+            state.record_turn(question, question, answer)
+            self._sse("annotations", {"items": []})
+            return
+
         if not has_search_fields and state.anthem_providers:
             answer = _anthem_follow_up_answer(
                 question, state.anthem_providers
@@ -27255,6 +27352,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         related_items, condition_term = _anthem_directory_condition_items(
             question, plan, institution, source_label
         )
+        if condition_term:
+            self._sse_text(
+                "log",
+                "[anthem: UCSF directory condition "
+                f"{condition_term!r} matched {len(related_items)} "
+                "specialist(s)]",
+            )
         added_related: list[dict] = []
         if related_items:
             existing = {
