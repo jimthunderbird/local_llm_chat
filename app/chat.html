@@ -7644,6 +7644,9 @@ function makeNewsItem(entry, data) {
     source: data.source || entry.newsSource || "News",
     section: data.section || "",
     academicTitle: String(data.academic_title || ""),
+    npi: String(data.npi || ""),
+    institution: String(data.institution || ""),
+    providerSpecialty: String(data.specialty || ""),
     summary: data.summary || "",
     paragraphs: Array.isArray(data.paragraphs)
       ? data.paragraphs.map((text) => String(text || "")).filter(Boolean)
@@ -15093,9 +15096,24 @@ function ensureNewsArticle(item) {
     renderNewsModal(item);
     renderNewsAction(item);
   }
-  const requestUrl = articleApi
-    ? `${articleApi}?url=${encodeURIComponent(link)}&title=${encodeURIComponent(item.title || "")}`
-    : `/api/news_article?url=${encodeURIComponent(link)}&title=${encodeURIComponent(item.title || "")}`;
+  let requestUrl;
+  if (articleApi) {
+    const params = new URLSearchParams();
+    params.set("url", link);
+    params.set("title", item.title || "");
+    if (articleApi === "/api/anthem_provider") {
+      if (item.npi) params.set("npi", item.npi);
+      if (item.providerSpecialty) {
+        params.set("specialty", item.providerSpecialty);
+      }
+      if (item.institution) {
+        params.set("institution", item.institution);
+      }
+    }
+    requestUrl = `${articleApi}?${params.toString()}`;
+  } else {
+    requestUrl = `/api/news_article?url=${encodeURIComponent(link)}&title=${encodeURIComponent(item.title || "")}`;
+  }
   fetch(requestUrl)
     .then((response) => response.json().then((data) => {
       if (!response.ok) {

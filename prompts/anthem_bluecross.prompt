@@ -8,6 +8,21 @@ question_llm: ornith-1.5:35b
 
 group unit_tests {
   task (completed) {
+    when i click on Johannes Kratz, MD:
+    expect: in "Education & Training" and "Awards & Recognition", it should have good information
+    actural: Not found in the retrieved public records
+    please fix it in a systematic way, find ways to gather these information for any doctor
+  }
+  
+  task (completed) {
+    refer to task.ucsf_only_doctors:
+    question: find list of lung cancer specialists only in ucsf
+    expect: the result should contain Johannes Kratz, MD
+    actual: Johannes Kratz, MD is not in the list
+    please fix in a systematic way
+  }
+
+  task (completed) {
     refer to task.ucsf_only_doctors:
     question: find list of head and neck cancer specialists only in ucsf
     expect: the result should contain a list of doctors in UCSF only

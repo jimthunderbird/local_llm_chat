@@ -19311,9 +19311,9 @@ Return only one JSON object with these keys:
 
 Rules:
 - The verified directory facts are authoritative for name, NPI, specialty, address, phone, status, and publication list.
-- If an institution profile is provided, prefer it for background, research interests, education, awards, and clinical focus. Summarize it accurately; do not copy it verbatim.
-- If the institution profile lists education or training, include it in "education".
-- If the institution profile lists board certifications, licenses, awards, or honors, include them in "awards".
+- If the institution profile is provided, prefer it for background, research interests, education, awards, and clinical focus. Summarize it accurately; do not copy it verbatim.
+- If the verified directory facts include an education/training list or provider title, use them in "education" and "background".
+- If the institution profile or directory facts list board certifications, licenses, awards, or honors, include them in "awards".
 - Use the publication titles to describe research interests when they are available.
 - For education and awards, use only details found in the institution profile or details you are confident are public. If you are not confident, write exactly "Not found in the retrieved public records."
 - Do not invent publications, degrees, dates, awards, or affiliations.
@@ -19723,6 +19723,21 @@ _ANTHEM_FACILITY_NAMES = [
 _ANTHEM_FACILITY_NAMES.sort(
     key=lambda item: len(item[0]), reverse=True
 )
+
+_ANTHEM_QUERY_CORRECTIONS = (
+    (re.compile(r"\blunch\s+cancer\b", re.IGNORECASE), "lung cancer"),
+    (re.compile(r"\blong\s+cancer\b", re.IGNORECASE), "lung cancer"),
+    (re.compile(r"\blung\s+caner\b", re.IGNORECASE), "lung cancer"),
+)
+
+
+def _anthem_normalize_question(question: str) -> str:
+    """Correct common spelling mistakes in provider search questions."""
+    text = " ".join(str(question or "").split())
+    for pattern, replacement in _ANTHEM_QUERY_CORRECTIONS:
+        text = pattern.sub(replacement, text)
+    return text
+
 
 _ANTHEM_ADDRESS_SUFFIXES = {
     "AV": "AVE",
@@ -22205,6 +22220,14 @@ def _anthem_provider_detail(
             facts.rstrip()
             + f"\nAcademic title: {academic_title}\n"
         )
+    directory_profile_url = ""
+    directory_evidence = ""
+    if _anthem_is_ucsf_facility(institution):
+        directory_evidence, directory_profile_url = (
+            _anthem_ucsf_directory_evidence(npi, display_name)
+        )
+        if directory_evidence:
+            facts = facts.rstrip() + "\n" + directory_evidence + "\n"
     lookup_specialty = specialty or record_specialty
     profile_page = _anthem_provider_profile_page(
         display_name, institution, lookup_specialty
@@ -22283,6 +22306,21 @@ def _anthem_provider_detail(
         notes.append(
             f"Institution profile: {profile_page['url']}"
         )
+    if (
+        directory_profile_url
+        and (
+            not profile_page
+            or directory_profile_url != profile_page["url"]
+        )
+    ):
+        notes.append(
+            "UCSF Health provider directory: "
+            f"{directory_profile_url}"
+        )
+    elif directory_evidence:
+        notes.append(
+            "UCSF Health provider directory record matched by NPI/name."
+        )
     if publications:
         query = quote_plus(f"{last_name} {first_name}".strip())
         notes.append(
@@ -22318,6 +22356,35 @@ def _anthem_provider_detail(
     with _ANTHEM_PROVIDER_DETAIL_LOCK:
         _ANTHEM_PROVIDER_DETAIL_CACHE[cache_key] = item
     return dict(item)
+
+
+def _anthem_add_academic_titles(
+    items: list[dict],
+    institution: str,
+) -> None:
+    """Fill ``academic_title`` on provider items in parallel."""
+    if not items or not _anthem_facility_profile_supported(institution):
+        return
+
+    def load_title(item: dict) -> tuple[dict, str]:
+        return item, _anthem_academic_title(item["name"], institution)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(load_title, item) for item in items]
+        for future in as_completed(futures):
+            try:
+                item, title = future.result()
+            except Exception:
+                continue
+            if not title:
+                continue
+            item["academic_title"] = title
+            base = str(item.get("summary") or "")
+            item["summary"] = (
+                f"Academic title: {title}"
+                + (f" · {base}" if base else "")
+            )
+            item["paragraphs"] = [item["summary"]]
 
 
 def _anthem_provider_items_from_context(
@@ -22415,29 +22482,457 @@ def _anthem_provider_items_from_context(
                 "institution": institution,
             }
         )
-    if items and _anthem_facility_profile_supported(institution):
-        def load_title(item: dict) -> tuple[dict, str]:
-            return item, _anthem_academic_title(item["name"], institution)
-
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = [
-                pool.submit(load_title, item) for item in items
-            ]
-            for future in as_completed(futures):
-                try:
-                    item, title = future.result()
-                except Exception:
-                    continue
-                if not title:
-                    continue
-                item["academic_title"] = title
-                base = str(item.get("summary") or "")
-                item["summary"] = (
-                    f"Academic title: {title}"
-                    + (f" · {base}" if base else "")
-                )
-                item["paragraphs"] = [item["summary"]]
+    _anthem_add_academic_titles(items, institution)
     return items
+
+
+_ANTHEM_UCSF_DIRECTORY_CACHE: dict[str, list[dict]] = {}
+_ANTHEM_UCSF_DIRECTORY_LOCK = threading.Lock()
+
+
+def _anthem_ucsf_directory_query(term: str, limit: int = 50) -> list[dict]:
+    """Search the UCSF Health public provider directory."""
+    term = " ".join(str(term or "").split())
+    if not term:
+        return []
+    key = f"{term.casefold()}|{limit}"
+    with _ANTHEM_UCSF_DIRECTORY_LOCK:
+        cached = _ANTHEM_UCSF_DIRECTORY_CACHE.get(key)
+        if cached is not None:
+            return [dict(item) for item in cached]
+    try:
+        response = requests.post(
+            "https://www.ucsfhealth.org/api/backend/providers",
+            params={"unified": term, "page": "1"},
+            json={
+                "pageContext": ["delivery:ucsf:provider"],
+                "options": {"brand": ["UCSF Health"]},
+                "per_page": str(limit),
+            },
+            headers={
+                **chat.HTTP_HEADERS,
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json",
+            },
+            timeout=(5, 20),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return []
+    results = [
+        item
+        for item in data.get("results") or []
+        if isinstance(item, dict) and item.get("npi")
+    ]
+    with _ANTHEM_UCSF_DIRECTORY_LOCK:
+        _ANTHEM_UCSF_DIRECTORY_CACHE[key] = results
+    return [dict(item) for item in results]
+
+
+def _anthem_ucsf_directory_items(
+    results: list[dict],
+    facility: str,
+    source_label: str,
+) -> list[dict]:
+    """Convert UCSF directory records into provider cards."""
+    items: list[dict] = []
+    seen: set[str] = set()
+    for result in results:
+        npi = str(result.get("npi") or "").strip()
+        name = str(
+            result.get("preferredNameDegrees")
+            or result.get("fullName")
+            or ""
+        ).strip()
+        if not name:
+            continue
+        identity = npi or name.casefold()
+        if identity in seen:
+            continue
+        seen.add(identity)
+        specialty = "; ".join(
+            str(value).strip()
+            for value in result.get("specialties") or []
+            if str(value).strip()
+        )
+        locations = [
+            value
+            for value in result.get("markatableLocations") or []
+            if isinstance(value, dict)
+        ]
+        locations.sort(
+            key=lambda value: int(value.get("rank") or 999)
+        )
+        organization = ""
+        address = ""
+        phone = ""
+        if locations:
+            location = locations[0]
+            organization = str(location.get("name") or "").strip()
+            locality = " ".join(
+                part
+                for part in (
+                    str(location.get("state") or "").strip(),
+                    str(location.get("zipCode") or "").strip(),
+                )
+                if part
+            )
+            address = ", ".join(
+                part
+                for part in (
+                    str(location.get("streetAddress") or "").strip(),
+                    str(location.get("city") or "").strip(),
+                    locality,
+                )
+                if part
+            )
+            contact = location.get("contactPrimary") or {}
+            phone = str(contact.get("value") or "").strip()
+        summary = " · ".join(
+            part
+            for part in (specialty, organization, address, phone)
+            if part
+        )
+        if npi:
+            link = (
+                "https://npiregistry.cms.hhs.gov/provider-view/"
+                f"{npi}"
+            )
+            query_parts = []
+            if specialty:
+                query_parts.append(
+                    "specialty=" + quote_plus(specialty)
+                )
+            if facility:
+                query_parts.append(
+                    "institution=" + quote_plus(facility)
+                )
+            if query_parts:
+                link += "?" + "&".join(query_parts)
+        else:
+            link = "https://www.ucsfhealth.org" + str(
+                result.get("slug") or ""
+            )
+        items.append(
+            {
+                "title": name,
+                "name": name,
+                "npi": npi,
+                "organization": organization,
+                "specialty": specialty,
+                "academic_title": "",
+                "address": address,
+                "phone": phone,
+                "fax": "",
+                "link": link,
+                "source": "UCSF Health Provider Directory",
+                "section": specialty,
+                "summary": summary,
+                "paragraphs": [summary] if summary else [],
+                "docs": True,
+                "docs_label": "UCSF",
+                "learnable": False,
+                "findable": True,
+                "learn_noun": "provider",
+                "article_api": "/api/anthem_provider",
+                "complete": True,
+                "profile_source": source_label,
+                "institution": facility,
+            }
+        )
+    _anthem_add_academic_titles(items, facility)
+    return items
+
+
+def _anthem_ucsf_directory_record(
+    npi: str,
+    name: str,
+) -> dict | None:
+    """Find a UCSF directory record by NPI or full name."""
+    name = " ".join(str(name or "").split())
+    if not name and not npi:
+        return None
+    clean_name = re.sub(
+        r",?\s*(?:M\.?D\.?|D\.?O\.?|Ph\.?D\.?|MBBS|MPH|MBA|"
+        r"MS|M\.S\.|BSN|NP|PA-C|RN)\b.*$",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    ).strip(" ,")
+    results = _anthem_ucsf_directory_query(
+        clean_name or name, limit=20
+    )
+    target_npi = str(npi or "").strip()
+    if target_npi:
+        for result in results:
+            if str(result.get("npi") or "") == target_npi:
+                return result
+
+    def normalize(value: str) -> str:
+        value = re.sub(
+            r",?\s*(?:M\.?D\.?|D\.?O\.?|Ph\.?D\.?|MBBS|MPH|MBA|"
+            r"MS|M\.S\.|BSN|NP|PA-C|RN)\b.*$",
+            "",
+            str(value or ""),
+            flags=re.IGNORECASE,
+        )
+        return " ".join(value.casefold().split())
+
+    wanted = normalize(name)
+    if not wanted:
+        return None
+    for result in results:
+        display = str(
+            result.get("preferredNameDegrees")
+            or result.get("fullName")
+            or ""
+        )
+        if normalize(display) == wanted:
+            return result
+    return None
+
+
+def _anthem_ucsf_directory_evidence(
+    npi: str,
+    name: str,
+) -> tuple[str, str]:
+    """Return structured UCSF directory facts and a profile URL.
+
+    The UCSF directory exposes training history and provider titles that may
+    not survive HTML extraction. Passing them to the profile model gives the
+    Education & Training section a reliable public source even when the
+    institution page is unavailable.
+    """
+    record = _anthem_ucsf_directory_record(npi, name)
+    if not record:
+        return "", ""
+    lines = ["UCSF Health public provider directory:"]
+    title = str(record.get("providerTitle") or "").strip()
+    if title:
+        lines.append(f"Provider title: {title}")
+    affiliations = [
+        str(value).strip()
+        for value in record.get("affiliations") or []
+        if str(value).strip()
+    ]
+    if affiliations:
+        lines.append(
+            "Affiliations: " + "; ".join(affiliations)
+        )
+    training = [
+        item
+        for item in record.get("training") or []
+        if isinstance(item, dict)
+    ]
+    if training:
+        lines.append("Education & training:")
+        for entry in training:
+            name_value = str(entry.get("name") or "").strip()
+            type_value = str(entry.get("type") or "").strip()
+            end_value = str(entry.get("endDate") or "").strip()
+            label = ": ".join(
+                part for part in (type_value, name_value) if part
+            )
+            if label:
+                lines.append(
+                    "- " + label
+                    + (f" ({end_value})" if end_value else "")
+                )
+    languages = [
+        str(value).strip()
+        for value in record.get("languages") or []
+        if str(value).strip()
+    ]
+    if languages:
+        lines.append("Languages: " + "; ".join(languages))
+    accepting = record.get("acceptingNewPatients")
+    if accepting is not None:
+        lines.append(
+            "Accepting new patients: "
+            + ("yes" if accepting else "no")
+        )
+    if len(lines) == 1:
+        return "", ""
+    slug = str(record.get("slug") or "").strip()
+    url = (
+        "https://www.ucsfhealth.org" + slug if slug else ""
+    )
+    return "\n".join(lines), url
+
+
+_ANTHEM_CONDITION_ANCHORS = {
+    "alzheimer",
+    "aneurysm",
+    "arrhythmia",
+    "arthritis",
+    "asthma",
+    "cancer",
+    "carcinoma",
+    "copd",
+    "deficiency",
+    "dementia",
+    "diabetes",
+    "disease",
+    "disorder",
+    "epilepsy",
+    "failure",
+    "fibrosis",
+    "hypertension",
+    "infection",
+    "leukemia",
+    "lymphoma",
+    "melanoma",
+    "neoplasm",
+    "parkinson",
+    "sarcoma",
+    "sclerosis",
+    "syndrome",
+    "transplant",
+    "tumor",
+    "tumour",
+}
+_ANTHEM_DIRECTORY_STOPWORDS = _ANTHEM_GENERIC_KEYWORDS | {
+    "also",
+    "and",
+    "at",
+    "around",
+    "can",
+    "find",
+    "get",
+    "good",
+    "in",
+    "list",
+    "looking",
+    "me",
+    "near",
+    "need",
+    "only",
+    "please",
+    "recommend",
+    "recommendation",
+    "search",
+    "show",
+    "specialising",
+    "specialist",
+    "specialists",
+    "specialize",
+    "specialized",
+    "specializes",
+    "specializing",
+    "surgeon",
+    "surgeons",
+    "top",
+    "treat",
+    "treating",
+    "treats",
+    "who",
+    "with",
+}
+
+
+_ANTHEM_CONDITION_PATTERN = re.compile(
+    r"((?:[a-z0-9'-]+\s+){0,4}(?:"
+    + "|".join(
+        sorted(_ANTHEM_CONDITION_ANCHORS, key=len, reverse=True)
+    )
+    + r"))\b"
+)
+
+
+def _anthem_is_ucsf_facility(facility: str) -> bool:
+    """Return whether a facility is covered by the UCSF directory API."""
+    key = " ".join(str(facility or "").casefold().split())
+    return "ucsf" in key or "university of california san francisco" in key
+
+
+def _anthem_directory_condition_term(
+    question: str,
+    plan: dict[str, str],
+    facility: str,
+) -> str:
+    """Return the condition phrase a provider question is about.
+
+    Examples: ``lung cancer``, ``head and neck cancer``, or
+    ``heart failure``. Generic query words and facility names are skipped
+    so they do not become part of the directory search term.
+    """
+    text = " ".join(str(question or "").casefold().split())
+    if not text:
+        return ""
+    facility_tokens = set(
+        re.findall(r"[a-z0-9]+", str(facility or "").casefold())
+    )
+    match = _ANTHEM_CONDITION_PATTERN.search(text)
+    if not match:
+        return ""
+    words = [
+        word
+        for word in match.group(1).split()
+        if word not in facility_tokens and len(word) > 1
+    ]
+    while words and (
+        words[0] in _ANTHEM_DIRECTORY_STOPWORDS
+        or words[0] in _ANTHEM_CONDITION_ANCHORS
+    ):
+        words.pop(0)
+    condition = " ".join(words)
+    return condition or match.group(1).split()[-1]
+
+
+def _anthem_directory_condition_items(
+    question: str,
+    plan: dict[str, str],
+    facility: str,
+    source_label: str,
+) -> tuple[list[dict], str]:
+    """Supplement NPPES results with the facility's own provider directory.
+
+    NPPES is a registration database, so a specialist can be listed under a
+    stale out-of-state address or a broader taxonomy. Searching the UCSF
+    Health directory by the condition in the question finds current
+    specialists such as the thoracic surgical oncologists who treat lung
+    cancer. The supplement is deduplicated by NPI against the NPPES list.
+    """
+    if not _anthem_is_ucsf_facility(facility):
+        return [], ""
+    if plan.get("doctor_name"):
+        return [], ""
+    term = _anthem_directory_condition_term(
+        question, plan, facility
+    )
+    if not term:
+        return [], ""
+    results = _anthem_ucsf_directory_query(term, limit=50)
+    condition_tokens = [
+        token
+        for token in re.findall(r"[a-z0-9]+", term)
+        if token not in _ANTHEM_DIRECTORY_STOPWORDS
+    ]
+    selected: list[dict] = []
+    for result in results:
+        if (
+            str(result.get("providerType") or "").casefold()
+            != "physician"
+        ):
+            continue
+        specialty_text = " ".join(
+            str(value)
+            for value in result.get("specialties") or []
+        ).casefold()
+        if not all(
+            token in specialty_text for token in condition_tokens
+        ):
+            continue
+        selected.append(result)
+        if len(selected) >= 8:
+            break
+    return (
+        _anthem_ucsf_directory_items(
+            selected, facility, source_label
+        ),
+        term,
+    )
 
 
 def _anthem_lookup(
@@ -26756,6 +27251,32 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         provider_items = _anthem_provider_items_from_context(
             context, source_label, institution=institution
         )
+        primary_count = len(provider_items)
+        related_items, condition_term = _anthem_directory_condition_items(
+            question, plan, institution, source_label
+        )
+        added_related: list[dict] = []
+        if related_items:
+            existing = {
+                str(item.get("npi") or item.get("name", "")).casefold()
+                for item in provider_items
+            }
+            for item in related_items:
+                identity = str(
+                    item.get("npi") or item.get("name", "")
+                ).casefold()
+                if identity in existing:
+                    continue
+                existing.add(identity)
+                provider_items.append(item)
+                added_related.append(item)
+            if added_related:
+                self._sse_text(
+                    "log",
+                    "[anthem: added "
+                    f"{len(added_related)} UCSF directory "
+                    f"specialist(s) for {condition_term!r}]",
+                )
         state.anthem_context = context
         state.anthem_plan = plan
         state.anthem_providers = provider_items
@@ -26775,7 +27296,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         "click a result to open its profile"
                     ),
                     "docs": True,
-                    "docs_label": "NPPES",
+                    "docs_label": (
+                        "NPPES / UCSF"
+                        if added_related
+                        else "NPPES"
+                    ),
                     "reset": True,
                 },
             )
@@ -26796,9 +27321,15 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
         if provider_items:
             lines.append(
-                f"Found {len(provider_items)} provider(s) from "
+                f"Found {primary_count} provider(s) from "
                 f"{source_label}."
             )
+            if added_related:
+                lines.append(
+                    "Also included "
+                    f"{len(added_related)} UCSF Health directory "
+                    f"specialist(s) who treat {condition_term}."
+                )
             for index, provider in enumerate(
                 provider_items, start=1
             ):
