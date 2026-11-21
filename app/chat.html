@@ -2132,7 +2132,7 @@
   }
   .news-link:hover { border-bottom-style: solid; }
   .news-link[hidden] { display: none; }
-  /* "Find" is shown only for book readers loaded through the shared modal. */
+  /* "Find" is available for article, news, and book readers. */
   .news-find-btn {
     flex: 0 0 auto;
     background: transparent;
@@ -4350,7 +4350,7 @@
               title="Next restaurant" aria-label="Next restaurant" hidden>›</button>
       <a id="news-link" class="news-link" href="#" target="_blank" rel="noopener noreferrer">Open article ↗</a>
       <button id="news-find-btn" class="news-find-btn" type="button" hidden
-              title="Find words in this book (Ctrl/⌘+F)" aria-label="Find words in this book">Find</button>
+              title="Find words in this article (Ctrl/⌘+F)" aria-label="Find words in this article">Find</button>
       <button id="news-podcast" class="news-tts news-podcast" type="button" hidden
               title="Create and play an AI news podcast" aria-label="Create and play an AI news podcast">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -4378,7 +4378,7 @@
     <div id="news-find-bar" class="news-find-bar" role="search" hidden>
       <span class="news-find-label">Find</span>
       <input id="news-find-input" type="search" autocomplete="off" spellcheck="false"
-             placeholder="Find words in this book… (Enter next, Shift+Enter previous)">
+             placeholder="Find words in this article… (Enter next, Shift+Enter previous)">
       <span id="news-find-count" class="news-find-count"></span>
       <button id="news-find-prev" class="news-find-nav" type="button"
               title="Previous match (Shift+Enter)" aria-label="Previous match" disabled>‹</button>
@@ -7579,6 +7579,12 @@ function formatNewsDate(value) {
 }
 
 function makeNewsItem(entry, data) {
+  const learnable = data.learnable !== undefined
+    ? Boolean(data.learnable)
+    : !(data.docs || data.mdn || entry.newsDocs);
+  const findable = data.findable !== undefined
+    ? Boolean(data.findable)
+    : Boolean(learnable || data.docs);
   return {
     index: Number(data.index) || entry.newsItems.length + 1,
     newsId: String(data.news_id || ""),
@@ -7627,10 +7633,9 @@ function makeNewsItem(entry, data) {
     localNewsError: "",
     localNewsPlaceName: "",
     youtubeVideoSearchPrefix: String(data.youtube_video_search_prefix || ""),
-    learnable: data.learnable !== undefined
-      ? Boolean(data.learnable)
-      : !(data.docs || data.mdn || entry.newsDocs),
+    learnable,
     learnNoun: String(data.learn_noun || ""),
+    findable,
     entry,
     podcast: null,
     title: data.title || "(untitled)",
@@ -14521,7 +14526,7 @@ function newsOpenHref(url, title = "") {
 }
 
 /* ------------------------------------------------------------------ *
- *  Find words in a book loaded through the shared reader modal
+ *  Find words in an article or book loaded through the shared reader modal
  * ------------------------------------------------------------------ *
  *  Books written by /write_a_book open in the news/article reader instead
  *  of a new tab. They set item.findable, which reveals the header "Find"
@@ -14778,7 +14783,7 @@ newsFindInputEl.addEventListener("keydown", (event) => {
   }
 });
 
-/* Ctrl/⌘+F opens the book's Find bar instead of the browser's page find. */
+/* Ctrl/⌘+F opens the article's Find bar instead of the browser's page find. */
 document.addEventListener("keydown", (event) => {
   if (event.defaultPrevented || event.isComposing) return;
   if (event.altKey || !(event.metaKey || event.ctrlKey)) return;
@@ -14998,7 +15003,12 @@ function navigateRestaurant(step) {
 function openNewsModal(item, options = {}) {
   const historyMode = options.restaurantHistory || "root";
   trackRestaurantHistory(item, historyMode);
-  if (newsItem && newsItem !== item) cancelNewsPodcastGeneration(newsItem);
+  if (newsItem && newsItem !== item) {
+    if (newsItem.newsId && newsItem.newsId !== item.newsId) {
+      closeNewsChatState(newsItem.newsId);
+    }
+    cancelNewsPodcastGeneration(newsItem);
+  }
   newsItem = item;
   resetNewsFind();
   updateRestaurantNav();
@@ -16966,6 +16976,8 @@ function openNewsStory(newsId, fallbackUrl = "", fallbackTitle = "") {
 }
 
 function closeNewsModal() {
+  const closingNewsId = newsItem?.newsId;
+  closeNewsChatState(closingNewsId);
   cancelNewsPodcastGeneration(newsItem);
   newsItem = null;
   resetNewsFind();
@@ -17095,7 +17107,11 @@ function renderNewsAction(item) {
 }
 
 async function learnNewsItem(item) {
-  if (!item || item.learning || !item.newsId) return;
+  // A /news result may not have a content-addressed news id yet. The server
+  // can generate one from the title/link/body, so do not block Learn just
+  // because item.newsId is empty. The response supplies the generated id,
+  // which enables the Chat action afterwards.
+  if (!item || item.learning) return;
   item.learning = true;
   item.learnError = "";
   renderNewsAction(item);
@@ -17252,6 +17268,19 @@ function scheduleNewsChatRender(message) {
     message.renderPending = false;
     newsChatRenderMessage(message);
   }, 55);
+}
+
+function closeNewsChatState(newsId) {
+  // Drop the server-side article-only conversation when the story modal is
+  // closed or replaced. The main chat uses a separate ChatState and is not
+  // affected by this request.
+  if (!newsId) return;
+  fetch("/api/news_chat_close", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: newsId }),
+    keepalive: true,
+  }).catch(() => {});
 }
 
 function resetNewsChat(hide = true) {

@@ -1,3 +1,7 @@
+task.find_words_in_article (completed) {
+  inside of the article loader modal, in the top bar of the modal, allow finding word in the current article
+}
+
 task.bug."https://www.investors.com/news/technology/jensen-huang-considers-returning-to-nvidia-stock/" (completed) {
   the article "https://www.investors.com/news/technology/jensen-huang-considers-returning-to-nvidia-stock/" is not loading the full article
 }

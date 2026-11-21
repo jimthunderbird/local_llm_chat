@@ -1,3 +1,14 @@
+task.bug.article_loader_learn_not_working (completed) {
+  when i load the article "https://www.cbsnews.com/sanfrancisco/news/runaway-concrete-truck-plows-into-daly-city-homes/" into the article loading modal, the "Learn" button is not working!
+  please fix it in a systematic way
+}
+
+task.bug.article_loader_chat_context (completed) {
+  - currently, in the article popup modal, when chatting on a learned article, the answer is not right
+  - it should create a separate article-chat-only context, when the article loading modal is closed, this article-chat-only context should be cleaned up
+  - the article-chat-only context should not affect the main chat context
+}
+
 task.no_auto_scrolling_for_all_command_results (completed) {
   - for all the results of the commands, do not auto scroll 
 }

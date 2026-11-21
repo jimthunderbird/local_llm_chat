@@ -19647,6 +19647,10 @@ def get_video_chat_state(video_id: str) -> ChatState:
         session = ChatState(chunks=chunks)
         session.transcript = video_id
         session.global_chunks = chunks
+        # A video-modal chat is always scoped to that transcript. It must not
+        # inherit the main chat's Online/research mode or route questions to
+        # unrelated news research.
+        session.research_with_news_mode = False
         VIDEO_CHAT_STATES[video_id] = session
         return session
 
@@ -19686,6 +19690,10 @@ def get_news_chat_state(news_id: str) -> ChatState:
         session.transcript = None
         session.news_id = news_id
         session.global_chunks = chunks
+        # The story-modal chat must answer only from this learned article.
+        # ChatState defaults to Online mode, which would route the question
+        # to news research and ignore the scoped article corpus.
+        session.research_with_news_mode = False
         NEWS_CHAT_STATES[news_id] = session
         return session
 
@@ -19761,6 +19769,8 @@ def get_gutenberg_chat_state(
         session.article_structure = structure
         session.article_iterative = True
         session.global_chunks = chunks
+        # A book-modal chat stays on the book's own article context.
+        session.research_with_news_mode = False
         GUTENBERG_BOOK_STATES[book_id] = session
         GUTENBERG_BOOK_STATE_ORDER.append(book_id)
 
@@ -21255,6 +21265,17 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._handle_news_chat(
                 news_id, question, reset=bool(payload.get("reset"))
             )
+            return
+        if parsed.path == "/api/news_chat_close":
+            payload = self._read_json()
+            if payload is None:
+                return
+            news_id = str(payload.get("id") or "").strip()
+            if not NEWS_ID_PATTERN.fullmatch(news_id):
+                self._send_error_json("Missing or invalid news story id", 400)
+                return
+            forget_news_chat_state(news_id)
+            self._send_json({"closed": True, "id": news_id})
             return
         if parsed.path == "/api/video_summary":
             payload = self._read_json()
@@ -26947,6 +26968,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             "images": images,
             "complete": True,
             "learnable": True,
+            "findable": True,
             "learn_noun": "article",
         }
         try:

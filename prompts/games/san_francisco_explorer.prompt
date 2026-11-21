@@ -3,6 +3,10 @@ youtube_video_search_prefix: San Francisco
 game_data_file: {diretory_of_this_prompt}/../../.chat/games/san_francisco_explorer.json
 exploration_bounds: south=32.5343, west=-124.4096, north=42.0095, east=-114.1308
 
+task.bug.article_loader_word_finding_not_working (completed) {
+  - when click open the local news entry link and open up the article, the article modal is not showing the word finding feature, please take a look at the effect in /article <article_url>, there should be a word finding feature in the article loading modal
+}
+
 task.bug.main_explorer_not_loading_nearby_places (completed) {
   in the main explorer modal:
   - it said: Could not load nearby places: Not found
