@@ -8,6 +8,15 @@ question_llm: ornith-1.5:35b
 
 group unit_tests {
   task (completed) {
+    after typing the command /anthem {
+      question: find list of head and neck cancer specialists only in ucsf
+      expect: the result should contain a list of doctors in UCSF only
+      actual: SAI DEEPIKA CHALLAPALLI, MD is in the result, this doctor is in 450 SUTTER ST and is not in UCSF
+      please fix this issue in a systematic way
+    }
+  }
+
+  task (completed) {
     question: pediatric otolaryngology in UCSF
     expect: the provider's name (such as doctor's name) should appear
     actual: doctor's name is not presented

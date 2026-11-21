@@ -19724,6 +19724,99 @@ _ANTHEM_FACILITY_NAMES.sort(
     key=lambda item: len(item[0]), reverse=True
 )
 
+_ANTHEM_ADDRESS_SUFFIXES = {
+    "AV": "AVE",
+    "AVENUE": "AVE",
+    "BLVD": "BLVD",
+    "BOULEVARD": "BLVD",
+    "CT": "CT",
+    "COURT": "CT",
+    "DR": "DR",
+    "DRIVE": "DR",
+    "HWY": "HWY",
+    "HIGHWAY": "HWY",
+    "LANE": "LN",
+    "LN": "LN",
+    "PKWY": "PKWY",
+    "PARKWAY": "PKWY",
+    "PL": "PL",
+    "PLACE": "PL",
+    "RD": "RD",
+    "ROAD": "RD",
+    "ST": "ST",
+    "STREET": "ST",
+    "TER": "TER",
+    "TERRACE": "TER",
+}
+_ANTHEM_ADDRESS_UNIT_RE = re.compile(
+    r"\s+(?:#|APT\b|BLDG\b|BUILDING\b|DEPT\b|FL\b|FLOOR\b|MC\b|"
+    r"RM\b|ROOM\b|STE\b|SUITE\b|UNIT\b|BOX\b).*$",
+    re.IGNORECASE,
+)
+
+
+def _anthem_normalize_street(value: str) -> str:
+    """Return a comparable street line without unit details."""
+    text = " ".join(str(value or "").upper().replace(",", " ").split())
+    text = _ANTHEM_ADDRESS_UNIT_RE.sub("", text).strip()
+    words = text.split()
+    if words:
+        words[-1] = _ANTHEM_ADDRESS_SUFFIXES.get(words[-1], words[-1])
+    return " ".join(words)
+
+
+def _anthem_address_keys(addresses) -> set[tuple[str, str]]:
+    """Return ``(normalized street, ZIP5)`` keys for practice addresses."""
+    keys: set[tuple[str, str]] = set()
+    for address in addresses or []:
+        if not isinstance(address, dict):
+            continue
+        purpose = str(address.get("address_purpose") or "").upper()
+        if purpose and purpose != "LOCATION":
+            continue
+        street = _anthem_normalize_street(address.get("address_1"))
+        postal = str(address.get("postal_code") or "").strip()[:5]
+        if street:
+            keys.add((street, postal))
+    return keys
+
+
+def _anthem_facility_aliases(facility: str) -> set[str]:
+    """Return the names a facility may use in a directory record."""
+    name = " ".join(str(facility or "").casefold().split())
+    aliases = {name} if name else set()
+    if not name:
+        return aliases
+    for phrase, display in _ANTHEM_FACILITY_NAMES:
+        phrase_key = phrase.casefold()
+        display_key = display.casefold()
+        if (
+            phrase_key in name
+            or name in phrase_key
+            or display_key in name
+            or name in display_key
+        ):
+            aliases.update({phrase_key, display_key})
+    return aliases
+
+
+def _anthem_name_matches_facility(name: str, facility: str) -> bool:
+    """Return whether a directory name refers to the requested facility."""
+    text = " ".join(str(name or "").casefold().split())
+    if not text:
+        return False
+    return any(
+        alias and alias in text
+        for alias in _anthem_facility_aliases(facility)
+    )
+
+
+def _anthem_facility_profile_supported(facility: str) -> bool:
+    """Return whether we can verify affiliation through profile pages."""
+    key = " ".join(str(facility or "").casefold().split())
+    return "ucsf" in key or "stanford" in key
+
+
 _ANTHEM_CITY_STATES = {
     "san francisco": "San Francisco, CA",
     "los angeles": "Los Angeles, CA",
@@ -20409,6 +20502,8 @@ def _anthem_fhir_search(
     practitioners: list[dict] = []
     organizations: list[dict] = []
     locations: list[dict] = []
+    facility_org_ids: set[str] = set()
+    facility_location_ids: set[str] = set()
 
     if doctor_name:
         practitioners = [
@@ -20446,6 +20541,7 @@ def _anthem_fhir_search(
         for organization in organizations[:8]:
             organization_id = str(organization.get("id") or "").strip()
             if organization_id:
+                facility_org_ids.add(organization_id)
                 fetch(
                     "PractitionerRole",
                     [
@@ -20487,6 +20583,15 @@ def _anthem_fhir_search(
                 location_resource.get("id") or ""
             ).strip()
             if location_id:
+                if facility:
+                    location_name = (
+                        _fhir_human_name(location_resource)
+                        or _fhir_reference_display(location_resource)
+                    )
+                    if _anthem_name_matches_facility(
+                        location_name, facility
+                    ):
+                        facility_location_ids.add(location_id)
                 fetch(
                     "PractitionerRole",
                     [
@@ -20558,6 +20663,68 @@ def _anthem_fhir_search(
             + "]"
         )
     _anthem_resolve_references(base, token, resources, log)
+    if facility:
+        # A specialty search can return roles from every organization in the
+        # directory. Keep only roles whose linked organization or location is
+        # the requested facility; otherwise a broad specialty query would
+        # leak unrelated practices into a facility-constrained answer.
+        kept: dict[tuple[str, str], dict] = {}
+        kept_roles = 0
+        for key, resource in resources.items():
+            if key[0] != "PractitionerRole":
+                continue
+            org_id = _fhir_reference_id(
+                resource.get("organization")
+            ).split("/", 1)[-1]
+            loc_id = _fhir_reference_id(
+                resource.get("location")
+            ).split("/", 1)[-1]
+            org_resource = resources.get(("Organization", org_id), {})
+            loc_resource = resources.get(("Location", loc_id), {})
+            org_name = (
+                _fhir_human_name(org_resource)
+                or _fhir_reference_display(resource.get("organization"))
+            )
+            loc_name = (
+                _fhir_human_name(loc_resource)
+                or _fhir_reference_display(resource.get("location"))
+            )
+            loc_address = _fhir_address(loc_resource.get("address"))
+            if not (
+                org_id in facility_org_ids
+                or loc_id in facility_location_ids
+                or _anthem_name_matches_facility(org_name, facility)
+                or _anthem_name_matches_facility(loc_name, facility)
+                or _anthem_name_matches_facility(loc_address, facility)
+            ):
+                continue
+            kept[key] = resource
+            kept_roles += 1
+            for resource_type, reference in (
+                ("Practitioner", resource.get("practitioner")),
+                ("Organization", resource.get("organization")),
+                ("Location", resource.get("location")),
+                (
+                    "HealthcareService",
+                    resource.get("healthcareService"),
+                ),
+            ):
+                reference_id = _fhir_reference_id(reference).split(
+                    "/", 1
+                )[-1]
+                if not reference_id:
+                    continue
+                reference_key = (resource_type, reference_id)
+                if reference_key in resources:
+                    kept.setdefault(reference_key, resources[reference_key])
+        if kept_roles:
+            resources = kept
+        else:
+            log(
+                "[anthem: FHIR returned no PractitionerRole linked to "
+                f"{facility!r}; trying the NPPES fallback]"
+            )
+            resources = {}
     return resources
 
 
@@ -20700,6 +20867,7 @@ def _anthem_format_nppes(
     preferred_city: str = "",
     preferred_state: str = "",
     preferred_postal: str = "",
+    preferred_addresses: set[tuple[str, str]] | None = None,
 ) -> str:
     """Turn NPPES API results into a compact provider context."""
     blocks: list[str] = []
@@ -20774,6 +20942,11 @@ def _anthem_format_nppes(
                 preferred_postal[:5]
             ):
                 location_rank -= 8
+            if preferred_addresses and (
+                _anthem_normalize_street(item.get("address_1")),
+                postal_value[:5],
+            ) in preferred_addresses:
+                location_rank -= 16
             purpose_rank = (
                 0 if item.get("address_purpose") == "LOCATION" else 1
             )
@@ -20948,8 +21121,13 @@ def _anthem_nppes_taxonomy_candidates(
 def _anthem_nppes_facility_location(
     facility: str,
     log: Callable[[str], None],
-) -> tuple[str, str, str]:
-    """Find the city/state of a named facility through NPPES."""
+) -> tuple[str, str, str, set[tuple[str, str]]]:
+    """Find a named facility's location and its NPPES address anchors.
+
+    Organization records give us the addresses that actually belong to the
+    facility. Those anchors let a practitioner search reject providers who
+    happen to practise in the same city but not at the facility.
+    """
     facility = " ".join(str(facility or "").split())
     names = [facility]
     simplified = re.sub(
@@ -20962,13 +21140,17 @@ def _anthem_nppes_facility_location(
     simplified = " ".join(simplified.split())
     if simplified and simplified.casefold() != facility.casefold():
         names.append(simplified)
-    for name in names:
+    anchors: set[tuple[str, str]] = set()
+    primary_city = ""
+    primary_state = ""
+    primary_postal = ""
+    for name in dict.fromkeys(names):
         if not name:
             continue
         results = _anthem_nppes_request(
             [
                 ("version", "2.1"),
-                ("limit", "20"),
+                ("limit", "50"),
                 ("organization_name", name),
             ],
             log,
@@ -20984,17 +21166,121 @@ def _anthem_nppes_facility_location(
                 if address.get("address_purpose") == "LOCATION"
                 else 1
             )
+            anchors.update(_anthem_address_keys(addresses))
+            if primary_city and primary_state:
+                continue
             for address in addresses:
                 city = str(address.get("city") or "").strip()
                 state = str(address.get("state") or "").strip().upper()
                 postal = str(address.get("postal_code") or "").strip()
                 if city and state:
-                    log(
-                        "[anthem: NPPES located facility "
-                        f"{facility!r} in {city}, {state}]"
-                    )
-                    return city, state, postal
-    return "", "", ""
+                    primary_city, primary_state = city, state
+                    primary_postal = postal
+                    break
+    if anchors:
+        log(
+            "[anthem: NPPES mapped facility "
+            f"{facility!r} to {len(anchors)} address(es)]"
+        )
+    if primary_city and primary_state:
+        log(
+            "[anthem: NPPES located facility "
+            f"{facility!r} in {primary_city}, {primary_state}]"
+        )
+    return primary_city, primary_state, primary_postal, anchors
+
+
+def _anthem_nppes_facility_filter(
+    results: list[dict],
+    facility: str,
+    anchors: set[tuple[str, str]],
+    limit: int,
+    log: Callable[[str], None],
+) -> list[dict]:
+    """Keep only NPPES providers confirmed to be at the requested facility.
+
+    Address anchors come from the facility's own NPPES organization records.
+    When there are not enough anchor matches, UCSF/Stanford profile pages are
+    used as a second source of affiliation evidence. This prevents a city-wide
+    specialty search from returning a nearby private practice as if it were
+    part of the hospital.
+    """
+    if not results:
+        return []
+    anchor_flags = [
+        bool(_anthem_address_keys(result.get("addresses")) & anchors)
+        for result in results
+    ]
+    anchor_hits = sum(anchor_flags)
+    if anchor_hits >= limit:
+        selected = [
+            result
+            for result, hit in zip(results, anchor_flags)
+            if hit
+        ]
+        individuals = [
+            result
+            for result in selected
+            if result.get("enumeration_type") == "NPI-1"
+        ]
+        return (individuals or selected)[:limit]
+
+    supported = _anthem_facility_profile_supported(facility)
+    if not anchors and not supported:
+        log(
+            "[anthem: no facility address anchors were found; keeping "
+            "location matches without facility verification]"
+        )
+        return results
+
+    affiliated = list(anchor_flags)
+    if supported:
+        needed = max(1, limit - anchor_hits)
+        pending = [
+            index
+            for index, hit in enumerate(anchor_flags)
+            if not hit
+            and results[index].get("enumeration_type") == "NPI-1"
+        ][: max(12, needed * 3)]
+
+        def check(index: int) -> tuple[int, bool]:
+            record = results[index]
+            name = _anthem_provider_record_name(record)
+            return index, _anthem_provider_affiliation(name, facility)
+
+        if pending:
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                futures = {
+                    pool.submit(check, index): index
+                    for index in pending
+                }
+                for future in as_completed(futures):
+                    try:
+                        index, confirmed = future.result()
+                    except Exception:
+                        continue
+                    if confirmed:
+                        affiliated[index] = True
+
+    selected = [
+        result
+        for result, hit in zip(results, affiliated)
+        if hit
+    ]
+    if not selected:
+        return []
+    individuals = [
+        result
+        for result in selected
+        if result.get("enumeration_type") == "NPI-1"
+    ]
+    selected = individuals or selected
+    if anchors:
+        log(
+            f"[anthem: confirmed {len(selected)} provider(s) at "
+            f"{facility!r}]"
+        )
+    return selected[:limit]
 
 
 def _anthem_nppes_search(
@@ -21012,14 +21298,22 @@ def _anthem_nppes_search(
     facility_only = bool(
         facility and not (first_name or last_name or specialty)
     )
-    if facility and not facility_only and not (city or state or postal):
+    facility_anchors: set[tuple[str, str]] = set()
+    if facility and not facility_only:
         # NPPES organization names are not reliable in a practitioner query.
-        # Resolve the facility to a city/state first, then search providers
-        # around that location.
-        inferred_city, inferred_state, _inferred_postal = (
-            _anthem_nppes_facility_location(facility, log)
-        )
-        if inferred_city or inferred_state:
+        # Resolve the facility to a city/state and to the addresses that
+        # belong to its organization records, then search providers around
+        # that location and keep only providers at the facility.
+        (
+            inferred_city,
+            inferred_state,
+            _inferred_postal,
+            inferred_anchors,
+        ) = _anthem_nppes_facility_location(facility, log)
+        facility_anchors = inferred_anchors
+        if not (city or state or postal) and (
+            inferred_city or inferred_state
+        ):
             # Use the facility's city/state to search nearby providers, but do
             # not keep its ZIP: providers at the same hospital often list a
             # different practice ZIP code.
@@ -21165,6 +21459,21 @@ def _anthem_nppes_search(
                 "address matching the requested location]"
             )
 
+    if facility and not facility_only:
+        results = _anthem_nppes_facility_filter(
+            results,
+            facility,
+            facility_anchors,
+            ANTHEM_MAX_PROVIDERS,
+            log,
+        )
+        if not results:
+            log(
+                "[anthem: no NPPES record confirmed an affiliation with "
+                f"{facility!r}; refusing to return unrelated providers]"
+            )
+            return "", 0
+
     if first_name or last_name or specialty:
         # A provider-name or specialty answer should lead with individual
         # practitioners; organizations are kept only when no person remains.
@@ -21180,7 +21489,9 @@ def _anthem_nppes_search(
         f"[anthem: NPPES fallback returned {len(results)} record(s)]"
     )
     return (
-        _anthem_format_nppes(results, city, state, postal),
+        _anthem_format_nppes(
+            results, city, state, postal, facility_anchors
+        ),
         len(results),
     )
 
@@ -21455,20 +21766,14 @@ def _anthem_pubmed_publications(
     return publications[:limit]
 
 
-def _anthem_provider_profile_page(
+def _anthem_provider_profile_urls(
     name: str,
     institution: str,
-    specialty: str = "",
-) -> dict | None:
-    """Try to fetch an institution profile page for a provider.
-
-    Only institution families with predictable public profile URLs are
-    attempted. The result is passed to the profile model as additional
-    evidence, especially for education, awards, and research interests.
-    """
+) -> list[str]:
+    """Return predictable institution profile URLs for a provider."""
     first_name, last_name = _anthem_split_name(name)
     if not last_name:
-        return None
+        return []
 
     def slug(value: str) -> str:
         return re.sub(
@@ -21478,7 +21783,7 @@ def _anthem_provider_profile_page(
     first_slug = slug(first_name.split()[0]) if first_name else ""
     last_slug = slug(last_name)
     if not last_slug:
-        return None
+        return []
     dotted = f"{first_slug}.{last_slug}" if first_slug else last_slug
     hyphenated = f"{first_slug}-{last_slug}" if first_slug else last_slug
     institution_key = " ".join(str(institution or "").casefold().split())
@@ -21499,7 +21804,84 @@ def _anthem_provider_profile_page(
                 f"https://med.stanford.edu/profiles/{hyphenated}",
             ]
         )
-    candidates = list(dict.fromkeys(candidates))
+    return list(dict.fromkeys(candidates))
+
+
+_ANTHEM_AFFILIATION_CACHE: dict[tuple[str, str], bool] = {}
+_ANTHEM_AFFILIATION_LOCK = threading.Lock()
+
+
+def _anthem_provider_affiliation(name: str, institution: str) -> bool:
+    """Return whether an institution profile page confirms a provider.
+
+    This is a lightweight existence/name check for list filtering; the detail
+    modal separately extracts the full profile text. Results are cached so a
+    follow-up question does not refetch every candidate.
+    """
+    name = " ".join(str(name or "").split())
+    institution = " ".join(str(institution or "").split())
+    if not name or not institution:
+        return False
+    key = (institution.casefold(), name.casefold())
+    with _ANTHEM_AFFILIATION_LOCK:
+        cached = _ANTHEM_AFFILIATION_CACHE.get(key)
+        if cached is not None:
+            return cached
+    urls = _anthem_provider_profile_urls(name, institution)
+    words = [
+        word.casefold()
+        for word in re.findall(r"[A-Za-z]{2,}", name)
+        if word.casefold() not in {"md", "do", "dr", "phd"}
+    ]
+    first_word = words[0] if words else ""
+    last_word = words[-1] if words else ""
+    confirmed = False
+    for url in urls:
+        try:
+            response = requests.get(
+                url,
+                headers={
+                    **chat.HTTP_HEADERS,
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "text/html,application/xhtml+xml",
+                },
+                timeout=(4, 15),
+                allow_redirects=True,
+            )
+        except requests.RequestException:
+            continue
+        if response.status_code != 200:
+            continue
+        content_type = str(
+            response.headers.get("Content-Type") or ""
+        ).split(";", 1)[0].strip().lower()
+        if content_type and "html" not in content_type:
+            continue
+        text = response.text.casefold()
+        if len(text) < 5000:
+            continue
+        if first_word and last_word and (
+            first_word in text and last_word in text
+        ):
+            confirmed = True
+            break
+    with _ANTHEM_AFFILIATION_LOCK:
+        _ANTHEM_AFFILIATION_CACHE[key] = confirmed
+    return confirmed
+
+
+def _anthem_provider_profile_page(
+    name: str,
+    institution: str,
+    specialty: str = "",
+) -> dict | None:
+    """Try to fetch an institution profile page for a provider.
+
+    Only institution families with predictable public profile URLs are
+    attempted. The result is passed to the profile model as additional
+    evidence, especially for education, awards, and research interests.
+    """
+    candidates = _anthem_provider_profile_urls(name, institution)
     if not candidates or trafilatura is None:
         return None
 
