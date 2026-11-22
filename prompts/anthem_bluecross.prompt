@@ -90,6 +90,11 @@ group unit_tests {
 }
 
 group application {
+  task.feature.stream_nextwork_status_checking (completed) {
+    for each doctor in the list, do the In Network/Out of Network check a streaming fashion
+    once one check has result, display it immediately
+  }
+
   task.feature.do_not_scroll (completed) {
     reference task.stream_the_doctor_list:
     - do not scroll the list of doctors

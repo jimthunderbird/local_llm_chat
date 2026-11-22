@@ -26119,6 +26119,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     # Injected in main().
     state: ChatState
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Status annotations may stream from a background worker while the
+        # request thread is still emitting search logs and result cards.
+        self._sse_write_lock = threading.Lock()
+
     # ---- basic helpers ------------------------------------------------
     def log_message(self, fmt, *args):
         # Keep the terminal quiet; errors still surface through SSE.
@@ -26199,8 +26205,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         payload = json.dumps(data, ensure_ascii=False)
         message = f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
         try:
-            self.wfile.write(message)
-            self.wfile.flush()
+            with self._sse_write_lock:
+                self.wfile.write(message)
+                self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             raise ClientDisconnected() from exc
 
@@ -29659,6 +29666,43 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         streamed_items: list[dict] = []
         stream_started = False
+        status_executor: ThreadPoolExecutor | None = None
+        status_futures: list = []
+
+        def stream_provider_status(provider_item: dict) -> None:
+            self._sse("news", {"type": "update", **provider_item})
+
+        def annotate_provider_batch(batch: list[dict]) -> None:
+            _anthem_annotate_member_status(
+                batch,
+                plan.get("location", ""),
+                on_update=stream_provider_status,
+                institution=institution,
+            )
+
+        def queue_provider_status(batch: list[dict]) -> None:
+            nonlocal status_executor
+            if not batch:
+                return
+            if status_executor is None:
+                status_executor = ThreadPoolExecutor(max_workers=1)
+            status_futures.append(
+                status_executor.submit(
+                    annotate_provider_batch, list(batch)
+                )
+            )
+
+        def finish_provider_status() -> None:
+            nonlocal status_executor
+            for future in status_futures:
+                try:
+                    future.result()
+                except Exception:
+                    pass
+            status_futures.clear()
+            if status_executor is not None:
+                status_executor.shutdown(wait=True)
+                status_executor = None
 
         def stream_provider_batch(batch_context: str) -> None:
             nonlocal stream_started
@@ -29691,6 +29735,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 item["anthem_status_pending"] = True
                 streamed_items.append(item)
                 self._sse("news", {"type": "item", **item})
+            queue_provider_status(batch_items)
 
         self._sse_text(
             "log", "[anthem: querying the provider directory APIs]"
@@ -29704,6 +29749,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             max_results=requested_limit,
         )
         if not context:
+            finish_provider_status()
             message = (
                 "I could not retrieve provider records from the CMS "
                 "NPPES registry.\n"
@@ -29786,7 +29832,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 provider_items, start=1
             ):
                 provider_item["index"] = index
-                provider_item["anthem_status_pending"] = True
+                if not streamed_items:
+                    provider_item["anthem_status_pending"] = True
             if member_plan.get("member_id"):
                 plan_name = (
                     member_plan.get("plan_name") or "Anthem member plan"
@@ -29909,18 +29956,18 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "academic titles in the background]",
             )
 
-            def stream_provider_status(provider_item: dict) -> None:
-                self._sse(
-                    "news", {"type": "update", **provider_item}
+            if streamed_items:
+                if added_related:
+                    queue_provider_status(added_related)
+                finish_provider_status()
+            else:
+                _anthem_annotate_member_status(
+                    provider_items,
+                    plan.get("location", ""),
+                    member_plan=member_plan,
+                    on_update=stream_provider_status,
+                    institution=institution,
                 )
-
-            _anthem_annotate_member_status(
-                provider_items,
-                plan.get("location", ""),
-                member_plan=member_plan,
-                on_update=stream_provider_status,
-                institution=institution,
-            )
             member_counts = {"listed": 0, "not_listed": 0, "unknown": 0}
             for provider_item in provider_items:
                 member_status = str(
