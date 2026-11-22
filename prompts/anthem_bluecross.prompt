@@ -6,7 +6,24 @@ knowledge {
 
 question_llm: ornith-1.5:35b
 
+anthem_plan_member_id: {directory_of_this_prompt}/.chat/anthem/member_id.txt
+
 group unit_tests {
+  task (completed) {
+    the anthem plan member id is located at the file {anthem_plan_member_id}
+    based on the anthem plan id, tell me if the doctors or facilities are in network or not
+  }
+
+  task (completed) {
+    questoin: show me a list of head and neck cancer doctors in md anderson
+    expect: Shirley Y. Su, MBBS, FRACS should be in the list
+    actual: this doctor is not in the list
+  }
+
+  task (completed) {
+    can you double check if Karen Y. Choi, MD, FACS in Anthem Blue Cross BlueChoice National PPO or not
+  }
+
   task (completed) {
     can you double check if UT MD Anderson Cancer Center is in Anthem Blue Cross BlueChoice National PPO or not
   }

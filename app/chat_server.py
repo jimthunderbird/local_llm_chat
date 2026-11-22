@@ -19199,6 +19199,7 @@ ANTHEM_FHIR_CLIENT_SECRET = os.environ.get(
 ANTHEM_NPPES_URL = "https://npiregistry.cms.hhs.gov/api/"
 ANTHEM_MODEL = os.environ.get("OLLAMA_ANTHEM_MODEL", "ornith-1.5:35b")
 ANTHEM_MAX_PROVIDERS = 12
+ANTHEM_MAX_FACILITY_PROVIDERS = 50
 ANTHEM_CONTEXT_CHARS = 20000
 
 # NPPES taxonomy search matches the official taxonomy description, not the
@@ -20019,6 +20020,12 @@ def _anthem_fast_plan(question: str) -> dict[str, str]:
             r"([A-Z][A-Za-z'.-]+(?:\s+[A-Z][A-Za-z'.-]+){0,3})",
             text,
         )
+    if not doctor_match:
+        doctor_match = re.search(
+            r"\b([A-Z][A-Za-z'.-]+(?:\s+[A-Z][A-Za-z'.-]+){1,3})"
+            r"\s*,?\s*(?:M\.?D\.?|D\.?O\.?|Ph\.?D\.?|FACS)\b",
+            text,
+        )
     if doctor_match:
         plan["doctor_name"] = doctor_match.group(1)
     plan["facility"] = _anthem_fast_facility(text)
@@ -20026,6 +20033,14 @@ def _anthem_fast_plan(question: str) -> dict[str, str]:
     plan["location"] = _anthem_fast_location(
         text, plan["facility"], plan["specialty"]
     )
+    if plan["doctor_name"] and re.search(
+        r",\s*(?:M\.?D\.?|D\.?O\.?|Ph\.?D\.?|FACS)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        # "Kratz, MD" is a credential, not Maryland.
+        if plan["location"].upper() in {"MD", "DO"}:
+            plan["location"] = ""
     qualifiers = []
     for qualifier in _ANTHEM_QUALIFIER_WORDS:
         if (
@@ -21050,27 +21065,43 @@ def _anthem_format_nppes(
 def _anthem_nppes_request(
     params: list[tuple[str, str]],
     log: Callable[[str], None],
+    paginate: bool = False,
 ) -> list[dict]:
-    """Run one NPPES API request and return its result list."""
+    """Run an NPPES API request, optionally paging through all results."""
+    base_params = list(params)
     try:
-        response = requests.get(
-            ANTHEM_NPPES_URL,
-            params=params,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "local-llm-chat-anthem/1.0",
-            },
-            timeout=(5, 30),
-        )
-        response.raise_for_status()
-        data = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        log(f"[anthem: NPPES fallback failed: {exc}]")
-        return []
-    results = data.get("results") or []
-    if not isinstance(results, list):
-        return []
-    return [item for item in results if isinstance(item, dict)]
+        page_limit = int(dict(base_params).get("limit", "0"))
+    except (TypeError, ValueError):
+        page_limit = 0
+    pages = 5 if paginate and page_limit >= 200 else 1
+    results: list[dict] = []
+    for page in range(pages):
+        page_params = list(base_params)
+        if page:
+            page_params.append(("skip", str(page * page_limit)))
+        try:
+            response = requests.get(
+                ANTHEM_NPPES_URL,
+                params=page_params,
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "local-llm-chat-anthem/1.0",
+                },
+                timeout=(5, 30),
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            log(f"[anthem: NPPES fallback failed: {exc}]")
+            break
+        batch = data.get("results") or []
+        if not isinstance(batch, list):
+            break
+        batch = [item for item in batch if isinstance(item, dict)]
+        results.extend(batch)
+        if len(batch) < page_limit:
+            break
+    return results
 
 
 _ANTHEM_GENERIC_KEYWORDS = {
@@ -21376,6 +21407,13 @@ def _anthem_nppes_search(
     taxonomies = _anthem_nppes_taxonomy_candidates(
         specialty, keywords
     )
+    result_limit = (
+        ANTHEM_MAX_FACILITY_PROVIDERS if facility
+        else ANTHEM_MAX_PROVIDERS
+    )
+    paginate = bool(
+        facility and taxonomies and not (first_name or last_name)
+    )
 
     def build(
         taxonomy: str = "",
@@ -21440,7 +21478,9 @@ def _anthem_nppes_search(
 
     results: list[dict] = []
     for params in attempts:
-        results = _anthem_nppes_request(params, log)
+        results = _anthem_nppes_request(
+            params, log, paginate=paginate
+        )
         if results:
             used_taxonomy = dict(params).get("taxonomy_description", "")
             if used_taxonomy:
@@ -21519,7 +21559,7 @@ def _anthem_nppes_search(
             results,
             facility,
             facility_anchors,
-            ANTHEM_MAX_PROVIDERS,
+            result_limit,
             log,
         )
         if not results:
@@ -21537,7 +21577,7 @@ def _anthem_nppes_search(
             if result.get("enumeration_type") == "NPI-1"
             else 1
         )
-    results = results[:ANTHEM_MAX_PROVIDERS]
+    results = results[:result_limit]
     if not results:
         return "", 0
     log(
@@ -22981,6 +23021,14 @@ _ANTHEM_BLUECARD_PREFIX_LOCK = threading.Lock()
 _ANTHEM_BLUECARD_PREFIX_CACHE: dict[str, tuple[str, ...]] = {}
 _ANTHEM_BLUECARD_LOCK = threading.Lock()
 _ANTHEM_BLUECARD_CACHE: dict[tuple[str, str], str] = {}
+_ANTHEM_MEMBER_PLAN_LOCK = threading.Lock()
+_ANTHEM_MEMBER_PLAN_CACHE: dict[str, dict] = {}
+_ANTHEM_MEMBER_STATUS_LOCK = threading.Lock()
+_ANTHEM_MEMBER_STATUS_CACHE: dict[tuple[str, str], str] = {}
+_ANTHEM_MEMBER_ID_FILES = (
+    SCRIPT_DIR / ".chat" / "anthem" / "member_id.txt",
+    SCRIPT_DIR / "prompts" / ".chat" / "anthem" / "member_id.txt",
+)
 
 
 def _anthem_findcare_headers(token: str = "") -> dict[str, str]:
@@ -23031,6 +23079,109 @@ def _anthem_findcare_token() -> str:
             _ANTHEM_FINDCARE_TOKEN_CACHE["value"] = token
             _ANTHEM_FINDCARE_TOKEN_CACHE["expires_at"] = now + 2700
     return token
+
+
+def _anthem_member_plan() -> dict:
+    """Return the Anthem plan tied to the stored member ID."""
+    with _ANTHEM_MEMBER_PLAN_LOCK:
+        cached = _ANTHEM_MEMBER_PLAN_CACHE.get("value")
+    if cached:
+        return dict(cached)
+    member_id = ""
+    for path in _ANTHEM_MEMBER_ID_FILES:
+        try:
+            if path.is_file():
+                member_id = " ".join(
+                    path.read_text(encoding="utf-8", errors="ignore").split()
+                )
+                if member_id:
+                    break
+        except OSError:
+            continue
+    plan = {
+        "member_id": member_id,
+        "prefix": member_id[:3].upper() if member_id else "",
+        "plan_name": "",
+        "product_type": "",
+        "state": "",
+        "effective_date": "",
+    }
+    token = _anthem_findcare_token()
+    if member_id and token:
+        try:
+            response = requests.post(
+                _ANTHEM_FINDCARE_BASE
+                + "/precare/api/member/public/v1/summary",
+                headers=_anthem_findcare_headers(token),
+                json={
+                    "identificationNumber": member_id,
+                    "locale": "en_US",
+                },
+                timeout=(5, 25),
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError):
+            data = {}
+        members = data.get("memberList") or []
+        if members:
+            member = members[0] if isinstance(members[0], dict) else {}
+            coverage = member.get("coverageDetails") or {}
+            prefix = str(coverage.get("surrogatePrefix") or "").strip()
+            if prefix:
+                plan["prefix"] = prefix.upper()
+            product_names = [
+                item
+                for item in coverage.get("productNames") or []
+                if isinstance(item, dict)
+                and str(item.get("type") or "").upper() == "MEDICAL"
+            ]
+            if product_names:
+                plan["plan_name"] = str(
+                    product_names[0].get("name") or ""
+                ).strip()
+            plan["product_type"] = str(
+                coverage.get("productType") or ""
+            ).strip()
+            plan["state"] = str(
+                (member.get("address") or {}).get("state") or ""
+            ).strip()
+            plan["effective_date"] = str(
+                coverage.get("coverageEffectiveDate") or ""
+            ).strip()
+    with _ANTHEM_MEMBER_PLAN_LOCK:
+        _ANTHEM_MEMBER_PLAN_CACHE["value"] = dict(plan)
+    return dict(plan)
+
+
+def _anthem_member_plan_label(status: str) -> str:
+    return {
+        "listed": "In Network (Member Plan)",
+        "not_listed": "Out of Network (Member Plan)",
+        "unknown": "Network Unknown (Member Plan)",
+    }.get(status, "Network Unknown (Member Plan)")
+
+
+def _anthem_findcare_member_status(
+    name: str,
+    state: str,
+    npi: str = "",
+    city: str = "",
+) -> str:
+    """Return network status for the stored Anthem member plan."""
+    plan = _anthem_member_plan()
+    prefix = str(plan.get("prefix") or "").strip()
+    if not prefix:
+        return "unknown"
+    return _anthem_findcare_plan_status(
+        name,
+        state,
+        (prefix,),
+        _ANTHEM_MEMBER_STATUS_CACHE,
+        _ANTHEM_MEMBER_STATUS_LOCK,
+        npi=npi,
+        city=city,
+    )
 
 
 def _anthem_findcare_plans(state: str) -> list[dict]:
@@ -23228,6 +23379,21 @@ def _anthem_findcare_provider_lookup(
     return False
 
 
+def _anthem_strip_credentials(name: str) -> str:
+    """Strip trailing medical credentials from a person's name."""
+    credential_pattern = (
+        r"(?:M\.?D\.?|D\.?O\.?|Ph\.?D\.?|MBBS|MPH|MBA|"
+        r"MS|M\.S\.|BSN|NP|PA-C|RN|FACS|FACP|FACC|FAAP)"
+    )
+    return re.sub(
+        rf"(?:,\s*{credential_pattern}\b.*"
+        rf"|\s+{credential_pattern}\s*$)",
+        "",
+        " ".join(str(name or "").split()),
+        flags=re.IGNORECASE,
+    ).strip(" ,")
+
+
 def _anthem_facility_name_variants(name: str) -> list[str]:
     """Return common hospital-name variants for Anthem's lookup."""
     name = " ".join(str(name or "").split())
@@ -23260,6 +23426,30 @@ def _anthem_facility_name_variants(name: str) -> list[str]:
         collapsed = " ".join(collapsed.split())
         if collapsed and collapsed not in variants:
             variants.append(collapsed)
+    facility_words = (
+        "hospital", "center", "clinic", "medical", "health", "cancer",
+        "institute", "university", "foundation", "group", "system",
+    )
+    clean_name = _anthem_strip_credentials(name)
+    clean_words = clean_name.split()
+    if 2 <= len(clean_words) <= 4 and not any(
+        word.casefold().strip(".,") in facility_words
+        for word in clean_words
+    ):
+        first, last = clean_words[0], clean_words[-1]
+        middle = clean_words[1:-1]
+        short = f"{first} {last}"
+        if short not in variants:
+            variants.append(short)
+        if middle:
+            initials = " ".join(
+                word.strip(".,")[0].upper()
+                for word in middle
+                if word.strip(".,")
+            )
+            with_initial = f"{first} {initials} {last}"
+            if with_initial not in variants:
+                variants.append(with_initial)
     return variants
 
 
@@ -23285,17 +23475,7 @@ def _anthem_findcare_plan_status(
     token = _anthem_findcare_token()
     if not token:
         return "unknown"
-    credential_pattern = (
-        r"(?:M\.?D\.?|D\.?O\.?|Ph\.?D\.?|MBBS|MPH|MBA|"
-        r"MS|M\.S\.|BSN|NP|PA-C|RN)"
-    )
-    query_name = re.sub(
-        rf"(?:,\s*{credential_pattern}\b.*"
-        rf"|\s+{credential_pattern}\s*$)",
-        "",
-        name,
-        flags=re.IGNORECASE,
-    ).strip(" ,")
+    query_name = _anthem_strip_credentials(name)
     latitude, longitude = _ANTHEM_STATE_COORDS.get(
         state, _ANTHEM_STATE_COORDS["CA"]
     )
@@ -23432,9 +23612,11 @@ def _anthem_annotate_ppo_status(
     items: list[dict],
     default_state: str = "",
 ) -> None:
-    """Add Anthem PPO and BlueCard National PPO flags to provider cards."""
+    """Add member-plan, Anthem PPO, and BlueCard flags to provider cards."""
     if not items:
         return
+    member_plan = _anthem_member_plan()
+    member_prefix = str(member_plan.get("prefix") or "").strip()
 
     def annotate(item: dict) -> None:
         name = str(item.get("name") or item.get("title") or "").strip()
@@ -23449,6 +23631,21 @@ def _anthem_annotate_ppo_status(
             name, state, npi=npi, city=city
         )
         bluecard_label = _ANTHEM_BLUECARD_LABELS[bluecard_status]
+        member_status = "unknown"
+        member_label = ""
+        if member_prefix:
+            member_status = _anthem_findcare_member_status(
+                name, state, npi=npi, city=city
+            )
+            member_label = _anthem_member_plan_label(member_status)
+            item["anthem_member_plan"] = member_status
+            item["anthem_member_plan_label"] = member_label
+            item["anthem_member_plan_flag"] = _ANTHEM_PPO_FLAGS[
+                member_status
+            ]
+            item["anthem_member_plan_name"] = str(
+                member_plan.get("plan_name") or ""
+            )
         item["anthem_ppo"] = status
         item["anthem_ppo_label"] = label
         item["anthem_ppo_flag"] = _ANTHEM_PPO_FLAGS[status]
@@ -23458,8 +23655,8 @@ def _anthem_annotate_ppo_status(
             _ANTHEM_BLUECARD_FLAGS[bluecard_status]
         )
         summary = str(item.get("summary") or "").strip()
-        for value in (label, bluecard_label):
-            if value not in summary:
+        for value in (member_label, label, bluecard_label):
+            if value and value not in summary:
                 summary = f"{summary} · {value}" if summary else value
         item["summary"] = summary
         item["paragraphs"] = [summary] if summary else []
@@ -27963,17 +28160,32 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     f"{len(added_related)} UCSF directory "
                     f"specialist(s) for {condition_term!r}]",
                 )
+        member_plan: dict = {}
         if provider_items:
+            member_plan = _anthem_member_plan()
             self._sse_text(
                 "log",
-                "[anthem: checking Anthem PPO and BlueCard National "
-                "PPO directories]",
+                "[anthem: checking member-plan, Anthem PPO, and "
+                "BlueCard National PPO directories]",
             )
+            if member_plan.get("member_id"):
+                plan_name = (
+                    member_plan.get("plan_name") or "Anthem member plan"
+                )
+                self._sse_text(
+                    "log",
+                    f"[anthem: member plan {plan_name} "
+                    f"(prefix {member_plan.get('prefix') or '?'}, "
+                    f"state {member_plan.get('state') or '?'}, "
+                    f"effective "
+                    f"{member_plan.get('effective_date') or '?'})]",
+                )
             _anthem_annotate_ppo_status(
                 provider_items, plan.get("location", "")
             )
             ppo_counts = {"listed": 0, "not_listed": 0, "unknown": 0}
             bluecard_counts = {"listed": 0, "not_listed": 0, "unknown": 0}
+            member_counts = {"listed": 0, "not_listed": 0, "unknown": 0}
             for provider_item in provider_items:
                 status = str(
                     provider_item.get("anthem_ppo") or "unknown"
@@ -27985,6 +28197,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
                 bluecard_counts[bluecard_status] = (
                     bluecard_counts.get(bluecard_status, 0) + 1
+                )
+                member_status = str(
+                    provider_item.get("anthem_member_plan") or "unknown"
+                )
+                member_counts[member_status] = (
+                    member_counts.get(member_status, 0) + 1
                 )
             self._sse_text(
                 "log",
@@ -28000,6 +28218,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 f"{bluecard_counts['not_listed']} not found, "
                 f"{bluecard_counts['unknown']} unconfirmed]",
             )
+            if member_plan.get("prefix"):
+                self._sse_text(
+                    "log",
+                    "[anthem: member-plan flag: "
+                    f"{member_counts['listed']} in network, "
+                    f"{member_counts['not_listed']} out of network, "
+                    f"{member_counts['unknown']} unconfirmed]",
+                )
         state.anthem_context = context
         state.anthem_plan = plan
         state.anthem_providers = provider_items
@@ -28015,8 +28241,18 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "source": "Anthem Provider Directory",
                     "description": (
                         f"{source_label} · "
-                        f"{len(provider_items)} provider record(s); "
-                        "click a result to open its profile"
+                        f"{len(provider_items)} provider record(s)"
+                        + (
+                            " · member plan "
+                            + (
+                                member_plan.get("plan_name")
+                                or "Anthem member plan"
+                            )
+                            + f" ({member_plan.get('prefix')})"
+                            if member_plan.get("prefix")
+                            else ""
+                        )
+                        + "; click a result to open its profile"
                     ),
                     "docs": True,
                     "docs_label": (
@@ -28047,6 +28283,26 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 f"Found {primary_count} provider(s) from "
                 f"{source_label}."
             )
+            if member_plan.get("prefix"):
+                lines.append(
+                    "Member plan: "
+                    + (
+                        member_plan.get("plan_name")
+                        or "Anthem member plan"
+                    )
+                    + f" (prefix {member_plan.get('prefix')}"
+                    + (
+                        f", state {member_plan.get('state')}"
+                        if member_plan.get("state")
+                        else ""
+                    )
+                    + (
+                        f", effective {member_plan.get('effective_date')}"
+                        if member_plan.get("effective_date")
+                        else ""
+                    )
+                    + ")."
+                )
             if added_related:
                 lines.append(
                     "Also included "
@@ -28067,6 +28323,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                             if academic_title
                             else ""
                         ),
+                        provider.get("anthem_member_plan_label"),
                         provider.get("anthem_ppo_label"),
                         provider.get("anthem_bluecard_national_label"),
                         provider.get("specialty"),
@@ -28089,9 +28346,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "Click a provider card below to open the full profile."
             )
             lines.append(
-                "Anthem PPO and BlueCard National PPO status are based on "
-                "Anthem's public plan directories and should be confirmed "
-                "with Anthem before booking."
+                "Member-plan, Anthem PPO, and BlueCard National PPO status "
+                "are based on Anthem's public plan directories and should "
+                "be confirmed with Anthem before booking."
             )
         else:
             lines.append(

@@ -7644,6 +7644,10 @@ function makeNewsItem(entry, data) {
     source: data.source || entry.newsSource || "News",
     section: data.section || "",
     academicTitle: String(data.academic_title || ""),
+    anthemMemberPlan: String(data.anthem_member_plan || ""),
+    anthemMemberPlanLabel: String(data.anthem_member_plan_label || ""),
+    anthemMemberPlanFlag: String(data.anthem_member_plan_flag || ""),
+    anthemMemberPlanName: String(data.anthem_member_plan_name || ""),
     anthemPpo: String(data.anthem_ppo || ""),
     anthemPpoLabel: String(data.anthem_ppo_label || ""),
     anthemPpoFlag: String(data.anthem_ppo_flag || ""),
@@ -8566,6 +8570,9 @@ function renderNewsList(entry) {
       const meta = document.createElement("div");
       meta.className = "news-meta";
       const metaParts = [];
+      if (item.anthemMemberPlanLabel) {
+        metaParts.push(item.anthemMemberPlanLabel);
+      }
       if (item.anthemPpoLabel) {
         metaParts.push(item.anthemPpoLabel);
       }
