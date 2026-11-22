@@ -21332,10 +21332,16 @@ def _anthem_nppes_facility_filter(
         def check(index: int) -> tuple[int, bool]:
             record = results[index]
             name = _anthem_provider_record_name(record)
-            return index, _anthem_provider_affiliation(name, facility)
+            npi = str(record.get("number") or "").strip()
+            return index, _anthem_provider_affiliation(
+                name, facility, npi=npi
+            )
 
         if pending:
-            with ThreadPoolExecutor(max_workers=6) as pool:
+            # Affiliation checks are network-bound but independent. Use a
+            # wider pool so a UCSF/Stanford facility filter does not add
+            # tens of seconds before the provider list can be streamed.
+            with ThreadPoolExecutor(max_workers=32) as pool:
                 futures = {
                     pool.submit(check, index): index
                     for index in pending
@@ -22001,8 +22007,17 @@ _ANTHEM_TITLE_CACHE: dict[tuple[str, str], str] = {}
 _ANTHEM_TITLE_LOCK = threading.Lock()
 
 
-def _anthem_academic_title(name: str, institution: str) -> str:
-    """Return a provider's academic title from an institution profile."""
+def _anthem_academic_title(
+    name: str,
+    institution: str,
+    deadline: float | None = None,
+) -> str:
+    """Return a provider's academic title from an institution profile.
+
+    ``deadline`` is an optional ``time.monotonic()`` cutoff. When it is
+    reached, remaining profile URLs are skipped and the empty result is not
+    cached, so a later request can try again.
+    """
     name = " ".join(str(name or "").split())
     institution = " ".join(str(institution or "").split())
     if not name or not institution:
@@ -22014,7 +22029,11 @@ def _anthem_academic_title(name: str, institution: str) -> str:
     _first_name, last_name = _anthem_split_name(name)
     last_key = last_name.casefold()
     title = ""
+    aborted = False
     for url in _anthem_provider_title_urls(name, institution):
+        if deadline is not None and time.monotonic() >= deadline:
+            aborted = True
+            break
         try:
             response = requests.get(
                 url,
@@ -22056,17 +22075,55 @@ def _anthem_academic_title(name: str, institution: str) -> str:
         if candidate:
             title = candidate
             break
-    with _ANTHEM_TITLE_LOCK:
-        _ANTHEM_TITLE_CACHE[key] = title
+    if not aborted:
+        with _ANTHEM_TITLE_LOCK:
+            _ANTHEM_TITLE_CACHE[key] = title
     return title
 
 
-_ANTHEM_AFFILIATION_CACHE: dict[tuple[str, str], bool] = {}
+_ANTHEM_AFFILIATION_CACHE: dict[tuple[str, str, str], bool] = {}
 _ANTHEM_AFFILIATION_LOCK = threading.Lock()
 
 
-def _anthem_provider_affiliation(name: str, institution: str) -> bool:
-    """Return whether an institution profile page confirms a provider.
+def _anthem_ucsf_directory_affiliation(
+    name: str,
+    npi: str = "",
+) -> bool:
+    """Return whether the UCSF directory lists this provider.
+
+    A last-name search is one fast API call and is more reliable than
+    fetching several profile-page URL variants. It is also the same public
+    directory used by the specialist supplement, so the two paths agree.
+    """
+    _first_name, last_name = _anthem_split_name(name)
+    if not last_name:
+        return False
+    results = _anthem_ucsf_directory_query(last_name, limit=50)
+    target_npi = str(npi or "").strip()
+    if target_npi:
+        return any(
+            str(result.get("npi") or "") == target_npi
+            for result in results
+        )
+    return any(
+        _anthem_names_match(
+            name,
+            str(
+                result.get("preferredNameDegrees")
+                or result.get("fullName")
+                or ""
+            ),
+        )
+        for result in results
+    )
+
+
+def _anthem_provider_affiliation(
+    name: str,
+    institution: str,
+    npi: str = "",
+) -> bool:
+    """Return whether an institution directory confirms a provider.
 
     This is a lightweight existence/name check for list filtering; the detail
     modal separately extracts the full profile text. Results are cached so a
@@ -22076,12 +22133,20 @@ def _anthem_provider_affiliation(name: str, institution: str) -> bool:
     institution = " ".join(str(institution or "").split())
     if not name or not institution:
         return False
-    key = (institution.casefold(), name.casefold())
+    target_npi = str(npi or "").strip()
+    key = (institution.casefold(), name.casefold(), target_npi)
     with _ANTHEM_AFFILIATION_LOCK:
         cached = _ANTHEM_AFFILIATION_CACHE.get(key)
         if cached is not None:
             return cached
-    urls = _anthem_provider_profile_urls(name, institution)
+    if "ucsf" in institution.casefold():
+        confirmed = _anthem_ucsf_directory_affiliation(
+            name, target_npi
+        )
+        with _ANTHEM_AFFILIATION_LOCK:
+            _ANTHEM_AFFILIATION_CACHE[key] = confirmed
+        return confirmed
+    urls = _anthem_provider_title_urls(name, institution)
     words = [
         word.casefold()
         for word in re.findall(r"[A-Za-z]{2,}", name)
@@ -22099,7 +22164,7 @@ def _anthem_provider_affiliation(name: str, institution: str) -> bool:
                     "User-Agent": "Mozilla/5.0",
                     "Accept": "text/html,application/xhtml+xml",
                 },
-                timeout=(4, 15),
+                timeout=(3, 8),
                 allow_redirects=True,
             )
         except requests.RequestException:
@@ -22253,12 +22318,38 @@ def _anthem_generate_provider_profile(
     return result
 
 
+def _anthem_detail_with_summary(
+    item: dict,
+    summary: str,
+    network_labels: str,
+) -> dict:
+    """Prepend the result-card summary to a provider detail payload."""
+    text = " ".join(str(summary or "").split())
+    labels = [
+        label.strip()
+        for label in str(network_labels or "").split(" · ")
+        if label.strip()
+    ]
+    for label in labels:
+        if label not in text:
+            text = f"{text} · {label}" if text else label
+    if not text:
+        return item
+    result = dict(item)
+    blocks = list(item.get("blocks") or [])
+    blocks.insert(0, {"type": "paragraph", "text": text})
+    result["blocks"] = blocks
+    return result
+
+
 def _anthem_provider_detail(
     npi: str,
     name: str,
     specialty: str = "",
     institution: str = "",
     source_label: str = "",
+    summary: str = "",
+    network_labels: str = "",
 ) -> dict:
     """Build one provider's detail modal payload.
 
@@ -22276,7 +22367,9 @@ def _anthem_provider_detail(
     with _ANTHEM_PROVIDER_DETAIL_LOCK:
         cached = _ANTHEM_PROVIDER_DETAIL_CACHE.get(cache_key)
         if cached:
-            return dict(cached)
+            return _anthem_detail_with_summary(
+                dict(cached), summary, network_labels
+            )
 
     record = _anthem_nppes_record_for_provider(npi, name)
     record_specialty = ""
@@ -22435,7 +22528,9 @@ def _anthem_provider_detail(
     }
     with _ANTHEM_PROVIDER_DETAIL_LOCK:
         _ANTHEM_PROVIDER_DETAIL_CACHE[cache_key] = item
-    return dict(item)
+    return _anthem_detail_with_summary(
+        dict(item), summary, network_labels
+    )
 
 
 def _anthem_add_academic_titles(
@@ -22492,6 +22587,7 @@ def _anthem_provider_items_from_context(
         address = record.get("address", "")
         phone = record.get("phone/contact", "") or record.get("phone", "")
         fax = record.get("fax", "")
+        network = record.get("network", "")
         contact = phone
         if fax and "fax" not in contact.casefold():
             contact = (
@@ -22546,6 +22642,8 @@ def _anthem_provider_items_from_context(
                 "address": address,
                 "phone": phone,
                 "fax": fax,
+                "network": network,
+                "anthem_status_pending": True,
                 "link": link,
                 "source": "Anthem Provider Directory",
                 "section": specialty,
@@ -22562,7 +22660,6 @@ def _anthem_provider_items_from_context(
                 "institution": institution,
             }
         )
-    _anthem_add_academic_titles(items, institution)
     return items
 
 
@@ -22701,7 +22798,9 @@ def _anthem_ucsf_directory_items(
                 "npi": npi,
                 "organization": organization,
                 "specialty": specialty,
-                "academic_title": "",
+                "academic_title": str(
+                    result.get("providerTitle") or ""
+                ).strip(),
                 "address": address,
                 "phone": phone,
                 "fax": "",
@@ -22721,7 +22820,6 @@ def _anthem_ucsf_directory_items(
                 "institution": facility,
             }
         )
-    _anthem_add_academic_titles(items, facility)
     return items
 
 
@@ -23029,6 +23127,118 @@ _ANTHEM_MEMBER_ID_FILES = (
     SCRIPT_DIR / ".chat" / "anthem" / "member_id.txt",
     SCRIPT_DIR / "prompts" / ".chat" / "anthem" / "member_id.txt",
 )
+# Network status is keyed by NPI (or name), state, and plan prefix. Unlike the
+# per-plan in-memory caches below, this cache survives server restarts so a
+# repeat search does not have to call Anthem's Find Care API again.
+_ANTHEM_STATUS_CACHE_PATH = (
+    SCRIPT_DIR / ".chat" / "anthem" / "network_status_cache.json"
+)
+_ANTHEM_STATUS_CACHE_TTL = 7 * 24 * 60 * 60
+_ANTHEM_PREFIX_STATUS_LOCK = threading.Lock()
+_ANTHEM_PREFIX_STATUS_CACHE: dict[str, dict] = {}
+_ANTHEM_PREFIX_STATUS_LOADED = False
+
+
+def _anthem_status_cache_key(
+    npi: str,
+    name: str,
+    state: str,
+    prefix: str,
+) -> str:
+    """Return a stable cache key for one provider/state/plan prefix."""
+    identity = " ".join(str(npi or "").split()) or " ".join(
+        str(name or "").casefold().split()
+    )
+    return (
+        f"{identity}|{str(state or '').strip().upper()}|"
+        f"{str(prefix or '').strip()}"
+    )
+
+
+def _anthem_status_cache_load_locked() -> None:
+    """Load the persisted prefix cache once while holding the lock."""
+    global _ANTHEM_PREFIX_STATUS_LOADED
+    if _ANTHEM_PREFIX_STATUS_LOADED:
+        return
+    _ANTHEM_PREFIX_STATUS_LOADED = True
+    try:
+        data = json.loads(
+            _ANTHEM_STATUS_CACHE_PATH.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, dict):
+        return
+    now = time.time()
+    for key, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        status = str(entry.get("status") or "")
+        checked_at = float(entry.get("checked_at") or 0.0)
+        if status not in {"listed", "not_listed"} or not checked_at:
+            continue
+        if now - checked_at > _ANTHEM_STATUS_CACHE_TTL:
+            continue
+        _ANTHEM_PREFIX_STATUS_CACHE[str(key)] = {
+            "status": status,
+            "checked_at": checked_at,
+        }
+
+
+def _anthem_status_cache_get(key: str) -> str | None:
+    """Return a cached prefix status, or ``None`` when it is stale."""
+    with _ANTHEM_PREFIX_STATUS_LOCK:
+        _anthem_status_cache_load_locked()
+        entry = _ANTHEM_PREFIX_STATUS_CACHE.get(key)
+        if not entry:
+            return None
+        checked_at = float(entry.get("checked_at") or 0.0)
+        if time.time() - checked_at > _ANTHEM_STATUS_CACHE_TTL:
+            _ANTHEM_PREFIX_STATUS_CACHE.pop(key, None)
+            return None
+        status = str(entry.get("status") or "")
+        return status or None
+
+
+def _anthem_status_cache_set(key: str, status: str) -> None:
+    """Persist one definitive prefix status for future searches."""
+    if status not in {"listed", "not_listed"}:
+        return
+    with _ANTHEM_PREFIX_STATUS_LOCK:
+        _anthem_status_cache_load_locked()
+        _ANTHEM_PREFIX_STATUS_CACHE[key] = {
+            "status": status,
+            "checked_at": time.time(),
+        }
+        # Keep the file bounded even after many months of searches.
+        if len(_ANTHEM_PREFIX_STATUS_CACHE) > 20000:
+            newest = sorted(
+                _ANTHEM_PREFIX_STATUS_CACHE.items(),
+                key=lambda item: float(item[1].get("checked_at") or 0.0),
+                reverse=True,
+            )[:20000]
+            _ANTHEM_PREFIX_STATUS_CACHE.clear()
+            _ANTHEM_PREFIX_STATUS_CACHE.update(dict(newest))
+        payload = {
+            "version": 1,
+            "entries": dict(_ANTHEM_PREFIX_STATUS_CACHE),
+        }
+        try:
+            _ANTHEM_STATUS_CACHE_PATH.parent.mkdir(
+                parents=True, exist_ok=True
+            )
+            temporary = _ANTHEM_STATUS_CACHE_PATH.with_name(
+                _ANTHEM_STATUS_CACHE_PATH.name
+                + f".{os.getpid()}.{threading.get_ident()}.tmp"
+            )
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=0),
+                encoding="utf-8",
+            )
+            os.replace(temporary, _ANTHEM_STATUS_CACHE_PATH)
+        except OSError:
+            pass
 
 
 def _anthem_findcare_headers(token: str = "") -> dict[str, str]:
@@ -23154,12 +23364,26 @@ def _anthem_member_plan() -> dict:
     return dict(plan)
 
 
+_ANTHEM_MEMBER_PLAN_FLAGS = {
+    "listed": "In Network",
+    "not_listed": "Out Of Network",
+    "unknown": "Out Of Network",
+}
+
+
 def _anthem_member_plan_label(status: str) -> str:
+    """Return the binary member-plan status shown in the result list.
+
+    Anthem's public directory can occasionally fail to confirm a provider.
+    The result list deliberately shows only In Network or Out Of Network, so
+    an unconfirmed lookup is reported as Out Of Network rather than an
+    Unknown state.
+    """
     return {
-        "listed": "In Network (Member Plan)",
-        "not_listed": "Out of Network (Member Plan)",
-        "unknown": "Network Unknown (Member Plan)",
-    }.get(status, "Network Unknown (Member Plan)")
+        "listed": "In Network",
+        "not_listed": "Out Of Network",
+        "unknown": "Out Of Network",
+    }.get(status, "Out Of Network")
 
 
 def _anthem_findcare_member_status(
@@ -23319,22 +23543,28 @@ def _anthem_findcare_provider_lookup(
     state: str,
     city: str,
     prefix: str,
-) -> bool:
-    """Look up a provider or facility by name through Find Care."""
+) -> str:
+    """Return ``listed``/``not_listed``/``unknown`` for one plan prefix.
+
+    The NPI-based provider endpoint is authoritative and much faster than
+    asking the search-box for suggestions first. A successful response with
+    no matching provider is a definitive ``not_listed``; a transport error is
+    ``unknown`` and is deliberately not written to the persistent cache.
+    """
     name = " ".join(str(name or "").split())
-    state = " ".join(str(state or "CA").split()).upper() or "CA"
+    state = " ".join(str(state or "").split()).upper() or "CA"
     city = " ".join(str(city or "").split())
     if not name:
-        return False
+        return "unknown"
     latitude, longitude = _ANTHEM_STATE_COORDS.get(
         state, _ANTHEM_STATE_COORDS["CA"]
     )
     token = _anthem_findcare_token()
     if not token:
-        return False
+        return "unknown"
     npi = str(npi or "").strip()
 
-    def attempt(query: str) -> bool:
+    def attempt(query: str) -> bool | None:
         body = {
             "providerName": query,
             "latitude": latitude,
@@ -23360,7 +23590,7 @@ def _anthem_findcare_provider_lookup(
             response.raise_for_status()
             providers = response.json().get("providers") or []
         except (requests.RequestException, ValueError):
-            return False
+            return None
         for provider in providers:
             if not isinstance(provider, dict):
                 continue
@@ -23373,10 +23603,34 @@ def _anthem_findcare_provider_lookup(
                 return True
         return False
 
+    any_success = False
     for variant in _anthem_facility_name_variants(name):
-        if attempt(variant):
-            return True
-    return False
+        result = attempt(variant)
+        if result is True:
+            return "listed"
+        if result is False:
+            any_success = True
+    return "not_listed" if any_success else "unknown"
+
+
+def _anthem_findcare_prefix_status(
+    name: str,
+    state: str,
+    prefix: str,
+    npi: str = "",
+    city: str = "",
+) -> str:
+    """Look up one provider for one plan prefix, using the persistent cache."""
+    key = _anthem_status_cache_key(npi, name, state, prefix)
+    cached = _anthem_status_cache_get(key)
+    if cached:
+        return cached
+    status = _anthem_findcare_provider_lookup(
+        name, npi, state, city, prefix
+    )
+    if status != "unknown":
+        _anthem_status_cache_set(key, status)
+    return status
 
 
 def _anthem_strip_credentials(name: str) -> str:
@@ -23467,90 +23721,28 @@ def _anthem_findcare_plan_status(
     state = " ".join(str(state or "CA").split()).upper() or "CA"
     if not name:
         return "unknown"
-    key = (name.casefold(), state)
+    key = (str(npi or "").strip() or name.casefold(), state)
     with lock:
         cached = cache.get(key)
     if cached:
         return cached
-    token = _anthem_findcare_token()
-    if not token:
-        return "unknown"
     query_name = _anthem_strip_credentials(name)
-    latitude, longitude = _ANTHEM_STATE_COORDS.get(
-        state, _ANTHEM_STATE_COORDS["CA"]
-    )
-    any_ok = False
+    any_not_listed = False
     status = "unknown"
     for prefix in prefixes:
-        body = {
-            "locale": "en_US",
-            "text": query_name or name,
-            "memberCoordinates": {
-                "latitude": latitude,
-                "longitude": longitude,
-                "stateCode": state,
-            },
-            "clientCoordinates": {
-                "latitude": latitude,
-                "longitude": longitude,
-            },
-            "distance": "25",
-            "publicCriteria": {
-                "brand": "ABCBS",
-                "prefix": prefix,
-                "state": state,
-                "network": [],
-                "flags": [],
-                "careType": "medical",
-            },
-        }
-        try:
-            response = requests.post(
-                _ANTHEM_FINDCARE_BASE
-                + "/precare/api/lookup/public/v2/search-box",
-                headers=_anthem_findcare_headers(token),
-                json=body,
-                timeout=(5, 25),
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except (requests.RequestException, ValueError):
-            continue
-        any_ok = True
-        suggestions = []
-        for block in payload.get("data") or []:
-            if not isinstance(block, dict):
-                continue
-            options = block.get("options") or {}
-            suggestions.extend(options.get("suggestions") or [])
-        for suggestion in suggestions:
-            if not isinstance(suggestion, dict):
-                continue
-            text = str(suggestion.get("text") or "")
-            criteria = (
-                suggestion.get("criteria", {})
-                .get("searchCriteria", {})
-                .get("demographicFilter", {})
-            )
-            if not criteria.get("providerIdentifier"):
-                continue
-            if _anthem_names_match(name, text):
-                status = "listed"
-                break
-        if status == "listed":
+        prefix_status = _anthem_findcare_prefix_status(
+            query_name or name,
+            state,
+            prefix,
+            npi=npi,
+            city=city,
+        )
+        if prefix_status == "listed":
+            status = "listed"
             break
-    if status != "listed":
-        for prefix in prefixes:
-            if _anthem_findcare_provider_lookup(
-                query_name or name,
-                npi,
-                state,
-                city,
-                prefix,
-            ):
-                status = "listed"
-                break
-    if status != "listed" and any_ok:
+        if prefix_status == "not_listed":
+            any_not_listed = True
+    if status != "listed" and any_not_listed:
         status = "not_listed"
     with lock:
         cache[key] = status
@@ -23608,61 +23800,121 @@ def _anthem_item_city(item: dict) -> str:
     return prefix.split(",")[-1].strip()
 
 
-def _anthem_annotate_ppo_status(
+def _anthem_annotate_member_status(
     items: list[dict],
     default_state: str = "",
+    member_plan: dict | None = None,
+    on_update: Callable[[dict], None] | None = None,
+    institution: str = "",
+    title_deadline_seconds: float = 8.0,
+    title_limit: int = 24,
 ) -> None:
-    """Add member-plan, Anthem PPO, and BlueCard flags to provider cards."""
+    """Add the stored member-plan network status to provider cards.
+
+    Only the member plan is checked. Anthem PPO and BlueCard National PPO are
+    deliberately not queried because their status is not needed in the result
+    list. When ``on_update`` is supplied, it is called in the SSE handler
+    thread as each provider finishes, allowing the browser to render the list
+    before all member-plan checks have completed.
+
+    Academic titles are enriched in the same worker pool, but only for the
+    first ``title_limit`` cards and only until ``title_deadline_seconds``
+    elapses. This keeps the result list fast: cards are already on screen, and
+    title updates are extra rather than a prerequisite for rendering.
+    """
     if not items:
         return
-    member_plan = _anthem_member_plan()
+    if member_plan is None:
+        member_plan = _anthem_member_plan()
     member_prefix = str(member_plan.get("prefix") or "").strip()
+    institution = " ".join(str(institution or "").split())
+    title_supported = bool(
+        institution and _anthem_facility_profile_supported(institution)
+    )
+    title_deadline = time.monotonic() + max(0.0, title_deadline_seconds)
 
-    def annotate(item: dict) -> None:
-        name = str(item.get("name") or item.get("title") or "").strip()
-        state = _anthem_item_state(item) or str(default_state or "")
-        city = _anthem_item_city(item)
-        npi = str(item.get("npi") or "").strip()
-        status = _anthem_findcare_ppo_status(
-            name, state, npi=npi, city=city
-        )
-        label = _ANTHEM_PPO_LABELS[status]
-        bluecard_status = _anthem_findcare_bluecard_status(
-            name, state, npi=npi, city=city
-        )
-        bluecard_label = _ANTHEM_BLUECARD_LABELS[bluecard_status]
-        member_status = "unknown"
+    def finish(
+        item: dict,
+        member_status: str,
+        academic_title: str = "",
+    ) -> dict:
+        # Drop any PPO/BlueCard data left over from an earlier response so a
+        # card only ever shows the member-plan result.
+        for key in (
+            "anthem_ppo",
+            "anthem_ppo_label",
+            "anthem_ppo_flag",
+            "anthem_bluecard_national",
+            "anthem_bluecard_national_label",
+            "anthem_bluecard_national_flag",
+        ):
+            item.pop(key, None)
         member_label = ""
         if member_prefix:
-            member_status = _anthem_findcare_member_status(
-                name, state, npi=npi, city=city
-            )
             member_label = _anthem_member_plan_label(member_status)
             item["anthem_member_plan"] = member_status
             item["anthem_member_plan_label"] = member_label
-            item["anthem_member_plan_flag"] = _ANTHEM_PPO_FLAGS[
+            item["anthem_member_plan_flag"] = _ANTHEM_MEMBER_PLAN_FLAGS[
                 member_status
             ]
             item["anthem_member_plan_name"] = str(
                 member_plan.get("plan_name") or ""
             )
-        item["anthem_ppo"] = status
-        item["anthem_ppo_label"] = label
-        item["anthem_ppo_flag"] = _ANTHEM_PPO_FLAGS[status]
-        item["anthem_bluecard_national"] = bluecard_status
-        item["anthem_bluecard_national_label"] = bluecard_label
-        item["anthem_bluecard_national_flag"] = (
-            _ANTHEM_BLUECARD_FLAGS[bluecard_status]
-        )
+        title = academic_title or str(
+            item.get("academic_title") or ""
+        ).strip()
+        if title:
+            item["academic_title"] = title
         summary = str(item.get("summary") or "").strip()
-        for value in (member_label, label, bluecard_label):
+        for value in (
+            f"Academic title: {title}" if title else "",
+            member_label,
+        ):
             if value and value not in summary:
                 summary = f"{summary} · {value}" if summary else value
         item["summary"] = summary
         item["paragraphs"] = [summary] if summary else []
+        item["anthem_status_pending"] = False
+        return item
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        list(pool.map(annotate, items))
+    def annotate(index: int, item: dict) -> dict:
+        name = str(item.get("name") or item.get("title") or "").strip()
+        state = (
+            _anthem_item_state(item)
+            or str(member_plan.get("state") or "")
+            or str(default_state or "")
+        )
+        city = _anthem_item_city(item)
+        npi = str(item.get("npi") or "").strip()
+        member_status = "unknown"
+        if member_prefix:
+            member_status = _anthem_findcare_member_status(
+                name, state, npi=npi, city=city
+            )
+        academic_title = ""
+        if (
+            title_supported
+            and index < title_limit
+            and not str(item.get("academic_title") or "").strip()
+        ):
+            academic_title = _anthem_academic_title(
+                name, institution, deadline=title_deadline
+            )
+        return finish(item, member_status, academic_title)
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        futures = {
+            pool.submit(annotate, index, item): item
+            for index, item in enumerate(items)
+        }
+        for future in as_completed(futures):
+            item = futures[future]
+            try:
+                result = future.result()
+            except Exception:
+                result = finish(item, "unknown")
+            if on_update is not None:
+                on_update(result)
 
 
 def _anthem_directory_condition_term(
@@ -24924,6 +25176,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             name = (params.get("title") or [""])[0].strip()
             specialty = (params.get("specialty") or [""])[0].strip()
             institution = (params.get("institution") or [""])[0].strip()
+            summary = (params.get("summary") or [""])[0].strip()
+            network_labels = (
+                params.get("network_labels") or [""]
+            )[0].strip()
             if not npi:
                 match = re.search(
                     r"/provider-view/(\d{10})", url
@@ -24949,6 +25205,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     name,
                     specialty=specialty,
                     institution=institution,
+                    summary=summary,
+                    network_labels=network_labels,
                 )
             except Exception as exc:
                 self._send_error_json(
@@ -28128,46 +28386,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             context, source_label, institution=institution
         )
         primary_count = len(provider_items)
-        related_items, condition_term = _anthem_directory_condition_items(
-            question, plan, institution, source_label
-        )
-        if condition_term:
-            self._sse_text(
-                "log",
-                "[anthem: UCSF directory condition "
-                f"{condition_term!r} matched {len(related_items)} "
-                "specialist(s)]",
-            )
-        added_related: list[dict] = []
-        if related_items:
-            existing = {
-                str(item.get("npi") or item.get("name", "")).casefold()
-                for item in provider_items
-            }
-            for item in related_items:
-                identity = str(
-                    item.get("npi") or item.get("name", "")
-                ).casefold()
-                if identity in existing:
-                    continue
-                existing.add(identity)
-                provider_items.append(item)
-                added_related.append(item)
-            if added_related:
-                self._sse_text(
-                    "log",
-                    "[anthem: added "
-                    f"{len(added_related)} UCSF directory "
-                    f"specialist(s) for {condition_term!r}]",
-                )
         member_plan: dict = {}
         if provider_items:
             member_plan = _anthem_member_plan()
-            self._sse_text(
-                "log",
-                "[anthem: checking member-plan, Anthem PPO, and "
-                "BlueCard National PPO directories]",
-            )
+            for index, provider_item in enumerate(
+                provider_items, start=1
+            ):
+                provider_item["index"] = index
+                provider_item["anthem_status_pending"] = True
             if member_plan.get("member_id"):
                 plan_name = (
                     member_plan.get("plan_name") or "Anthem member plan"
@@ -28180,52 +28406,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     f"effective "
                     f"{member_plan.get('effective_date') or '?'})]",
                 )
-            _anthem_annotate_ppo_status(
-                provider_items, plan.get("location", "")
-            )
-            ppo_counts = {"listed": 0, "not_listed": 0, "unknown": 0}
-            bluecard_counts = {"listed": 0, "not_listed": 0, "unknown": 0}
-            member_counts = {"listed": 0, "not_listed": 0, "unknown": 0}
-            for provider_item in provider_items:
-                status = str(
-                    provider_item.get("anthem_ppo") or "unknown"
-                )
-                ppo_counts[status] = ppo_counts.get(status, 0) + 1
-                bluecard_status = str(
-                    provider_item.get("anthem_bluecard_national")
-                    or "unknown"
-                )
-                bluecard_counts[bluecard_status] = (
-                    bluecard_counts.get(bluecard_status, 0) + 1
-                )
-                member_status = str(
-                    provider_item.get("anthem_member_plan") or "unknown"
-                )
-                member_counts[member_status] = (
-                    member_counts.get(member_status, 0) + 1
-                )
-            self._sse_text(
-                "log",
-                "[anthem: Anthem PPO flag: "
-                f"{ppo_counts['listed']} listed, "
-                f"{ppo_counts['not_listed']} not found, "
-                f"{ppo_counts['unknown']} unconfirmed]",
-            )
-            self._sse_text(
-                "log",
-                "[anthem: BlueCard National PPO flag: "
-                f"{bluecard_counts['listed']} listed, "
-                f"{bluecard_counts['not_listed']} not found, "
-                f"{bluecard_counts['unknown']} unconfirmed]",
-            )
-            if member_plan.get("prefix"):
-                self._sse_text(
-                    "log",
-                    "[anthem: member-plan flag: "
-                    f"{member_counts['listed']} in network, "
-                    f"{member_counts['not_listed']} out of network, "
-                    f"{member_counts['unknown']} unconfirmed]",
-                )
         state.anthem_context = context
         state.anthem_plan = plan
         state.anthem_providers = provider_items
@@ -28233,6 +28413,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         state.anthem_records = record_count
         state.anthem_items_sent = bool(provider_items)
 
+        added_related: list[dict] = []
+        condition_term = ""
+
+        # Send the result cards before the network checks. The cards show a
+        # pending label, and each card is updated by a later "news" event as
+        # soon as its own member-plan check finishes.
         if provider_items:
             self._sse(
                 "news",
@@ -28255,17 +28441,91 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         + "; click a result to open its profile"
                     ),
                     "docs": True,
-                    "docs_label": (
-                        "NPPES / UCSF"
-                        if added_related
-                        else "NPPES"
-                    ),
+                    "docs_label": "NPPES",
                     "reset": True,
                 },
             )
             for provider_item in provider_items:
                 self._sse(
                     "news", {"type": "item", **provider_item}
+                )
+
+            # The facility's own directory can add current specialists who
+            # are missing from NPPES. Fetch it after the first cards are on
+            # screen so its API latency does not delay the result list.
+            related_items, condition_term = (
+                _anthem_directory_condition_items(
+                    question, plan, institution, source_label
+                )
+            )
+            if condition_term:
+                self._sse_text(
+                    "log",
+                    "[anthem: UCSF directory condition "
+                    f"{condition_term!r} matched {len(related_items)} "
+                    "specialist(s)]",
+                )
+            if related_items:
+                existing = {
+                    str(item.get("npi") or item.get("name", "")).casefold()
+                    for item in provider_items
+                }
+                for item in related_items:
+                    identity = str(
+                        item.get("npi") or item.get("name", "")
+                    ).casefold()
+                    if identity in existing:
+                        continue
+                    existing.add(identity)
+                    item["index"] = len(provider_items) + 1
+                    item["anthem_status_pending"] = True
+                    provider_items.append(item)
+                    added_related.append(item)
+                    self._sse(
+                        "news", {"type": "item", **item}
+                    )
+                if added_related:
+                    state.anthem_providers = provider_items
+                    self._sse_text(
+                        "log",
+                        "[anthem: added "
+                        f"{len(added_related)} UCSF directory "
+                        f"specialist(s) for {condition_term!r}]",
+                    )
+
+            self._sse_text(
+                "log",
+                "[anthem: checking the member-plan directory and "
+                "academic titles in the background]",
+            )
+
+            def stream_provider_status(provider_item: dict) -> None:
+                self._sse(
+                    "news", {"type": "update", **provider_item}
+                )
+
+            _anthem_annotate_member_status(
+                provider_items,
+                plan.get("location", ""),
+                member_plan=member_plan,
+                on_update=stream_provider_status,
+                institution=institution,
+            )
+            member_counts = {"listed": 0, "not_listed": 0, "unknown": 0}
+            for provider_item in provider_items:
+                member_status = str(
+                    provider_item.get("anthem_member_plan") or "unknown"
+                )
+                member_counts[member_status] = (
+                    member_counts.get(member_status, 0) + 1
+                )
+            if member_plan.get("prefix"):
+                self._sse_text(
+                    "log",
+                    "[anthem: member-plan flag: "
+                    f"{member_counts['listed']} in network, "
+                    f"{member_counts['not_listed']} out of network, "
+                    f"{member_counts['unknown']} unconfirmed]",
                 )
 
         # Build the answer text directly from the API records. No question
@@ -28324,8 +28584,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                             else ""
                         ),
                         provider.get("anthem_member_plan_label"),
-                        provider.get("anthem_ppo_label"),
-                        provider.get("anthem_bluecard_national_label"),
                         provider.get("specialty"),
                         provider.get("organization"),
                         provider.get("address"),
@@ -28346,9 +28604,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "Click a provider card below to open the full profile."
             )
             lines.append(
-                "Member-plan, Anthem PPO, and BlueCard National PPO status "
-                "are based on Anthem's public plan directories and should "
-                "be confirmed with Anthem before booking."
+                "Member-plan network status is based on Anthem's public "
+                "plan directory and should be confirmed with Anthem "
+                "before booking."
             )
         else:
             lines.append(

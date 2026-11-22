@@ -1,6 +1,6 @@
 knowledge {
   anthem {
-    Anthem's Underlying Provider Directory FHIR APIAnthem serves its public Provider Directory API via Elevance Health's totalview.healthos.elevancehealth.com gateway (documented at [anthem.com/developers](https://anthem.com/developers) and [totalview.healthos.elevancehealth.com/fhir/documentation](https://totalview.healthos.elevancehealth.com/fhir/documentation)):Base Endpoint Pattern: [https://totalview.healthos.elevancehealth.com/resources/registered/](https://totalview.healthos.elevancehealth.com/resources/registered/){Brand}/api/v1/fhir (where {Brand} corresponds to the regional/plan brand such as AnthemBlueCross or Anthem)Authentication: None required for the public Provider Directory endpoints (unlike the Patient Access API, which requires SMART on FHIR / OAuth 2.0).   Supported FHIR Resources for Doctor Search:Practitioner — Search by name, family, given, or identifier (NPI).   PractitionerRole — Links a doctor to their specialty, location, organization, and network.   Location — Search by address, city, state, or postal code.   Organization & InsurancePlan — Filter by hospital/clinic group and specific Anthem plan network.   
+    Anthem's Underlying Provider Directory FHIR APIAnthem serves its public Provider Directory API via Elevance Health's totalview.healthos.elevancehealth.com gateway (documented at [anthem.com/developers](https://anthem.com/developers) and [totalview.healthos.elevancehealth.com/fhir/documentation](https://totalview.healthos.elevancehealth.com/fhir/documentation)):Base Endpoint Pattern: [https://totalview.healthos.elevancehealth.com/resources/registered/](https://totalview.healthos.elevancehealth.com/resources/registered/){Brand}/api/v1/fhir (where {Brand} corresponds to the regional/plan brand such as AnthemBlueCross or Anthem)Authentication: None required for the public Provider Directory endpoints (unlike the Patient Access API, which requires SMART on FHIR / OAuth 2.0).   Supported FHIR Resources for Doctor Search:Practitioner — Search by name, family, given, or identifier (NPI).   PractitionerRole — Links a doctor to their specialty, location, organization, and network.   Location — Search by address, city, state, or postal code.   Organization & InsurancePlan — Filter by hospital/clinic group and specific Anthem plan network.
   }
 }
 
@@ -10,8 +10,14 @@ anthem_plan_member_id: {directory_of_this_prompt}/.chat/anthem/member_id.txt
 
 group unit_tests {
   task (completed) {
-    the anthem plan member id is located at the file {anthem_plan_member_id}
-    based on the anthem plan id, tell me if the doctors or facilities are in network or not
+    in the result list, we should only have "In Network" and "Out Of Network", we should not have "Network Unknown (Member Plan)"
+  }
+
+  task (completed) {
+    in the result list, each entry has:
+    Network Unknown (Member Plan) · Network Unknown (Anthem PPO) · Network Unknown (Anthem BlueCard National PPO)
+
+    - we do not need to look up Anthem PPO and Anthem BlueCard National PPO, we just need to look for Member Plan, we need to say if the doctor or facility is In Network or Out Of Network
   }
 
   task (completed) {
@@ -38,7 +44,7 @@ group unit_tests {
     actural: Not found in the retrieved public records
     please fix it in a systematic way, find ways to gather these information for any doctor
   }
-  
+
   task (completed) {
     refer to task.ucsf_only_doctors:
     question: find list of lung cancer specialists only in ucsf
@@ -71,6 +77,32 @@ group unit_tests {
 }
 
 group application {
+  task.optimization.speed_up_result_list (completed) {
+    the list of doctors still take a long time to load, please speed it up
+  }
+
+  task.feature.speed_up_result_list (completed) {
+    1. Send the provider list immediately and annotate network status asynchronously, either via later SSE updates or a separate endpoint. This alone
+    would reduce perceived load from ~66s to ~3s.
+    2. Use the NPI-based lookup/v1/provider call first, instead of trying all search-box prefixes first.
+    3. Deduplicate PPO/BlueCard/member-plan lookups since the same provider lookup is repeated across plan groups.
+    4. Annotate on demand when a card is opened, or only annotate the first page of results.
+    5. Persist the status cache by NPI + state + plan prefix so restarts do not lose it.
+    6. Use the registered Anthem FHIR Directory if credentials become available, since _anthem_network() already reads network participation from PractitionerRole and would avoid the Find Care calls entirely.
+  }
+
+  task.feature.result_summary_plus_detail (completed) {
+    when openning the provider's detail modal, the result summary is overwritten by the detail:
+    for example, the detail modal should constain something like :
+    Internal Medicine, Critical Care Medicine license Q4798 (TX); Internal Medicine, Pulmonary Disease (primary) license Q4798 (TX) · 1515 HOLCOMBE BLVD, HOUSTON, TX 770304000 · 713-792-6161 · In Network (Member Plan) · In Network (Anthem PPO) · In Network (Anthem BlueCard National PPO)
+    <the doctor's detail>
+  }
+
+  task.feature.member_id_reverse_plan_search (completed) {
+    the anthem plan member id is located at the file {anthem_plan_member_id}
+    based on the anthem plan id, tell me if the doctors or facilities are in network or not
+  }
+
   task.feature.anthem_bluecross_bluecard_national_ppo (completed) {
     please show me if the doctors or hospital/facilities are in network in anthem bluecross bluecard national ppo or not
   }
@@ -83,7 +115,7 @@ group application {
     - type: /anthem
     - type "find list of lung cancer specialists only in ucsf"
     - now, type: tell me more about Johannes Kratz, MD
-    - requirement: 
+    - requirement:
     it should return me the detail of Johannes Kratz, MD
     the context should be aware of the list of doctors in UCSF
   }
@@ -95,7 +127,7 @@ group application {
 
   task.feature.show_providers_result_instantly (completed) {
     - currrently, when presenting list of results, it uses {question_llm} to generate the list
-      DO NOT do that, instead, just use related apis or mcps to give me the result ASAP 
+      DO NOT do that, instead, just use related apis or mcps to give me the result ASAP
   }
 
   task.feature.provider_detail_modal (completed) {
@@ -104,7 +136,7 @@ group application {
       - the modal should {
         - show the provider's detail, for example if it's a doctor, show his or her background introduction, research interest, education background, awards...etc
       }
-    }  
+    }
   }
 
   task.initial_spec (completed) {
@@ -117,7 +149,7 @@ group application {
         - a list of doctors in a specific hospital, medical university (UCSF, Standford, MD Anderson... etc)
 
         requirement:
-        - it should use {question_llm} 
+        - it should use {question_llm}
         - it should allow follow up questions and maintain question to question context similar to the main chat
       }
       - if <question> is presented, it should allow me to search:

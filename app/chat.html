@@ -7648,12 +7648,10 @@ function makeNewsItem(entry, data) {
     anthemMemberPlanLabel: String(data.anthem_member_plan_label || ""),
     anthemMemberPlanFlag: String(data.anthem_member_plan_flag || ""),
     anthemMemberPlanName: String(data.anthem_member_plan_name || ""),
-    anthemPpo: String(data.anthem_ppo || ""),
-    anthemPpoLabel: String(data.anthem_ppo_label || ""),
-    anthemPpoFlag: String(data.anthem_ppo_flag || ""),
-    anthemBluecardNational: String(data.anthem_bluecard_national || ""),
-    anthemBluecardLabel: String(data.anthem_bluecard_national_label || ""),
-    anthemBluecardFlag: String(data.anthem_bluecard_national_flag || ""),
+    network: String(data.network || ""),
+    anthemStatusPending: data.anthem_status_pending !== undefined
+      ? Boolean(data.anthem_status_pending)
+      : false,
     npi: String(data.npi || ""),
     institution: String(data.institution || ""),
     providerSpecialty: String(data.specialty || ""),
@@ -7741,6 +7739,51 @@ function addNewsEvent(entry, data) {
   if (type === "item") {
     entry.newsItems.push(makeNewsItem(entry, data));
     scheduleRender(entry);
+    return;
+  }
+  if (type === "update") {
+    const index = Number(data.index);
+    const npi = String(data.npi || "");
+    const item = entry.newsItems.find((candidate) => candidate.index === index)
+      || (npi && entry.newsItems.find((candidate) => candidate.npi === npi))
+      || entry.newsItems.find(
+        (candidate) => candidate.title === (data.title || data.name)
+      );
+    if (item) {
+      const fields = [
+        ["anthem_member_plan", "anthemMemberPlan"],
+        ["anthem_member_plan_label", "anthemMemberPlanLabel"],
+        ["anthem_member_plan_flag", "anthemMemberPlanFlag"],
+        ["anthem_member_plan_name", "anthemMemberPlanName"],
+        ["anthem_network", "network"],
+        ["academic_title", "academicTitle"],
+        ["summary", "summary"],
+      ];
+      for (const [source, target] of fields) {
+        if (data[source] !== undefined) {
+          item[target] = String(data[source] || "");
+        }
+      }
+      if (data.anthem_status_pending !== undefined) {
+        item.anthemStatusPending = Boolean(data.anthem_status_pending);
+      }
+      if (Array.isArray(data.paragraphs)) {
+        item.paragraphs = data.paragraphs
+          .map((text) => String(text || ""))
+          .filter(Boolean);
+      }
+      if (newsItem === item) {
+        renderNewsModal(item);
+        // If the profile opened before its network checks finished, refresh
+        // the detail so its lead summary includes the new flags.
+        if (item.articleApi && !item.articleLoading) {
+          item.articleFetched = false;
+          item.fullArticleLoaded = false;
+          ensureNewsArticle(item);
+        }
+      }
+      scheduleRender(entry);
+    }
     return;
   }
   if (type === "paragraph") {
@@ -8570,14 +8613,11 @@ function renderNewsList(entry) {
       const meta = document.createElement("div");
       meta.className = "news-meta";
       const metaParts = [];
+      if (item.anthemStatusPending) {
+        metaParts.push("checking network status…");
+      }
       if (item.anthemMemberPlanLabel) {
         metaParts.push(item.anthemMemberPlanLabel);
-      }
-      if (item.anthemPpoLabel) {
-        metaParts.push(item.anthemPpoLabel);
-      }
-      if (item.anthemBluecardLabel) {
-        metaParts.push(item.anthemBluecardLabel);
       }
       if (item.academicTitle) {
         metaParts.push(`Academic title: ${item.academicTitle}`);
@@ -15127,6 +15167,13 @@ function ensureNewsArticle(item) {
       }
       if (item.institution) {
         params.set("institution", item.institution);
+      }
+      if (item.summary) params.set("summary", item.summary);
+      const providerLabels = [
+        item.anthemMemberPlanLabel,
+      ].filter(Boolean);
+      if (providerLabels.length) {
+        params.set("network_labels", providerLabels.join(" · "));
       }
     }
     requestUrl = `${articleApi}?${params.toString()}`;
