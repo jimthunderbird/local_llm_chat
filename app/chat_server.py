@@ -19716,6 +19716,8 @@ _ANTHEM_FACILITY_NAMES = [
     ("children's hospital", "Children's Hospital"),
     ("childrens hospital", "Children's Hospital"),
     ("ucsf", "UCSF"),
+    ("stanford health care", "Stanford"),
+    ("stanford hospital", "Stanford"),
     ("stanford", "Stanford"),
     ("providence", "Providence"),
     ("scripps", "Scripps"),
@@ -19729,6 +19731,7 @@ _ANTHEM_QUERY_CORRECTIONS = (
     (re.compile(r"\blunch\s+cancer\b", re.IGNORECASE), "lung cancer"),
     (re.compile(r"\blong\s+cancer\b", re.IGNORECASE), "lung cancer"),
     (re.compile(r"\blung\s+caner\b", re.IGNORECASE), "lung cancer"),
+    (re.compile(r"\bstandford\b", re.IGNORECASE), "stanford"),
 )
 
 
@@ -19999,7 +20002,8 @@ def _anthem_fast_plan(question: str) -> dict[str, str]:
     the API results can appear immediately. The slower question model is only
     used as a fallback when these rules find no search fields.
     """
-    text = " ".join(str(question or "").split())
+    text = _anthem_normalize_question(question)
+    text = " ".join(text.split())
     lower = text.casefold()
     plan = {
         "doctor_name": "",
@@ -21332,6 +21336,27 @@ def _anthem_nppes_taxonomy_candidates(
         for word in re.split(r"[^A-Za-z]+", str(keywords or ""))
         if word and word.casefold() not in _ANTHEM_GENERIC_KEYWORDS
     ]
+    mapped_key = mapped.casefold() if mapped else ""
+    if "surgery" in mapped_key and qualifier_words:
+        qualifier_set = {word.casefold() for word in qualifier_words}
+        if qualifier_set & {
+            "lung",
+            "thoracic",
+            "heart",
+            "cardiac",
+            "esophageal",
+            "esophagus",
+        }:
+            add("Thoracic Surgery")
+        if qualifier_set & {
+            "cancer",
+            "tumor",
+            "tumour",
+            "oncology",
+            "breast",
+            "melanoma",
+        }:
+            add("Surgical Oncology")
     if mapped and qualifier_words:
         # "pediatric" plus "Otolaryngology" is more specific than the generic
         # taxonomy and matches "Otolaryngology, Pediatric Otolaryngology".
@@ -21355,6 +21380,15 @@ def _anthem_nppes_facility_location(
     """
     facility = " ".join(str(facility or "").split())
     names = [facility]
+    names.extend(
+        alias
+        for alias in sorted(
+            _anthem_facility_aliases(facility),
+            key=len,
+            reverse=True,
+        )
+        if alias and alias.casefold() != facility.casefold()
+    )
     simplified = re.sub(
         r"\b(?:medical|center|centre|hospital|clinic|health|healthcare|"
         r"system|university|institute|group|inc|llc)\b",
@@ -21421,6 +21455,8 @@ def _anthem_nppes_facility_filter(
     anchors: set[tuple[str, str]],
     limit: int,
     log: Callable[[str], None],
+    on_batch: Callable[[list[dict]], None] | None = None,
+    batch_size: int = 10,
 ) -> list[dict]:
     """Keep only NPPES providers confirmed to be at the requested facility.
 
@@ -21429,6 +21465,10 @@ def _anthem_nppes_facility_filter(
     used as a second source of affiliation evidence. This prevents a city-wide
     specialty search from returning a nearby private practice as if it were
     part of the hospital.
+
+    When ``on_batch`` is supplied, confirmed individual providers are emitted
+    in batches as soon as they are verified, so the browser can render the
+    first page without waiting for every affiliation check.
     """
     if not results:
         return []
@@ -21437,7 +21477,38 @@ def _anthem_nppes_facility_filter(
         for result in results
     ]
     anchor_hits = sum(anchor_flags)
+
+    stream_order: list[int] = []
+    streamed: set[int] = set()
+    stream_batch: list[dict] = []
+
+    def emit(index: int) -> None:
+        if on_batch is None or len(stream_order) >= limit:
+            return
+        if index in streamed:
+            return
+        if results[index].get("enumeration_type") != "NPI-1":
+            return
+        streamed.add(index)
+        stream_order.append(index)
+        stream_batch.append(results[index])
+        if len(stream_batch) >= batch_size:
+            on_batch(list(stream_batch))
+            stream_batch.clear()
+
+    def flush() -> None:
+        if on_batch is not None and stream_batch:
+            on_batch(list(stream_batch))
+            stream_batch.clear()
+
     if anchor_hits >= limit:
+        if on_batch is not None:
+            for index, hit in enumerate(anchor_flags):
+                if hit:
+                    emit(index)
+            flush()
+            if stream_order:
+                return [results[i] for i in stream_order][:limit]
         selected = [
             result
             for result, hit in zip(results, anchor_flags)
@@ -21456,9 +21527,19 @@ def _anthem_nppes_facility_filter(
             "[anthem: no facility address anchors were found; keeping "
             "location matches without facility verification]"
         )
+        if on_batch is not None:
+            for index in range(len(results)):
+                emit(index)
+            flush()
+            if stream_order:
+                return [results[i] for i in stream_order][:limit]
         return results
 
     affiliated = list(anchor_flags)
+    if on_batch is not None:
+        for index, hit in enumerate(anchor_flags):
+            if hit:
+                emit(index)
     if supported:
         needed = max(1, limit - anchor_hits)
         pending = [
@@ -21492,6 +21573,17 @@ def _anthem_nppes_facility_filter(
                         continue
                     if confirmed:
                         affiliated[index] = True
+                        if on_batch is not None:
+                            emit(index)
+    flush()
+    if on_batch is not None and stream_order:
+        selected = [results[i] for i in stream_order]
+        if anchors:
+            log(
+                f"[anthem: confirmed {len(selected)} provider(s) at "
+                f"{facility!r}]"
+            )
+        return selected[:limit]
 
     selected = [
         result
@@ -21517,8 +21609,17 @@ def _anthem_nppes_facility_filter(
 def _anthem_nppes_search(
     plan: dict[str, str],
     log: Callable[[str], None],
+    on_batch: Callable[[str], None] | None = None,
+    condition_tokens: list[str] | None = None,
+    modalities: list[tuple[str, ...]] | None = None,
+    max_results: int = 0,
 ) -> tuple[str, int]:
-    """Search CMS NPPES as a fallback when the Anthem FHIR API fails."""
+    """Search CMS NPPES for the provider list.
+
+    When ``on_batch`` is supplied, formatted result batches are emitted as
+    soon as they are verified so the browser can render the first page before
+    the full search and facility verification finish.
+    """
     first_name, last_name = _anthem_split_name(
         plan.get("doctor_name", "")
     )
@@ -21556,6 +21657,8 @@ def _anthem_nppes_search(
         ANTHEM_MAX_FACILITY_PROVIDERS if facility
         else ANTHEM_MAX_PROVIDERS
     )
+    if max_results > 0:
+        result_limit = min(result_limit, max_results)
     paginate = bool(
         facility and taxonomies and not (first_name or last_name)
     )
@@ -21699,13 +21802,54 @@ def _anthem_nppes_search(
                 "address matching the requested location]"
             )
 
+    if condition_tokens and modalities:
+        def result_matches_condition(result: dict) -> bool:
+            text = " ".join(
+                str(taxonomy.get("desc") or "")
+                for taxonomy in result.get("taxonomies") or []
+                if isinstance(taxonomy, dict)
+            )
+            return _anthem_provider_matches_condition(
+                {"specialty": text, "section": text},
+                condition_tokens,
+                modalities,
+            )
+
+        relevant = [
+            result
+            for result in results
+            if result_matches_condition(result)
+        ]
+        if relevant:
+            results = relevant
+            log(
+                "[anthem: NPPES kept "
+                f"{len(results)} provider(s) matching the condition "
+                "and requested treatment]"
+            )
+        else:
+            log(
+                "[anthem: NPPES had no provider matching the condition "
+                "and requested treatment; keeping the wider list]"
+            )
+
     if facility and not facility_only:
+        def stream_facility_batch(batch: list[dict]) -> None:
+            if on_batch is None or not batch:
+                return
+            batch_context = _anthem_format_nppes(
+                batch, city, state, postal, facility_anchors
+            )
+            if batch_context:
+                on_batch(batch_context)
+
         results = _anthem_nppes_facility_filter(
             results,
             facility,
             facility_anchors,
             result_limit,
             log,
+            on_batch=stream_facility_batch if on_batch else None,
         )
         if not results:
             log(
@@ -21717,14 +21861,23 @@ def _anthem_nppes_search(
     if first_name or last_name or specialty:
         # A provider-name or specialty answer should lead with individual
         # practitioners; organizations are kept only when no person remains.
-        results.sort(
-            key=lambda result: 0
-            if result.get("enumeration_type") == "NPI-1"
-            else 1
-        )
+        sort_key = lambda result: 0 if result.get("enumeration_type") == "NPI-1" else 1
+        if not (on_batch is not None and facility):
+            results.sort(key=sort_key)
     results = results[:result_limit]
     if not results:
         return "", 0
+    if on_batch is not None and not facility:
+        for start in range(0, len(results), 10):
+            batch_context = _anthem_format_nppes(
+                results[start : start + 10],
+                city,
+                state,
+                postal,
+                facility_anchors,
+            )
+            if batch_context:
+                on_batch(batch_context)
     log(
         f"[anthem: NPPES fallback returned {len(results)} record(s)]"
     )
@@ -22393,68 +22546,213 @@ def _anthem_provider_profile_page(
     return None
 
 
-def _anthem_generate_provider_profile(
+def _anthem_profile_sentences(text: str) -> list[str]:
+    """Split retrieved public text into compact sentences."""
+    text = " ".join(str(text or "").split())
+    if not text:
+        return []
+    return [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", text)
+        if sentence.strip()
+    ]
+
+
+def _anthem_join_profile_lines(
+    items: list[str],
+    limit: int = 4,
+) -> str:
+    """Deduplicate and join profile lines without inventing new text."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = " ".join(str(item or "").strip(" -•:;,").split())
+        if not text:
+            continue
+        if text.casefold() in seen:
+            continue
+        seen.add(text.casefold())
+        if text[-1] not in ".!?":
+            text += "."
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return " ".join(result)
+
+
+def _anthem_build_provider_profile(
     name: str,
     facts: str,
     publications: list[dict],
     profile_text: str = "",
 ) -> dict[str, str]:
-    """Generate the narrative profile sections for the detail modal."""
-    publication_text = "\n".join(
-        f"- {publication['title']} "
-        f"({publication['journal']} {publication['date']})".strip()
-        for publication in publications
-    ) or "(none found)"
-    prompt = (
-        ANTHEM_PROVIDER_PROFILE_PROMPT
-        .replace("{{FACTS}}", facts)
-        .replace("{{PUBLICATIONS}}", publication_text)
-        .replace(
-            "{{PROFILE_PAGE}}", profile_text or "(none found)"
-        )
-    )
-    keys = (
-        "background",
-        "research_interests",
-        "education",
-        "awards",
-        "clinical_focus",
-    )
-    try:
-        raw = chat.generate_text(
-            prompt,
-            model=ANTHEM_MODEL,
-            temperature=0.0,
-            num_predict=900,
-            num_ctx=chat.ANSWER_NUM_CTX,
-        )
-    except RuntimeError as exc:
-        return {
-            "background": f"Could not generate a profile: {exc}",
-            "research_interests": "",
-            "education": "",
-            "awards": "",
-            "clinical_focus": "",
-        }
-    parsed = _anthem_json_object(raw)
-    if not parsed:
-        return {
-            "background": " ".join(str(raw or "").split()),
-            "research_interests": "",
-            "education": "",
-            "awards": "",
-            "clinical_focus": "",
-        }
-    result: dict[str, str] = {}
-    marker = "Not found in the retrieved public records."
-    for key in keys:
-        text = " ".join(str(parsed.get(key) or "").split())
-        if marker in text:
-            remainder = text.replace(marker, "").strip()
-            if len(remainder) > 80:
-                text = remainder
-        result[key] = text
-    return result
+    """Build profile sections from retrieved public records without an LLM.
+
+    Provider detail used to ask the local question model to write these
+    sections, which made the first modal open wait for a 35B generation. The
+    sections now use only facts already retrieved from the directory, the
+    institution profile page, and the publication list.
+    """
+    lines = [
+        line.strip()
+        for line in str(facts or "").splitlines()
+        if line.strip()
+    ]
+    values: dict[str, list[str]] = {}
+    for line in lines:
+        if line.startswith("-") or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        value = " ".join(value.split())
+        if value:
+            values.setdefault(key.strip().casefold(), []).append(value)
+
+    def first_value(*keys: str) -> str:
+        for key in keys:
+            for value in values.get(key.casefold()) or []:
+                if value:
+                    return value
+        return ""
+
+    display_name = first_value("provider", "name") or name or "Provider"
+    _first_name, last_name = _anthem_split_name(display_name)
+    specialty = first_value("specialty")
+    organization = first_value("organization")
+    academic_title = first_value("academic title")
+    provider_title = first_value("provider title")
+    affiliations = first_value("affiliations")
+    profile_sentences = _anthem_profile_sentences(profile_text)
+
+    background: list[str] = []
+    intro = f"{display_name} is listed as "
+    intro += specialty or "a health care provider"
+    if organization:
+        intro += f" at {organization}"
+    if academic_title:
+        intro += f" and holds the academic title {academic_title}"
+    background.append(intro + ".")
+    if provider_title and provider_title.casefold() not in intro.casefold():
+        background.append(f"The public directory lists the provider title as {provider_title}.")
+    if affiliations and affiliations.casefold() not in intro.casefold():
+        background.append(f"Affiliations include {affiliations}.")
+    if last_name:
+        for sentence in profile_sentences:
+            if (
+                last_name.casefold() in sentence.casefold()
+                and len(sentence) <= 500
+            ):
+                background.append(sentence)
+                if len(background) >= 3:
+                    break
+
+    research: list[str] = []
+    for sentence in profile_sentences:
+        if len(sentence) > 500:
+            continue
+        if re.search(
+            r"\b(?:research|investigat|clinical trial|studies|study)\b",
+            sentence,
+            re.IGNORECASE,
+        ):
+            research.append(sentence)
+            if len(research) >= 2:
+                break
+    if publications:
+        titles = [
+            str(publication.get("title") or "").strip()
+            for publication in publications[:3]
+            if str(publication.get("title") or "").strip()
+        ]
+        if titles:
+            research.append(
+                "Published work includes " + "; ".join(titles) + "."
+            )
+
+    education: list[str] = []
+    for line in lines:
+        candidate = line.strip(" -•:;,")
+        if candidate.casefold() in {
+            "education",
+            "education & training",
+            "education and training",
+        }:
+            continue
+        if re.match(
+            r"^(?:education|training|fellowship|residency|internship|"
+            r"medical school|medical degree|degree|board certificat)",
+            candidate,
+            re.IGNORECASE,
+        ):
+            education.append(candidate)
+    for sentence in profile_sentences:
+        if len(sentence) > 500:
+            continue
+        if re.search(
+            r"\b(?:fellowship|residency|internship|medical school|"
+            r"medical degree|board certified)\b",
+            sentence,
+            re.IGNORECASE,
+        ):
+            education.append(sentence)
+
+    awards: list[str] = []
+    for line in lines:
+        if re.search(
+            r"\b(?:award|honor|recognition|recognized|"
+            r"board certified|board certification|distinguished)\b",
+            line,
+            re.IGNORECASE,
+        ):
+            awards.append(line)
+    for sentence in profile_sentences:
+        if len(sentence) > 500:
+            continue
+        if re.search(
+            r"\b(?:award|honor|recognition|recognized|"
+            r"board certified|board certification|distinguished)\b",
+            sentence,
+            re.IGNORECASE,
+        ):
+            awards.append(sentence)
+
+    clinical: list[str] = []
+    if specialty:
+        clinical.append(f"Specializes in {specialty}.")
+    if provider_title:
+        clinical.append(f"Clinical role: {provider_title}.")
+    for line in lines:
+        if specialty and re.match(
+            r"^specialty\b", line, re.IGNORECASE
+        ):
+            continue
+        if re.match(
+            r"^(?:clinical focus|areas? of expertise|specialty)",
+            line,
+            re.IGNORECASE,
+        ):
+            clinical.append(line)
+    for sentence in profile_sentences:
+        if len(sentence) > 500:
+            continue
+        if re.search(
+            r"\b(?:clinical focus|treats|specializes|specializing|"
+            r"focuses on|care for)\b",
+            sentence,
+            re.IGNORECASE,
+        ):
+            clinical.append(sentence)
+
+    return {
+        "background": _anthem_join_profile_lines(background, limit=3),
+        "research_interests": _anthem_join_profile_lines(
+            research, limit=3
+        ),
+        "education": _anthem_join_profile_lines(education, limit=5),
+        "awards": _anthem_join_profile_lines(awards, limit=4),
+        "clinical_focus": _anthem_join_profile_lines(
+            clinical, limit=3
+        ),
+    }
 
 
 def _anthem_detail_with_summary(
@@ -22481,6 +22779,26 @@ def _anthem_detail_with_summary(
     return result
 
 
+def _anthem_parallel_calls(
+    calls: dict[str, Callable[[], object]],
+) -> dict[str, object]:
+    """Run independent provider-detail network calls concurrently."""
+    if not calls:
+        return {}
+    results: dict[str, object] = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(calls))) as pool:
+        futures = {
+            pool.submit(call): key for key, call in calls.items()
+        }
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                results[key] = future.result()
+            except Exception:
+                results[key] = None
+    return results
+
+
 def _anthem_provider_detail(
     npi: str,
     name: str,
@@ -22489,19 +22807,25 @@ def _anthem_provider_detail(
     source_label: str = "",
     summary: str = "",
     network_labels: str = "",
+    anthem_provider_id: str = "",
+    anthem_address_id: str = "",
 ) -> dict:
     """Build one provider's detail modal payload.
 
     Directory facts come from NPPES, publications from PubMed, and the
-    narrative sections from the configured Anthem model. The modal shows a
-    source note so education/award details are not mistaken for verified
-    directory data.
+    narrative sections from retrieved public records. Independent network
+    calls run in parallel so the first modal open is limited by the slowest
+    source rather than the sum of every source. The modal shows a source note
+    so education/award details are not mistaken for verified directory data.
     """
     npi = str(npi or "").strip()
     name = " ".join(str(name or "").split())
     institution = " ".join(str(institution or "").split())
+    anthem_provider_id = str(anthem_provider_id or "").strip()
+    anthem_address_id = str(anthem_address_id or "").strip()
     cache_key = (
         f"{npi or name.casefold()}|{institution.casefold()}"
+        f"|{anthem_provider_id}"
     )
     with _ANTHEM_PROVIDER_DETAIL_LOCK:
         cached = _ANTHEM_PROVIDER_DETAIL_CACHE.get(cache_key)
@@ -22510,9 +22834,93 @@ def _anthem_provider_detail(
                 dict(cached), summary, network_labels
             )
 
-    record = _anthem_nppes_record_for_provider(npi, name)
+    findcare_detail: dict = {}
+    record: dict = {}
     record_specialty = ""
-    if record:
+    parallel_results: dict[str, object] = {}
+    if name:
+        tasks: dict[str, Callable[[], object]] = {
+            "record": lambda: _anthem_nppes_record_for_provider(
+                npi, name
+            ),
+            "title": lambda: _anthem_academic_title(
+                name, institution
+            ),
+            "profile": lambda: _anthem_provider_profile_page(
+                name, institution, specialty
+            ),
+            "pubmed": lambda: _anthem_pubmed_publications(
+                name,
+                specialty=specialty,
+                institution=institution,
+            ),
+        }
+        if anthem_provider_id:
+            tasks["detail"] = lambda: _anthem_findcare_provider_detail(
+                anthem_provider_id, anthem_address_id
+            )
+        if _anthem_is_ucsf_facility(institution):
+            tasks["ucsf"] = lambda: _anthem_ucsf_directory_evidence(
+                npi, name
+            )
+        parallel_results = _anthem_parallel_calls(tasks)
+        findcare_detail = parallel_results.get("detail") or {}
+        record = parallel_results.get("record") or {}
+    else:
+        # Without a usable name, resolve identity first, then enrich in
+        # parallel using the name returned by the directory.
+        bootstrap_tasks: dict[str, Callable[[], object]] = {}
+        if anthem_provider_id:
+            bootstrap_tasks["detail"] = (
+                lambda: _anthem_findcare_provider_detail(
+                    anthem_provider_id, anthem_address_id
+                )
+            )
+        if npi:
+            bootstrap_tasks["record"] = (
+                lambda: _anthem_nppes_record_for_provider(npi, "")
+            )
+        bootstrap = _anthem_parallel_calls(bootstrap_tasks)
+        findcare_detail = bootstrap.get("detail") or {}
+        record = bootstrap.get("record") or {}
+        if findcare_detail:
+            name = _anthem_findcare_detail_facts(findcare_detail)[0]
+        elif record:
+            name = _anthem_provider_record_name(record, "")
+        if name:
+            tasks = {
+                "title": lambda: _anthem_academic_title(
+                    name, institution
+                ),
+                "profile": lambda: _anthem_provider_profile_page(
+                    name, institution, specialty
+                ),
+                "pubmed": lambda: _anthem_pubmed_publications(
+                    name,
+                    specialty=specialty,
+                    institution=institution,
+                ),
+            }
+            if _anthem_is_ucsf_facility(institution):
+                tasks["ucsf"] = (
+                    lambda: _anthem_ucsf_directory_evidence(npi, name)
+                )
+            parallel_results = _anthem_parallel_calls(tasks)
+    if findcare_detail:
+        display_name, findcare_npi, facts = (
+            _anthem_findcare_detail_facts(findcare_detail)
+        )
+        npi = findcare_npi or npi
+        record_specialty = " ".join(
+            str(taxonomy.get("name") or taxonomy.get("desc") or "")
+            for taxonomy in findcare_detail.get("specialty") or []
+            if isinstance(taxonomy, dict)
+        )
+        if not source_label:
+            source_label = (
+                "Anthem Find Care public provider detail API"
+            )
+    elif record:
         npi = str(record.get("number") or npi)
         display_name = _anthem_provider_record_name(record, name)
         facts = _anthem_format_nppes([record])
@@ -22526,7 +22934,7 @@ def _anthem_provider_detail(
         facts = f"Provider: {display_name}\n"
         if specialty:
             facts += f"Specialty: {specialty}\n"
-    academic_title = _anthem_academic_title(display_name, institution)
+    academic_title = str(parallel_results.get("title") or "")
     if academic_title:
         facts = (
             facts.rstrip()
@@ -22534,22 +22942,20 @@ def _anthem_provider_detail(
         )
     directory_profile_url = ""
     directory_evidence = ""
-    if _anthem_is_ucsf_facility(institution):
-        directory_evidence, directory_profile_url = (
-            _anthem_ucsf_directory_evidence(npi, display_name)
-        )
-        if directory_evidence:
-            facts = facts.rstrip() + "\n" + directory_evidence + "\n"
+    ucsf_result = parallel_results.get("ucsf")
+    if isinstance(ucsf_result, tuple) and len(ucsf_result) == 2:
+        directory_evidence = str(ucsf_result[0] or "")
+        directory_profile_url = str(ucsf_result[1] or "")
+    if directory_evidence:
+        facts = facts.rstrip() + "\n" + directory_evidence + "\n"
     lookup_specialty = specialty or record_specialty
-    profile_page = _anthem_provider_profile_page(
-        display_name, institution, lookup_specialty
-    )
-    publications = _anthem_pubmed_publications(
-        display_name,
-        specialty=lookup_specialty,
-        institution=institution,
-    )
-    profile = _anthem_generate_provider_profile(
+    profile_page = parallel_results.get("profile")
+    if not isinstance(profile_page, dict):
+        profile_page = None
+    publications = parallel_results.get("pubmed") or []
+    if not isinstance(publications, list):
+        publications = []
+    profile = _anthem_build_provider_profile(
         display_name,
         facts,
         publications,
@@ -22612,6 +23018,11 @@ def _anthem_provider_detail(
         + quote_plus(display_name)
     )
     notes = []
+    if findcare_detail:
+        notes.append(
+            "Provider profile facts come from Anthem's public Find Care "
+            "provider-detail API."
+        )
     if npi:
         notes.append(f"CMS NPPES record: {nppes_link}")
     if profile_page:
@@ -22652,10 +23063,14 @@ def _anthem_provider_detail(
 
     item = {
         "title": display_name,
-        "source": "Anthem Provider Directory · CMS NPPES",
+        "source": (
+            "Anthem Find Care provider detail API"
+            if findcare_detail
+            else "Anthem Provider Directory · CMS NPPES"
+        ),
         "link": nppes_link,
         "docs": True,
-        "docs_label": "NPPES",
+        "docs_label": "Anthem" if findcare_detail else "NPPES",
         "learnable": False,
         "findable": True,
         "complete": True,
@@ -22727,6 +23142,8 @@ def _anthem_provider_items_from_context(
         phone = record.get("phone/contact", "") or record.get("phone", "")
         fax = record.get("fax", "")
         network = record.get("network", "")
+        anthem_provider_id = record.get("anthem provider id", "")
+        anthem_address_id = record.get("anthem address id", "")
         contact = phone
         if fax and "fax" not in contact.casefold():
             contact = (
@@ -22756,6 +23173,14 @@ def _anthem_provider_items_from_context(
             query_parts.append(
                 "institution=" + quote_plus(institution)
             )
+        if anthem_provider_id:
+            query_parts.append(
+                "anthem_provider_id=" + quote_plus(anthem_provider_id)
+            )
+        if anthem_address_id:
+            query_parts.append(
+                "anthem_address_id=" + quote_plus(anthem_address_id)
+            )
         query = "&".join(query_parts)
         if npi:
             link = (
@@ -22775,6 +23200,8 @@ def _anthem_provider_items_from_context(
                 "title": name,
                 "name": name,
                 "npi": npi,
+                "anthem_provider_id": anthem_provider_id,
+                "anthem_address_id": anthem_address_id,
                 "organization": organization,
                 "specialty": specialty,
                 "academic_title": "",
@@ -24273,41 +24700,545 @@ def _anthem_directory_condition_items(
     )
 
 
+_ANTHEM_FINDCARE_SUMMARY_PATH = "/fad/api/provider/summary"
+_ANTHEM_FINDCARE_DETAIL_PATH = "/precare/api/provider/public/v2/detail"
+
+
+def _anthem_findcare_output_flags() -> dict[str, object]:
+    """Return the output flags the Find Care public APIs expect."""
+    return {
+        "includeTaxonomy": True,
+        "includeVisibilityRules": True,
+        "improveSearchCriteria": True,
+        "includeDisclaimerRules": True,
+        "includeReviewRatings": True,
+        "imposeAddressConsolidation": True,
+        "includeSpfInfo": True,
+        "includeProviderNetworks": True,
+        "includePrimeGroupSearch": False,
+        "includeHealthSystemSearch": False,
+        "inFcrMode": False,
+        "includeAllNetworks": False,
+    }
+
+
+def _anthem_findcare_location(
+    plan: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Return the location object used by Find Care public APIs."""
+    plan = plan or {}
+    member_plan = _anthem_member_plan()
+    city, state, postal = _anthem_parse_location(
+        str(plan.get("location") or "")
+    )
+    state = (
+        state
+        or str(member_plan.get("state") or "").strip().upper()
+        or "CA"
+    )
+    latitude, longitude = _ANTHEM_STATE_COORDS.get(
+        state, _ANTHEM_STATE_COORDS["CA"]
+    )
+    location = {
+        "distance": "50",
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+    if city:
+        location["city"] = city
+    location["state"] = state
+    if postal:
+        location["postalCode"] = postal
+    return location
+
+
+def _anthem_findcare_plan_choice(
+    state: str,
+    member_plan: dict | None = None,
+) -> dict[str, object]:
+    """Pick a public plan/network for the Find Care provider APIs.
+
+    The public endpoints need an alpha prefix and plan metadata even when
+    the question is not about a specific plan. Prefer the prefix from the
+    stored member plan, then a commercial PPO, then Anthem's documented
+    fallback prefix.
+    """
+    member_plan = member_plan or _anthem_member_plan()
+    prefix = str(member_plan.get("prefix") or "").strip()
+    plans = _anthem_findcare_plans(state)
+    chosen: dict | None = None
+    if prefix:
+        chosen = next(
+            (
+                plan
+                for plan in plans
+                if str(plan.get("prefix") or "").strip() == prefix
+            ),
+            None,
+        )
+    if chosen is None:
+        chosen = next(
+            (
+                plan
+                for plan in plans
+                if str(plan.get("careType") or "").upper()
+                == "MEDICAL"
+                and "PPO" in str(plan.get("planType") or "").upper()
+            ),
+            None,
+        )
+    if chosen is None:
+        chosen = next(
+            (
+                plan
+                for plan in plans
+                if str(plan.get("careType") or "").upper()
+                == "MEDICAL"
+            ),
+            None,
+        )
+    categories = []
+    plan_types = []
+    plan_entries = []
+    if isinstance(chosen, dict):
+        categories = [
+            str(value).strip()
+            for value in chosen.get("planCategoryList") or []
+            if str(value).strip()
+        ]
+        plan_type = str(chosen.get("planType") or "").strip()
+        if plan_type:
+            plan_types.append(plan_type)
+        identifier = str(chosen.get("id") or "").strip()
+        if identifier:
+            plan_entries.append(
+                {
+                    "identifier": identifier,
+                    "isNationalPlan": bool(
+                        chosen.get("isNationalPlan")
+                    ),
+                }
+            )
+        prefix = str(chosen.get("prefix") or "").strip() or prefix
+    if not prefix:
+        prefix = _ANTHEM_PPO_PREFIX_FALLBACK[0]
+    return {
+        "category": categories[0] if categories else "EMP",
+        "types": plan_types or ["PPOGRP"],
+        "plans": plan_entries,
+        "prefix": prefix,
+    }
+
+
+def _anthem_findcare_summary_request(
+    plan: dict[str, str],
+) -> dict[str, object]:
+    """Build the body for ``/fad/api/provider/summary``.
+
+    Retained for reference only. The doctor-list flow no longer calls this
+    endpoint because it did not return usable provider records.
+    """
+    member_plan = _anthem_member_plan()
+    location = _anthem_findcare_location(plan)
+    state = str(location.get("state") or "CA")
+    plan_choice = _anthem_findcare_plan_choice(state, member_plan)
+    demographic_filter: dict[str, object] = {
+        "specialtyCategoryCodes": [],
+        "typeCodes": ["P"],
+        "selectedTypeCodes": [],
+    }
+    search_text = " ".join(
+        str(
+            plan.get("doctor_name")
+            or plan.get("specialty")
+            or plan.get("facility")
+            or plan.get("keywords")
+            or ""
+        ).split()
+    )
+    if search_text:
+        demographic_filter["providerName"] = search_text
+    facility = " ".join(str(plan.get("facility") or "").split())
+    if facility:
+        demographic_filter["hospitalAffiliation"] = facility
+    return {
+        "alphaPrefix": str(plan_choice.get("prefix") or ""),
+        "isFuturePlan": "false",
+        "locale": "en_US",
+        "location": location,
+        "memberCriteria": {},
+        "outputFlags": _anthem_findcare_output_flags(),
+        "pageNumber": 1,
+        "pageSize": 50,
+        "plan": {
+            "category": plan_choice.get("category"),
+            "stateCode": state,
+            "types": plan_choice.get("types") or [],
+            "plans": plan_choice.get("plans") or [],
+        },
+        "searchCriteria": {
+            "miscFilter": {},
+            "demographicFilter": demographic_filter,
+            "brandCode": "ABCBS",
+            "isInitialSearch": True,
+        },
+    }
+
+
+def _anthem_findcare_text(value: object) -> str:
+    """Flatten a scalar-or-list API field into display text."""
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        return "; ".join(
+            part for part in (_anthem_findcare_text(item) for item in value) if part
+        )
+    if isinstance(value, dict):
+        for key in ("name", "code", "description", "value"):
+            text = _anthem_findcare_text(value.get(key))
+            if text:
+                return text
+        return ""
+    return " ".join(str(value).split())
+
+
+def _anthem_findcare_address(address: object) -> str:
+    """Format an Anthem address object as one line."""
+    if not isinstance(address, dict):
+        return _anthem_findcare_text(address)
+    parts = [
+        _anthem_findcare_text(address.get("addressLineOne")),
+        _anthem_findcare_text(address.get("addressLineTwo")),
+        _anthem_findcare_text(address.get("addressOne")),
+        _anthem_findcare_text(address.get("addressTwo")),
+    ]
+    city = _anthem_findcare_text(address.get("city"))
+    state = _anthem_findcare_text(
+        address.get("stateCd")
+        or address.get("state")
+        or address.get("stateCode")
+    )
+    postal = _anthem_findcare_text(
+        address.get("zipCd") or address.get("postalCode")
+    )
+    locality = " ".join(part for part in (city, state) if part)
+    if postal:
+        locality = f"{locality} {postal}".strip()
+    if locality:
+        parts.append(locality)
+    return ", ".join(
+        dict.fromkeys(part for part in parts if part)
+    )
+
+
+def _anthem_findcare_provider_record(provider: object) -> dict[str, str]:
+    """Normalize one Find Care summary provider record."""
+    if not isinstance(provider, dict):
+        return {}
+    location = provider.get("location")
+    if not isinstance(location, dict):
+        location = {}
+    address = location.get("address")
+    if not isinstance(address, dict):
+        address = provider.get("address")
+    if not isinstance(address, dict):
+        address = {}
+    name = (
+        _anthem_findcare_text(provider.get("providerName"))
+        or _anthem_findcare_text(provider.get("fullNm"))
+        or " ".join(
+            part
+            for part in (
+                _anthem_findcare_text(provider.get("firstName")),
+                _anthem_findcare_text(provider.get("middleName")),
+                _anthem_findcare_text(provider.get("lastName")),
+            )
+            if part
+        )
+        or _anthem_findcare_text(provider.get("doingBusinessAs"))
+    )
+    specialty = (
+        _anthem_findcare_text(provider.get("specialty"))
+        or _anthem_findcare_text(provider.get("specialties"))
+        or _anthem_findcare_text(provider.get("taxonomies"))
+    )
+    organization = (
+        _anthem_findcare_text(provider.get("organizationName"))
+        or _anthem_findcare_text(provider.get("organization"))
+        or _anthem_findcare_text(location.get("affiliationName"))
+        or _anthem_findcare_text(location.get("organizationName"))
+    )
+    npi = (
+        _anthem_findcare_text(location.get("npiIds"))
+        or _anthem_findcare_text(provider.get("npi"))
+    )
+    phone = (
+        _anthem_findcare_text(address.get("phone"))
+        or _anthem_findcare_text(address.get("phoneNumber"))
+        or _anthem_findcare_text(location.get("phone"))
+    )
+    provider_id = (
+        _anthem_findcare_text(provider.get("providerIdentifier"))
+        or _anthem_findcare_text(provider.get("providerId"))
+        or _anthem_findcare_text(provider.get("id"))
+    )
+    address_id = (
+        _anthem_findcare_text(address.get("addressId"))
+        or _anthem_findcare_text(provider.get("addressId"))
+    )
+    return {
+        "name": name,
+        "npi": npi,
+        "specialty": specialty,
+        "organization": organization,
+        "address": _anthem_findcare_address(address),
+        "phone": phone,
+        "provider_id": provider_id,
+        "address_id": address_id,
+    }
+
+
+def _anthem_findcare_summary_context(
+    data: dict,
+) -> tuple[str, int]:
+    """Turn a Find Care summary response into provider blocks."""
+    providers = (
+        data.get("providerList")
+        or data.get("providers")
+        or data.get("data")
+        or []
+    )
+    if isinstance(providers, dict):
+        providers = (
+            providers.get("providerList")
+            or providers.get("providers")
+            or providers.get("data")
+            or []
+        )
+    if not isinstance(providers, list):
+        providers = []
+    blocks: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for provider in providers:
+        record = _anthem_findcare_provider_record(provider)
+        if not record.get("name"):
+            continue
+        identity = (
+            record.get("provider_id") or record["name"].casefold(),
+            record.get("address", "").casefold(),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        lines = [f"Provider: {record['name']}"]
+        for label, key in (
+            ("NPI", "npi"),
+            ("Specialty", "specialty"),
+            ("Organization", "organization"),
+            ("Address", "address"),
+            ("Phone/contact", "phone"),
+            ("Anthem provider id", "provider_id"),
+            ("Anthem address id", "address_id"),
+        ):
+            if record.get(key):
+                lines.append(f"{label}: {record[key]}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)[:ANTHEM_CONTEXT_CHARS], len(blocks)
+
+
+def _anthem_findcare_summary(
+    plan: dict[str, str],
+    log: Callable[[str], None],
+) -> tuple[str, int]:
+    """Retained but unused: fetch the Find Care summary response.
+
+    The doctor-list flow no longer calls this API because it did not return
+    usable provider records.
+    """
+    token = _anthem_findcare_token()
+    if not token:
+        raise AnthemFHIRError("Find Care token was unavailable")
+    body = _anthem_findcare_summary_request(plan)
+    response = requests.post(
+        _ANTHEM_FINDCARE_BASE + _ANTHEM_FINDCARE_SUMMARY_PATH,
+        headers=_anthem_findcare_headers(token),
+        json=body,
+        timeout=(5, 30),
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        raise AnthemFHIRError("Find Care summary returned no JSON object")
+    context, count = _anthem_findcare_summary_context(data)
+    if count:
+        log(
+            "[anthem: Find Care summary API returned "
+            f"{count} provider record(s)]"
+        )
+    return context, count
+
+
+def _anthem_findcare_detail_request(
+    provider_id: str,
+    address_id: str = "",
+) -> dict[str, object]:
+    """Build the body for the public Anthem provider-detail API."""
+    member_plan = _anthem_member_plan()
+    location = _anthem_findcare_location({})
+    state = str(location.get("state") or "CA")
+    plan_choice = _anthem_findcare_plan_choice(state, member_plan)
+    request: dict[str, object] = {
+        "id": str(provider_id or "").strip(),
+        "addressId": str(address_id or "").strip(),
+        "distance": 50,
+        "planStateCode": state,
+        "networks": [],
+        "alphaPrefix": str(plan_choice.get("prefix") or ""),
+        "latitude": str(location.get("latitude") or ""),
+        "longitude": str(location.get("longitude") or ""),
+        "outputFlags": _anthem_findcare_output_flags(),
+        "brandCode": "ABCBS",
+        "locale": "en_US",
+        "memberCriteria": {},
+        "typeCodes": ["P"],
+        "plans": plan_choice.get("plans") or [],
+    }
+    for key in ("city", "postalCode"):
+        if location.get(key):
+            request[key] = location[key]
+    return request
+
+
+def _anthem_findcare_provider_detail(
+    provider_id: str,
+    address_id: str = "",
+) -> dict:
+    """Fetch one provider profile from the public Find Care detail API."""
+    if not str(provider_id or "").strip():
+        return {}
+    token = _anthem_findcare_token()
+    if not token:
+        return {}
+    response = requests.post(
+        _ANTHEM_FINDCARE_BASE + _ANTHEM_FINDCARE_DETAIL_PATH,
+        headers=_anthem_findcare_headers(token),
+        json=_anthem_findcare_detail_request(provider_id, address_id),
+        timeout=(5, 30),
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        return {}
+    detail = data.get("providerDetail") or data.get("detail") or data
+    return detail if isinstance(detail, dict) else {}
+
+
+def _anthem_findcare_detail_facts(detail: dict) -> tuple[str, str, str]:
+    """Return ``(name, npi, facts)`` from a Find Care detail response."""
+    record = _anthem_findcare_provider_record(detail)
+    name = record.get("name") or "Provider"
+    npi = record.get("npi", "")
+    location = detail.get("location")
+    if not isinstance(location, dict):
+        location = {}
+    address = location.get("address")
+    if not isinstance(address, dict):
+        address = {}
+    lines = [f"Provider: {name}"]
+    if npi:
+        lines.append(f"NPI: {npi}")
+    specialty = (
+        _anthem_findcare_text(detail.get("specialty"))
+        or record.get("specialty", "")
+    )
+    if specialty:
+        lines.append(f"Specialty: {specialty}")
+    organization = (
+        _anthem_findcare_text(detail.get("organizationName"))
+        or record.get("organization", "")
+    )
+    if organization:
+        lines.append(f"Organization: {organization}")
+    address_text = _anthem_findcare_address(address)
+    if address_text:
+        lines.append(f"Address: {address_text}")
+    phone = (
+        _anthem_findcare_text(address.get("clinicalContactPhone"))
+        or _anthem_findcare_text(address.get("phone"))
+        or record.get("phone", "")
+    )
+    if phone:
+        lines.append(f"Phone/contact: {phone}")
+    gender = _anthem_findcare_text(detail.get("gender"))
+    if gender:
+        lines.append(f"Gender: {gender}")
+    languages = _anthem_findcare_text(location.get("languages"))
+    if languages:
+        lines.append(f"Languages: {languages}")
+    networks = _anthem_findcare_text(
+        location.get("participatingNetworks")
+    )
+    if networks:
+        lines.append(f"Network: {networks}")
+    educations = detail.get("educations")
+    if educations:
+        lines.append(
+            "Education & Training: "
+            + _anthem_findcare_text(educations)
+        )
+    experiences = (
+        detail.get("areaOfExpertises")
+        or detail.get("areasOfExpertise")
+    )
+    if experiences:
+        lines.append(
+            "Areas of Expertise: "
+            + _anthem_findcare_text(experiences)
+        )
+    licenses = detail.get("licenseTypes") or detail.get("licenseNumbers")
+    if licenses:
+        lines.append("Licenses: " + _anthem_findcare_text(licenses))
+    biography = _anthem_findcare_text(detail.get("biography"))
+    if biography:
+        lines.append(f"Biography: {biography}")
+    return name, npi, "\n".join(lines)
+
+
 def _anthem_lookup(
     plan: dict[str, str],
     log: Callable[[str], None],
+    on_batch: Callable[[str], None] | None = None,
+    condition_tokens: list[str] | None = None,
+    modalities: list[tuple[str, ...]] | None = None,
+    max_results: int = 0,
 ) -> tuple[str, str, list[str], int]:
-    """Try the Anthem FHIR API, then the CMS NPPES fallback.
+    """Return providers from the CMS NPPES registry.
+
+    The Anthem Find Care provider summary API and the Anthem Provider
+    Directory FHIR API are deliberately not called: neither returned usable
+    provider records. The list flow now uses the public CMS NPPES registry.
+    When ``on_batch`` is supplied, result batches are streamed as soon as
+    they are verified.
 
     Returns ``(context, source_label, errors, record_count)``.
     """
     errors: list[str] = []
-    token = _anthem_access_token()
-    for label, base in _anthem_fhir_bases():
-        if label.startswith("registered") and not token:
-            continue
-        try:
-            resources = _anthem_fhir_search(base, token, plan, log)
-        except AnthemFHIRError as exc:
-            errors.append(f"{label} ({base}): {exc}")
-            continue
-        context = _anthem_format_fhir(resources, plan)
-        if context.strip():
-            return (
-                context,
-                f"Anthem Provider Directory FHIR API ({label})",
-                errors,
-                len(resources),
-            )
-        errors.append(f"{label} ({base}): no matching providers")
-    nppes_context, nppes_count = _anthem_nppes_search(plan, log)
+    nppes_context, nppes_count = _anthem_nppes_search(
+        plan,
+        log,
+        on_batch=on_batch,
+        condition_tokens=condition_tokens,
+        modalities=modalities,
+        max_results=max_results,
+    )
     if nppes_context.strip():
         return (
             nppes_context,
-            "CMS NPPES registry (fallback; Anthem directory unavailable)",
+            "CMS NPPES registry",
             errors,
             nppes_count,
         )
+    errors.append("CMS NPPES registry: no matching providers")
     return "", "", errors, 0
 
 
@@ -25447,6 +26378,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             network_labels = (
                 params.get("network_labels") or [""]
             )[0].strip()
+            anthem_provider_id = (
+                params.get("anthem_provider_id") or [""]
+            )[0].strip()
+            anthem_address_id = (
+                params.get("anthem_address_id") or [""]
+            )[0].strip()
             if not npi:
                 match = re.search(
                     r"/provider-view/(\d{10})", url
@@ -25461,9 +26398,18 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 url_params = parse_qs(urlparse(url).query)
                 institution = (url_params.get("institution") or [""])[0]
                 institution = institution.strip()
-            if not (npi or name):
+            if not anthem_provider_id and url:
+                url_params = parse_qs(urlparse(url).query)
+                anthem_provider_id = (
+                    url_params.get("anthem_provider_id") or [""]
+                )[0].strip()
+                anthem_address_id = (
+                    url_params.get("anthem_address_id") or [""]
+                )[0].strip()
+            if not (npi or name or anthem_provider_id):
                 self._send_error_json(
-                    "Missing provider NPI or name", 400
+                    "Missing provider NPI, name, or Anthem provider id",
+                    400,
                 )
                 return
             try:
@@ -25474,6 +26420,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     institution=institution,
                     summary=summary,
                     network_labels=network_labels,
+                    anthem_provider_id=anthem_provider_id,
+                    anthem_address_id=anthem_address_id,
                 )
             except Exception as exc:
                 self._send_error_json(
@@ -28453,7 +29401,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
     def _run_anthem_question(self, question: str) -> None:
         """Search the Anthem directory and stream API results directly."""
-        question = " ".join((question or "").split())
+        question = _anthem_normalize_question(question)
+        question = " ".join(question.split())
         if not question:
             return
         state = self.state
@@ -28507,6 +29456,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         or ""
                     ),
                     source_label=state.anthem_source,
+                    anthem_provider_id=str(
+                        target.get("anthem_provider_id") or ""
+                    ),
+                    anthem_address_id=str(
+                        target.get("anthem_address_id") or ""
+                    ),
                 )
                 answer = _anthem_provider_detail_text(detail)
             except Exception as exc:
@@ -28643,6 +29598,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     specialty=specialty,
                     institution=institution,
                     source_label=source_label,
+                    anthem_provider_id=str(
+                        (selected or {}).get("anthem_provider_id") or ""
+                    ),
+                    anthem_address_id=str(
+                        (selected or {}).get("anthem_address_id") or ""
+                    ),
                 )
                 answer = _anthem_provider_detail_text(detail)
             except Exception as exc:
@@ -28686,16 +29647,66 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._sse("annotations", {"items": []})
             return
 
+        institution = plan.get("facility", "")
+        condition_filter_term = _anthem_directory_condition_term(
+            question, plan, institution
+        )
+        condition_filter_tokens = _anthem_condition_tokens(
+            condition_filter_term
+        )
+        modality_filters = _anthem_requested_modalities(question)
+        requested_limit = _anthem_requested_limit(question)
+
+        streamed_items: list[dict] = []
+        stream_started = False
+
+        def stream_provider_batch(batch_context: str) -> None:
+            nonlocal stream_started
+            batch_items = _anthem_provider_items_from_context(
+                batch_context,
+                "CMS NPPES registry",
+                institution=institution,
+            )
+            if not batch_items:
+                return
+            if not stream_started:
+                self._sse(
+                    "news",
+                    {
+                        "type": "start",
+                        "source": "Anthem Provider Directory",
+                        "description": (
+                            "CMS NPPES registry · streaming provider "
+                            "results; click a result to open its profile"
+                        ),
+                        "docs": True,
+                        "docs_label": "NPPES",
+                        "no_scroll": True,
+                        "reset": True,
+                    },
+                )
+                stream_started = True
+            for item in batch_items:
+                item["index"] = len(streamed_items) + 1
+                item["anthem_status_pending"] = True
+                streamed_items.append(item)
+                self._sse("news", {"type": "item", **item})
+
         self._sse_text(
             "log", "[anthem: querying the provider directory APIs]"
         )
         context, source_label, errors, record_count = _anthem_lookup(
-            plan, lambda text: self._sse_text("log", text)
+            plan,
+            lambda text: self._sse_text("log", text),
+            on_batch=stream_provider_batch,
+            condition_tokens=condition_filter_tokens,
+            modalities=modality_filters,
+            max_results=requested_limit,
         )
         if not context:
             message = (
-                "I could not retrieve provider records from the Anthem "
-                "Provider Directory or the CMS NPPES fallback.\n"
+                "I could not retrieve provider records from the CMS "
+                "NPPES registry.\n"
             )
             if errors:
                 message += "\nWhat failed:\n" + "\n".join(
@@ -28712,12 +29723,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 state.anthem_source = ""
                 state.anthem_records = 0
                 state.anthem_items_sent = False
-            message += (
-                "\nTo use a registered Anthem provider-directory app, set "
-                "ANTHEM_FHIR_TOKEN or ANTHEM_FHIR_TOKEN_URL together with "
-                "ANTHEM_FHIR_CLIENT_ID and ANTHEM_FHIR_CLIENT_SECRET, and "
-                "optionally ANTHEM_FHIR_BASE_URL.\n"
-            )
             self._sse_text("delta", message)
             state.latest_answer = message
             state.latest_sources = []
@@ -28730,52 +29735,50 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._sse("annotations", {"items": []})
             return
 
-        # The API response itself is the result list. Parse it into clickable
-        # cards and keep the same records for follow-up questions.
-        institution = plan.get("facility", "")
-        provider_items = _anthem_provider_items_from_context(
-            context, source_label, institution=institution
-        )
-        condition_filter_term = _anthem_directory_condition_term(
-            question, plan, institution
-        )
-        condition_filter_tokens = _anthem_condition_tokens(
-            condition_filter_term
-        )
-        modality_filters = _anthem_requested_modalities(question)
-        if condition_filter_tokens and modality_filters:
-            relevant_items = [
-                item
-                for item in provider_items
-                if _anthem_provider_matches_condition(
-                    item, condition_filter_tokens, modality_filters
-                )
-            ]
-            if relevant_items:
-                self._sse_text(
-                    "log",
-                    "[anthem: kept "
-                    f"{len(relevant_items)} provider(s) matching "
-                    f"{condition_filter_term!r} and the requested "
-                    "treatment]",
-                )
-                provider_items = relevant_items
-            else:
-                self._sse_text(
-                    "log",
-                    "[anthem: no NPPES provider matched the condition "
-                    "and treatment; keeping the wider list for facility "
-                    "verification]",
-                )
-        requested_limit = _anthem_requested_limit(question)
-        if requested_limit and len(provider_items) > requested_limit:
-            provider_items = provider_items[:requested_limit]
+        if streamed_items:
+            provider_items = streamed_items
             self._sse_text(
                 "log",
-                "[anthem: limiting the result list to "
-                f"{requested_limit} provider(s)]",
+                f"[anthem: streamed {len(provider_items)} provider(s) "
+                "in batches]",
             )
-        primary_count = len(provider_items)
+        else:
+            # The API response itself is the result list. Parse it into
+            # clickable cards and keep the same records for follow-ups.
+            provider_items = _anthem_provider_items_from_context(
+                context, source_label, institution=institution
+            )
+            if condition_filter_tokens and modality_filters:
+                relevant_items = [
+                    item
+                    for item in provider_items
+                    if _anthem_provider_matches_condition(
+                        item, condition_filter_tokens, modality_filters
+                    )
+                ]
+                if relevant_items:
+                    self._sse_text(
+                        "log",
+                        "[anthem: kept "
+                        f"{len(relevant_items)} provider(s) matching "
+                        f"{condition_filter_term!r} and the requested "
+                        "treatment]",
+                    )
+                    provider_items = relevant_items
+                else:
+                    self._sse_text(
+                        "log",
+                        "[anthem: no NPPES provider matched the "
+                        "condition and treatment; keeping the wider "
+                        "list for facility verification]",
+                    )
+            if requested_limit and len(provider_items) > requested_limit:
+                provider_items = provider_items[:requested_limit]
+                self._sse_text(
+                    "log",
+                    "[anthem: limiting the result list to "
+                    f"{requested_limit} provider(s)]",
+                )
         member_plan: dict = {}
         if provider_items:
             member_plan = _anthem_member_plan()
@@ -28810,35 +29813,37 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         # pending label, and each card is updated by a later "news" event as
         # soon as its own member-plan check finishes.
         if provider_items:
-            self._sse(
-                "news",
-                {
-                    "type": "start",
-                    "source": "Anthem Provider Directory",
-                    "description": (
-                        f"{source_label} · "
-                        f"{len(provider_items)} provider record(s)"
-                        + (
-                            " · member plan "
-                            + (
-                                member_plan.get("plan_name")
-                                or "Anthem member plan"
-                            )
-                            + f" ({member_plan.get('prefix')})"
-                            if member_plan.get("prefix")
-                            else ""
-                        )
-                        + "; click a result to open its profile"
-                    ),
-                    "docs": True,
-                    "docs_label": "NPPES",
-                    "reset": True,
-                },
-            )
-            for provider_item in provider_items:
+            if not stream_started:
                 self._sse(
-                    "news", {"type": "item", **provider_item}
+                    "news",
+                    {
+                        "type": "start",
+                        "source": "Anthem Provider Directory",
+                        "description": (
+                            f"{source_label} · "
+                            f"{len(provider_items)} provider record(s)"
+                            + (
+                                " · member plan "
+                                + (
+                                    member_plan.get("plan_name")
+                                    or "Anthem member plan"
+                                )
+                                + f" ({member_plan.get('prefix')})"
+                                if member_plan.get("prefix")
+                                else ""
+                            )
+                            + "; click a result to open its profile"
+                        ),
+                        "docs": True,
+                        "docs_label": "NPPES",
+                        "no_scroll": True,
+                        "reset": True,
+                    },
                 )
+                for provider_item in provider_items:
+                    self._sse(
+                        "news", {"type": "item", **provider_item}
+                    )
 
             # The facility's own directory can add current specialists who
             # are missing from NPPES. Fetch it after the first cards are on
@@ -28933,94 +29938,16 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     f"{member_counts['unknown']} unconfirmed]",
                 )
 
-        # Build the answer text directly from the API records. No question
-        # model is asked to write or reformat the list.
-        lines: list[str] = []
-        if "fallback" in source_label.lower():
-            lines.append(
-                "Note: the Anthem Provider Directory FHIR API did not "
-                "return usable records. These results come from the CMS "
-                "NPPES registry and do not confirm Anthem network "
-                "participation."
-            )
-        if provider_items:
-            lines.append(
-                f"Found {primary_count} provider(s) from "
-                f"{source_label}."
-            )
-            if member_plan.get("prefix"):
-                lines.append(
-                    "Member plan: "
-                    + (
-                        member_plan.get("plan_name")
-                        or "Anthem member plan"
-                    )
-                    + f" (prefix {member_plan.get('prefix')}"
-                    + (
-                        f", state {member_plan.get('state')}"
-                        if member_plan.get("state")
-                        else ""
-                    )
-                    + (
-                        f", effective {member_plan.get('effective_date')}"
-                        if member_plan.get("effective_date")
-                        else ""
-                    )
-                    + ")."
-                )
-            if added_related:
-                lines.append(
-                    "Also included "
-                    f"{len(added_related)} UCSF Health directory "
-                    f"specialist(s) who treat {condition_term}."
-                )
-            for index, provider in enumerate(
-                provider_items, start=1
-            ):
-                academic_title = str(
-                    provider.get("academic_title") or ""
-                ).strip()
-                details = " · ".join(
-                    part
-                    for part in (
-                        (
-                            f"Academic title: {academic_title}"
-                            if academic_title
-                            else ""
-                        ),
-                        provider.get("anthem_member_plan_label"),
-                        provider.get("specialty"),
-                        provider.get("organization"),
-                        provider.get("address"),
-                        provider.get("phone"),
-                    )
-                    if part
-                )
-                title = (
-                    provider.get("title")
-                    or provider.get("name")
-                    or "Provider"
-                )
-                lines.append(
-                    f"{index}. {title}"
-                    + (f" — {details}" if details else "")
-                )
-            lines.append(
-                "Click a provider card below to open the full profile."
-            )
-            lines.append(
-                "Member-plan network status is based on Anthem's public "
-                "plan directory and should be confirmed with Anthem "
-                "before booking."
-            )
-        else:
-            lines.append(
+        # The provider cards are the answer. Do not duplicate them as a
+        # verbose text list, plan summary, or source note in the transcript.
+        response = ""
+        if not provider_items:
+            response = (
                 f"Found directory records from {source_label}, but they "
-                "could not be formatted as provider cards."
+                "could not be formatted as provider cards.\n\n"
+                + context[:2000]
             )
-            lines.append(context[:2000])
-        response = "\n".join(lines)
-        self._sse_text("delta", response)
+            self._sse_text("delta", response)
 
         state.latest_answer = response
         state.latest_sources = []
@@ -29029,7 +29956,15 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             "anthem_records": record_count,
             "model": "direct API records",
         }
-        state.record_turn(question, question, response)
+        if response:
+            state.record_turn(question, question, response)
+        elif provider_items:
+            state.record_turn(
+                question,
+                question,
+                f"Provider results displayed as "
+                f"{len(provider_items)} cards.",
+            )
         self._sse("annotations", {"items": []})
 
     def _command_deepresearch(self, topic: str) -> None:

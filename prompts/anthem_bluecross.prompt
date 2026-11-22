@@ -10,6 +10,12 @@ anthem_plan_member_id: {directory_of_this_prompt}/.chat/anthem/member_id.txt
 
 group unit_tests {
   task (completed) {
+    question: i want to have a surgery on my lung tumor, give me some doctors who are specialized in this field in standford hospital
+    expect: it should show me list of related doctors in stanford hospital, california
+    actual: a list of unrelated doctors showing up!
+  }
+
+  task (completed) {
     1. type /anthem
     2. tell me about Johannes Kratz, MD in UCSF
     3. it should show the doctor's detail
@@ -84,6 +90,53 @@ group unit_tests {
 }
 
 group application {
+  task.feature.do_not_scroll (completed) {
+    reference task.stream_the_doctor_list:
+    - do not scroll the list of doctors
+  }
+
+  task.stream_the_doctor_list (completed) {
+    can we do this, once we found 10 doctors, stream them right away to the list, just like streaming pagenated results
+  }
+
+  task.feature.simplified_answer (completed) {
+    question: i want to have a surgery on a bump in my neck, give me some doctors who are specialized in this field in stanford hospital
+    answer: "Note: these results come from the CMS NPPES registry and do not confirm Anthem network participation. Found 50 provider(s) from CMS NPPES registry. Member plan: PPO PRUDENT BUYER INCENTIVE..."
+    - the answer then contains a list of doctors (not the links)
+    - please remove all these, we just want a list of doctors
+  }
+
+  task.async_detail_loading (completed) {
+    seems like now when loading the doctor's detail, we use:
+    1.CMS NPPES record: https://npiregistry.cms.hhs.gov/provider-view/1437810983
+    2.Institution profile: https://profiles.stanford.edu/benjamin-shou
+    3.PubMed author search: https://pubmed.ncbi.nlm.nih.gov/?term=SHOU+BENJAMIN+LZ
+
+    please do these network calls parallel and get the information as fast as possible
+  }
+
+  task.no_more_findcare_summary_api (completed) {
+    the Anthem Find Care provider summary API did not return usable records, DO NOT use this API!
+  }
+
+  task.no_more_FHIR_API (completed) {
+    when getting list of doctors:
+    the Anthem Provider Directory FHIR API did not return usable records, DO NOT use this API!
+  }
+
+  task.refactor.no_local_llm_profile_generation (completed) {
+    when loading the doctor's detail, DO NOT use {question_llm} for profile generation, it is too slow
+  }
+
+  task.refactor.simplified_anthem_api (completed) {
+    refactor {
+      - when getting a list of doctors, use this api:
+      /fad/api/provider/summary
+      - when getting the doctor's detail, use this api:
+      /precare/api/provider/public/v2/detail
+    }
+  }
+
   task.feature.free_form_question (completed) {
     question: i want to have a surgery on my lung tumor, give me some doctors who are specialized in this field in ucsf
     expect: it should show me a list of doctors with surgery and lung cancer experience, including Johannes Kratz, MD

@@ -7533,7 +7533,7 @@ function renderEntry(entry) {
     restoreSelectionOffsets(entry.markdownEl, savedSelection.start, savedSelection.end);
   }
 
-  if (shouldStick) scrollToBottom();
+  if (shouldStick && !entry.newsNoScroll) scrollToBottom();
 }
 
 function addLog(entry, text) {
@@ -7705,6 +7705,7 @@ function addNewsEvent(entry, data) {
     entry.newsSources = Array.isArray(data.sources) ? data.sources : [];
     entry.newsDocs = Boolean(data.docs || data.mdn);
     entry.newsDocsLabel = String(data.docs_label || "");
+    entry.newsNoScroll = Boolean(data.no_scroll);
     entry.newsTabs = Array.isArray(data.tabs) ? data.tabs : [];
     entry.newsLocation = data.location && typeof data.location === "object"
       ? data.location
@@ -18740,7 +18741,7 @@ function submitText(text, fromChoice = false) {
       renderEntry(entry);
       if (askController === controller) setBusy(false);
       inputEl.focus({ preventScroll: true });
-      if (!entry.pinToTop) scrollToBottomIfSticking();
+      if (!entry.pinToTop && !entry.newsNoScroll) scrollToBottomIfSticking();
     });
 }
 
