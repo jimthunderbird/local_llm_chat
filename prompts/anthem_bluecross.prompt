@@ -84,6 +84,31 @@ group unit_tests {
 }
 
 group application {
+  task.feature.free_form_question (completed) {
+    question: i want to have a surgery on my lung tumor, give me some doctors who are specialized in this field in ucsf
+    expect: it should show me a list of doctors with surgery and lung cancer experience, including Johannes Kratz, MD
+    please implement it in a systematic way
+  }
+
+  task.bug.show_n_doctors_in_hospital (completed) {
+    - question: show me all lung cancer doctors in UCSF
+    - what happened: Johannes Kratz, MD is not in the list
+    please fix it in a systematic way
+  }
+
+  task.feature.show_n_doctors_in_hospital (completed) {
+    - question: show me N head and neck doctors in UCSF
+    - answer: we should see only list of at most N doctors in UCSF
+    apply to all "show me N doctors in specialty in a facility" type of question
+  }
+
+  task.anthem_as_an_online_tool (completed) {
+    - make /anthem a tool that the chat can invoke when chat mode is "Online"
+    - for example:
+    question: tell me about Shirley Su, MD in MD Anderson
+    answer should contain this doctor's detail
+  }
+
   task.feature.direct_doctor_detail (completed) {
     question: tell me about Johannes Kratz, MD in UCSF
     answer: it should show me the doctor's detail
@@ -139,7 +164,7 @@ group application {
 
   task.feature.show_providers_result_instantly (completed) {
     - currrently, when presenting list of results, it uses {question_llm} to generate the list
-      DO NOT do that, instead, just use related apis or mcps to give me the result ASAP
+    DO NOT do that, instead, just use related apis or mcps to give me the result ASAP
   }
 
   task.feature.provider_detail_modal (completed) {

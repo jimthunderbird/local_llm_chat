@@ -20155,6 +20155,98 @@ def _anthem_is_detail_request(question: str) -> bool:
     return bool(_ANTHEM_DETAIL_REQUEST_RE.search(str(question or "")))
 
 
+_ANTHEM_PROVIDER_INTENT_RE = re.compile(
+    r"\b(?:doctor|doctors|physician|physicians|specialist|specialists|"
+    r"provider|providers|surgeon|surgeons)\b",
+    re.IGNORECASE,
+)
+_ANTHEM_PROVIDER_SEARCH_RE = re.compile(
+    r"\b(?:find|list|show me|give me|search|look for|looking for|"
+    r"recommend|which|who|tell me about|i want)\b",
+    re.IGNORECASE,
+)
+
+
+def _anthem_online_tool_matches(question: str) -> bool:
+    """Return whether an Online-mode question should use the Anthem tool.
+
+    The provider directory is invoked for the two clear cases:
+    a named doctor with a detail request, or a provider-search request that
+    mentions a doctor, specialty, or facility. Ordinary news questions that
+    merely mention doctors are left to the Online research flow.
+    """
+    text = " ".join(str(question or "").split())
+    if not text:
+        return False
+    plan = _anthem_fast_plan(text)
+    if plan.get("doctor_name") and _anthem_is_detail_request(text):
+        return True
+    if not _ANTHEM_PROVIDER_SEARCH_RE.search(text):
+        return False
+    if plan.get("specialty") and (
+        plan.get("facility") or plan.get("location")
+    ):
+        return True
+    if not _ANTHEM_PROVIDER_INTENT_RE.search(text):
+        return False
+    return bool(
+        plan.get("doctor_name")
+        or plan.get("specialty")
+        or plan.get("facility")
+    )
+
+
+_ANTHEM_LIMIT_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+}
+_ANTHEM_LIMIT_RE = re.compile(
+    r"\b(?:show|list|give|find|display|recommend)\b.{0,40}?"
+    r"\b(\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+    r"eighteen|nineteen|twenty|thirty|forty|fifty)\b",
+    re.IGNORECASE,
+)
+
+
+def _anthem_requested_limit(question: str) -> int:
+    """Return the requested doctor count from a provider question.
+
+    Examples: ``show me 10 head and neck doctors in UCSF`` or
+    ``find five specialists at MD Anderson``. A missing count returns 0.
+    """
+    text = " ".join(str(question or "").casefold().split())
+    match = _ANTHEM_LIMIT_RE.search(text)
+    if not match:
+        return 0
+    value = match.group(1)
+    number = int(value) if value.isdigit() else _ANTHEM_LIMIT_WORDS.get(value, 0)
+    if number <= 0:
+        return 0
+    return min(number, 100)
+
+
 def _anthem_provider_detail_text(item: dict) -> str:
     """Render provider-detail blocks as readable chat text."""
     lines: list[str] = []
@@ -23018,26 +23110,49 @@ _ANTHEM_CONDITION_ANCHORS = {
     "tumour",
 }
 _ANTHEM_DIRECTORY_STOPWORDS = _ANTHEM_GENERIC_KEYWORDS | {
+    "all",
     "also",
     "and",
-    "at",
+    "another",
+    "any",
     "around",
+    "at",
+    "available",
+    "board",
+    "both",
     "can",
+    "certified",
+    "each",
+    "every",
+    "few",
     "find",
     "get",
     "good",
+    "have",
+    "i",
     "in",
     "list",
     "looking",
+    "many",
     "me",
+    "most",
+    "my",
     "near",
+    "nearby",
     "need",
+    "on",
     "only",
+    "operation",
+    "operations",
+    "other",
     "please",
+    "procedure",
     "recommend",
     "recommendation",
     "search",
+    "several",
     "show",
+    "some",
     "specialising",
     "specialist",
     "specialists",
@@ -23047,12 +23162,16 @@ _ANTHEM_DIRECTORY_STOPWORDS = _ANTHEM_GENERIC_KEYWORDS | {
     "specializing",
     "surgeon",
     "surgeons",
+    "surgery",
+    "surgical",
     "top",
     "treat",
     "treating",
     "treats",
+    "want",
     "who",
     "with",
+    "would",
 }
 
 
@@ -23987,15 +24106,116 @@ def _anthem_directory_condition_term(
     words = [
         word
         for word in match.group(1).split()
-        if word not in facility_tokens and len(word) > 1
+        if (
+            word not in facility_tokens
+            and word not in _ANTHEM_DIRECTORY_STOPWORDS
+            and len(word) > 1
+        )
     ]
-    while words and (
-        words[0] in _ANTHEM_DIRECTORY_STOPWORDS
-        or words[0] in _ANTHEM_CONDITION_ANCHORS
-    ):
+    while words and words[0] in _ANTHEM_CONDITION_ANCHORS:
         words.pop(0)
-    condition = " ".join(words)
-    return condition or match.group(1).split()[-1]
+    synonyms = {
+        "neoplasm": "cancer",
+        "tumor": "cancer",
+        "tumour": "cancer",
+    }
+    words = [synonyms.get(word, word) for word in words]
+    condition = " ".join(dict.fromkeys(words))
+    if condition:
+        return condition
+    fallback = match.group(1).split()[-1]
+    return synonyms.get(fallback, fallback)
+
+
+_ANTHEM_CONDITION_ALIASES = {
+    "bone": {"bone", "orthopedic", "orthopaedic", "musculoskeletal"},
+    "brain": {"brain", "neuro", "neurologic", "neurosurgery"},
+    "breast": {"breast", "mammary"},
+    "cancer": {
+        "cancer",
+        "oncology",
+        "carcinoma",
+        "tumor",
+        "tumour",
+        "neoplasm",
+        "sarcoma",
+        "lymphoma",
+        "leukemia",
+        "melanoma",
+        "thoracic",
+        "cardiothoracic",
+        "surgical oncology",
+    },
+    "head": {"head"},
+    "heart": {"heart", "cardiac", "cardio", "cardiovascular"},
+    "kidney": {"kidney", "renal"},
+    "liver": {"liver", "hepatic"},
+    "lung": {
+        "lung",
+        "pulmonary",
+        "thoracic",
+        "cardiothoracic",
+        "respiratory",
+    },
+    "neck": {"neck"},
+}
+_ANTHEM_MODALITY_ALIASES = {
+    "chemotherapy": ("chemo", "medical oncology"),
+    "radiation": ("radi", "radiation"),
+    "surgery": ("surg",),
+}
+
+
+def _anthem_condition_tokens(term: str) -> list[str]:
+    """Split a directory condition phrase into filterable tokens."""
+    return [
+        token
+        for token in re.findall(r"[a-z0-9]+", str(term or "").casefold())
+        if token not in _ANTHEM_DIRECTORY_STOPWORDS
+    ]
+
+
+def _anthem_requested_modalities(question: str) -> list[tuple[str, ...]]:
+    """Return treatment modalities explicitly requested in a question."""
+    text = " ".join(str(question or "").casefold().split())
+    groups: list[tuple[str, ...]] = []
+    if re.search(
+        r"\b(?:surgery|surgical|surgeon|operation|procedure)\b", text
+    ):
+        groups.append(_ANTHEM_MODALITY_ALIASES["surgery"])
+    if re.search(r"\b(?:radiation|radiotherapy|radiosurgery)\b", text):
+        groups.append(_ANTHEM_MODALITY_ALIASES["radiation"])
+    if re.search(r"\b(?:chemotherapy|chemo)\b", text):
+        groups.append(_ANTHEM_MODALITY_ALIASES["chemotherapy"])
+    return groups
+
+
+def _anthem_provider_matches_condition(
+    item: dict,
+    condition_tokens: list[str],
+    modalities: list[tuple[str, ...]],
+) -> bool:
+    """Return whether a provider matches the condition and treatment.
+
+    Condition words are expanded through small synonym groups, so a
+    lung-cancer question also accepts thoracic/cardiothoracic surgery, and a
+    surgery question requires a surgical specialty.
+    """
+    text = " ".join(
+        str(item.get(key) or "")
+        for key in ("specialty", "section")
+    ).casefold()
+    if not text.strip():
+        # Without a specialty there is nothing reliable to filter on.
+        return True
+    for token in condition_tokens:
+        aliases = _ANTHEM_CONDITION_ALIASES.get(token, {token})
+        if not any(alias in text for alias in aliases):
+            return False
+    for group in modalities:
+        if not any(alias in text for alias in group):
+            return False
+    return True
 
 
 def _anthem_directory_condition_items(
@@ -26944,6 +27164,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._run_anthem_question(question)
             return
         if state.research_with_news_mode:
+            if _anthem_online_tool_matches(question):
+                self._sse_text(
+                    "log",
+                    "[online: routing the provider question to the Anthem "
+                    "directory tool]",
+                )
+                self._run_anthem_question(question)
+                return
             # In this mode every question continues the current research
             # thread. The first researched question uses the direct initial
             # search (no related-question planning); later questions keep the
@@ -28508,6 +28736,45 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         provider_items = _anthem_provider_items_from_context(
             context, source_label, institution=institution
         )
+        condition_filter_term = _anthem_directory_condition_term(
+            question, plan, institution
+        )
+        condition_filter_tokens = _anthem_condition_tokens(
+            condition_filter_term
+        )
+        modality_filters = _anthem_requested_modalities(question)
+        if condition_filter_tokens and modality_filters:
+            relevant_items = [
+                item
+                for item in provider_items
+                if _anthem_provider_matches_condition(
+                    item, condition_filter_tokens, modality_filters
+                )
+            ]
+            if relevant_items:
+                self._sse_text(
+                    "log",
+                    "[anthem: kept "
+                    f"{len(relevant_items)} provider(s) matching "
+                    f"{condition_filter_term!r} and the requested "
+                    "treatment]",
+                )
+                provider_items = relevant_items
+            else:
+                self._sse_text(
+                    "log",
+                    "[anthem: no NPPES provider matched the condition "
+                    "and treatment; keeping the wider list for facility "
+                    "verification]",
+                )
+        requested_limit = _anthem_requested_limit(question)
+        if requested_limit and len(provider_items) > requested_limit:
+            provider_items = provider_items[:requested_limit]
+            self._sse_text(
+                "log",
+                "[anthem: limiting the result list to "
+                f"{requested_limit} provider(s)]",
+            )
         primary_count = len(provider_items)
         member_plan: dict = {}
         if provider_items:
@@ -28594,6 +28861,21 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     for item in provider_items
                 }
                 for item in related_items:
+                    if (
+                        condition_filter_tokens
+                        and modality_filters
+                        and not _anthem_provider_matches_condition(
+                            item,
+                            condition_filter_tokens,
+                            modality_filters,
+                        )
+                    ):
+                        continue
+                    if (
+                        requested_limit
+                        and len(provider_items) >= requested_limit
+                    ):
+                        break
                     identity = str(
                         item.get("npi") or item.get("name", "")
                     ).casefold()
