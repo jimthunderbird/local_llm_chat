@@ -10,6 +10,13 @@ anthem_plan_member_id: {directory_of_this_prompt}/.chat/anthem/member_id.txt
 
 group unit_tests {
   task (completed) {
+    1. type /anthem
+    2. tell me about Johannes Kratz, MD in UCSF
+    3. it should show the doctor's detail
+    apply to all doctors
+  }
+
+  task (completed) {
     in the result list, we should only have "In Network" and "Out Of Network", we should not have "Network Unknown (Member Plan)"
   }
 
@@ -77,6 +84,11 @@ group unit_tests {
 }
 
 group application {
+  task.feature.direct_doctor_detail (completed) {
+    question: tell me about Johannes Kratz, MD in UCSF
+    answer: it should show me the doctor's detail
+  }
+
   task.optimization.speed_up_result_list (completed) {
     the list of doctors still take a long time to load, please speed it up
   }

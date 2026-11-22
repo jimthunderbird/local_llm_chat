@@ -20026,10 +20026,56 @@ def _anthem_fast_plan(question: str) -> dict[str, str]:
             r"\s*,?\s*(?:M\.?D\.?|D\.?O\.?|Ph\.?D\.?|FACS)\b",
             text,
         )
+    if not doctor_match:
+        # Detail questions often omit credentials: "tell me about Jane Doe".
+        # Only accept a multi-word capitalized name and reject phrases that
+        # are clearly specialties, facilities, or care settings.
+        detail_match = re.search(
+            r"\b(?i:tell me about|who is|describe|profile of|"
+            r"background of)\s+"
+            r"([A-Z][A-Za-z'.-]+(?:\s+[A-Z][A-Za-z'.-]+){1,3})",
+            text,
+        )
+        if detail_match:
+            candidate = detail_match.group(1).strip()
+            candidate_key = candidate.casefold()
+            generic_terms = (
+                "cancer",
+                "center",
+                "hospital",
+                "clinic",
+                "health",
+                "medical",
+                "medicine",
+                "surgery",
+                "specialist",
+                "specialists",
+                "doctor",
+                "doctors",
+                "department",
+                "institute",
+                "care",
+                "insurance",
+                "network",
+            )
+            if not any(
+                term in candidate_key for term in generic_terms
+            ):
+                doctor_match = detail_match
     if doctor_match:
         plan["doctor_name"] = doctor_match.group(1)
     plan["facility"] = _anthem_fast_facility(text)
     plan["specialty"] = _anthem_fast_specialty(text)
+    if plan["doctor_name"]:
+        doctor_key = plan["doctor_name"].casefold()
+        if (
+            plan["facility"]
+            and doctor_key in plan["facility"].casefold()
+        ) or (
+            plan["specialty"]
+            and doctor_key in plan["specialty"].casefold()
+        ):
+            plan["doctor_name"] = ""
     plan["location"] = _anthem_fast_location(
         text, plan["facility"], plan["specialty"]
     )
@@ -20095,9 +20141,10 @@ def _anthem_select_provider(
 
 _ANTHEM_DETAIL_REQUEST_RE = re.compile(
     r"\b(?:"
-    r"tell me more|more about|details?|profile|background|biography|bio|"
-    r"education|training|awards?|recognition|publications?|research|"
-    r"who is|experience|qualifications?"
+    r"tell me more|tell me about|more about|details?|profile|background|"
+    r"biography|bio|education|training|awards?|recognition|"
+    r"publications?|research|who is|experience|qualifications?|describe|"
+    r"overview"
     r")\b",
     re.IGNORECASE,
 )
@@ -28316,6 +28363,82 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     or "none"
                 )
                 + "]",
+            )
+
+        # A question that names a doctor and asks for background should load
+        # that provider's full profile directly. Requiring a previous result
+        # list here made "tell me about <doctor> in <hospital>" return a
+        # search list instead of the requested detail.
+        if (
+            plan.get("doctor_name")
+            and _anthem_is_detail_request(question)
+        ):
+            doctor_name = str(plan.get("doctor_name") or "").strip()
+            specialty = str(plan.get("specialty") or "").strip()
+            institution = str(
+                plan.get("facility")
+                or state.anthem_plan.get("facility")
+                or ""
+            ).strip()
+            source_label = (
+                state.anthem_source or "Anthem Provider Directory"
+            )
+            npi = ""
+            selected = (
+                _anthem_select_provider(question, state.anthem_providers)
+                if state.anthem_providers
+                else None
+            )
+            if selected is not None:
+                doctor_name = str(
+                    selected.get("name")
+                    or selected.get("title")
+                    or doctor_name
+                ).strip()
+                npi = str(selected.get("npi") or "").strip()
+                specialty = str(
+                    selected.get("specialty") or specialty
+                ).strip()
+                institution = str(
+                    selected.get("institution") or institution
+                ).strip()
+                source_label = state.anthem_source or source_label
+            self._sse_text(
+                "log",
+                "[anthem: loading the full profile for "
+                f"{doctor_name or 'the requested doctor'}]",
+            )
+            try:
+                detail = _anthem_provider_detail(
+                    npi,
+                    doctor_name,
+                    specialty=specialty,
+                    institution=institution,
+                    source_label=source_label,
+                )
+                answer = _anthem_provider_detail_text(detail)
+            except Exception as exc:
+                self._sse_text(
+                    "log",
+                    f"[anthem: could not load provider detail: {exc}]",
+                )
+                answer = ""
+            if answer:
+                self._sse_text("delta", answer)
+                state.latest_answer = answer
+                state.latest_sources = []
+                state.latest_benchmark = {
+                    "anthem_source": source_label or "provider profile",
+                    "anthem_records": 1,
+                    "model": "direct API records + provider profile",
+                }
+                state.record_turn(question, question, answer)
+                self._sse("annotations", {"items": []})
+                return
+            self._sse_text(
+                "log",
+                "[anthem: provider detail was unavailable; falling back "
+                "to a directory search]",
             )
 
         if not has_search_fields:
