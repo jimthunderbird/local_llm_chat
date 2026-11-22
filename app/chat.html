@@ -7647,6 +7647,9 @@ function makeNewsItem(entry, data) {
     anthemPpo: String(data.anthem_ppo || ""),
     anthemPpoLabel: String(data.anthem_ppo_label || ""),
     anthemPpoFlag: String(data.anthem_ppo_flag || ""),
+    anthemBluecardNational: String(data.anthem_bluecard_national || ""),
+    anthemBluecardLabel: String(data.anthem_bluecard_national_label || ""),
+    anthemBluecardFlag: String(data.anthem_bluecard_national_flag || ""),
     npi: String(data.npi || ""),
     institution: String(data.institution || ""),
     providerSpecialty: String(data.specialty || ""),
@@ -8565,6 +8568,9 @@ function renderNewsList(entry) {
       const metaParts = [];
       if (item.anthemPpoLabel) {
         metaParts.push(item.anthemPpoLabel);
+      }
+      if (item.anthemBluecardLabel) {
+        metaParts.push(item.anthemBluecardLabel);
       }
       if (item.academicTitle) {
         metaParts.push(`Academic title: ${item.academicTitle}`);

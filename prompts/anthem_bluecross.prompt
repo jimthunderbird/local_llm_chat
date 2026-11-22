@@ -8,6 +8,10 @@ question_llm: ornith-1.5:35b
 
 group unit_tests {
   task (completed) {
+    can you double check if UT MD Anderson Cancer Center is in Anthem Blue Cross BlueChoice National PPO or not
+  }
+
+  task (completed) {
     the In Network or Out of Network information should show in the list of results
   }
 
@@ -50,6 +54,10 @@ group unit_tests {
 }
 
 group application {
+  task.feature.anthem_bluecross_bluecard_national_ppo (completed) {
+    please show me if the doctors or hospital/facilities are in network in anthem bluecross bluecard national ppo or not
+  }
+
   task.feature.in_network_confirmation (completed) {
     for each doctor or provider in the result list, please add a flag to mention if the provider is in Anthem PPO Plan
   }

@@ -22898,15 +22898,89 @@ _ANTHEM_PPO_FLAGS = {
     "not_listed": "Out of Network",
     "unknown": "Network Unknown",
 }
+_ANTHEM_BLUECARD_PREFIX_FALLBACK = ("901", "904")
+_ANTHEM_BLUECARD_LABELS = {
+    "listed": "In Network (Anthem BlueCard National PPO)",
+    "not_listed": "Out of Network (Anthem BlueCard National PPO)",
+    "unknown": "Network Unknown (Anthem BlueCard National PPO)",
+}
+_ANTHEM_BLUECARD_FLAGS = {
+    "listed": "In Network",
+    "not_listed": "Out of Network",
+    "unknown": "Network Unknown",
+}
+_ANTHEM_STATE_COORDS = {
+    "AL": ("32.806671", "-86.791130"),
+    "AK": ("61.370716", "-152.404419"),
+    "AZ": ("33.729759", "-111.431221"),
+    "AR": ("34.969704", "-92.373123"),
+    "CA": ("37.7749", "-122.4194"),
+    "CO": ("39.059811", "-105.311104"),
+    "CT": ("41.597782", "-72.755371"),
+    "DE": ("39.318523", "-75.507141"),
+    "DC": ("38.897438", "-77.026817"),
+    "FL": ("27.766279", "-81.686783"),
+    "GA": ("33.040619", "-83.643074"),
+    "GU": ("13.4443", "144.7937"),
+    "HI": ("21.094318", "-157.498337"),
+    "ID": ("44.240459", "-114.478828"),
+    "IL": ("40.349457", "-88.986137"),
+    "IN": ("39.849426", "-86.258278"),
+    "IA": ("42.011539", "-93.210526"),
+    "KS": ("38.526600", "-96.726486"),
+    "KY": ("37.668140", "-84.670067"),
+    "LA": ("31.169546", "-91.867805"),
+    "ME": ("44.693947", "-69.381927"),
+    "MD": ("39.063946", "-76.802101"),
+    "MA": ("42.230171", "-71.530106"),
+    "MI": ("43.326618", "-84.536095"),
+    "MN": ("45.694454", "-93.900192"),
+    "MS": ("32.741646", "-89.678696"),
+    "MO": ("38.456085", "-92.288368"),
+    "MT": ("46.921925", "-110.454353"),
+    "NE": ("41.125370", "-98.268082"),
+    "NV": ("38.313515", "-117.055374"),
+    "NH": ("43.452492", "-71.563896"),
+    "NJ": ("40.298904", "-74.521011"),
+    "NM": ("34.840515", "-106.248482"),
+    "NY": ("42.165726", "-74.948051"),
+    "NC": ("35.630066", "-79.806419"),
+    "ND": ("47.528912", "-99.784012"),
+    "MP": ("15.0979", "145.6739"),
+    "OH": ("40.388783", "-82.764915"),
+    "OK": ("35.565342", "-96.928917"),
+    "OR": ("44.572021", "-122.070938"),
+    "PA": ("40.590752", "-77.209755"),
+    "PR": ("18.220833", "-66.590149"),
+    "RI": ("41.680893", "-71.511780"),
+    "SC": ("33.856892", "-80.945007"),
+    "SD": ("44.299782", "-99.438828"),
+    "TN": ("35.747845", "-86.692345"),
+    "TX": ("31.054487", "-97.563461"),
+    "UT": ("40.150032", "-111.862434"),
+    "VT": ("44.045876", "-72.710686"),
+    "VI": ("18.3358", "-64.8963"),
+    "VA": ("37.769337", "-78.169968"),
+    "WA": ("47.400902", "-121.490494"),
+    "WV": ("38.491226", "-80.954453"),
+    "WI": ("44.268543", "-89.616508"),
+    "WY": ("42.755966", "-107.302490"),
+}
 _ANTHEM_FINDCARE_TOKEN_LOCK = threading.Lock()
 _ANTHEM_FINDCARE_TOKEN_CACHE: dict[str, object] = {
     "value": "",
     "expires_at": 0.0,
 }
+_ANTHEM_PLAN_LOCK = threading.Lock()
+_ANTHEM_PLAN_CACHE: dict[str, list[dict]] = {}
 _ANTHEM_PPO_PREFIX_LOCK = threading.Lock()
 _ANTHEM_PPO_PREFIX_CACHE: dict[str, tuple[str, ...]] = {}
 _ANTHEM_PPO_LOCK = threading.Lock()
 _ANTHEM_PPO_CACHE: dict[tuple[str, str], str] = {}
+_ANTHEM_BLUECARD_PREFIX_LOCK = threading.Lock()
+_ANTHEM_BLUECARD_PREFIX_CACHE: dict[str, tuple[str, ...]] = {}
+_ANTHEM_BLUECARD_LOCK = threading.Lock()
+_ANTHEM_BLUECARD_CACHE: dict[tuple[str, str], str] = {}
 
 
 def _anthem_findcare_headers(token: str = "") -> dict[str, str]:
@@ -22959,15 +23033,15 @@ def _anthem_findcare_token() -> str:
     return token
 
 
-def _anthem_findcare_ppo_prefixes(state: str) -> tuple[str, ...]:
-    """Return Anthem PPO alpha prefixes offered in one state."""
+def _anthem_findcare_plans(state: str) -> list[dict]:
+    """Return Anthem's public plan list for one state."""
     state = " ".join(str(state or "CA").split()).upper() or "CA"
-    with _ANTHEM_PPO_PREFIX_LOCK:
-        cached = _ANTHEM_PPO_PREFIX_CACHE.get(state)
-    if cached:
-        return cached
+    with _ANTHEM_PLAN_LOCK:
+        cached = _ANTHEM_PLAN_CACHE.get(state)
+    if cached is not None:
+        return [dict(plan) for plan in cached]
     token = _anthem_findcare_token()
-    prefixes: list[str] = []
+    plans: list[dict] = []
     if token:
         try:
             response = requests.get(
@@ -22978,34 +23052,79 @@ def _anthem_findcare_ppo_prefixes(state: str) -> tuple[str, ...]:
                 timeout=(5, 25),
             )
             response.raise_for_status()
-            plans = response.json().get("data") or []
+            plans = [
+                plan
+                for plan in response.json().get("data") or []
+                if isinstance(plan, dict)
+            ]
         except (requests.RequestException, ValueError):
             plans = []
-        ranked: list[tuple[int, str]] = []
-        for plan in plans:
-            if not isinstance(plan, dict):
-                continue
-            if str(plan.get("careType") or "").upper() != "MEDICAL":
-                continue
-            if "PPO" not in str(plan.get("planType") or "").upper():
-                continue
-            prefix = str(plan.get("prefix") or "").strip()
-            if not prefix or prefix in prefixes:
-                continue
-            categories = {
-                str(value).upper()
-                for value in plan.get("planCategoryList") or []
-            }
-            commercial = bool(categories & {"EMP", "IND", "STU", "NON"})
-            ranked.append((0 if commercial else 1, prefix))
-        for _score, prefix in sorted(ranked):
-            if prefix not in prefixes:
-                prefixes.append(prefix)
+    with _ANTHEM_PLAN_LOCK:
+        _ANTHEM_PLAN_CACHE[state] = plans
+    return [dict(plan) for plan in plans]
+
+
+def _anthem_findcare_ppo_prefixes(state: str) -> tuple[str, ...]:
+    """Return Anthem commercial PPO alpha prefixes offered in one state."""
+    state = " ".join(str(state or "CA").split()).upper() or "CA"
+    with _ANTHEM_PPO_PREFIX_LOCK:
+        cached = _ANTHEM_PPO_PREFIX_CACHE.get(state)
+    if cached:
+        return cached
+    prefixes: list[str] = []
+    ranked: list[tuple[int, str]] = []
+    for plan in _anthem_findcare_plans(state):
+        if str(plan.get("careType") or "").upper() != "MEDICAL":
+            continue
+        if "PPO" not in str(plan.get("planType") or "").upper():
+            continue
+        prefix = str(plan.get("prefix") or "").strip()
+        if not prefix or prefix in prefixes:
+            continue
+        categories = {
+            str(value).upper()
+            for value in plan.get("planCategoryList") or []
+        }
+        commercial = bool(categories & {"EMP", "IND", "STU", "NON"})
+        ranked.append((0 if commercial else 1, prefix))
+    for _score, prefix in sorted(ranked):
+        if prefix not in prefixes:
+            prefixes.append(prefix)
     if not prefixes:
         prefixes = list(_ANTHEM_PPO_PREFIX_FALLBACK)
     result = tuple(prefixes[:3])
     with _ANTHEM_PPO_PREFIX_LOCK:
         _ANTHEM_PPO_PREFIX_CACHE[state] = result
+    return result
+
+
+def _anthem_findcare_bluecard_prefixes(state: str) -> tuple[str, ...]:
+    """Return Anthem BlueCard National PPO alpha prefixes."""
+    state = " ".join(str(state or "CA").split()).upper() or "CA"
+    with _ANTHEM_BLUECARD_PREFIX_LOCK:
+        cached = _ANTHEM_BLUECARD_PREFIX_CACHE.get(state)
+    if cached:
+        return cached
+    prefixes: list[str] = []
+    for plan in _anthem_findcare_plans(state):
+        if str(plan.get("careType") or "").upper() != "MEDICAL":
+            continue
+        plan_type = str(plan.get("planType") or "").upper()
+        name = str(plan.get("name") or "")
+        if "PPO" not in plan_type:
+            continue
+        if not plan.get("isNationalPlan"):
+            continue
+        if "bluecard" not in name.casefold() and "national ppo" not in name.casefold():
+            continue
+        prefix = str(plan.get("prefix") or "").strip()
+        if prefix and prefix not in prefixes:
+            prefixes.append(prefix)
+    if not prefixes:
+        prefixes = list(_ANTHEM_BLUECARD_PREFIX_FALLBACK)
+    result = tuple(prefixes[:2])
+    with _ANTHEM_BLUECARD_PREFIX_LOCK:
+        _ANTHEM_BLUECARD_PREFIX_CACHE[state] = result
     return result
 
 
@@ -23032,46 +23151,168 @@ def _anthem_names_match(left: str, right: str) -> bool:
     return left_tokens[0] == right_tokens[0]
 
 
-def _anthem_findcare_ppo_status(name: str, state: str) -> str:
-    """Return ``listed``, ``not_listed``, or ``unknown`` for Anthem PPO.
+def _anthem_facility_names_match(left: str, right: str) -> bool:
+    """Return whether one name's tokens are contained in the other."""
+    left_tokens = set(_anthem_name_tokens(left))
+    right_tokens = set(_anthem_name_tokens(right))
+    if not left_tokens or not right_tokens:
+        return False
+    return left_tokens.issubset(right_tokens) or right_tokens.issubset(
+        left_tokens
+    )
 
-    The public Find Care plan-specific search box is used because Anthem's
-    FHIR Provider Directory requires registered credentials. A provider that
-    appears under a PPO alpha prefix is listed in that PPO plan directory.
-    """
+
+def _anthem_findcare_provider_lookup(
+    name: str,
+    npi: str,
+    state: str,
+    city: str,
+    prefix: str,
+) -> bool:
+    """Look up a provider or facility by name through Find Care."""
+    name = " ".join(str(name or "").split())
+    state = " ".join(str(state or "CA").split()).upper() or "CA"
+    city = " ".join(str(city or "").split())
+    if not name:
+        return False
+    latitude, longitude = _ANTHEM_STATE_COORDS.get(
+        state, _ANTHEM_STATE_COORDS["CA"]
+    )
+    token = _anthem_findcare_token()
+    if not token:
+        return False
+    npi = str(npi or "").strip()
+
+    def attempt(query: str) -> bool:
+        body = {
+            "providerName": query,
+            "latitude": latitude,
+            "longitude": longitude,
+            "postalCode": "",
+            "city": city,
+            "county": "",
+            "state": state,
+            "brandCode": "ABCBS",
+            "locale": "en_US",
+            "planStateCode": state,
+            "alphaPrefix": prefix,
+            "distance": "250",
+        }
+        try:
+            response = requests.post(
+                _ANTHEM_FINDCARE_BASE
+                + "/precare/api/lookup/v1/provider",
+                headers=_anthem_findcare_headers(token),
+                json=body,
+                timeout=(5, 25),
+            )
+            response.raise_for_status()
+            providers = response.json().get("providers") or []
+        except (requests.RequestException, ValueError):
+            return False
+        for provider in providers:
+            if not isinstance(provider, dict):
+                continue
+            if npi and npi in str(provider.get("npiIds") or ""):
+                return True
+            provider_name = str(provider.get("providerName") or "")
+            if _anthem_names_match(query, provider_name) or (
+                _anthem_facility_names_match(query, provider_name)
+            ):
+                return True
+        return False
+
+    for variant in _anthem_facility_name_variants(name):
+        if attempt(variant):
+            return True
+    return False
+
+
+def _anthem_facility_name_variants(name: str) -> list[str]:
+    """Return common hospital-name variants for Anthem's lookup."""
+    name = " ".join(str(name or "").split())
+    if not name:
+        return []
+    variants = [name]
+    lowered = name.casefold()
+    prefixes = (
+        "the university of texas ",
+        "university of texas ",
+        "the university of ",
+        "uthealth ",
+        "ut health ",
+        "ut ",
+        "the ",
+    )
+    for prefix in prefixes:
+        if lowered.startswith(prefix) and len(name) > len(prefix):
+            candidate = name[len(prefix):].strip(" ,")
+            if candidate and candidate not in variants:
+                variants.append(candidate)
+    for variant in list(variants):
+        collapsed = re.sub(
+            r"\bM\.?\s*D\.?(?![A-Za-z])",
+            "MD",
+            variant,
+            flags=re.IGNORECASE,
+        )
+        collapsed = re.sub(r"\.", "", collapsed)
+        collapsed = " ".join(collapsed.split())
+        if collapsed and collapsed not in variants:
+            variants.append(collapsed)
+    return variants
+
+
+def _anthem_findcare_plan_status(
+    name: str,
+    state: str,
+    prefixes: tuple[str, ...],
+    cache: dict[tuple[str, str], str],
+    lock: threading.Lock,
+    npi: str = "",
+    city: str = "",
+) -> str:
+    """Return ``listed``, ``not_listed``, or ``unknown`` for a plan group."""
     name = " ".join(str(name or "").split())
     state = " ".join(str(state or "CA").split()).upper() or "CA"
     if not name:
         return "unknown"
     key = (name.casefold(), state)
-    with _ANTHEM_PPO_LOCK:
-        cached = _ANTHEM_PPO_CACHE.get(key)
+    with lock:
+        cached = cache.get(key)
     if cached:
         return cached
     token = _anthem_findcare_token()
     if not token:
         return "unknown"
+    credential_pattern = (
+        r"(?:M\.?D\.?|D\.?O\.?|Ph\.?D\.?|MBBS|MPH|MBA|"
+        r"MS|M\.S\.|BSN|NP|PA-C|RN)"
+    )
     query_name = re.sub(
-        r",?\s*(?:M\.?D\.?|D\.?O\.?|Ph\.?D\.?|MBBS|MPH|MBA|"
-        r"MS|M\.S\.|BSN|NP|PA-C|RN)\b.*$",
+        rf"(?:,\s*{credential_pattern}\b.*"
+        rf"|\s+{credential_pattern}\s*$)",
         "",
         name,
         flags=re.IGNORECASE,
     ).strip(" ,")
+    latitude, longitude = _ANTHEM_STATE_COORDS.get(
+        state, _ANTHEM_STATE_COORDS["CA"]
+    )
     any_ok = False
     status = "unknown"
-    for prefix in _anthem_findcare_ppo_prefixes(state):
+    for prefix in prefixes:
         body = {
             "locale": "en_US",
             "text": query_name or name,
             "memberCoordinates": {
-                "latitude": "37.7749",
-                "longitude": "-122.4194",
+                "latitude": latitude,
+                "longitude": longitude,
                 "stateCode": state,
             },
             "clientCoordinates": {
-                "latitude": "37.7749",
-                "longitude": "-122.4194",
+                "latitude": latitude,
+                "longitude": longitude,
             },
             "distance": "25",
             "publicCriteria": {
@@ -23118,11 +23359,58 @@ def _anthem_findcare_ppo_status(name: str, state: str) -> str:
                 break
         if status == "listed":
             break
+    if status != "listed":
+        for prefix in prefixes:
+            if _anthem_findcare_provider_lookup(
+                query_name or name,
+                npi,
+                state,
+                city,
+                prefix,
+            ):
+                status = "listed"
+                break
     if status != "listed" and any_ok:
         status = "not_listed"
-    with _ANTHEM_PPO_LOCK:
-        _ANTHEM_PPO_CACHE[key] = status
+    with lock:
+        cache[key] = status
     return status
+
+
+def _anthem_findcare_ppo_status(
+    name: str,
+    state: str,
+    npi: str = "",
+    city: str = "",
+) -> str:
+    """Return Anthem commercial PPO directory status for a provider."""
+    return _anthem_findcare_plan_status(
+        name,
+        state,
+        _anthem_findcare_ppo_prefixes(state),
+        _ANTHEM_PPO_CACHE,
+        _ANTHEM_PPO_LOCK,
+        npi=npi,
+        city=city,
+    )
+
+
+def _anthem_findcare_bluecard_status(
+    name: str,
+    state: str,
+    npi: str = "",
+    city: str = "",
+) -> str:
+    """Return Anthem BlueCard National PPO directory status for a provider."""
+    return _anthem_findcare_plan_status(
+        name,
+        state,
+        _anthem_findcare_bluecard_prefixes(state),
+        _ANTHEM_BLUECARD_CACHE,
+        _ANTHEM_BLUECARD_LOCK,
+        npi=npi,
+        city=city,
+    )
 
 
 def _anthem_item_state(item: dict) -> str:
@@ -23131,25 +23419,48 @@ def _anthem_item_state(item: dict) -> str:
     return match.group(1) if match else ""
 
 
+def _anthem_item_city(item: dict) -> str:
+    address = str(item.get("address") or "")
+    match = re.search(r"\b([A-Z]{2})\s+\d{5}", address)
+    if not match:
+        return ""
+    prefix = address[: match.start()].strip(" ,")
+    return prefix.split(",")[-1].strip()
+
+
 def _anthem_annotate_ppo_status(
     items: list[dict],
     default_state: str = "",
 ) -> None:
-    """Add an Anthem PPO directory flag to every provider card."""
+    """Add Anthem PPO and BlueCard National PPO flags to provider cards."""
     if not items:
         return
 
     def annotate(item: dict) -> None:
         name = str(item.get("name") or item.get("title") or "").strip()
         state = _anthem_item_state(item) or str(default_state or "")
-        status = _anthem_findcare_ppo_status(name, state)
+        city = _anthem_item_city(item)
+        npi = str(item.get("npi") or "").strip()
+        status = _anthem_findcare_ppo_status(
+            name, state, npi=npi, city=city
+        )
         label = _ANTHEM_PPO_LABELS[status]
+        bluecard_status = _anthem_findcare_bluecard_status(
+            name, state, npi=npi, city=city
+        )
+        bluecard_label = _ANTHEM_BLUECARD_LABELS[bluecard_status]
         item["anthem_ppo"] = status
         item["anthem_ppo_label"] = label
         item["anthem_ppo_flag"] = _ANTHEM_PPO_FLAGS[status]
+        item["anthem_bluecard_national"] = bluecard_status
+        item["anthem_bluecard_national_label"] = bluecard_label
+        item["anthem_bluecard_national_flag"] = (
+            _ANTHEM_BLUECARD_FLAGS[bluecard_status]
+        )
         summary = str(item.get("summary") or "").strip()
-        if label not in summary:
-            summary = f"{summary} · {label}" if summary else label
+        for value in (label, bluecard_label):
+            if value not in summary:
+                summary = f"{summary} · {value}" if summary else value
         item["summary"] = summary
         item["paragraphs"] = [summary] if summary else []
 
@@ -27655,23 +27966,39 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if provider_items:
             self._sse_text(
                 "log",
-                "[anthem: checking the Anthem PPO plan directory]",
+                "[anthem: checking Anthem PPO and BlueCard National "
+                "PPO directories]",
             )
             _anthem_annotate_ppo_status(
                 provider_items, plan.get("location", "")
             )
             ppo_counts = {"listed": 0, "not_listed": 0, "unknown": 0}
+            bluecard_counts = {"listed": 0, "not_listed": 0, "unknown": 0}
             for provider_item in provider_items:
                 status = str(
                     provider_item.get("anthem_ppo") or "unknown"
                 )
                 ppo_counts[status] = ppo_counts.get(status, 0) + 1
+                bluecard_status = str(
+                    provider_item.get("anthem_bluecard_national")
+                    or "unknown"
+                )
+                bluecard_counts[bluecard_status] = (
+                    bluecard_counts.get(bluecard_status, 0) + 1
+                )
             self._sse_text(
                 "log",
                 "[anthem: Anthem PPO flag: "
                 f"{ppo_counts['listed']} listed, "
                 f"{ppo_counts['not_listed']} not found, "
                 f"{ppo_counts['unknown']} unconfirmed]",
+            )
+            self._sse_text(
+                "log",
+                "[anthem: BlueCard National PPO flag: "
+                f"{bluecard_counts['listed']} listed, "
+                f"{bluecard_counts['not_listed']} not found, "
+                f"{bluecard_counts['unknown']} unconfirmed]",
             )
         state.anthem_context = context
         state.anthem_plan = plan
@@ -27741,6 +28068,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                             else ""
                         ),
                         provider.get("anthem_ppo_label"),
+                        provider.get("anthem_bluecard_national_label"),
                         provider.get("specialty"),
                         provider.get("organization"),
                         provider.get("address"),
@@ -27761,9 +28089,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "Click a provider card below to open the full profile."
             )
             lines.append(
-                "Anthem PPO status is based on Anthem's public PPO plan "
-                "directory and should be confirmed with Anthem before "
-                "booking."
+                "Anthem PPO and BlueCard National PPO status are based on "
+                "Anthem's public plan directories and should be confirmed "
+                "with Anthem before booking."
             )
         else:
             lines.append(
