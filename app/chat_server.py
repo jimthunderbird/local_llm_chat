@@ -19337,12 +19337,14 @@ _UHC_QUESTION_PROMPT = """You classify questions for the UnitedHealthcare provid
 Return only one JSON object, with no prose and no markdown fences.
 
 Fields:
-- "type": one of "doctor_detail", "specialty_list", or
-  "specialty_facility_list".
+- "type": one of "doctor_detail", "specialty_list",
+  "specialty_facility_list", or "network_membership".
 - "doctor_name": a doctor's full name, or an empty string.
 - "npi": a 10-digit NPI if the user provides one, or an empty string.
 - "specialty": the medical specialty, or an empty string.
 - "facility": the hospital, clinic, or medical group, or an empty string.
+- "network": a named UnitedHealthcare network or plan such as "Select Plus",
+  "Choice Plus", or "NexusACO RP", or an empty string.
 - "location": a city, state, ZIP code, or address, or an empty string.
 
 How to choose the type:
@@ -19351,17 +19353,22 @@ How to choose the type:
   restricting the search to one named facility.
 - "specialty_facility_list": the user asks for doctors in a specialty at a
   named hospital, clinic, or medical group.
+- "network_membership": the user asks whether a specific doctor is in a named
+  network/plan, optionally in a state. Example: "is Dr X in Select Plus in
+  California?" or "double check Dr X is not in Select Plus in California."
 
 Rules:
 - Use the earlier conversation to resolve follow-up references such as
   "him", "her", "there", or "that hospital".
-- Preserve a named doctor, NPI, specialty, facility, and location exactly when
-  the user gives them.
+- Preserve a named doctor, NPI, specialty, facility, network, and location
+  exactly when the user gives them.
+- For network_membership, put the network in "network" and the state in
+  "location"; do not put the network in "specialty".
 - Use specific medical specialty wording such as "Thoracic Surgery",
   "Otolaryngology", "Cardiology", or "Surgical Oncology".
 - A question about a neck lump treated with surgery should use
   "Otolaryngology" or "Head and Neck Surgery".
-- Do not invent a doctor, NPI, facility, specialty, or location.
+- Do not invent a doctor, NPI, facility, specialty, network, or location.
 
 <conversation>
 {{CONVERSATION}}
@@ -22034,6 +22041,11 @@ def _anthem_nppes_search(
         add_attempt(build(taxonomies[0], include_location=False))
     else:
         add_attempt(build("", include_location=True))
+    if (first_name or last_name) and (city or state or postal or facility):
+        # A named doctor can be registered under an older practice address.
+        # Do not lose the doctor just because the requested facility/location
+        # constraint returns no NPPES rows.
+        add_attempt(build("", include_location=False))
 
     results: list[dict] = []
     for params in attempts:
@@ -22154,6 +22166,7 @@ def _anthem_nppes_search(
             if batch_context:
                 on_batch(batch_context)
 
+        pre_facility_results = list(results)
         results = _anthem_nppes_facility_filter(
             results,
             facility,
@@ -22162,6 +22175,12 @@ def _anthem_nppes_search(
             log,
             on_batch=stream_facility_batch if on_batch else None,
         )
+        if not results and (first_name or last_name):
+            results = pre_facility_results
+            log(
+                "[anthem: could not confirm the facility affiliation; "
+                "returning the named doctor's NPPES record]"
+            )
         if not results:
             log(
                 "[anthem: no NPPES record confirmed an affiliation with "
@@ -26282,6 +26301,89 @@ def _uhc_detail_item(
     }
 
 
+def _uhc_role_location_states(
+    role: dict,
+    by_id: dict[tuple[str, str], dict],
+) -> list[str]:
+    """Return the states on all locations attached to one role."""
+    states: list[str] = []
+    locations = role.get("location") or []
+    if isinstance(locations, dict):
+        locations = [locations]
+    for reference in locations:
+        location = by_id.get(
+            ("Location", _uhc_ref_id(reference))
+        ) or {}
+        address = location.get("address") or {}
+        state = str(address.get("state") or "").strip().upper()
+        if state and state not in states:
+            states.append(state)
+    return states
+
+
+def _uhc_check_network_membership(
+    plan: dict[str, str],
+    log: Callable[[str], None] | None = None,
+) -> dict:
+    """Check one doctor against a named UHC network and optional state."""
+    network_name = " ".join(str(plan.get("network") or "").split())
+    if not network_name:
+        return {
+            "status": "network_missing",
+            "message": "Tell me which UnitedHealthcare network to check.",
+        }
+    _city, state, _postal = _anthem_parse_location(
+        plan.get("location", "")
+    )
+    network_org = _uhc_find_organization(network_name, log)
+    if network_org is None:
+        return {
+            "status": "network_not_found",
+            "network": network_name,
+            "state": state,
+        }
+    network_id = str(network_org.get("id") or "").strip()
+    candidates = _uhc_practitioner_candidates(plan, log)
+    if not candidates:
+        return {
+            "status": "not_found",
+            "network": network_name,
+            "state": state,
+        }
+    for practitioner in candidates[:5]:
+        roles_bundle = _uhc_roles_for_practitioner(
+            str(practitioner.get("id") or ""), log
+        )
+        by_type, by_id = _uhc_bundle_index(roles_bundle)
+        for role in by_type.get("PractitionerRole") or []:
+            if network_id not in _uhc_role_network_ids(role):
+                continue
+            role_states = _uhc_role_location_states(role, by_id)
+            if state and state not in role_states:
+                continue
+            _location_id, address, _phone = _uhc_role_locations(
+                role, by_id
+            )
+            return {
+                "status": "listed",
+                "network": network_name,
+                "network_id": network_id,
+                "state": state,
+                "practitioner": _fhir_human_name(practitioner),
+                "npi": _uhc_practitioner_npi(practitioner),
+                "role_id": str(role.get("id") or ""),
+                "location": address,
+            }
+    return {
+        "status": "not_listed",
+        "network": network_name,
+        "network_id": network_id,
+        "state": state,
+        "practitioner": _fhir_human_name(candidates[0]),
+        "npi": _uhc_practitioner_npi(candidates[0]),
+    }
+
+
 def _uhc_nppes_fallback_card(
     plan: dict[str, str],
     log: Callable[[str], None] | None = None,
@@ -26319,6 +26421,18 @@ def _uhc_nppes_fallback_card(
     return item
 
 
+_UHC_KNOWN_NETWORKS = (
+    "Select Plus",
+    "Choice Plus",
+    "NexusACO RP",
+    "NexusACO OAP",
+    "Charter HMO",
+    "Doctors Plan",
+    "Navigate",
+    "Core",
+)
+
+
 def _uhc_fallback_plan(question: str) -> dict[str, str]:
     """Deterministic question classification when the model is unavailable."""
     text = _anthem_normalize_question(question)
@@ -26329,12 +26443,28 @@ def _uhc_fallback_plan(question: str) -> dict[str, str]:
     specialty = fast.get("specialty", "")
     facility = fast.get("facility", "")
     location = fast.get("location", "")
+    network = ""
+    lowered = text.casefold()
+    for name in _UHC_KNOWN_NETWORKS:
+        if name.casefold() in lowered:
+            network = name
+            break
+    if not network:
+        network_match = re.search(
+            r"\b(?:in|inside|under|within)\s+(?:the\s+)?"
+            r"([A-Z][A-Za-z0-9 &/.-]{2,60}?)\s+(?:network|plan)\b",
+            text,
+        )
+        if network_match:
+            network = network_match.group(1).strip(" ,.")
     detail_words = re.search(
         r"\b(?:tell me about|who is|profile|background|details?|credentials?)\b",
         text,
         re.IGNORECASE,
     )
-    if (doctor_name or npi) and detail_words:
+    if network and (doctor_name or npi):
+        qtype = "network_membership"
+    elif (doctor_name or npi) and detail_words:
         qtype = "doctor_detail"
     elif doctor_name and not specialty:
         qtype = "doctor_detail"
@@ -26352,6 +26482,7 @@ def _uhc_fallback_plan(question: str) -> dict[str, str]:
         "npi": npi,
         "specialty": specialty,
         "facility": facility,
+        "network": network,
         "location": location,
     }
 
@@ -26395,6 +26526,7 @@ def _uhc_classify_question(
             "npi",
             "specialty",
             "facility",
+            "network",
             "location",
         )
     }
@@ -26402,10 +26534,16 @@ def _uhc_classify_question(
         "doctor_detail",
         "specialty_list",
         "specialty_facility_list",
+        "network_membership",
     }:
         result = _uhc_fallback_plan(question)
     if result["type"] == "doctor_detail" and not (
         result["doctor_name"] or result["npi"]
+    ):
+        result = _uhc_fallback_plan(question)
+    if result["type"] == "network_membership" and not (
+        result["network"]
+        and (result["doctor_name"] or result["npi"])
     ):
         result = _uhc_fallback_plan(question)
     with _UHC_QUESTION_LOCK:
@@ -30801,6 +30939,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             f"npi={plan.get('npi') or 'none'}, "
             f"specialty={plan.get('specialty') or 'none'}, "
             f"facility={plan.get('facility') or 'none'}, "
+            f"network={plan.get('network') or 'none'}, "
             f"location={plan.get('location') or 'none'}]"
         )
         plan_type = plan.get("type")
@@ -30884,6 +31023,74 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             state.record_turn(
                 question, question, "Provider details displayed as 1 card."
             )
+            self._sse("annotations", {"items": []})
+            return
+
+        if plan_type == "network_membership":
+            result = _uhc_check_network_membership(
+                plan, lambda text: self._sse_text("log", text)
+            )
+            status = result.get("status")
+            network = result.get("network") or plan.get("network") or ""
+            location_state = (
+                result.get("state") or plan.get("location") or ""
+            )
+            practitioner_name = (
+                result.get("practitioner")
+                or plan.get("doctor_name")
+                or "The doctor"
+            )
+            npi = result.get("npi") or plan.get("npi") or ""
+            where = f" in {location_state}" if location_state else ""
+            if status == "listed":
+                message = (
+                    f"Yes — {practitioner_name}"
+                    + (f" (NPI {npi})" if npi else "")
+                    + f" is listed in the UnitedHealthcare public {network} "
+                    f"network{where}."
+                )
+                if result.get("location"):
+                    message += (
+                        f" Directory location: {result['location']}."
+                    )
+            elif status == "not_listed":
+                message = (
+                    f"No — {practitioner_name}"
+                    + (f" (NPI {npi})" if npi else "")
+                    + " is in the UnitedHealthcare public provider "
+                    f"directory, but I did not find a {network} role{where}."
+                )
+            elif status == "not_found":
+                message = (
+                    f"{practitioner_name}"
+                    + (f" (NPI {npi})" if npi else "")
+                    + " is not listed in the UnitedHealthcare public "
+                    f"provider directory, so there is no {network} record "
+                    f"for them{where}. This does not by itself prove "
+                    "out-of-network status: hospital insurance-acceptance "
+                    "pages list plans at the facility level and do not "
+                    "confirm an individual doctor's network status. "
+                    "Confirm with UnitedHealthcare or the doctor's office."
+                )
+            elif status == "network_not_found":
+                message = (
+                    f"I could not resolve the network {network!r} in the "
+                    "UnitedHealthcare public directory."
+                )
+            else:
+                message = (
+                    "Tell me which UnitedHealthcare network to check, "
+                    "such as Select Plus or Choice Plus."
+                )
+            self._sse_text("delta", message)
+            state.latest_answer = message
+            state.latest_sources = []
+            state.latest_benchmark = {
+                "uhc_source": "UnitedHealthcare Plan-Net FHIR",
+                "uhc_records": 1 if status == "listed" else 0,
+                "model": "UnitedHealthcare Plan-Net FHIR",
+            }
+            state.record_turn(question, question, message)
             self._sse("annotations", {"items": []})
             return
 

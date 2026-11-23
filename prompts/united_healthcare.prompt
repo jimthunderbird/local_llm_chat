@@ -24,6 +24,14 @@ knowledge {
 }
 
 task (completed) {
+  from https://www.ucsfhealth.org/patients-visitors/billing-insurance/health-insurance, looks like Dr Johannes Kratz is in network of United Healthcare Select Plus, can you check again why he is not in the network
+}
+
+task (completed) {
+  can you double check if Dr Johannes Kratz from UCSF is not in the Select Plus inside California
+}
+
+task (completed) {
   - question: tell me about doctor Johannes Kratz from UCSF
   - result: I could not find that doctor in the public UnitedHealthcare provider directory
 }

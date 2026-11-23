@@ -94,6 +94,14 @@ group unit_tests {
 }
 
 group application {
+  task.feature.tool_calling (completed) {
+    1. run /anthem
+    2. ask question: doctor Johannes Kratz from UCSF
+    3. expect: we should get the doctor's information
+       actual: "I could not retrieve provider records from the CMS NPPES registry.What failed:CMS NPPES registry: no matching providers"
+    please fix it in a systematic way, detect the doctor's name and facility name and get the doctor's information
+  }
+
   task.feature.learn_in_detail_modal (completed) {
     in the doctor's detail modal, add the learn and chat functionalities similar to the article loading modal
   }
