@@ -9,6 +9,10 @@ question_llm: ornith-1.5:35b
 anthem_plan_member_id: {directory_of_this_prompt}/.chat/anthem/member_id.txt
 
 group unit_tests {
+  task.bug (completed) {
+    AttributeError: 'ChatRequestHandler' object has no attribute '_sse_write_lock'
+  }
+
   task (completed) {
     question: i want to have a surgery on my lung tumor, give me some doctors who are specialized in this field in standford hospital
     expect: it should show me list of related doctors in stanford hospital, california
@@ -90,6 +94,17 @@ group unit_tests {
 }
 
 group application {
+  task.feature.learn_in_detail_modal (completed) {
+    in the doctor's detail modal, add the learn and chat functionalities similar to the article loading modal
+  }
+
+  task.feature.smart_detect_specialty (completed) {
+    question: i want to have a surgery on a bump in my neck, give me some doctors who are specialized in this field in stanford hospital
+    expect: it should detect the specialty on head and neck and show me a list of related doctors
+    actual: many doctors in the list are not related to head and neck
+    - can you use {question_llm} to construct a prompt, act as a anthem bluecross health provider, smartly detect the specialty based on the question, then search the doctor using the apis with the {specialty}?
+  }
+
   task.feature.stream_nextwork_status_checking (completed) {
     for each doctor in the list, do the In Network/Out of Network check a streaming fashion
     once one check has result, display it immediately

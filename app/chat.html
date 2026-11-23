@@ -7654,6 +7654,9 @@ function makeNewsItem(entry, data) {
       : false,
     npi: String(data.npi || ""),
     institution: String(data.institution || ""),
+    practitionerId: String(data.practitioner_id || ""),
+    roleId: String(data.role_id || ""),
+    organizationId: String(data.organization_id || ""),
     providerSpecialty: String(data.specialty || ""),
     summary: data.summary || "",
     paragraphs: Array.isArray(data.paragraphs)
@@ -15177,6 +15180,16 @@ function ensureNewsArticle(item) {
         params.set("network_labels", providerLabels.join(" · "));
       }
     }
+    if (articleApi === "/api/uhc_provider") {
+      if (item.practitionerId) {
+        params.set("practitioner_id", item.practitionerId);
+      }
+      if (item.roleId) params.set("role_id", item.roleId);
+      if (item.organizationId) {
+        params.set("organization_id", item.organizationId);
+      }
+      if (item.npi) params.set("npi", item.npi);
+    }
     requestUrl = `${articleApi}?${params.toString()}`;
   } else {
     requestUrl = `/api/news_article?url=${encodeURIComponent(link)}&title=${encodeURIComponent(item.title || "")}`;
@@ -15191,6 +15204,13 @@ function ensureNewsArticle(item) {
     }))
     .then((data) => {
       item.articleFetched = true;
+      if (data.learnable !== undefined) item.learnable = Boolean(data.learnable);
+      if (data.findable !== undefined) item.findable = Boolean(data.findable);
+      if (data.learn_noun) item.learnNoun = String(data.learn_noun);
+      if (data.source) item.source = String(data.source);
+      if (data.section) item.section = String(data.section);
+      if (data.published) item.published = String(data.published);
+      if (data.specialty) item.providerSpecialty = String(data.specialty);
       if (data.iframe_url) item.iframeUrl = String(data.iframe_url);
       item.articlePartial = Boolean(data.partial);
       const blocks = Array.isArray(data.blocks)

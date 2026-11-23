@@ -362,6 +362,7 @@ WEB_COMMANDS = {
     "/deepresearch": "run a bounded multi-round research report on <topic>: /deepresearch <topic>",
     "/research_with_the_news": "research a topic from recent news, Wikipedia, or a doctor's hospital website, then keep doing so for each follow-up: /research_with_the_news <topic>; /research_with_the_news on; /research_with_the_news off",
     "/anthem": "search the Anthem Provider Directory for doctors by name, specialty, hospital, or location; each result opens a provider profile; follow-up questions keep the provider context: /anthem <question>; /anthem off",
+    "/united_healthcare": "search the UnitedHealthcare provider directory by NPI, doctor name, specialty, or hospital; each result opens a provider profile; /united_healthcare <question>; /united_healthcare off",
     "/write_a_book": "ask for every book setting (model, directory, words, chapters, sub-questions, articles per sub-question), then research recent news and write a book: /write_a_book [<subject>]",
     "/books": "list the books written by /write_a_book in .chat/books: /books [keyword]",
     "/settings": "set English Corner options: /settings english_words_to_learn <range> (3k, 5k, 10k, 20k, 30k, 50k, 100k, or a range such as 10k..50k; default 10k..50k; off disables highlighting)",
@@ -9508,6 +9509,7 @@ COMMAND_ARGUMENTS = {
     "/deepresearch",
     "/research_with_the_news",
     "/anthem",
+    "/united_healthcare",
     "/write_a_book",
     "/settings",
 }
@@ -19214,6 +19216,9 @@ _NPPES_TAXONOMY_ALIASES = {
     "pulmonologist": "Pulmonary Disease",
     "lung": "Pulmonary Disease",
     "head and neck": "Otolaryngology",
+    "head and neck surgery": "Otolaryngology",
+    "head neck surgery": "Otolaryngology",
+    "neck surgery": "Otolaryngology",
     "ent": "Otolaryngology",
     "ear nose and throat": "Otolaryngology",
     "orthopedics": "Orthopaedic Surgery",
@@ -19257,6 +19262,118 @@ _ANTHEM_FHIR_SPECIALTY_CODES = {
     "urologist": "208800000X",
 }
 
+
+# /united_healthcare -- UnitedHealthcare public Plan-Net FHIR directory.
+UHC_FHIR_BASE = os.environ.get(
+    "UHC_FHIR_BASE", "https://flex.optum.com/fhirpublic/R4"
+).rstrip("/")
+UHC_MODEL = os.environ.get("OLLAMA_UHC_MODEL", ANTHEM_MODEL)
+
+_UHC_SPECIALTY_CODES = {
+    "cardiology": "207RC0000X",
+    "cardiologist": "207RC0000X",
+    "cardiovascular disease": "207RC0000X",
+    "heart": "207RC0000X",
+    "dermatology": "207N00000X",
+    "dermatologist": "207N00000X",
+    "neurology": "2084N0400X",
+    "neurologist": "2084N0400X",
+    "medical oncology": "207QX0050X",
+    "oncologist": "207QX0050X",
+    "oncology": "207QX0050X",
+    "surgical oncology": "2086X0206X",
+    "otolaryngology": "207Y00000X",
+    "otorhinolaryngology": "207Y00000X",
+    "ent": "207Y00000X",
+    "head and neck": "207Y00000X",
+    "head and neck surgery": "207Y00000X",
+    "orthopaedic surgery": "207X00000X",
+    "orthopedic surgery": "207X00000X",
+    "orthopedics": "207X00000X",
+    "pediatrics": "208000000X",
+    "pediatrician": "208000000X",
+    "pulmonary disease": "207RP1001X",
+    "pulmonology": "207RP1001X",
+    "pulmonologist": "207RP1001X",
+    "lung": "207RP1001X",
+    "surgery": "208600000X",
+    "surgeon": "208600000X",
+    "thoracic surgery": "208G00000X",
+    "cardiothoracic surgery": "208G00000X",
+    "vascular surgery": "2086S0129X",
+    "urology": "208800000X",
+    "urologist": "208800000X",
+    "gastroenterology": "207RG0100X",
+    "gastroenterologist": "207RG0100X",
+    "endocrinology": "207RE0101X",
+    "endocrinologist": "207RE0101X",
+    "psychiatry": "2084P0800X",
+    "psychiatrist": "2084P0800X",
+    "ophthalmology": "207W00000X",
+    "ophthalmologist": "207W00000X",
+    "obstetrics": "207V00000X",
+    "gynecology": "207V00000X",
+    "obstetrics and gynecology": "207V00000X",
+    "anesthesiology": "207L00000X",
+    "anesthesiologist": "207L00000X",
+    "radiology": "2085R0202X",
+    "radiologist": "2085R0202X",
+    "pathology": "207ZP0102X",
+    "pathologist": "207ZP0102X",
+    "family medicine": "207Q00000X",
+    "internal medicine": "207R00000X",
+    "infectious disease": "207RI0200X",
+    "immunology": "207KI0005X",
+    "rheumatology": "207RR0500X",
+    "nephrology": "207RN0300X",
+    "hematology": "207RH0000X",
+    "emergency medicine": "207P00000X",
+    "physical therapy": "225100000X",
+    "dentistry": "122300000X",
+    "podiatry": "213E00000X",
+}
+
+_UHC_QUESTION_PROMPT = """You classify questions for the UnitedHealthcare provider directory.
+Return only one JSON object, with no prose and no markdown fences.
+
+Fields:
+- "type": one of "doctor_detail", "specialty_list", or
+  "specialty_facility_list".
+- "doctor_name": a doctor's full name, or an empty string.
+- "npi": a 10-digit NPI if the user provides one, or an empty string.
+- "specialty": the medical specialty, or an empty string.
+- "facility": the hospital, clinic, or medical group, or an empty string.
+- "location": a city, state, ZIP code, or address, or an empty string.
+
+How to choose the type:
+- "doctor_detail": the user asks for details about one specific doctor.
+- "specialty_list": the user asks for doctors in a specialty, without
+  restricting the search to one named facility.
+- "specialty_facility_list": the user asks for doctors in a specialty at a
+  named hospital, clinic, or medical group.
+
+Rules:
+- Use the earlier conversation to resolve follow-up references such as
+  "him", "her", "there", or "that hospital".
+- Preserve a named doctor, NPI, specialty, facility, and location exactly when
+  the user gives them.
+- Use specific medical specialty wording such as "Thoracic Surgery",
+  "Otolaryngology", "Cardiology", or "Surgical Oncology".
+- A question about a neck lump treated with surgery should use
+  "Otolaryngology" or "Head and Neck Surgery".
+- Do not invent a doctor, NPI, facility, specialty, or location.
+
+<conversation>
+{{CONVERSATION}}
+</conversation>
+
+<question>
+{{QUESTION}}
+</question>
+
+JSON:
+"""
+
 ANTHEM_PLAN_PROMPT = """You extract search parameters for the Anthem Provider Directory.
 Return only one JSON object, with no prose and no markdown fences.
 
@@ -19288,6 +19405,47 @@ Rules:
 
 JSON:
 """
+
+ANTHEM_SPECIALTY_PROMPT = """You are an Anthem BlueCross provider-directory search specialist.
+Choose the best provider specialty for the patient's question.
+
+Return only one JSON object, with no prose and no markdown fences:
+{
+  "specialty": "...",
+  "keywords": "..."
+}
+
+Rules:
+- If the question names a medical specialty, preserve that specialty.
+- If the question describes a body area, condition, or treatment, choose the
+  specialty that actually treats it. Be specific, not generic.
+- Prefer NPPES taxonomy wording such as "Otolaryngology", "Thoracic Surgery",
+  "Surgical Oncology", "Cardiology", "Neurology", "Dermatology", or
+  "Orthopaedic Surgery".
+- Examples:
+  - neck lump, neck bump, thyroid, throat, tonsil, sinus, ear, hearing,
+    voice, or head and neck surgery -> "Otolaryngology"
+  - lung tumor surgery, chest surgery, or esophageal surgery ->
+    "Thoracic Surgery"
+  - cancer surgery -> "Surgical Oncology"
+  - heart or cardiac surgery -> "Thoracic Surgery"
+  - brain or spine surgery -> "Neurological Surgery"
+- "specialty" must be a medical specialty, not a hospital, clinic, city, or
+  doctor name.
+- "keywords" may contain extra anatomy or condition words, or be empty.
+- Do not invent a doctor, facility, or location.
+
+<current_search_plan>
+{{CURRENT_PLAN}}
+</current_search_plan>
+
+<question>
+{{QUESTION}}
+</question>
+
+JSON:
+"""
+
 
 ANTHEM_PROVIDER_PROFILE_PROMPT = """You are preparing a concise provider profile for a patient.
 
@@ -20100,6 +20258,149 @@ def _anthem_fast_plan(question: str) -> dict[str, str]:
             qualifiers.append(qualifier)
     plan["keywords"] = " ".join(dict.fromkeys(qualifiers))
     return _anthem_clean_plan(plan, question)
+
+
+_ANTHEM_GENERIC_SPECIALTIES = {
+    "surgery",
+    "surgeon",
+    "medicine",
+    "internal medicine",
+    "family medicine",
+    "general practice",
+    "primary care",
+}
+_ANTHEM_BODY_AREA_TERMS = {
+    "head",
+    "neck",
+    "throat",
+    "thyroid",
+    "voice",
+    "ear",
+    "nose",
+    "sinus",
+    "tonsil",
+    "lung",
+    "chest",
+    "thoracic",
+    "heart",
+    "cardiac",
+    "brain",
+    "spine",
+    "back",
+    "knee",
+    "hip",
+    "shoulder",
+    "skin",
+    "breast",
+    "stomach",
+    "abdomen",
+    "liver",
+    "kidney",
+    "eye",
+    "prostate",
+    "bone",
+    "tumor",
+    "tumour",
+    "bump",
+    "lump",
+    "mass",
+}
+_ANTHEM_SPECIALTY_CACHE: dict[str, dict[str, str]] = {}
+_ANTHEM_SPECIALTY_LOCK = threading.Lock()
+
+
+def _anthem_needs_smart_specialty(
+    question: str,
+    plan: dict[str, str],
+) -> bool:
+    """Return whether the fast plan needs a model-detected specialty."""
+    if plan.get("doctor_name"):
+        return False
+    specialty = " ".join(
+        str(plan.get("specialty") or "").casefold().split()
+    )
+    text = " ".join(
+        [
+            str(question or ""),
+            str(plan.get("keywords") or ""),
+        ]
+    ).casefold()
+    if not specialty:
+        return bool(plan.get("keywords"))
+    if specialty not in _ANTHEM_GENERIC_SPECIALTIES:
+        return False
+    return any(
+        re.search(rf"\b{re.escape(term)}\b", text)
+        for term in _ANTHEM_BODY_AREA_TERMS
+    )
+
+
+def _anthem_smart_specialty(
+    question: str,
+    plan: dict[str, str],
+) -> dict[str, str]:
+    """Use the question model to choose a specific provider specialty.
+
+    The fast parser often sees only the treatment word (for example
+    "surgery") and misses the body area (for example a neck lump). The model
+    is asked for a short NPPES-style specialty so the directory search uses a
+    clinically appropriate taxonomy instead of a broad one.
+    """
+    question = " ".join(str(question or "").split())
+    if not question:
+        return {}
+    key = question.casefold()
+    with _ANTHEM_SPECIALTY_LOCK:
+        cached = _ANTHEM_SPECIALTY_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
+    current_plan = json.dumps(
+        {
+            key: str(plan.get(key) or "")
+            for key in (
+                "specialty",
+                "keywords",
+                "facility",
+                "location",
+            )
+        },
+        ensure_ascii=False,
+    )
+    prompt = ANTHEM_SPECIALTY_PROMPT.replace(
+        "{{CURRENT_PLAN}}", current_plan
+    ).replace("{{QUESTION}}", question)
+    try:
+        raw = chat.generate_text(
+            prompt,
+            model=ANTHEM_MODEL,
+            temperature=0.0,
+            num_predict=200,
+            num_ctx=chat.ANSWER_NUM_CTX,
+        )
+    except RuntimeError:
+        return {}
+    parsed = _anthem_json_object(raw)
+    if not isinstance(parsed, dict):
+        return {}
+    specialty = " ".join(
+        str(parsed.get("specialty") or "").split()
+    )
+    specialty = re.sub(
+        r"\s*\(.*\)\s*$", "", specialty
+    ).strip(" .,;")
+    keywords = " ".join(str(parsed.get("keywords") or "").split())
+    if specialty.casefold() in {
+        "",
+        "none",
+        "unknown",
+        "n/a",
+        "not applicable",
+    }:
+        return {}
+    result = {"specialty": specialty, "keywords": keywords}
+    with _ANTHEM_SPECIALTY_LOCK:
+        _ANTHEM_SPECIALTY_CACHE[key] = dict(result)
+    return dict(result)
 
 
 def _anthem_select_provider(
@@ -21339,6 +21640,16 @@ def _anthem_nppes_taxonomy_candidates(
     mapped_key = mapped.casefold() if mapped else ""
     if "surgery" in mapped_key and qualifier_words:
         qualifier_set = {word.casefold() for word in qualifier_words}
+        if qualifier_set & {
+            "neck",
+            "head",
+            "throat",
+            "thyroid",
+            "voice",
+            "tonsil",
+            "sinus",
+        }:
+            add("Otolaryngology")
         if qualifier_set & {
             "lung",
             "thoracic",
@@ -23061,6 +23372,27 @@ def _anthem_provider_detail(
     )
     blocks.append({"type": "list", "items": notes})
 
+    # The article/news Learn and Chat controls store readable paragraphs, not
+    # the structured blocks. Flatten the modal content once here so provider
+    # profiles can be learned and discussed through the same pipeline.
+    learn_paragraphs: list[str] = []
+    if summary:
+        learn_paragraphs.append(summary)
+    for block in blocks:
+        if block.get("type") == "paragraph":
+            text = " ".join(str(block.get("text") or "").split())
+            if text:
+                learn_paragraphs.append(text)
+        elif block.get("type") == "list":
+            items = [
+                " ".join(str(item).split())
+                for item in block.get("items") or []
+                if str(item).strip()
+            ]
+            if items:
+                learn_paragraphs.append(" ".join(items))
+    learn_paragraphs = list(dict.fromkeys(learn_paragraphs))
+
     item = {
         "title": display_name,
         "source": (
@@ -23069,13 +23401,16 @@ def _anthem_provider_detail(
             else "Anthem Provider Directory · CMS NPPES"
         ),
         "link": nppes_link,
+        "section": specialty or record_specialty,
         "docs": True,
         "docs_label": "Anthem" if findcare_detail else "NPPES",
-        "learnable": False,
+        "learnable": True,
+        "learn_noun": "provider",
         "findable": True,
+        "article_api": "/api/anthem_provider",
         "complete": True,
         "blocks": blocks,
-        "paragraphs": [],
+        "paragraphs": learn_paragraphs,
         "images": [],
         "profile_source": source_label,
         "institution": institution,
@@ -23217,7 +23552,7 @@ def _anthem_provider_items_from_context(
                 "paragraphs": [summary] if summary else [],
                 "docs": True,
                 "docs_label": "NPPES",
-                "learnable": False,
+                "learnable": True,
                 "findable": True,
                 "learn_noun": "provider",
                 "article_api": "/api/anthem_provider",
@@ -23377,7 +23712,7 @@ def _anthem_ucsf_directory_items(
                 "paragraphs": [summary] if summary else [],
                 "docs": True,
                 "docs_label": "UCSF",
-                "learnable": False,
+                "learnable": True,
                 "findable": True,
                 "learn_noun": "provider",
                 "article_api": "/api/anthem_provider",
@@ -25243,6 +25578,841 @@ def _anthem_lookup(
 
 
 
+_UHC_ROLE_INCLUDES = [
+    ("_include", "PractitionerRole:practitioner"),
+    ("_include", "PractitionerRole:location"),
+    ("_include", "PractitionerRole:organization"),
+    ("_include", "PractitionerRole:network"),
+]
+_UHC_QUESTION_CACHE: dict[str, dict[str, str]] = {}
+_UHC_QUESTION_LOCK = threading.Lock()
+
+
+def _uhc_fhir_get(
+    resource: str,
+    params: list[tuple[str, str]] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> dict:
+    """Fetch one UnitedHealthcare public Plan-Net FHIR response."""
+    return _uhc_fhir_url(
+        f"{UHC_FHIR_BASE}/{resource}", params or [], log
+    )
+
+
+def _uhc_fhir_url(
+    url: str,
+    params: list[tuple[str, str]] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> dict:
+    """Fetch one absolute Plan-Net FHIR URL."""
+    try:
+        response = requests.get(
+            url,
+            params=params or [],
+            headers={
+                "Accept": "application/fhir+json",
+                "User-Agent": "local-llm-chat-uhc/1.0",
+            },
+            timeout=(5, 30),
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        if log is not None:
+            log(f"[uhc: FHIR request failed: {exc}]")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _uhc_next_link(bundle: dict) -> str:
+    """Return a FHIR Bundle's next-page URL, if present."""
+    for link in bundle.get("link") or []:
+        if not isinstance(link, dict):
+            continue
+        if link.get("relation") == "next" and link.get("url"):
+            return str(link.get("url")).strip()
+    return ""
+
+
+def _uhc_bundle_index(
+    bundle: dict,
+) -> tuple[dict[str, list[dict]], dict[tuple[str, str], dict]]:
+    """Index a FHIR Bundle's resources by type and by ResourceType/id."""
+    by_type: dict[str, list[dict]] = {}
+    by_id: dict[tuple[str, str], dict] = {}
+    for resource in _fhir_bundle_resources(bundle):
+        resource_type = str(resource.get("resourceType") or "").strip()
+        resource_id = str(resource.get("id") or "").strip()
+        if not resource_type:
+            continue
+        by_type.setdefault(resource_type, []).append(resource)
+        if resource_id:
+            by_id[(resource_type, resource_id)] = resource
+    return by_type, by_id
+
+
+def _uhc_ref_id(value) -> str:
+    """Return the id part of a FHIR reference."""
+    key = _fhir_reference_id(value)
+    return key.split("/", 1)[1] if "/" in key else ""
+
+
+def _uhc_practitioner_npi(practitioner: dict) -> str:
+    """Return a Practitioner's NPI identifier."""
+    for identifier in practitioner.get("identifier") or []:
+        if not isinstance(identifier, dict):
+            continue
+        value = str(identifier.get("value") or "").strip()
+        system = str(identifier.get("system") or "").lower()
+        if value and (
+            system.endswith("us-npi")
+            or re.fullmatch(r"\d{10}", value)
+        ):
+            return value
+    return ""
+
+
+def _uhc_practitioner_specialties(practitioner: dict) -> str:
+    """Return a Practitioner's qualification specialties."""
+    labels: list[str] = []
+    for qualification in practitioner.get("qualification") or []:
+        if not isinstance(qualification, dict):
+            continue
+        for label in _fhir_codeables([qualification.get("code")]):
+            if label and label not in labels:
+                labels.append(label)
+    return "; ".join(labels)
+
+
+def _uhc_role_specialties(role: dict) -> str:
+    """Return the specialty labels on one PractitionerRole."""
+    labels: list[str] = []
+    for label in _fhir_codeables(role.get("specialty")):
+        if label and label not in labels:
+            labels.append(label)
+    return "; ".join(labels)
+
+
+def _uhc_role_network_ids(role: dict) -> list[str]:
+    """Return Organization ids referenced as network participation."""
+    ids: list[str] = []
+    for extension in role.get("extension") or []:
+        if not isinstance(extension, dict):
+            continue
+        if "network-reference" not in str(extension.get("url") or ""):
+            continue
+        network_id = _uhc_ref_id(extension.get("valueReference"))
+        if network_id and network_id not in ids:
+            ids.append(network_id)
+    networks = role.get("network") or []
+    if isinstance(networks, dict):
+        networks = [networks]
+    for reference in networks:
+        network_id = _uhc_ref_id(reference)
+        if network_id and network_id not in ids:
+            ids.append(network_id)
+    return ids
+
+
+def _uhc_role_networks(
+    role: dict,
+    by_id: dict[tuple[str, str], dict],
+) -> str:
+    """Return readable network names for one PractitionerRole."""
+    labels: list[str] = []
+    for network_id in _uhc_role_network_ids(role):
+        organization = by_id.get(("Organization", network_id)) or {}
+        label = (
+            str(organization.get("name") or "").strip()
+            or network_id
+        )
+        if label and label not in labels:
+            labels.append(label)
+    return "; ".join(labels)
+
+
+def _uhc_role_locations(
+    role: dict,
+    by_id: dict[tuple[str, str], dict],
+) -> tuple[str, str, str]:
+    """Return (location id, address, phone) for the first role location."""
+    locations = role.get("location") or []
+    if isinstance(locations, dict):
+        locations = [locations]
+    for reference in locations:
+        location_id = _uhc_ref_id(reference)
+        location = by_id.get(("Location", location_id)) or {}
+        address = _fhir_address(location.get("address"))
+        phone = _fhir_telecom(location.get("telecom"))
+        if address or phone:
+            return location_id, address, phone
+    return "", "", ""
+
+
+def _uhc_role_facility(
+    role: dict,
+    by_type: dict[str, list[dict]],
+    by_id: dict[tuple[str, str], dict],
+    network_ids: list[str],
+    preferred_org_id: str = "",
+) -> tuple[str, str]:
+    """Return (organization id, name) for the role's practice facility."""
+    if preferred_org_id:
+        organization = by_id.get(("Organization", preferred_org_id))
+        if organization:
+            return preferred_org_id, str(
+                organization.get("name") or ""
+            ).strip()
+    organization_id = _uhc_ref_id(role.get("organization"))
+    if organization_id:
+        organization = by_id.get(("Organization", organization_id)) or {}
+        return organization_id, str(organization.get("name") or "").strip()
+    network_set = set(network_ids)
+    for organization in by_type.get("Organization") or []:
+        candidate_id = str(organization.get("id") or "").strip()
+        if candidate_id and candidate_id not in network_set:
+            return candidate_id, str(
+                organization.get("name") or ""
+            ).strip()
+    return "", ""
+
+
+def _uhc_role_accepting(role: dict) -> str:
+    """Return the Plan-Net accepting-patients label."""
+    for extension in role.get("extension") or []:
+        if not isinstance(extension, dict):
+            continue
+        if "newpatients" not in str(extension.get("url") or ""):
+            continue
+        for child in extension.get("extension") or []:
+            if not isinstance(child, dict):
+                continue
+            concept = child.get("valueCodeableConcept") or {}
+            text = str(concept.get("text") or "").strip()
+            if text:
+                return text
+            labels = _fhir_codeables([concept])
+            if labels:
+                return labels[0]
+    return ""
+
+
+def _uhc_card_from_role(
+    role: dict,
+    by_type: dict[str, list[dict]],
+    by_id: dict[tuple[str, str], dict],
+    preferred_org_id: str = "",
+) -> dict | None:
+    """Convert one PractitionerRole and its includes into a provider card."""
+    practitioner_id = _uhc_ref_id(role.get("practitioner"))
+    practitioner = by_id.get(("Practitioner", practitioner_id)) or {}
+    name = _fhir_human_name(practitioner) or _fhir_reference_display(
+        role.get("practitioner")
+    )
+    if not name:
+        return None
+    network_ids = _uhc_role_network_ids(role)
+    specialty = _uhc_role_specialties(role) or _uhc_practitioner_specialties(
+        practitioner
+    )
+    location_id, address, location_phone = _uhc_role_locations(
+        role, by_id
+    )
+    organization_id, organization = _uhc_role_facility(
+        role,
+        by_type,
+        by_id,
+        network_ids,
+        preferred_org_id=preferred_org_id,
+    )
+    phone = _fhir_telecom(role.get("telecom")) or location_phone
+    network_labels = [
+        label
+        for label in _uhc_role_networks(role, by_id).split("; ")
+        if label
+    ]
+    networks = "; ".join(network_labels[:4])
+    if len(network_labels) > 4:
+        networks += " …"
+    accepting = _uhc_role_accepting(role)
+    summary = " · ".join(
+        part
+        for part in (specialty, organization, address, phone, networks)
+        if part
+    )
+    link = f"{UHC_FHIR_BASE}/Practitioner/{practitioner_id}"
+    return {
+        "title": name,
+        "name": name,
+        "npi": _uhc_practitioner_npi(practitioner),
+        "practitioner_id": practitioner_id,
+        "role_id": str(role.get("id") or ""),
+        "location_id": location_id,
+        "organization_id": organization_id,
+        "organization": organization,
+        "specialty": specialty,
+        "address": address,
+        "phone": phone,
+        "network": networks,
+        "accepting": accepting,
+        "link": link,
+        "source": "UnitedHealthcare Provider Directory",
+        "section": specialty,
+        "summary": summary,
+        "paragraphs": [summary] if summary else [],
+        "docs": True,
+        "docs_label": "UHC",
+        "learnable": True,
+        "learn_noun": "doctor",
+        "findable": False,
+        "article_api": "/api/uhc_provider",
+        "complete": True,
+    }
+
+
+def _uhc_practitioner_candidates(
+    plan: dict[str, str],
+    log: Callable[[str], None] | None = None,
+) -> list[dict]:
+    """Return UHC Practitioner candidates matching an NPI or name."""
+    npi = str(plan.get("npi") or "").strip()
+    name = " ".join(str(plan.get("doctor_name") or "").split())
+    candidates: list[dict] = []
+    seen: set[str] = set()
+
+    def add(practitioner: dict) -> None:
+        practitioner_id = str(practitioner.get("id") or "")
+        if practitioner_id and practitioner_id in seen:
+            return
+        if practitioner_id:
+            seen.add(practitioner_id)
+        candidates.append(practitioner)
+
+    if npi:
+        bundle = _uhc_fhir_get(
+            "Practitioner",
+            [
+                (
+                    "identifier",
+                    f"http://hl7.org/fhir/sid/us-npi|{npi}",
+                ),
+                ("_count", "10"),
+            ],
+            log,
+        )
+        for practitioner in _fhir_bundle_resources(bundle):
+            if _uhc_practitioner_npi(practitioner) == npi:
+                add(practitioner)
+    if name:
+        first_name, last_name = _anthem_split_name(name)
+        attempts: list[list[tuple[str, str]]] = [
+            [("name", name), ("_count", "20")]
+        ]
+        if first_name or last_name:
+            params: list[tuple[str, str]] = [("_count", "20")]
+            if last_name:
+                params.append(("family", last_name))
+            if first_name:
+                params.append(("given", first_name.split()[0]))
+            attempts.append(params)
+        if last_name:
+            attempts.append([("name", last_name), ("_count", "50")])
+        for params in attempts:
+            bundle = _uhc_fhir_get("Practitioner", params, log)
+            for practitioner in _fhir_bundle_resources(bundle):
+                candidate = _fhir_human_name(practitioner)
+                if candidate and _anthem_names_match(name, candidate):
+                    add(practitioner)
+    return candidates
+
+
+def _uhc_find_practitioner(
+    plan: dict[str, str],
+    log: Callable[[str], None] | None = None,
+) -> dict | None:
+    """Find one UHC Practitioner by NPI, then by full/name family parts."""
+    candidates = _uhc_practitioner_candidates(plan, log)
+    return candidates[0] if candidates else None
+
+
+def _uhc_find_practitioner_with_roles(
+    plan: dict[str, str],
+    log: Callable[[str], None] | None = None,
+) -> tuple[dict | None, dict]:
+    """Return the Practitioner record with the richest role information.
+
+    The public directory can contain more than one Practitioner resource for
+    the same NPI. One copy may have only a single sparse role while another
+    carries many locations and networks, so rank candidates by how much
+    PractitionerRole data they return.
+    """
+    candidates = _uhc_practitioner_candidates(plan, log)
+    best_practitioner: dict | None = None
+    best_roles: dict = {}
+    best_score = -1
+    for practitioner in candidates[:5]:
+        roles = _uhc_roles_for_practitioner(
+            str(practitioner.get("id") or ""), log
+        )
+        role_resources = [
+            resource
+            for resource in _fhir_bundle_resources(roles)
+            if resource.get("resourceType") == "PractitionerRole"
+        ]
+        score = len(role_resources) * 10 + sum(
+            len(_uhc_role_network_ids(role))
+            for role in role_resources
+        )
+        if score > best_score:
+            best_score = score
+            best_practitioner = practitioner
+            best_roles = roles
+    if best_practitioner is not None:
+        return best_practitioner, best_roles
+    if candidates:
+        return candidates[0], {}
+    return None, {}
+
+
+def _uhc_roles_for_practitioner(
+    practitioner_id: str,
+    log: Callable[[str], None] | None = None,
+) -> dict:
+    """Fetch all PractitionerRoles and included resources for one provider."""
+    if not practitioner_id:
+        return {}
+    return _uhc_fhir_get(
+        "PractitionerRole",
+        [
+            ("practitioner", f"Practitioner/{practitioner_id}"),
+            ("_count", "50"),
+            *_UHC_ROLE_INCLUDES,
+        ],
+        log,
+    )
+
+
+def _uhc_find_organization(
+    facility: str,
+    log: Callable[[str], None] | None = None,
+) -> dict | None:
+    """Resolve a hospital/clinic name to one UHC Organization."""
+    facility = " ".join(str(facility or "").split())
+    if not facility:
+        return None
+    variants = _anthem_facility_name_variants(facility) or [facility]
+    for variant in variants:
+        bundle = _uhc_fhir_get(
+            "Organization",
+            [("name", variant), ("_count", "20")],
+            log,
+        )
+        organizations = [
+            organization
+            for organization in _fhir_bundle_resources(bundle)
+            if organization.get("resourceType") == "Organization"
+        ]
+        if not organizations:
+            continue
+        wanted = facility.casefold()
+        for organization in organizations:
+            name = str(organization.get("name") or "").strip()
+            if name.casefold() == wanted:
+                return organization
+        for organization in organizations:
+            name = str(organization.get("name") or "").strip().casefold()
+            if wanted in name or name in wanted:
+                return organization
+        return organizations[0]
+    return None
+
+
+def _uhc_specialty_code(specialty: str) -> str:
+    """Map a specialty name to a NUCC taxonomy code used by UHC."""
+    key = " ".join(str(specialty or "").casefold().split())
+    if not key:
+        return ""
+    if key in _UHC_SPECIALTY_CODES:
+        return _UHC_SPECIALTY_CODES[key]
+    for label, code in _UHC_SPECIALTY_CODES.items():
+        if label in key or key in label:
+            return code
+    if "head and neck" in key or "neck" in key:
+        return "207Y00000X"
+    if "thoracic" in key or "cardiothoracic" in key:
+        return "208G00000X"
+    if "surgical oncology" in key:
+        return "2086X0206X"
+    if "surgery" in key or "surgeon" in key:
+        return "208600000X"
+    return _ANTHEM_FHIR_SPECIALTY_CODES.get(key, "")
+
+
+def _uhc_roles_search(
+    plan: dict[str, str],
+    organization: dict | None = None,
+    limit: int = 30,
+    log: Callable[[str], None] | None = None,
+) -> list[dict]:
+    """Search UHC PractitionerRoles and build one card per doctor."""
+    specialty_code = _uhc_specialty_code(plan.get("specialty", ""))
+    if not specialty_code:
+        return []
+    params: list[tuple[str, str]] = [
+        ("specialty", specialty_code),
+        ("_count", str(max(limit, 20))),
+        *_UHC_ROLE_INCLUDES,
+    ]
+    organization_id = ""
+    preferred_org_id = ""
+    if organization:
+        organization_id = str(organization.get("id") or "").strip()
+        preferred_org_id = organization_id
+        if organization_id:
+            params.append(
+                ("organization", f"Organization/{organization_id}")
+            )
+    else:
+        city, state, postal = _anthem_parse_location(
+            plan.get("location", "")
+        )
+        if city:
+            params.append(("location.address-city", city))
+        if state:
+            params.append(("location.address-state", state))
+        if postal:
+            params.append(("location.address-postalcode", postal))
+    bundle = _uhc_fhir_get("PractitionerRole", params, log)
+    cards: list[dict] = []
+    seen: set[str] = set()
+    pages = 0
+    while bundle and pages < 5:
+        by_type, by_id = _uhc_bundle_index(bundle)
+        for role in by_type.get("PractitionerRole") or []:
+            practitioner_id = _uhc_ref_id(role.get("practitioner"))
+            if not practitioner_id or practitioner_id in seen:
+                continue
+            card = _uhc_card_from_role(
+                role,
+                by_type,
+                by_id,
+                preferred_org_id=preferred_org_id,
+            )
+            if card is None:
+                continue
+            seen.add(practitioner_id)
+            cards.append(card)
+            if len(cards) >= limit:
+                break
+        if len(cards) >= limit:
+            break
+        next_url = _uhc_next_link(bundle)
+        if not next_url:
+            break
+        bundle = _uhc_fhir_url(next_url, [], log)
+        pages += 1
+    return cards
+
+
+def _uhc_detail_item(
+    practitioner: dict,
+    roles_bundle: dict,
+    role_id: str = "",
+    organization_id: str = "",
+) -> dict:
+    """Build the full UHC provider modal payload."""
+    by_type, by_id = _uhc_bundle_index(roles_bundle)
+    roles = [
+        role
+        for role in by_type.get("PractitionerRole") or []
+        if isinstance(role, dict)
+    ]
+    chosen = next(
+        (
+            role
+            for role in roles
+            if str(role.get("id") or "") == str(role_id or "")
+        ),
+        roles[0] if roles else {},
+    )
+    base = _uhc_card_from_role(
+        chosen,
+        by_type,
+        by_id,
+        preferred_org_id=organization_id,
+    ) if chosen else None
+    name = (
+        _fhir_human_name(practitioner)
+        or (base or {}).get("name")
+        or "Provider"
+    )
+    npi = _uhc_practitioner_npi(practitioner) or (base or {}).get("npi", "")
+    specialties = (
+        (base or {}).get("specialty", "")
+        or _uhc_practitioner_specialties(practitioner)
+    )
+    locations: list[str] = []
+    organizations: list[str] = []
+    networks: list[str] = []
+    phones: list[str] = []
+    accepting: list[str] = []
+    for role in roles:
+        _location_id, address, location_phone = _uhc_role_locations(
+            role, by_id
+        )
+        if address and address not in locations:
+            locations.append(address)
+        network_ids = _uhc_role_network_ids(role)
+        _org_id, organization = _uhc_role_facility(
+            role, by_type, by_id, network_ids
+        )
+        if organization and organization not in organizations:
+            organizations.append(organization)
+        role_networks = _uhc_role_networks(role, by_id)
+        for network in role_networks.split("; "):
+            if network and network not in networks:
+                networks.append(network)
+        phone = _fhir_telecom(role.get("telecom")) or location_phone
+        if phone and phone not in phones:
+            phones.append(phone)
+        role_accepting = _uhc_role_accepting(role)
+        if role_accepting and role_accepting not in accepting:
+            accepting.append(role_accepting)
+    if organization_id and not organizations:
+        organization = by_id.get(("Organization", organization_id)) or {}
+        name_value = str(organization.get("name") or "").strip()
+        if name_value:
+            organizations.append(name_value)
+    blocks: list[dict] = [
+        {"type": "heading", "text": "Provider", "level": 2}
+    ]
+    facts = [f"Name: {name}"]
+    if npi:
+        facts.append(f"NPI: {npi}")
+    if specialties:
+        facts.append(f"Specialty: {specialties}")
+    if accepting:
+        facts.append("Accepting new patients: " + "; ".join(accepting))
+    if networks:
+        shown = networks[:10]
+        facts.append(
+            "Networks: "
+            + "; ".join(shown)
+            + (" …" if len(networks) > len(shown) else "")
+        )
+    blocks.append({"type": "list", "items": facts})
+    if locations:
+        blocks.append(
+            {"type": "heading", "text": "Locations", "level": 2}
+        )
+        blocks.append({"type": "list", "items": locations})
+    if organizations:
+        blocks.append(
+            {"type": "heading", "text": "Organizations", "level": 2}
+        )
+        blocks.append({"type": "list", "items": organizations})
+    if phones:
+        blocks.append(
+            {"type": "heading", "text": "Contact", "level": 2}
+        )
+        blocks.append({"type": "list", "items": phones})
+    sources = [
+        f"UnitedHealthcare Practitioner: {UHC_FHIR_BASE}/Practitioner/"
+        f"{practitioner.get('id', '')}"
+    ]
+    if role_id:
+        sources.append(
+            f"UnitedHealthcare PractitionerRole: {UHC_FHIR_BASE}/"
+            f"PractitionerRole/{role_id}"
+        )
+    blocks.append(
+        {"type": "heading", "text": "Sources", "level": 2}
+    )
+    blocks.append({"type": "list", "items": sources})
+    paragraphs: list[str] = []
+    for block in blocks:
+        if block.get("type") == "paragraph":
+            text = " ".join(str(block.get("text") or "").split())
+            if text:
+                paragraphs.append(text)
+        elif block.get("type") == "list":
+            items = [
+                " ".join(str(item).split())
+                for item in block.get("items") or []
+                if str(item).strip()
+            ]
+            if items:
+                paragraphs.append(" ".join(items))
+    summary = " · ".join(
+        part
+        for part in (
+            specialties,
+            "; ".join(organizations),
+            locations[0] if locations else "",
+            "; ".join(networks),
+        )
+        if part
+    )
+    return {
+        "title": name,
+        "name": name,
+        "npi": npi,
+        "practitioner_id": str(practitioner.get("id") or ""),
+        "role_id": str(chosen.get("id") or ""),
+        "organization_id": organization_id,
+        "organization": "; ".join(organizations),
+        "specialty": specialties,
+        "address": locations[0] if locations else "",
+        "phone": phones[0] if phones else "",
+        "network": "; ".join(networks),
+        "link": f"{UHC_FHIR_BASE}/Practitioner/"
+        f"{practitioner.get('id', '')}",
+        "source": "UnitedHealthcare Provider Directory",
+        "section": specialties,
+        "summary": summary,
+        "paragraphs": list(dict.fromkeys(paragraphs)),
+        "docs": True,
+        "docs_label": "UHC",
+        "learnable": True,
+        "learn_noun": "doctor",
+        "findable": False,
+        "article_api": "/api/uhc_provider",
+        "complete": True,
+        "blocks": blocks,
+    }
+
+
+def _uhc_nppes_fallback_card(
+    plan: dict[str, str],
+    log: Callable[[str], None] | None = None,
+) -> dict | None:
+    """Show a CMS NPPES card when the provider is absent from UHC public data."""
+    npi = str(plan.get("npi") or "").strip()
+    name = " ".join(str(plan.get("doctor_name") or "").split())
+    if not (npi or name):
+        return None
+    record = _anthem_nppes_record_for_provider(npi, name)
+    if not record:
+        if log is not None:
+            log(
+                "[uhc: no UnitedHealthcare record or CMS NPPES record "
+                "matched the requested doctor]"
+            )
+        return None
+    context = _anthem_format_nppes([record])
+    items = _anthem_provider_items_from_context(
+        context,
+        "CMS NPPES registry",
+        institution=str(plan.get("facility") or ""),
+    )
+    if not items:
+        return None
+    item = items[0]
+    note = "Not listed in the UHC public directory"
+    item["source"] = "CMS NPPES registry"
+    item["profile_source"] = note
+    summary = str(item.get("summary") or "").strip()
+    item["summary"] = f"{summary} · {note}" if summary else note
+    item["paragraphs"] = [item["summary"]]
+    item["learnable"] = True
+    item["learn_noun"] = "doctor"
+    return item
+
+
+def _uhc_fallback_plan(question: str) -> dict[str, str]:
+    """Deterministic question classification when the model is unavailable."""
+    text = _anthem_normalize_question(question)
+    fast = _anthem_fast_plan(text)
+    npi_match = re.search(r"\b\d{10}\b", text)
+    npi = npi_match.group(0) if npi_match else ""
+    doctor_name = fast.get("doctor_name", "")
+    specialty = fast.get("specialty", "")
+    facility = fast.get("facility", "")
+    location = fast.get("location", "")
+    detail_words = re.search(
+        r"\b(?:tell me about|who is|profile|background|details?|credentials?)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if (doctor_name or npi) and detail_words:
+        qtype = "doctor_detail"
+    elif doctor_name and not specialty:
+        qtype = "doctor_detail"
+    elif specialty and facility:
+        qtype = "specialty_facility_list"
+    elif specialty:
+        qtype = "specialty_list"
+    elif facility:
+        qtype = "specialty_facility_list"
+    else:
+        qtype = "specialty_list"
+    return {
+        "type": qtype,
+        "doctor_name": doctor_name,
+        "npi": npi,
+        "specialty": specialty,
+        "facility": facility,
+        "location": location,
+    }
+
+
+def _uhc_classify_question(
+    question: str,
+    conversation: str = "",
+) -> dict[str, str]:
+    """Use the question model to classify a UHC provider question."""
+    question = " ".join(str(question or "").split())
+    if not question:
+        return _uhc_fallback_plan(question)
+    key = question.casefold() + "\n" + " ".join(
+        str(conversation or "").casefold().split()
+    )
+    with _UHC_QUESTION_LOCK:
+        cached = _UHC_QUESTION_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
+    prompt = _UHC_QUESTION_PROMPT.replace(
+        "{{CONVERSATION}}", conversation or "(none)"
+    ).replace("{{QUESTION}}", question)
+    try:
+        raw = chat.generate_text(
+            prompt,
+            model=UHC_MODEL,
+            temperature=0.0,
+            num_predict=300,
+            num_ctx=chat.ANSWER_NUM_CTX,
+        )
+    except RuntimeError:
+        return _uhc_fallback_plan(question)
+    parsed = _anthem_json_object(raw)
+    if not isinstance(parsed, dict):
+        return _uhc_fallback_plan(question)
+    result = {
+        key: " ".join(str(parsed.get(key) or "").split())
+        for key in (
+            "type",
+            "doctor_name",
+            "npi",
+            "specialty",
+            "facility",
+            "location",
+        )
+    }
+    if result["type"] not in {
+        "doctor_detail",
+        "specialty_list",
+        "specialty_facility_list",
+    }:
+        result = _uhc_fallback_plan(question)
+    if result["type"] == "doctor_detail" and not (
+        result["doctor_name"] or result["npi"]
+    ):
+        result = _uhc_fallback_plan(question)
+    with _UHC_QUESTION_LOCK:
+        _UHC_QUESTION_CACHE[key] = dict(result)
+    return dict(result)
+
+
 class ChatState:
     """The server-side equivalent of chat.py's interactive session state."""
 
@@ -25297,6 +26467,14 @@ class ChatState:
         self.anthem_source = ""
         self.anthem_records = 0
         self.anthem_items_sent = False
+        # /united_healthcare uses the public UnitedHealthcare Plan-Net FHIR
+        # directory. It has its own mode and conversation thread.
+        self.united_healthcare_mode = False
+        self.united_healthcare_context = ""
+        self.united_healthcare_plan: dict[str, str] = {}
+        self.united_healthcare_providers: list[dict] = []
+        self.united_healthcare_source = ""
+        self.united_healthcare_records = 0
         # /research_with_the_news keeps answering every following question in
         # the accumulated research context until the user turns it off. The
         # Mode selector defaults to Online, so the browser starts in this mode.
@@ -25556,6 +26734,10 @@ class ChatState:
             "benchmark_mode": self.benchmark_mode,
             "anthem_mode": self.anthem_mode,
             "anthem_has_context": bool(self.anthem_context),
+            "united_healthcare_mode": self.united_healthcare_mode,
+            "united_healthcare_has_context": bool(
+                self.united_healthcare_context
+            ),
             "research_with_news_mode": self.research_with_news_mode,
             "english_words_to_learn": self.english_words_to_learn,
             "english_words_label": self.english_words_label,
@@ -26120,10 +27302,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     state: ChatState
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Status annotations may stream from a background worker while the
-        # request thread is still emitting search logs and result cards.
+        # BaseHTTPRequestHandler.__init__ processes the request, so this lock
+        # must exist before super().__init__() is called. Status annotations
+        # may stream from a background worker while the request thread is
+        # emitting search logs and result cards.
         self._sse_write_lock = threading.Lock()
+        super().__init__(*args, **kwargs)
 
     # ---- basic helpers ------------------------------------------------
     def log_message(self, fmt, *args):
@@ -26204,8 +27388,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
     def _sse(self, event: str, data) -> None:
         payload = json.dumps(data, ensure_ascii=False)
         message = f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
+        lock = getattr(self, "_sse_write_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._sse_write_lock = lock
         try:
-            with self._sse_write_lock:
+            with lock:
                 self.wfile.write(message)
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
@@ -26373,6 +27561,62 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 self._send_error_json(str(exc), 502)
                 return
             self._send_json(article)
+            return
+        if path == "/api/uhc_provider":
+            params = parse_qs(parsed.query)
+            practitioner_id = (
+                params.get("practitioner_id") or [""]
+            )[0].strip()
+            role_id = (params.get("role_id") or [""])[0].strip()
+            organization_id = (
+                params.get("organization_id") or [""]
+            )[0].strip()
+            npi = (params.get("npi") or [""])[0].strip()
+            name = (params.get("title") or [""])[0].strip()
+            url = (params.get("url") or [""])[0].strip()
+            if not practitioner_id and url:
+                match = re.search(r"/Practitioner/([^/?#]+)", url)
+                if match:
+                    practitioner_id = match.group(1)
+            if not practitioner_id and (npi or name):
+                practitioner = _uhc_find_practitioner(
+                    {"npi": npi, "doctor_name": name}
+                )
+                if practitioner is not None:
+                    practitioner_id = str(
+                        practitioner.get("id") or ""
+                    )
+            if not practitioner_id:
+                self._send_error_json(
+                    "Missing or invalid UnitedHealthcare practitioner id",
+                    400,
+                )
+                return
+            roles_bundle = _uhc_roles_for_practitioner(practitioner_id)
+            by_type, by_id = _uhc_bundle_index(roles_bundle)
+            practitioner = by_id.get(("Practitioner", practitioner_id))
+            if not practitioner and (npi or name):
+                practitioner = _uhc_find_practitioner(
+                    {"npi": npi, "doctor_name": name}
+                )
+            if not practitioner and name:
+                practitioner = {
+                    "resourceType": "Practitioner",
+                    "id": practitioner_id,
+                    "name": [{"text": name}],
+                }
+            if not practitioner:
+                self._send_error_json(
+                    "UnitedHealthcare practitioner not found", 404
+                )
+                return
+            item = _uhc_detail_item(
+                practitioner,
+                roles_bundle,
+                role_id=role_id,
+                organization_id=organization_id,
+            )
+            self._send_json(item)
             return
         if path == "/api/anthem_provider":
             params = parse_qs(parsed.query)
@@ -28112,6 +29356,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
     def _run_question(self, question: str) -> None:
         state = self.state
+        if state.united_healthcare_mode:
+            self._run_united_healthcare_question(question)
+            return
         if state.anthem_mode:
             # /anthem keeps its own provider-directory thread. Every ordinary
             # question stays in that thread, with the recent provider results
@@ -29278,6 +30525,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "\n  provider search: Anthem mode on "
                     f"({state.anthem_records} record(s) in context)"
                 )
+            if state.united_healthcare_mode:
+                report += (
+                    "\n  provider search: UnitedHealthcare mode on "
+                    f"({state.united_healthcare_records} record(s) in "
+                    "context)"
+                )
             self._sse_text("output", "\n" + report + "\n")
         elif name == "/sources":
             self._command_sources()
@@ -29289,6 +30542,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_research_with_the_news(argument)
         elif name == "/anthem":
             self._command_anthem(argument)
+        elif name == "/united_healthcare":
+            self._command_united_healthcare(argument)
         elif name == "/write_a_book":
             self._command_write_a_book(argument)
         elif name == "/books":
@@ -29359,6 +30614,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             state.anthem_mode = True
             state.research_with_news_mode = False
+            if state.united_healthcare_mode:
+                state.united_healthcare_mode = False
+                self._reset_united_healthcare_context()
             self._reset_anthem_context()
             self._sse("meta", state.snapshot())
             self._sse_text(
@@ -29372,6 +30630,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if not value:
             state.anthem_mode = True
             state.research_with_news_mode = False
+            if state.united_healthcare_mode:
+                state.united_healthcare_mode = False
+                self._reset_united_healthcare_context()
             self._reset_anthem_context()
             self._sse("meta", state.snapshot())
             self._sse_text(
@@ -29385,6 +30646,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         was_on = state.anthem_mode
         state.anthem_mode = True
         state.research_with_news_mode = False
+        if state.united_healthcare_mode:
+            state.united_healthcare_mode = False
+            self._reset_united_healthcare_context()
         if not was_on:
             self._reset_anthem_context()
         self._sse("meta", state.snapshot())
@@ -29406,6 +30670,319 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         state.latest_benchmark = None
         state.code_language = ""
 
+    def _reset_united_healthcare_context(self) -> None:
+        """Clear the UnitedHealthcare provider-search thread."""
+        state = self.state
+        state.reset_conversation()
+        state.united_healthcare_context = ""
+        state.united_healthcare_plan = {}
+        state.united_healthcare_providers = []
+        state.united_healthcare_source = ""
+        state.united_healthcare_records = 0
+        state.cache.clear()
+        state.latest_answer = None
+        state.latest_sources = []
+        state.latest_benchmark = None
+        state.code_language = ""
+
+    def _command_united_healthcare(self, argument: str) -> None:
+        """Start, stop, or query the UnitedHealthcare provider mode."""
+        state = self.state
+        value = " ".join(argument.split())
+        normalized = value.casefold()
+        if normalized in {"off", "stop", "exit", "disable", "disabled"}:
+            if not state.united_healthcare_mode:
+                self._sse_text(
+                    "output",
+                    "\nUnitedHealthcare provider search is already off; "
+                    "normal chat is active.\n",
+                )
+                return
+            state.united_healthcare_mode = False
+            self._reset_united_healthcare_context()
+            self._sse("meta", state.snapshot())
+            self._sse_text(
+                "output",
+                "\nUnitedHealthcare provider search is off; normal chat "
+                "is back.\n",
+            )
+            return
+        if normalized in {"on", "start", "enable", "enabled"}:
+            if state.united_healthcare_mode:
+                self._sse_text(
+                    "output",
+                    "\nUnitedHealthcare provider search is already on.\n",
+                )
+                return
+            state.united_healthcare_mode = True
+            state.research_with_news_mode = False
+            if state.anthem_mode:
+                state.anthem_mode = False
+                self._reset_anthem_context()
+            self._reset_united_healthcare_context()
+            self._sse("meta", state.snapshot())
+            self._sse_text(
+                "output",
+                "\nUnitedHealthcare provider search is on. Ask about a "
+                "doctor, NPI, specialty, or hospital. Use "
+                "/united_healthcare off to return to normal chat.\n",
+            )
+            return
+        if not value:
+            state.united_healthcare_mode = True
+            state.research_with_news_mode = False
+            if state.anthem_mode:
+                state.anthem_mode = False
+                self._reset_anthem_context()
+            self._reset_united_healthcare_context()
+            self._sse("meta", state.snapshot())
+            self._sse_text(
+                "output",
+                "\nUnitedHealthcare provider search is ready. Ask about a "
+                "doctor, NPI, specialty, or hospital. Use "
+                "/united_healthcare off to return to normal chat.\n",
+            )
+            return
+        was_on = state.united_healthcare_mode
+        state.united_healthcare_mode = True
+        state.research_with_news_mode = False
+        if state.anthem_mode:
+            state.anthem_mode = False
+            self._reset_anthem_context()
+        if not was_on:
+            self._reset_united_healthcare_context()
+        self._sse("meta", state.snapshot())
+        self._run_united_healthcare_question(value)
+
+    def _emit_uhc_cards(
+        self,
+        cards: list[dict],
+        description: str,
+    ) -> None:
+        """Stream UnitedHealthcare provider cards into the reader."""
+        if not cards:
+            return
+        self._sse(
+            "news",
+            {
+                "type": "start",
+                "source": "UnitedHealthcare Provider Directory",
+                "description": description,
+                "docs": True,
+                "docs_label": "UHC",
+                "no_scroll": True,
+                "reset": True,
+            },
+        )
+        for index, card in enumerate(cards, start=1):
+            card["index"] = index
+            self._sse("news", {"type": "item", **card})
+
+    def _run_united_healthcare_question(self, question: str) -> None:
+        """Classify and answer one UnitedHealthcare provider question."""
+        question = _anthem_normalize_question(question)
+        question = " ".join(question.split())
+        if not question:
+            return
+        state = self.state
+        conversation = format_conversation(
+            state.conversation, state.conversation_summary
+        )
+        self._sse_text(
+            "log", "[uhc: classifying the provider question]"
+        )
+        plan = _uhc_classify_question(question, conversation)
+        state.united_healthcare_plan = plan
+        self._sse_text(
+            "log",
+            "[uhc: type="
+            f"{plan.get('type') or 'unknown'}, "
+            f"doctor={plan.get('doctor_name') or 'none'}, "
+            f"npi={plan.get('npi') or 'none'}, "
+            f"specialty={plan.get('specialty') or 'none'}, "
+            f"facility={plan.get('facility') or 'none'}, "
+            f"location={plan.get('location') or 'none'}]"
+        )
+        plan_type = plan.get("type")
+        if plan_type == "doctor_detail":
+            practitioner, roles_bundle = (
+                _uhc_find_practitioner_with_roles(
+                    plan, lambda text: self._sse_text("log", text)
+                )
+            )
+            if practitioner is None:
+                fallback = _uhc_nppes_fallback_card(
+                    plan, lambda text: self._sse_text("log", text)
+                )
+                if fallback is not None:
+                    note = (
+                        f"{fallback.get('name')} is not listed in the "
+                        "UnitedHealthcare public provider directory. "
+                        "Showing the public CMS NPPES record instead; this "
+                        "does not confirm UnitedHealthcare network "
+                        "participation."
+                    )
+                    self._sse_text("delta", note)
+                    self._emit_uhc_cards(
+                        [fallback],
+                        "Not found in the UnitedHealthcare public "
+                        "directory · showing CMS NPPES record",
+                    )
+                    state.united_healthcare_context = (
+                        note + " " + str(fallback.get("summary") or "")
+                    ).strip()
+                    state.united_healthcare_providers = [fallback]
+                    state.united_healthcare_source = (
+                        "CMS NPPES registry (UHC directory has no match)"
+                    )
+                    state.united_healthcare_records = 1
+                    state.latest_answer = note
+                    state.latest_sources = []
+                    state.latest_benchmark = {
+                        "uhc_source": state.united_healthcare_source,
+                        "uhc_records": 1,
+                        "model": "CMS NPPES fallback",
+                    }
+                    state.record_turn(question, question, note)
+                    self._sse("annotations", {"items": []})
+                    return
+                message = (
+                    "I could not find that doctor in the UnitedHealthcare "
+                    "public provider directory or the CMS NPPES registry."
+                )
+                self._sse_text("delta", message)
+                state.latest_answer = message
+                state.latest_sources = []
+                state.latest_benchmark = {
+                    "uhc_source": "UnitedHealthcare Provider Directory",
+                    "uhc_records": 0,
+                    "model": "UnitedHealthcare Plan-Net FHIR",
+                }
+                state.record_turn(question, question, message)
+                self._sse("annotations", {"items": []})
+                return
+            item = _uhc_detail_item(practitioner, roles_bundle)
+            self._emit_uhc_cards(
+                [item],
+                f"UnitedHealthcare profile for {item.get('name')}",
+            )
+            state.united_healthcare_context = str(
+                item.get("summary") or ""
+            )
+            state.united_healthcare_providers = [item]
+            state.united_healthcare_source = (
+                "UnitedHealthcare Provider Directory"
+            )
+            state.united_healthcare_records = 1
+            state.latest_answer = ""
+            state.latest_sources = []
+            state.latest_benchmark = {
+                "uhc_source": state.united_healthcare_source,
+                "uhc_records": 1,
+                "model": "UnitedHealthcare Plan-Net FHIR",
+            }
+            state.record_turn(
+                question, question, "Provider details displayed as 1 card."
+            )
+            self._sse("annotations", {"items": []})
+            return
+
+        specialty = str(plan.get("specialty") or "").strip()
+        if not _uhc_specialty_code(specialty):
+            message = (
+                "Tell me which medical specialty to search for, such as "
+                "cardiology, thoracic surgery, otolaryngology, or "
+                "dermatology."
+            )
+            self._sse_text("delta", message)
+            state.latest_answer = message
+            state.latest_sources = []
+            state.latest_benchmark = {
+                "uhc_source": "UnitedHealthcare Provider Directory",
+                "uhc_records": 0,
+                "model": "UnitedHealthcare Plan-Net FHIR",
+            }
+            state.record_turn(question, question, message)
+            self._sse("annotations", {"items": []})
+            return
+
+        organization: dict | None = None
+        facility = str(plan.get("facility") or "").strip()
+        location = str(plan.get("location") or "").strip()
+        if plan_type == "specialty_facility_list" and facility:
+            organization = _uhc_find_organization(
+                facility, lambda text: self._sse_text("log", text)
+            )
+            if organization is None and not location:
+                message = (
+                    f"I could not resolve {facility!r} in the "
+                    "UnitedHealthcare provider directory."
+                )
+                self._sse_text("delta", message)
+                state.latest_answer = message
+                state.latest_sources = []
+                state.latest_benchmark = {
+                    "uhc_source": "UnitedHealthcare Provider Directory",
+                    "uhc_records": 0,
+                    "model": "UnitedHealthcare Plan-Net FHIR",
+                }
+                state.record_turn(question, question, message)
+                self._sse("annotations", {"items": []})
+                return
+
+        cards = _uhc_roles_search(
+            plan,
+            organization=organization,
+            limit=20,
+            log=lambda text: self._sse_text("log", text),
+        )
+        if not cards:
+            where = facility or location
+            message = (
+                "No UnitedHealthcare directory providers were found for "
+                f"{specialty}"
+                + (f" in {where}." if where else ".")
+            )
+            self._sse_text("delta", message)
+            state.latest_answer = message
+            state.latest_sources = []
+            state.latest_benchmark = {
+                "uhc_source": "UnitedHealthcare Provider Directory",
+                "uhc_records": 0,
+                "model": "UnitedHealthcare Plan-Net FHIR",
+            }
+            state.record_turn(question, question, message)
+            self._sse("annotations", {"items": []})
+            return
+        description = (
+            f"UnitedHealthcare Provider Directory · {specialty}"
+            + (f" · {facility}" if facility else "")
+            + f" · {len(cards)} provider record(s); click a result to open "
+            "the profile"
+        )
+        self._emit_uhc_cards(cards, description)
+        state.united_healthcare_context = " ".join(
+            str(card.get("summary") or "") for card in cards
+        )
+        state.united_healthcare_providers = cards
+        state.united_healthcare_source = (
+            "UnitedHealthcare Provider Directory"
+        )
+        state.united_healthcare_records = len(cards)
+        state.latest_answer = ""
+        state.latest_sources = []
+        state.latest_benchmark = {
+            "uhc_source": state.united_healthcare_source,
+            "uhc_records": len(cards),
+            "model": "UnitedHealthcare Plan-Net FHIR",
+        }
+        state.record_turn(
+            question,
+            question,
+            f"Provider results displayed as {len(cards)} cards.",
+        )
+        self._sse("annotations", {"items": []})
+
     def _run_anthem_question(self, question: str) -> None:
         """Search the Anthem directory and stream API results directly."""
         question = _anthem_normalize_question(question)
@@ -29416,11 +30993,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         previous_context = state.anthem_context
         search_keys = ("doctor_name", "specialty", "facility", "location")
 
-        # Fast local parsing is the primary path. The question model is only
-        # used if these rules find no search fields, and it is never used to
-        # write the result list itself.
+        # Fast local parsing is the primary path. The question model is used
+        # only when the fast plan has no search fields or needs a more
+        # clinically specific specialty (for example a neck lump that the
+        # fast parser reduced to generic "Surgery").
         plan = _anthem_fast_plan(question)
-        has_search_fields = any(plan.get(key) for key in search_keys)
         self._sse_text(
             "log",
             "[anthem: fast search parameters: "
@@ -29434,6 +31011,22 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             + "]",
         )
+        if not plan.get("doctor_name") and _anthem_needs_smart_specialty(
+            question, plan
+        ):
+            smart = _anthem_smart_specialty(question, plan)
+            if smart.get("specialty"):
+                fast_specialty = plan.get("specialty") or "none"
+                plan["specialty"] = smart["specialty"]
+                if smart.get("keywords"):
+                    plan["keywords"] = smart["keywords"]
+                self._sse_text(
+                    "log",
+                    "[anthem: smart specialty "
+                    f"{plan['specialty']!r} (fast parser: "
+                    f"{fast_specialty!r})]",
+                )
+        has_search_fields = any(plan.get(key) for key in search_keys)
 
         target = (
             _anthem_select_provider(question, state.anthem_providers)
@@ -30098,6 +31691,20 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._sse_text(
                 "log",
                 "[anthem: mode off because the knowledge mode changed]",
+            )
+        if state.united_healthcare_mode and topic.casefold() not in {
+            "off",
+            "stop",
+            "exit",
+            "disable",
+            "disabled",
+        }:
+            state.united_healthcare_mode = False
+            self._reset_united_healthcare_context()
+            self._sse("meta", state.snapshot())
+            self._sse_text(
+                "log",
+                "[uhc: mode off because the knowledge mode changed]",
             )
         if not topic:
             self._sse_text(

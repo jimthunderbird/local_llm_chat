@@ -1,0 +1,41 @@
+question_llm: ollama local model ornith:35b
+
+knowledge {
+  uhc {
+    1. Look Up the Practitioner by NPI:
+    ```
+    curl --get "https://flex.optum.com/fhirpublic/R4/Practitioner" \
+  -H "Accept: application/fhir+json" \
+  --data-urlencode "identifier=http://hl7.org/fhir/sid/us-npi|1619004058"
+    ```
+
+    2. Check the returned JSON Bundle for entry[0].resource.id (the internal FHIR practitioner ID).
+
+    3. Once you have the internal id from Step 1, query PractitionerRole to see linked networks, locations, and organizations:
+    ```
+    curl --get "https://flex.optum.com/fhirpublic/R4/PractitionerRole" \
+  -H "Accept: application/fhir+json" \
+  --data-urlencode "practitioner=Practitioner/<PRACTITIONER_ID>" \
+  --data-urlencode "_include=PractitionerRole:network" \
+  --data-urlencode "_include=PractitionerRole:location" \
+  --data-urlencode "_include=PractitionerRole:organization"
+    ```
+  }
+}
+
+task (completed) {
+  - question: tell me about doctor Johannes Kratz from UCSF
+  - result: I could not find that doctor in the public UnitedHealthcare provider directory
+}
+
+task (completed) {
+  create command: /united_healthcare, and learn from {knowlege.uhc} {
+    once entered:
+    - clear up exiting acculated context in the chat
+    - when asking a question, use {question_llm} to check the type of the {question}:
+      here are the possible types:
+      1. asking the detail of the specific doctor
+      2. asking a list of doctors in a certain specialty
+      3. asking a list of doctors in a certain specialty in a certain medical facility
+  }
+}
