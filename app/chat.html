@@ -20803,7 +20803,7 @@ async function init() {
   setMode("insert", { moveCaret: false });
   inputEl.focus({ preventScroll: true });
   try {
-    const response = await fetch("/api/state", { cache: "no-store" });
+    const response = await fetch("/api/state?initial=1", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const state = await response.json();
     applyState(state, true);

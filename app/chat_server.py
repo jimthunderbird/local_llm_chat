@@ -26856,6 +26856,34 @@ class ChatState:
         self.conversation_summary_turns = 0
         self.conversation_revision += 1
 
+    def default_to_online_mode(self) -> None:
+        """Reset the knowledge mode to Online for a fresh chat load.
+
+        The chat state is shared by the browser and the server, so a provider
+        mode left active in an earlier session must not become the default
+        mode a newly loaded page sees.
+        """
+        provider_mode_was_on = (
+            self.anthem_mode or self.united_healthcare_mode
+        )
+        self.research_with_news_mode = True
+        self.anthem_mode = False
+        self.anthem_context = ""
+        self.anthem_plan = {}
+        self.anthem_providers = []
+        self.anthem_source = ""
+        self.anthem_records = 0
+        self.anthem_items_sent = False
+        self.united_healthcare_mode = False
+        self.united_healthcare_context = ""
+        self.united_healthcare_plan = {}
+        self.united_healthcare_providers = []
+        self.united_healthcare_source = ""
+        self.united_healthcare_records = 0
+        if provider_mode_was_on:
+            self.reset_conversation()
+        self.cache.clear()
+
     def resolve_question(self, question: str) -> ConversationResolution:
         """Interpret a question against the recent conversation.
 
@@ -27765,7 +27793,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         if path == "/api/state":
+            params = parse_qs(parsed.query)
             with self.state.lock:
+                if (params.get("initial") or [""])[0] == "1":
+                    self.state.default_to_online_mode()
                 self._send_json(self.state.snapshot(include_history=True))
             return
         if path == "/api/english_words":
@@ -30927,7 +30958,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             state.anthem_mode = True
-            state.research_with_news_mode = False
             if state.united_healthcare_mode:
                 state.united_healthcare_mode = False
                 self._reset_united_healthcare_context()
@@ -30943,7 +30973,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return
         if not value:
             state.anthem_mode = True
-            state.research_with_news_mode = False
             if state.united_healthcare_mode:
                 state.united_healthcare_mode = False
                 self._reset_united_healthcare_context()
@@ -30959,7 +30988,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return
         was_on = state.anthem_mode
         state.anthem_mode = True
-        state.research_with_news_mode = False
         if state.united_healthcare_mode:
             state.united_healthcare_mode = False
             self._reset_united_healthcare_context()
@@ -31029,7 +31057,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             state.united_healthcare_mode = True
-            state.research_with_news_mode = False
             if state.anthem_mode:
                 state.anthem_mode = False
                 self._reset_anthem_context()
@@ -31044,7 +31071,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return
         if not value:
             state.united_healthcare_mode = True
-            state.research_with_news_mode = False
             if state.anthem_mode:
                 state.anthem_mode = False
                 self._reset_anthem_context()
@@ -31059,7 +31085,6 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return
         was_on = state.united_healthcare_mode
         state.united_healthcare_mode = True
-        state.research_with_news_mode = False
         if state.anthem_mode:
             state.anthem_mode = False
             self._reset_anthem_context()

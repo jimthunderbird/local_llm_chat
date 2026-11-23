@@ -94,6 +94,11 @@ group unit_tests {
 }
 
 group application {
+  task.default_online_mode (completed) {
+    run /anthem
+    the chat mode should not change! stick to previous chat mode
+  }
+
   task.doctors_detail_auto_extract (completed) {
     1. run /anthem
     2. please return the same actual doctor's detail information for the following questions:

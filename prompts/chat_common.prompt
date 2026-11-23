@@ -1,3 +1,8 @@
+task.default_online_mode (completed) {
+  when we first load the chat:
+  default chat mode should be Online
+}
+
 task.bug.article_loader_learn_not_working (completed) {
   when i load the article "https://www.cbsnews.com/sanfrancisco/news/runaway-concrete-truck-plows-into-daly-city-homes/" into the article loading modal, the "Learn" button is not working!
   please fix it in a systematic way
@@ -10,7 +15,7 @@ task.bug.article_loader_chat_context (completed) {
 }
 
 task.no_auto_scrolling_for_all_command_results (completed) {
-  - for all the results of the commands, do not auto scroll 
+  - for all the results of the commands, do not auto scroll
 }
 
 task.show_accumulated_context (completed) {
@@ -24,7 +29,7 @@ task.action.best_context_window_for_chat (completed) {
 task.research.best_context_window_for_chat (completed) {
  research only, save the research result into {directory_of_this_prompt}/../research/best_context_window_for_chat.html {
     - What will be the best context window for chat given my current local llm?
-    - If I have a lot of conversations in the chat, what will be the best way to manage the context window? 
+    - If I have a lot of conversations in the chat, what will be the best way to manage the context window?
   }
 }
 
@@ -37,7 +42,7 @@ task.satus_detail_cutoff (completed) {
   - please refactor:
     - in the status bar, just present a "Status" button {
       - when clicked {
-        show all of the existing status in a modal, present them line by line 
+        show all of the existing status in a modal, present them line by line
       }
     }
 }
@@ -63,7 +68,7 @@ task.status_bar_update (completed) {
 task (completed) {
   currently before an answer is created, we see something like:
   [youtube iterative: round 1/5, added 12 paragraph(s), evidence ~795 token(s)][youtube iterative: round 2/5, added 6 paragraph(s), evidence ~1,143 token(s)][youtube iterative: round 3/5, added 1 paragraph(s), evidence ~1,166 token(s)][youtube iterative: round 4/5, added 3 paragraph(s), evidence ~1,357 token(s)][youtube iterative: checker still wanted more after 5 round(s); using the 22 gathered paragraph(s)]
-  please change the wording, instead of saying "youtube iterative", just say "context gathering" 
+  please change the wording, instead of saying "youtube iterative", just say "context gathering"
 }
 
 task (completed) {
@@ -91,7 +96,7 @@ task (completed) {
 }
 
 task (completed) {
-  bug: 
+  bug:
   question: who is mark wiens, give me a detail answer of 600 words
   expect: there are many trunks of text so we should be able to give an answer
   actual: I need to answer your question about Mark Wiens, but I have to be honest with you about a limitation here. The provided context does not contain sufficient information to answer this question
