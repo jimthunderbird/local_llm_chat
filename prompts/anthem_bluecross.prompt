@@ -94,6 +94,25 @@ group unit_tests {
 }
 
 group application {
+  task.doctors_detail_auto_extract (completed) {
+    1. run /anthem
+    2. please return the same actual doctor's detail information for the following questions:
+       - Johannes Kratz
+       - Johannes Kratz from UCSF
+       - doctor Johannes Kratz from UCSF
+       - tell me about doctor Johannes Kratz from UCSF
+       ...
+       we should return the doctor's detail information, not the link to the detail information
+  }
+
+  task.feature.extract_doctor_information (completed) {
+    1. run /anthem
+    2. ask question: Johannes Kratz from UCSF
+    3. expect: we should get the doctor's information
+       actual: 12 providers found but seems to be all UCSF
+    please fix it in a systematic way, detect the doctor's name and facility name and get the doctor's information
+  }
+
   task.feature.tool_calling (completed) {
     1. run /anthem
     2. ask question: doctor Johannes Kratz from UCSF

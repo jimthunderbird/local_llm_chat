@@ -20231,6 +20231,158 @@ def _anthem_fast_plan(question: str) -> dict[str, str]:
                 term in candidate_key for term in generic_terms
             ):
                 doctor_match = detail_match
+    if not doctor_match:
+        # A bare "Name from Facility" question is common and may omit
+        # "doctor", credentials, or a detail phrase. Accept a capitalized
+        # name before from/at, but reject specialties, body areas, and
+        # locations so "Head and Neck from UCSF" stays a specialty search.
+        name_from_match = re.search(
+            r"\b([A-Z][A-Za-z'.-]+(?:\s+[A-Z][A-Za-z'.-]+){0,3})\s+"
+            r"(?:from|at)\s+"
+            r"([A-Z][A-Za-z0-9'&., -]{1,60})",
+            text,
+        )
+        if name_from_match:
+            candidate = name_from_match.group(1).strip()
+            candidate_key = candidate.casefold()
+            generic_terms = (
+                "cancer",
+                "center",
+                "hospital",
+                "clinic",
+                "health",
+                "medical",
+                "medicine",
+                "surgery",
+                "specialist",
+                "specialists",
+                "doctor",
+                "doctors",
+                "department",
+                "institute",
+                "care",
+                "insurance",
+                "network",
+            )
+            body_terms = {
+                "head",
+                "neck",
+                "throat",
+                "thyroid",
+                "lung",
+                "heart",
+                "cardiac",
+                "brain",
+                "spine",
+                "back",
+                "knee",
+                "hip",
+                "skin",
+                "breast",
+                "stomach",
+                "abdomen",
+                "liver",
+                "kidney",
+                "eye",
+                "prostate",
+                "bone",
+            }
+            if (
+                not any(
+                    term in candidate_key for term in generic_terms
+                )
+                and not any(
+                    re.search(rf"\b{re.escape(term)}\b", candidate_key)
+                    for term in body_terms
+                )
+                and candidate_key not in _US_STATE_NAMES
+                and candidate_key not in _ANTHEM_CITY_NAMES
+            ):
+                doctor_match = name_from_match
+    if not doctor_match:
+        candidate = text.strip(" .,")
+        words = candidate.split()
+        credentials = {
+            "md",
+            "m.d.",
+            "do",
+            "d.o.",
+            "phd",
+            "ph.d.",
+            "facs",
+            "facc",
+            "mbbs",
+            "mph",
+            "mba",
+            "ms",
+            "msc",
+            "rn",
+            "np",
+            "pa",
+        }
+        while words and words[-1].casefold().strip(".,") in credentials:
+            words.pop()
+        candidate = " ".join(words)
+        candidate_key = candidate.casefold()
+        generic_terms = (
+            "cancer",
+            "center",
+            "hospital",
+            "clinic",
+            "health",
+            "medical",
+            "medicine",
+            "surgery",
+            "specialist",
+            "specialists",
+            "doctor",
+            "doctors",
+            "department",
+            "institute",
+            "care",
+            "insurance",
+            "network",
+        )
+        body_terms = {
+            "head",
+            "neck",
+            "throat",
+            "thyroid",
+            "lung",
+            "heart",
+            "cardiac",
+            "brain",
+            "spine",
+            "back",
+            "knee",
+            "hip",
+            "skin",
+            "breast",
+            "stomach",
+            "abdomen",
+            "liver",
+            "kidney",
+            "eye",
+            "prostate",
+            "bone",
+        }
+        if (
+            2 <= len(words) <= 4
+            and all(
+                re.fullmatch(r"[A-Z][A-Za-z'.-]*", word)
+                for word in words
+            )
+            and not any(
+                term in candidate_key for term in generic_terms
+            )
+            and not any(
+                re.search(rf"\b{re.escape(term)}\b", candidate_key)
+                for term in body_terms
+            )
+            and candidate_key not in _US_STATE_NAMES
+            and candidate_key not in _ANTHEM_CITY_NAMES
+        ):
+            doctor_match = re.match(r"(.*)", candidate)
     if doctor_match:
         plan["doctor_name"] = doctor_match.group(1)
     plan["facility"] = _anthem_fast_facility(text)
@@ -20465,6 +20617,30 @@ _ANTHEM_DETAIL_REQUEST_RE = re.compile(
 def _anthem_is_detail_request(question: str) -> bool:
     """Return whether a follow-up asks for a provider's full profile."""
     return bool(_ANTHEM_DETAIL_REQUEST_RE.search(str(question or "")))
+
+
+_ANTHEM_LIST_INTENT_RE = re.compile(
+    r"\b(?:list|doctors|physicians|specialists|surgeons|providers|"
+    r"options|candidates)\b",
+    re.IGNORECASE,
+)
+
+
+def _anthem_should_show_provider_detail(
+    question: str,
+    plan: dict[str, str],
+) -> bool:
+    """Return whether a named doctor should load the full detail directly.
+
+    Questions such as "Johannes Kratz", "Johannes Kratz from UCSF", and
+    "doctor Johannes Kratz from UCSF" identify one doctor even without a
+    detail phrase. Only explicit list/plural-provider wording stays a search.
+    """
+    if not plan.get("doctor_name"):
+        return False
+    if _anthem_is_detail_request(question):
+        return True
+    return not _ANTHEM_LIST_INTENT_RE.search(str(question or ""))
 
 
 _ANTHEM_PROVIDER_INTENT_RE = re.compile(
@@ -31359,10 +31535,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         # that provider's full profile directly. Requiring a previous result
         # list here made "tell me about <doctor> in <hospital>" return a
         # search list instead of the requested detail.
-        if (
-            plan.get("doctor_name")
-            and _anthem_is_detail_request(question)
-        ):
+        if _anthem_should_show_provider_detail(question, plan):
             doctor_name = str(plan.get("doctor_name") or "").strip()
             specialty = str(plan.get("specialty") or "").strip()
             institution = str(
