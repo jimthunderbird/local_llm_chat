@@ -20643,6 +20643,217 @@ def _anthem_should_show_provider_detail(
     return not _ANTHEM_LIST_INTENT_RE.search(str(question or ""))
 
 
+_ANTHEM_NUMBER_WORDS = {
+    "a": 1,
+    "an": 1,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+}
+
+_ANTHEM_SIMILAR_NUMBER_PATTERN = "|".join(
+    sorted(_ANTHEM_NUMBER_WORDS, key=len, reverse=True)
+)
+
+_ANTHEM_SIMILAR_RE = re.compile(
+    rf"(?i:\b(?:show|find|give|list|get)?\s*(?:me\s+)?"
+    rf"({_ANTHEM_SIMILAR_NUMBER_PATTERN}|\d+)?\s*"
+    r"(?:similar\s+(?:doctor|doctors|provider|providers)|"
+    r"(?:doctor|doctors|provider|providers)\s+similar)\s+to\s+"
+    r"(?:doctor|dr\.?|doctor\s+)?\s*)"
+    r"([A-Z][A-Za-z'.-]+(?:\s+[A-Z][A-Za-z'.-]+){0,3})"
+)
+
+
+def _anthem_similar_request(question: str) -> dict | None:
+    """Parse "show me N doctors similar to Dr X" requests."""
+    text = _anthem_normalize_question(question)
+    match = _ANTHEM_SIMILAR_RE.search(text)
+    if not match:
+        return None
+    doctor_name = " ".join(match.group(2).split())
+    if not doctor_name or len(doctor_name.split()) < 2:
+        return None
+    doctor_key = doctor_name.casefold()
+    if (
+        _anthem_fast_specialty(doctor_name)
+        or _anthem_fast_facility(doctor_name)
+        or doctor_key in _US_STATE_NAMES
+        or doctor_key in _ANTHEM_CITY_NAMES
+    ):
+        return None
+    raw_limit = str(match.group(1) or "").strip().casefold()
+    if raw_limit.isdigit():
+        limit = int(raw_limit)
+    else:
+        limit = _ANTHEM_NUMBER_WORDS.get(raw_limit, 5)
+    limit = max(1, min(limit, 50))
+    return {
+        "limit": limit,
+        "doctor_name": doctor_name,
+        "facility": _anthem_fast_facility(text),
+    }
+
+
+def _anthem_infer_target_specialty(detail: dict) -> str:
+    """Infer a searchable specialty from a provider's detail text."""
+    section = str(detail.get("section") or "").strip()
+    text = " ".join(
+        [section]
+        + [
+            str(paragraph or "")
+            for paragraph in detail.get("paragraphs") or []
+        ]
+    ).casefold()
+    rules = (
+        (
+            (
+                "thoracic",
+                "esophageal",
+                "esophagus",
+                "lung cancer",
+                "lung tumor",
+                "chest wall",
+                "mediastin",
+            ),
+            "Thoracic Surgery",
+        ),
+        (
+            (
+                "head and neck",
+                "otolaryng",
+                "larynx",
+                "thyroid",
+                "salivary",
+                "tonsil",
+                "sinus",
+            ),
+            "Otolaryngology",
+        ),
+        (
+            ("surgical oncology", "cancer surgery"),
+            "Surgical Oncology",
+        ),
+        (("cardiac surgery", "heart surgery"), "Thoracic Surgery"),
+        (("cardio", "heart"), "Cardiology"),
+        (("neuro", "brain", "spine"), "Neurology"),
+        (("dermat", "skin"), "Dermatology"),
+        (("orthop", "bone", "joint"), "Orthopaedic Surgery"),
+        (("gastro", "colon", "liver"), "Gastroenterology"),
+        (("urolog", "prostate", "bladder", "kidney"), "Urology"),
+    )
+    for terms, specialty in rules:
+        if any(term in text for term in terms):
+            return specialty
+    return section
+
+
+def _anthem_detail_section_text(item: dict, heading: str) -> str:
+    """Return the paragraph text under one detail-modal heading."""
+    target = " ".join(str(heading or "").casefold().split())
+    collecting = False
+    texts: list[str] = []
+    for block in item.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        kind = str(block.get("type") or "")
+        if kind == "heading":
+            collecting = (
+                " ".join(str(block.get("text") or "").casefold().split())
+                == target
+            )
+        elif collecting and kind == "paragraph":
+            text = " ".join(str(block.get("text") or "").split())
+            if text:
+                texts.append(text)
+    return " ".join(texts)
+
+
+def _anthem_detail_npi(item: dict) -> str:
+    """Extract the NPI line from a provider detail modal payload."""
+    for block in item.get("blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "list":
+            continue
+        for value in block.get("items") or []:
+            text = str(value or "").strip()
+            if text.upper().startswith("NPI:"):
+                return text.split(":", 1)[1].strip()
+    return ""
+
+
+def _anthem_similarity_terms(detail: dict) -> set[str]:
+    """Return research-interest terms used to rank similar doctors."""
+    text = _anthem_detail_section_text(detail, "Research Interests")
+    if not text:
+        text = " ".join(
+            str(paragraph or "")
+            for paragraph in detail.get("paragraphs") or []
+        )
+    stop = {
+        "about",
+        "after",
+        "also",
+        "among",
+        "based",
+        "clinical",
+        "current",
+        "department",
+        "director",
+        "during",
+        "education",
+        "faculty",
+        "health",
+        "hospital",
+        "including",
+        "medical",
+        "medicine",
+        "patients",
+        "professor",
+        "provider",
+        "published",
+        "research",
+        "school",
+        "specializes",
+        "specializing",
+        "their",
+        "there",
+        "these",
+        "through",
+        "trained",
+        "treating",
+        "treatment",
+        "university",
+        "which",
+        "while",
+        "with",
+    }
+    return {
+        word
+        for word in re.findall(r"[a-z]{5,}", text.casefold())
+        if word not in stop
+    }
+
+
 _ANTHEM_PROVIDER_INTENT_RE = re.compile(
     r"\b(?:doctor|doctors|physician|physicians|specialist|specialists|"
     r"provider|providers|surgeon|surgeons)\b",
@@ -31434,6 +31645,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     f"{plan['specialty']!r} (fast parser: "
                     f"{fast_specialty!r})]",
                 )
+        similar = _anthem_similar_request(question)
+        if similar:
+            self._run_anthem_similar_doctors(question, similar)
+            return
         has_search_fields = any(plan.get(key) for key in search_keys)
 
         target = (
@@ -32010,6 +32225,244 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 f"Provider results displayed as "
                 f"{len(provider_items)} cards.",
             )
+        self._sse("annotations", {"items": []})
+
+    def _run_anthem_similar_doctors(
+        self,
+        question: str,
+        request: dict,
+    ) -> None:
+        """Find doctors whose specialty/research is similar to one provider."""
+        state = self.state
+        limit = max(1, min(int(request.get("limit") or 5), 50))
+        target_name = str(request.get("doctor_name") or "").strip()
+        facility = str(request.get("facility") or "").strip()
+        self._sse_text(
+            "log",
+            f"[anthem: finding {limit} similar doctor(s) to "
+            f"{target_name or 'the requested doctor'}]",
+        )
+        try:
+            target_detail = _anthem_provider_detail(
+                "",
+                target_name,
+                institution=facility,
+                source_label="CMS NPPES registry",
+            )
+        except Exception as exc:
+            target_detail = {}
+            self._sse_text(
+                "log",
+                f"[anthem: could not load the target doctor: {exc}]",
+            )
+        if not target_detail:
+            message = (
+                f"I could not find {target_name or 'that doctor'} in the "
+                "provider directory."
+            )
+            self._sse_text("delta", message)
+            state.latest_answer = message
+            state.latest_sources = []
+            state.latest_benchmark = {
+                "anthem_source": "CMS NPPES registry",
+                "anthem_records": 0,
+                "model": "direct API records + similar-doctor ranking",
+            }
+            state.record_turn(question, question, message)
+            self._sse("annotations", {"items": []})
+            return
+        target_title = str(
+            target_detail.get("title") or target_name
+        ).strip()
+        target_specialty = _anthem_infer_target_specialty(target_detail)
+        target_npi = _anthem_detail_npi(target_detail)
+        target_terms = _anthem_similarity_terms(target_detail)
+        self._sse_text(
+            "log",
+            "[anthem: similar-doctor target "
+            f"{target_title!r}, specialty {target_specialty!r}]",
+        )
+        if not target_specialty:
+            message = (
+                f"I found {target_title} but could not determine a "
+                "searchable specialty for similar-doctor matching."
+            )
+            self._sse_text("delta", message)
+            state.latest_answer = message
+            state.latest_sources = []
+            state.latest_benchmark = {
+                "anthem_source": "CMS NPPES registry",
+                "anthem_records": 0,
+                "model": "direct API records + similar-doctor ranking",
+            }
+            state.record_turn(question, question, message)
+            self._sse("annotations", {"items": []})
+            return
+        cards: list[dict] = []
+        seen: set[str] = set()
+
+        def collect(
+            context: str,
+            source: str,
+            institution: str,
+        ) -> None:
+            for item in _anthem_provider_items_from_context(
+                context, source, institution=institution
+            ):
+                name = str(
+                    item.get("name") or item.get("title") or ""
+                ).strip()
+                npi = str(item.get("npi") or "").strip()
+                if (
+                    (target_npi and npi == target_npi)
+                    or (name and _anthem_names_match(target_title, name))
+                ):
+                    continue
+                key = npi or name.casefold()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                text = " ".join(
+                    str(item.get(key) or "")
+                    for key in ("specialty", "section", "summary")
+                ).casefold()
+                score = sum(1 for term in target_terms if term in text)
+                specialty_key = target_specialty.casefold()
+                if specialty_key and specialty_key in text:
+                    score += 20
+                else:
+                    specialty_tokens = [
+                        token
+                        for token in re.split(
+                            r"[^a-z0-9]+", specialty_key
+                        )
+                        if len(token) > 3
+                    ]
+                    if specialty_tokens and all(
+                        token in text for token in specialty_tokens
+                    ):
+                        score += 15
+                    elif any(
+                        token in text for token in specialty_tokens
+                    ):
+                        score += 5
+                if institution:
+                    score += 2
+                item["_similarity"] = score
+                cards.append(item)
+                if len(cards) >= max(limit * 8, 40):
+                    break
+
+        def search(facility_value: str, institution: str) -> None:
+            plan = {
+                "doctor_name": "",
+                "specialty": target_specialty,
+                "facility": facility_value,
+                "location": "",
+                "plan": "",
+                "keywords": "",
+            }
+            try:
+                context, source, _errors, _count = _anthem_lookup(
+                    plan,
+                    lambda text: self._sse_text("log", text),
+                    max_results=max(limit * 5, 25),
+                )
+            except Exception as exc:
+                self._sse_text(
+                    "log",
+                    f"[anthem: similar-doctor search failed: {exc}]",
+                )
+                return
+            if context:
+                collect(context, source, institution)
+
+        if facility:
+            search(facility, facility)
+        if len(cards) < limit:
+            search("", "")
+        cards.sort(
+            key=lambda item: (
+                -int(item.get("_similarity") or 0),
+                str(item.get("name") or ""),
+            )
+        )
+        cards = cards[:limit]
+        for item in cards:
+            item.pop("_similarity", None)
+        if not cards:
+            message = (
+                f"No similar doctors were found for {target_title} in "
+                f"{target_specialty}."
+            )
+            self._sse_text("delta", message)
+            state.latest_answer = message
+            state.latest_sources = []
+            state.latest_benchmark = {
+                "anthem_source": "CMS NPPES registry",
+                "anthem_records": 0,
+                "model": "direct API records + similar-doctor ranking",
+            }
+            state.record_turn(question, question, message)
+            self._sse("annotations", {"items": []})
+            return
+        self._sse(
+            "news",
+            {
+                "type": "start",
+                "source": "Anthem Provider Directory",
+                "description": (
+                    f"Similar doctors to {target_title} · "
+                    f"{target_specialty} · {len(cards)} provider "
+                    "record(s); click a result to open the profile"
+                ),
+                "docs": True,
+                "docs_label": "NPPES",
+                "no_scroll": True,
+                "reset": True,
+            },
+        )
+        for index, card in enumerate(cards, start=1):
+            card["index"] = index
+            card["anthem_status_pending"] = True
+            self._sse("news", {"type": "item", **card})
+
+        def stream_provider_status(provider_item: dict) -> None:
+            self._sse("news", {"type": "update", **provider_item})
+
+        _anthem_annotate_member_status(
+            cards,
+            "",
+            on_update=stream_provider_status,
+            institution=facility,
+        )
+        state.anthem_plan = {
+            "doctor_name": "",
+            "specialty": target_specialty,
+            "facility": facility,
+            "location": "",
+            "plan": "",
+            "keywords": "",
+        }
+        state.anthem_context = " ".join(
+            str(card.get("summary") or "") for card in cards
+        )
+        state.anthem_providers = cards
+        state.anthem_source = "CMS NPPES registry"
+        state.anthem_records = len(cards)
+        state.anthem_items_sent = True
+        state.latest_answer = ""
+        state.latest_sources = []
+        state.latest_benchmark = {
+            "anthem_source": state.anthem_source,
+            "anthem_records": len(cards),
+            "model": "direct API records + similar-doctor ranking",
+        }
+        state.record_turn(
+            question,
+            question,
+            f"Similar doctors displayed as {len(cards)} cards.",
+        )
         self._sse("annotations", {"items": []})
 
     def _command_deepresearch(self, topic: str) -> None:

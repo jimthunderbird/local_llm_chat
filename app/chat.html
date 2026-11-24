@@ -1256,6 +1256,12 @@
     color: var(--accent);
     font-weight: 700;
   }
+  .dictionary-history-highlight {
+    background: rgba(255, 214, 102, 0.22);
+    color: #ffe08a;
+    border-radius: 2px;
+    padding: 0 2px;
+  }
   .news-description {
     color: #cfdae5;
     font-size: 12px;
@@ -6130,12 +6136,13 @@ function readDisplayMathBlock(lines, start) {
   return null;
 }
 
-function wordNodes(text, clickable, highlight = false) {
+function wordNodes(text, clickable, highlight = false, highlightWord = "") {
   const frag = document.createDocumentFragment();
   if (!clickable) {
     frag.appendChild(document.createTextNode(text));
     return frag;
   }
+  const targetWord = String(highlightWord || "").toLocaleLowerCase();
   let last = 0;
   WORD_RE.lastIndex = 0;
   let match;
@@ -6149,6 +6156,9 @@ function wordNodes(text, clickable, highlight = false) {
     span.textContent = match[0];
     if (highlight && isEnglishCornerWord(match[0])) {
       span.classList.add("english-learning");
+    }
+    if (targetWord && match[0].toLocaleLowerCase() === targetWord) {
+      span.classList.add("dictionary-history-highlight");
     }
     frag.appendChild(span);
     last = match.index + match[0].length;
@@ -7992,7 +8002,9 @@ function renderDictionaryHistoryList(entry) {
       fieldLabel.textContent = `${name}:`;
       fieldEl.appendChild(fieldLabel);
       fieldEl.appendChild(document.createTextNode(" "));
-      fieldEl.appendChild(wordNodes(String(item[field] || ""), true));
+      fieldEl.appendChild(
+        wordNodes(String(item[field] || ""), true, false, String(item.word || ""))
+      );
       main.appendChild(fieldEl);
     }
 

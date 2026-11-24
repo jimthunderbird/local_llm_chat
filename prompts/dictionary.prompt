@@ -2,6 +2,11 @@ dictionary_llm: ollama local model ornith-1.5:35b with no thinking
 
 dictionary_history_directory: {directory_of_this_prompt}/../.chat/dictionary_history
 
+task.highlight_word_in_context_and_meaning (completed) {
+  for each entry in /dictionary_history command:
+  - highligh the word in its related context and meaning section
+}
+
 task.do_not_scroll_on_dictionary_history (completed) {
   after typing /dictionary_history, do not scroll
 }
@@ -43,7 +48,7 @@ task.dictionary_history (completed) {
   - for each dictionary inquery, add or update an entry in {directory_of_this_prompt}/../.chat/dictionary_history/<word>.json, it should contain [
     {
       context: <20 words before the word> <word> <20 words after the word>
-      meaning: <the word's meaning in this context> 
+      meaning: <the word's meaning in this context>
     }
   ]
   - create a command: /dictionary_history {
@@ -68,7 +73,7 @@ task.bug.dictionary_output_mismatching (completed) {
 }
 
 task.highlight_word_to_lookup (completed) {
-  in the dictionary lookup answer, highlight <word>  
+  in the dictionary lookup answer, highlight <word>
 }
 
 task.custom_dictionary_lookup_prompt (completed) {

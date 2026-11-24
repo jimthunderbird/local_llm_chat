@@ -1,6 +1,6 @@
 knowledge {
   anthem {
-    Anthem's Underlying Provider Directory FHIR APIAnthem serves its public Provider Directory API via Elevance Health's totalview.healthos.elevancehealth.com gateway (documented at [anthem.com/developers](https://anthem.com/developers) and [totalview.healthos.elevancehealth.com/fhir/documentation](https://totalview.healthos.elevancehealth.com/fhir/documentation)):Base Endpoint Pattern: [https://totalview.healthos.elevancehealth.com/resources/registered/](https://totalview.healthos.elevancehealth.com/resources/registered/){Brand}/api/v1/fhir (where {Brand} corresponds to the regional/plan brand such as AnthemBlueCross or Anthem)Authentication: None required for the public Provider Directory endpoints (unlike the Patient Access API, which requires SMART on FHIR / OAuth 2.0).   Supported FHIR Resources for Doctor Search:Practitioner — Search by name, family, given, or identifier (NPI).   PractitionerRole — Links a doctor to their specialty, location, organization, and network.   Location — Search by address, city, state, or postal code.   Organization & InsurancePlan — Filter by hospital/clinic group and specific Anthem plan network.
+    Anthem's Underlying Provider Directory FHIR APIAnthem serves its public Provider Directory API via Elevance Health's totalview.healthos.elevancehealth.com gateway (documented at [anthem.com/developers](https://anthem.com/developers) and [totalview.healthos.elevancehealth.com/fhir/documentation](https://totalview.healthos.elevancehealth.com/fhir/documentation)):Base Endpoint Pattern: [https://totalview.healthos.elevancehealth.com/resources/registered/](https://totalview.healthos.elevancehealth.com/resources/registered/){Brand}/api/v1/fhir (where {Brand} corresponds to the regional/plan brand such as AnthemBlueCross or Anthem)Authentication: None required for the public Provider Directory endpoints (unlike the Patient Access API, which requires SMART on FHIR / OAuth 2.0).   Supported FHIR Resources for Doctor Search:Practitioner - Search by name, family, given, or identifier (NPI).   PractitionerRole - Links a doctor to their specialty, location, organization, and network.   Location - Search by address, city, state, or postal code.   Organization & InsurancePlan - Filter by hospital/clinic group and specific Anthem plan network.
   }
 }
 
@@ -94,6 +94,20 @@ group unit_tests {
 }
 
 group application {
+  task.detect_english_numbers (completed) {
+    reference task.similar_doctor_finding
+    run /anthem
+    question: show me one similar doctor to doctor Johannes Kratz from UCSF
+    answer: should return only 1 similar doctor
+    please detect english number words properly
+  }
+
+  task.similar_doctor_finding (completed) {
+    run /anthem
+    question: show me {N} similar doctor to doctor Johannes Kratz from UCSF
+    expect: we should see {N} doctors who's specialty and research interest that are similar to doctor Johannes Kratz
+  }
+
   task.default_online_mode (completed) {
     run /anthem
     the chat mode should not change! stick to previous chat mode
