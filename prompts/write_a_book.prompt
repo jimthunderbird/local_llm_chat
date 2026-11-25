@@ -7,6 +7,24 @@ settings {
   sub_questions_article_search_limit: 10
 }
 
+task.book_modal_research_sources_url (completed) {
+  in the book loading modal:
+  - in "Research sources", show list of urls, when click on each url, open a new modal on top of the existing one, the new modal is the article modal with chat and learn feature
+}
+
+task.book_modal_research_sources (completed) {
+  in the book loading modal:
+  - in "Research sources", we have timestamps like 2026-08-07T07:00:00+00:00, please display the YYYY-MM-DD HH:ii:ss format, also consider PST/PDT
+}
+
+task.book_writing_progress_indication_not_working (completed) {
+  before writing a book, we need to gather the news, but the new gathering progress is not showed anymore, please resume that! we need to know what news urls are fetched and whether those url fetchings are successful or not
+}
+
+task.book_writing_stop_working (completed) {
+  the book writing seems to be stop working, please check why and fix it
+}
+
 task.find_word_in_book (completed) {
   please implement a "Find" component on top of the book loader modal, allow me the find words in the book
 }

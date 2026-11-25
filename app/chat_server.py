@@ -174,7 +174,7 @@ import wave
 import zipfile
 import time
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import redirect_stderr, redirect_stdout
@@ -800,6 +800,34 @@ WRITE_A_BOOK_EVIDENCE_CHARS = 12_000
 WRITE_A_BOOK_DIGEST_CHARS = 8_000
 WRITE_A_BOOK_REFERENCE_MAP_CHARS = 6_000
 
+
+def _book_env_int(name: str, default: int) -> int:
+    """Read a positive integer environment override for book research."""
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# Book research must always make forward progress. Each article fetch and each
+# Google News query has its own time limit, and the whole research phase has a
+# global budget. Without these caps an unresponsive publisher can hold a PHP
+# child for three minutes, making /write_a_book look frozen for an hour before
+# a single chapter is written. When the budget runs out the research phase
+# stops cleanly and the book is still written from the material already read.
+WRITE_A_BOOK_RESEARCH_BUDGET_SECONDS = _book_env_int(
+    "WRITE_A_BOOK_RESEARCH_BUDGET", 300
+)
+WRITE_A_BOOK_SEARCH_TIMEOUT_SECONDS = _book_env_int(
+    "WRITE_A_BOOK_SEARCH_TIMEOUT", 60
+)
+WRITE_A_BOOK_ARTICLE_TIMEOUT_SECONDS = _book_env_int(
+    "WRITE_A_BOOK_ARTICLE_TIMEOUT", 20
+)
+WRITE_A_BOOK_RESEARCH_WORKERS = _book_env_int(
+    "WRITE_A_BOOK_RESEARCH_WORKERS", 4
+)
+
 # task.blocking_detection in prompts/write_a_book.prompt: every research
 # article fetch reports whether the body was read and, when it was not,
 # distinguishes Google News' "automated queries" interstitial from a publisher
@@ -1081,6 +1109,30 @@ def _book_news_timestamp(value: str) -> float | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.timestamp()
+
+
+try:
+    from zoneinfo import ZoneInfo
+
+    _BOOK_SOURCE_TIME_ZONE = ZoneInfo("America/Los_Angeles")
+except (ImportError, KeyError):
+    # Python builds without the system tz database still show a stable
+    # Pacific timestamp; DST is unavailable in that fallback.
+    _BOOK_SOURCE_TIME_ZONE = timezone(timedelta(hours=-8))
+
+
+def _book_source_timestamp(value: str) -> str:
+    """Render a source timestamp in Pacific time as YYYY-MM-DD HH:MM:SS."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    timestamp = _book_news_timestamp(text)
+    if timestamp is None:
+        return text
+    local = datetime.fromtimestamp(
+        timestamp, tz=timezone.utc
+    ).astimezone(_BOOK_SOURCE_TIME_ZONE)
+    return local.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _parse_book_model_lines(raw: str, limit: int) -> list[str]:
@@ -1502,7 +1554,9 @@ def _book_html_document(
     for source in sources:
         source_title = html.escape(str(source.get("title") or "Untitled"))
         link = str(source.get("link") or "").strip()
-        published = html.escape(str(source.get("published") or ""))
+        published = html.escape(
+            _book_source_timestamp(str(source.get("published") or ""))
+        )
         if re.match(r"^https?://", link, re.IGNORECASE):
             source_title = (
                 f'<a href="{html.escape(link, quote=True)}" '
@@ -13746,7 +13800,9 @@ def build_research_with_news_context(
     return "\n\n".join(blocks)
 
 
-def fetch_news_article(url: str, title: str = "") -> dict:
+def fetch_news_article(
+    url: str, title: str = "", timeout: float = 180
+) -> dict:
     """Fetch one article body on demand for the news detail modal.
 
     The list feed uses the same fetcher, but a reader mirror can transiently
@@ -13781,7 +13837,7 @@ def fetch_news_article(url: str, title: str = "") -> dict:
         cwd=SCRIPT_DIR,
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=timeout,
     )
     payload = None
     for line in reversed(result.stdout.splitlines()):
@@ -13902,6 +13958,8 @@ def _book_search_candidates(
     *,
     keyword_limit: int = WRITE_A_BOOK_KEYWORD_LIMIT,
     per_question_limit: int = WRITE_A_BOOK_SEARCH_LIMIT_PER_KEYWORD,
+    timeout: float = WRITE_A_BOOK_SEARCH_TIMEOUT_SECONDS,
+    deadline: float | None = None,
 ) -> list[dict]:
     """Search recent Google News stories for the book's keyword list.
 
@@ -13941,6 +13999,12 @@ def _book_search_candidates(
     # again when the final list is selected.
     buckets: list[list[dict]] = []
     for keyword in unique_keywords:
+        if deadline is not None and time.monotonic() >= deadline:
+            log(
+                "[book: research time budget reached; skipping the "
+                "remaining keyword searches]"
+            )
+            break
         query = (
             f"when:{WRITE_A_BOOK_RESEARCH_YEARS}y "
             f"{_book_plus_keywords(keyword)}"
@@ -13964,7 +14028,7 @@ def _book_search_candidates(
                 cwd=SCRIPT_DIR,
                 capture_output=True,
                 text=True,
-                timeout=180,
+                timeout=timeout,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             log(f"[book: search failed for {keyword!r}: {exc}]")
@@ -14077,7 +14141,11 @@ def _book_search_candidates(
 
 
 def _book_load_source(
-    item: dict, log: Callable[[str], None]
+    item: dict,
+    log: Callable[[str], None],
+    *,
+    fetch_timeout: float = WRITE_A_BOOK_ARTICLE_TIMEOUT_SECONDS,
+    deadline: float | None = None,
 ) -> dict | None:
     """Fetch the full article body when the search list only has a summary."""
     title = str(item.get("title") or "").strip()
@@ -14088,10 +14156,17 @@ def _book_load_source(
             "[book: article content available from the search result: "
             f"{link} ({len(paragraphs)} paragraph(s))]"
         )
+    elif link and deadline is not None and time.monotonic() >= deadline:
+        log(
+            "[book: research time budget reached; using the search "
+            f"excerpt for: {link}]"
+        )
     elif link:
         log(f"[book: fetching article: {link}]")
         try:
-            article = fetch_news_article(link, title)
+            article = fetch_news_article(
+                link, title, timeout=fetch_timeout
+            )
         except (
             OSError,
             subprocess.SubprocessError,
@@ -33173,15 +33248,25 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
         except RuntimeError as exc:
             self._sse_text(
-                "output",
-                f"\n/write_a_book: keyword planning failed: {exc}\n",
+                "log",
+                "[book: keyword planning failed (" + str(exc)
+                + "); using the subject as the only search keyword]",
             )
-            return
+            keyword_reply = ""
         keywords = _book_keyword_list(
             keyword_reply, subject, options.sub_question_count
         )
         self._sse_text(
             "log", "[book: search keywords: " + " | ".join(keywords) + "]"
+        )
+        research_deadline = (
+            time.monotonic() + WRITE_A_BOOK_RESEARCH_BUDGET_SECONDS
+        )
+        self._sse_text(
+            "log",
+            "[book: research time budget: "
+            f"{WRITE_A_BOOK_RESEARCH_BUDGET_SECONDS}s; "
+            f"{WRITE_A_BOOK_RESEARCH_WORKERS} article fetch(es) at a time]",
         )
 
         candidates: list[dict] = []
@@ -33194,13 +33279,16 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 per_question_limit=(
                     options.sub_question_article_limit
                 ),
+                timeout=WRITE_A_BOOK_SEARCH_TIMEOUT_SECONDS,
+                deadline=research_deadline,
             )
         except RuntimeError as exc:
             self._sse_text(
-                "output",
-                f"\n/write_a_book: recent-news search failed: {exc}\n",
+                "log",
+                f"[book: recent-news search failed ({exc}); writing from "
+                "the model's general knowledge]",
             )
-            return
+            candidates = []
         if not candidates and subject.casefold() not in {
             keyword.casefold() for keyword in keywords
         }:
@@ -33218,6 +33306,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     per_question_limit=(
                         options.sub_question_article_limit
                     ),
+                    timeout=WRITE_A_BOOK_SEARCH_TIMEOUT_SECONDS,
+                    deadline=research_deadline,
                 )
             except RuntimeError as exc:
                 self._sse_text(
@@ -33238,19 +33328,43 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
 
         sources: list[dict] = []
-        for index, item in enumerate(candidates, 1):
-            title = str(item.get("title") or "Untitled")
-            link = str(item.get("link") or "").strip()
-            self._sse_text(
-                "log",
-                f"[book: reading source {index}/{len(candidates)}: {title} "
-                f"({link or 'no URL'})]",
+        if candidates:
+            def load_source(index: int, item: dict) -> dict | None:
+                title = str(item.get("title") or "Untitled")
+                link = str(item.get("link") or "").strip()
+                self._sse_text(
+                    "log",
+                    f"[book: reading source {index}/{len(candidates)}: "
+                    f"{title} ({link or 'no URL'})]",
+                )
+                try:
+                    return _book_load_source(
+                        item,
+                        lambda text: self._sse_text("log", text),
+                        fetch_timeout=WRITE_A_BOOK_ARTICLE_TIMEOUT_SECONDS,
+                        deadline=research_deadline,
+                    )
+                except ClientDisconnected:
+                    raise
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self._sse_text(
+                        "log",
+                        f"[book: could not read source {index} "
+                        f"({title}): {exc}]",
+                    )
+                    return None
+
+            workers = min(
+                WRITE_A_BOOK_RESEARCH_WORKERS, len(candidates)
             )
-            source = _book_load_source(
-                item, lambda text: self._sse_text("log", text)
-            )
-            if source is not None:
-                sources.append(source)
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                for source in executor.map(
+                    load_source,
+                    range(1, len(candidates) + 1),
+                    candidates,
+                ):
+                    if source is not None:
+                        sources.append(source)
         if sources:
             self._sse_text(
                 "log",
@@ -33339,14 +33453,56 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             except RuntimeError as exc:
                 self._sse_text(
                     "log",
-                    f"[book: chapter {index} failed: {exc}]",
+                    f"[book: chapter {index} failed with research "
+                    f"excerpts: {exc}]",
                 )
-                if not chapters:
-                    self._sse_text(
-                        "output",
-                        f"\n/write_a_book: could not write the book: {exc}\n",
+                if not sources:
+                    if not chapters:
+                        self._sse_text(
+                            "output",
+                            "\n/write_a_book: could not write the book: "
+                            f"{exc}\n",
+                        )
+                    break
+                self._sse_text(
+                    "log",
+                    f"[book: retrying chapter {index} from general "
+                    "knowledge]",
+                )
+                fallback_prompt = WRITE_A_BOOK_CHAPTER_PROMPT.format(
+                    subject=subject,
+                    number=index,
+                    title=chapter_title,
+                    target_words=max(80, int(words_per_chapter * 0.95)),
+                    max_words=words_per_chapter,
+                    references=(
+                        "No numbered research references were available."
+                    ),
+                    evidence=(
+                        "No recent source text was available. Use general "
+                        "knowledge, and avoid specific claims that cannot "
+                        "be verified."
+                    ),
+                )
+                try:
+                    chapter_text = chat.stream_answer(
+                        fallback_prompt,
+                        model=book_model,
+                        emit=lambda text: self._sse_text("delta", text),
                     )
-                break
+                except RuntimeError as retry_exc:
+                    self._sse_text(
+                        "log",
+                        f"[book: chapter {index} retry failed: "
+                        f"{retry_exc}]",
+                    )
+                    if not chapters:
+                        self._sse_text(
+                            "output",
+                            "\n/write_a_book: could not write the book: "
+                            f"{retry_exc}\n",
+                        )
+                    break
             chapter_text = _book_strip_chapter_heading(
                 chapter_text, chapter_title
             )

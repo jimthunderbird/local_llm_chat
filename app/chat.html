@@ -2228,6 +2228,20 @@
   .news-nav:hover:not(:disabled) { color: var(--text); }
   .news-nav:disabled { opacity: .3; cursor: default; }
   .news-nav[hidden] { display: none; }
+  #news-back {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 1px solid #2b4056;
+    border-radius: 5px;
+    color: var(--accent-2);
+    font-size: 11px;
+    line-height: 1.2;
+    padding: 3px 8px;
+    margin-top: 3px;
+    cursor: pointer;
+  }
+  #news-back:hover { color: var(--text); border-color: var(--accent-2); }
+  #news-back[hidden] { display: none; }
   #news-close {
     flex: 0 0 auto;
     background: transparent;
@@ -3850,6 +3864,44 @@
     line-height: 1.45;
   }
   .book-results-error { color: var(--warn); font-size: 11px; margin-top: 6px; }
+  /* Research-source rows in the book reader: the title and URL both open the
+   * source article in the stacked article modal with Learn/Chat. */
+  .news-body .book-source {
+    margin: 0 0 9px;
+    padding: 8px 10px;
+    background: #0f1a25;
+    border: 1px solid #22384b;
+    border-radius: 6px;
+  }
+  .news-body .book-source-title {
+    display: block;
+    color: var(--accent-2);
+    font-size: 12.5px;
+    font-weight: 700;
+    line-height: 1.35;
+    text-decoration: none;
+    overflow-wrap: anywhere;
+  }
+  .news-body .book-source-title:hover { text-decoration: underline; }
+  .news-body .book-source-url {
+    display: block;
+    margin-top: 2px;
+    color: var(--dim);
+    font-size: 11px;
+    line-height: 1.35;
+    text-decoration: none;
+    overflow-wrap: anywhere;
+  }
+  .news-body .book-source-url:hover {
+    color: var(--accent-2);
+    text-decoration: underline;
+  }
+  .news-body .book-source-date {
+    display: block;
+    margin-top: 3px;
+    color: var(--dimmer);
+    font-size: 10.5px;
+  }
 
   /* /mathtutor: upload Word test papers, then practice generated problems. */
   .math-tutor {
@@ -4350,6 +4402,8 @@
         <div id="news-title" class="news-modal-title">News</div>
         <div id="news-meta" class="news-modal-meta"></div>
       </div>
+      <button id="news-back" type="button"
+              title="Back to the book (Esc)" aria-label="Back to the book" hidden>‹ Back</button>
       <button id="news-prev" class="news-nav" type="button"
               title="Previous restaurant" aria-label="Previous restaurant" hidden>‹</button>
       <button id="news-next" class="news-nav" type="button"
@@ -4797,6 +4851,7 @@ const gameContextMenuEl = $("#game-context-menu");
 const gameContextSetLocationEl = $("#game-context-set-location");
 const newsTitleEl = $("#news-title");
 const newsMetaEl = $("#news-meta");
+const newsBackEl = $("#news-back");
 const newsPrevEl = $("#news-prev");
 const newsNextEl = $("#news-next");
 const newsLinkEl = $("#news-link");
@@ -4955,6 +5010,10 @@ let popupMinimized = false;
 let popupAnchorEl = null;
 let popupAnchorRect = null;
 let newsItem = null;
+// Article modals opened from a book's Research sources stack on top of the
+// book reader. Closing the article (X, backdrop, or Esc) pops back to the
+// book instead of closing the whole reader.
+const newsModalStack = [];
 // Restaurants opened from the /map modal form a back/forward history, just
 // like the dictionary popup's looked-up-word history.
 const restaurantHistory = [];
@@ -11603,7 +11662,57 @@ function writtenBookText(element) {
   for (const number of clone.querySelectorAll(".chapter-number")) {
     number.textContent = `${number.textContent} `;
   }
-  return String(clone.textContent || "").replace(/\s+/g, " ").trim();
+  let text = String(clone.textContent || "").replace(/\s+/g, " ").trim();
+  // Research sources keep the publisher's ISO timestamp in the saved HTML.
+  // Show it in Pacific time as YYYY-MM-DD HH:MM:SS inside the book modal.
+  if (element.closest && element.closest(".sources")) {
+    text = text.replace(
+      BOOK_SOURCE_TIMESTAMP_PATTERN,
+      (stamp) => formatBookSourceTimestamp(stamp)
+    );
+  }
+  return text;
+}
+
+const BOOK_SOURCE_TIMESTAMP_PATTERN =
+  /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?\b/g;
+const BOOK_SOURCE_TIMESTAMP_EXACT =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$/;
+const bookSourceTimestampFormatter = (() => {
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Los_Angeles",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    });
+  } catch {
+    return null;
+  }
+})();
+
+function formatBookSourceTimestamp(value) {
+  const text = String(value || "").trim();
+  if (!BOOK_SOURCE_TIMESTAMP_EXACT.test(text)) return value;
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime()) || !bookSourceTimestampFormatter) {
+    return value;
+  }
+  const parts = bookSourceTimestampFormatter.formatToParts(date);
+  const part = (type) =>
+    parts.find((entry) => entry.type === type)?.value || "";
+  const year = part("year");
+  const month = part("month");
+  const day = part("day");
+  const hour = part("hour");
+  const minute = part("minute");
+  const second = part("second");
+  if (!year || !month || !day || !hour || !minute || !second) return value;
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 }
 
 /* Convert the self-contained HTML produced by /write_a_book into the same
@@ -11628,6 +11737,43 @@ function writtenBookHtmlToBlocks(html) {
     } else if (element.tagName === "P") {
       const text = writtenBookText(element);
       if (text) blocks.push({ type: "paragraph", text });
+    } else if (
+      (element.tagName === "UL" || element.tagName === "OL")
+      && element.closest(".sources")
+    ) {
+      // Research sources keep their publisher URL so the book reader can
+      // open each source in a stacked article modal with Learn/Chat.
+      for (const child of element.children) {
+        if (child.tagName !== "LI") continue;
+        const linkNode = child.querySelector("a[href]");
+        const dateNode = child.querySelector(".muted");
+        const href = String(linkNode?.getAttribute("href") || "").trim();
+        let title = String(linkNode?.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (!title) {
+          const clone = child.cloneNode(true);
+          for (const date of clone.querySelectorAll(".muted")) date.remove();
+          title = String(clone.textContent || "")
+            .replace(/\s+/g, " ")
+            .trim();
+        }
+        const publishedRaw = String(dateNode?.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim();
+        const published = publishedRaw
+          ? formatBookSourceTimestamp(publishedRaw)
+          : "";
+        if (title || href) {
+          blocks.push({
+            type: "source",
+            title: title || href,
+            link: href,
+            published,
+            publishedRaw,
+          });
+        }
+      }
     } else if (element.tagName === "UL" || element.tagName === "OL") {
       // Only take the outer list; its items already include nested text.
       if (element.parentElement?.closest("ul, ol")) continue;
@@ -11652,6 +11798,10 @@ function writtenBookBlocksText(blocks) {
       if (block.text) parts.push(block.text);
     } else if (block?.type === "list" && Array.isArray(block.items)) {
       parts.push(...block.items);
+    } else if (block?.type === "source") {
+      if (block.title) parts.push(block.title);
+      if (block.link) parts.push(block.link);
+      if (block.published) parts.push(block.published);
     }
   }
   return parts;
@@ -14562,10 +14712,89 @@ function appendNewsBlocks(blocks, target) {
       case "image":
         appendNewsFigure(block, target);
         break;
+      case "source":
+        appendBookSource(block, target);
+        break;
       default:
         break;
     }
   }
+}
+
+function openBookSourceArticle(block) {
+  const link = String(block?.link || "").trim();
+  if (!/^https?:\/\//i.test(link)) return;
+  const entry = {
+    newsItems: [],
+    newsSource: "Research source",
+    newsDocs: false,
+  };
+  const item = makeNewsItem(entry, {
+    title: block.title || link,
+    link,
+    published: block.publishedRaw || block.published || "",
+    source: "Research source",
+    learnable: true,
+    findable: true,
+    complete: true,
+  });
+  item.complete = true;
+  item.articleLoading = false;
+  item.articleFetched = false;
+  openNewsModal(item, { stackCurrent: true });
+}
+
+function appendBookSource(block, target) {
+  const link = String(block?.link || "").trim();
+  const row = document.createElement("div");
+  row.className = "book-source";
+
+  const openFromEvent = (event) => {
+    if (
+      event.defaultPrevented
+      || event.button !== 0
+      || event.metaKey
+      || event.ctrlKey
+      || event.shiftKey
+      || event.altKey
+    ) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openBookSourceArticle(block);
+  };
+
+  const title = document.createElement(link ? "a" : "div");
+  title.className = "book-source-title";
+  title.textContent = String(block?.title || link || "Source");
+  if (link) {
+    title.href = link;
+    title.target = "_blank";
+    title.rel = "noopener noreferrer";
+    title.title = "Open this source in the article reader";
+    title.addEventListener("click", openFromEvent);
+  }
+  row.appendChild(title);
+
+  if (link) {
+    const url = document.createElement("a");
+    url.className = "book-source-url";
+    url.href = link;
+    url.target = "_blank";
+    url.rel = "noopener noreferrer";
+    url.textContent = link;
+    url.title = link;
+    url.addEventListener("click", openFromEvent);
+    row.appendChild(url);
+  }
+
+  const published = String(block?.published || "").trim();
+  if (published) {
+    const date = document.createElement("span");
+    date.className = "book-source-date";
+    date.textContent = published;
+    row.appendChild(date);
+  }
+  (target || newsBodyEl).appendChild(row);
 }
 
 function appendRedditEmbed(item, target, open = false) {
@@ -15085,6 +15314,16 @@ function navigateRestaurant(step) {
 
 function openNewsModal(item, options = {}) {
   const historyMode = options.restaurantHistory || "root";
+  const stackCurrent = Boolean(options.stackCurrent);
+  if (!options.fromStack && !stackCurrent) {
+    newsModalStack.length = 0;
+  }
+  if (stackCurrent && newsItem && newsItem !== item) {
+    newsModalStack.push({
+      item: newsItem,
+      scrollTop: newsBodyEl.scrollTop,
+    });
+  }
   trackRestaurantHistory(item, historyMode);
   if (newsItem && newsItem !== item) {
     if (newsItem.newsId && newsItem.newsId !== item.newsId) {
@@ -15109,12 +15348,21 @@ function openNewsModal(item, options = {}) {
   // Show the panel before rendering so the OSM tile map can measure the body
   // width accurately when it builds its tiles and pin positions.
   newsPanelEl.hidden = false;
+  updateNewsBackButton();
   renderNewsModal(item);
   renderNewsAction(item);
   // A newly rendered story should always start at the top. The panel may
   // briefly retain the previous story's scroll offset, so reset it after the
   // new content has a layout box (and once more after the first frame).
-  resetNewsBodyScroll(item);
+  // Returning from a stacked source restores the book's previous position.
+  if (Number.isFinite(options.restoreScrollTop)) {
+    const restore = Number(options.restoreScrollTop);
+    window.requestAnimationFrame(() => {
+      if (newsItem === item) newsBodyEl.scrollTop = restore;
+    });
+  } else {
+    resetNewsBodyScroll(item);
+  }
   ensureNewsArticle(item);
   ensureStackoverflowAnswers(item);
   if (item.map) ensureMapVideos(item);
@@ -17098,6 +17346,15 @@ function openNewsStory(newsId, fallbackUrl = "", fallbackTitle = "") {
 }
 
 function closeNewsModal() {
+  if (newsModalStack.length) {
+    const previous = newsModalStack.pop();
+    openNewsModal(previous.item, {
+      fromStack: true,
+      restaurantHistory: "none",
+      restoreScrollTop: previous.scrollTop,
+    });
+    return;
+  }
   const closingNewsId = newsItem?.newsId;
   closeNewsChatState(closingNewsId);
   cancelNewsPodcastGeneration(newsItem);
@@ -17109,11 +17366,17 @@ function closeNewsModal() {
   resetNewsChat();
   resetNewsPodcastPlayback();
   resetNewsAction();
+  newsModalStack.length = 0;
+  updateNewsBackButton();
   newsPanelEl.hidden = true;
   newsBodyEl.textContent = "";
   if (newsTranslationEl.parentNode !== newsBodyEl) {
     newsBodyEl.appendChild(newsTranslationEl);
   }
+}
+
+function updateNewsBackButton() {
+  if (newsBackEl) newsBackEl.hidden = !newsModalStack.length;
 }
 
 /* ------------------------------------------------------------------ *
@@ -17555,6 +17818,11 @@ $("#news-chat-close").addEventListener("click", (event) => {
 });
 
 $("#news-close").addEventListener("click", closeNewsModal);
+newsBackEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  closeNewsModal();
+});
 newsPrevEl.addEventListener("click", () => navigateRestaurant(-1));
 newsNextEl.addEventListener("click", () => navigateRestaurant(1));
 newsTtsBtn.addEventListener("click", (event) => {
@@ -18499,7 +18767,11 @@ function submitText(text, fromChoice = false) {
     || commandName === "changelog" || commandName === "dictionary_history";
 
   const isCommand = question.startsWith("/");
-  if (isCommand) {
+  // /write_a_book streams a long research log before writing any chapter.
+  // Unlike result-list commands, it must follow the stream so the user can
+  // see which news URLs are being fetched and whether each fetch succeeded.
+  const followsBookProgress = commandName === "write_a_book";
+  if (isCommand && !followsBookProgress) {
     // Command results should stay where they are while they stream. The
     // command entry is anchored once below, but the viewport must not follow
     // every log/output update to the bottom.
@@ -18568,9 +18840,14 @@ function submitText(text, fromChoice = false) {
   resetAnswerSourceStatus();
   if (image) clearPendingImage();
 
-  if (isCommand || commandName === "wiki_article" || pinsNewsSearch) {
+  if (
+    (isCommand && !followsBookProgress)
+    || commandName === "wiki_article"
+    || pinsNewsSearch
+  ) {
     // Every command result is anchored at its start and never follows the
-    // stream. This replaces the old per-command allowlist.
+    // stream. This replaces the old per-command allowlist. /write_a_book is
+    // the exception: its progress log must stay visible and follow along.
     pinEntryToTop(entry);
   } else {
     stickToBottom = true;
