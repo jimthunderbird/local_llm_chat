@@ -1,0 +1,21 @@
+pdf_books_dir: {directory_of_this_prompt}/../.chat/pdf_books
+
+task.bugs (completed) {
+  - the book loader does not show any images 
+  - the book content does not have bold fonts
+}
+
+task (completed) {
+  in the pdf book modal, do the following:
+  when pressing the right arrow key, go to next page
+  when pressing the left arrow key, go to previous page
+}
+
+task (completed) {
+  create command: /pdf_books {
+    options.list {
+      - list all the books in {pdf_books_dir}, display the book title and a book url
+      - when clicking on the book url, open up a modal and load the book text into it with pagination allowing me to navigate the book content page by page
+    }
+  }
+}

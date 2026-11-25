@@ -2335,6 +2335,12 @@
     object-fit: contain;
     background: #060a0e;
   }
+  .news-figure.pdf-page { margin-bottom: 0; }
+  .news-figure.pdf-page a { background: #fff; }
+  .news-figure.pdf-page img {
+    max-height: none;
+    background: #fff;
+  }
   .news-figure figcaption {
     margin-top: .35em;
     color: #93a6b8;
@@ -3811,6 +3817,12 @@
     font-size: 12.5px;
     font-weight: 700;
     line-height: 1.35;
+  }
+  .book-url {
+    color: var(--dim);
+    font-size: 10.5px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
   }
   .book-title-row {
     display: flex;
@@ -7326,6 +7338,7 @@ function makeEntry(kind, options = {}) {
     bookLibraryItems: [],
     bookLibraryDirectory: "",
     bookLibraryDone: false,
+    bookLibraryPdf: false,
     writtenBook: null,
     mathtutor: null,
     mathtutorState: null,
@@ -11887,6 +11900,140 @@ function openWrittenBookReaderOnClick(card, item) {
   });
 }
 
+/* PDF books from /pdf_books open in the same reader modal. The server extracts
+ * one PDF page at a time; the header arrows (or the existing ‹/› buttons) move
+ * page by page while Find/TTS/translation keep working on the current page. */
+function openPdfBookReader(item) {
+  const name = String(item?.name || "").trim();
+  if (!name) return;
+  const reader = {
+    title: String(item.title || name),
+    source: "PDF books",
+    section: "Loading page 1…",
+    link: String(item.url || ""),
+    linkLabel: "Open PDF ↗",
+    docs: true,
+    learnable: false,
+    // PDF pages are rendered as images to preserve figures and bold text;
+    // Find would only see the image, so keep it hidden for PDF pages.
+    findable: false,
+    complete: true,
+    articleFetched: true,
+    fullArticleLoaded: true,
+    summary: "",
+    paragraphs: [],
+    blocks: [],
+    questionBlocks: [],
+    answers: [],
+    images: [],
+    iframeUrl: "",
+    articlePartial: false,
+    articleLoading: true,
+    articleError: "",
+    pdf: true,
+    pdfName: name,
+    pdfPage: 1,
+    pdfPages: 0,
+    pdfRequestId: 0,
+  };
+  openNewsModal(reader);
+  loadPdfBookPage(reader, 1);
+}
+
+function openPdfBookReaderOnClick(card, item) {
+  card.addEventListener("click", (event) => {
+    if (
+      event.defaultPrevented
+      || event.button !== 0
+      || event.metaKey
+      || event.ctrlKey
+      || event.shiftKey
+      || event.altKey
+    ) return;
+    if (!String(item?.name || "").trim()) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openPdfBookReader(item);
+  });
+}
+
+async function loadPdfBookPage(reader, page) {
+  if (!reader?.pdf || !reader.pdfName) return;
+  const requestId = (reader.pdfRequestId || 0) + 1;
+  reader.pdfRequestId = requestId;
+  reader.articleLoading = true;
+  reader.articleError = "";
+  if (newsItem === reader) {
+    renderNewsModal(reader);
+    renderNewsAction(reader);
+    updateRestaurantNav();
+  }
+  try {
+    const url = "/api/pdf_book_page?name="
+      + encodeURIComponent(reader.pdfName)
+      + `&page=${encodeURIComponent(page)}`;
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try {
+        const payload = await response.json();
+        if (payload?.error) detail = payload.error;
+      } catch { /* ignore */ }
+      throw new Error(detail);
+    }
+    const data = await response.json();
+    if (reader.pdfRequestId !== requestId) return;
+    const paragraphs = Array.isArray(data.paragraphs)
+      ? data.paragraphs.map((text) => String(text || "")).filter(Boolean)
+      : [];
+    reader.pdfPage = Number(data.page) || page;
+    reader.pdfPages = Number(data.pages) || 0;
+    reader.paragraphs = paragraphs;
+    const imageUrl = String(data.image_url || "").trim();
+    // The rendered page preserves images, colors, and bold fonts. Keep the
+    // extracted paragraphs for read-aloud and translation, but render the
+    // page image so the book looks like the PDF.
+    reader.blocks = imageUrl
+      ? [{
+        type: "image",
+        url: imageUrl,
+        alt: `${reader.title} — page ${reader.pdfPage}`,
+        pdfPage: true,
+      }]
+      : paragraphs.map((text) => ({ type: "paragraph", text }));
+    reader.section = `Page ${reader.pdfPage}`
+      + (reader.pdfPages ? ` of ${reader.pdfPages}` : "");
+    reader.articleLoading = false;
+    reader.complete = true;
+    if (newsItem === reader) {
+      renderNewsModal(reader);
+      renderNewsAction(reader);
+      updateRestaurantNav();
+      newsBodyEl.scrollTop = 0;
+    }
+  } catch (error) {
+    if (reader.pdfRequestId !== requestId) return;
+    reader.articleLoading = false;
+    reader.complete = true;
+    reader.articleError = error?.message || String(error);
+    reader.paragraphs = [];
+    reader.blocks = [];
+    if (newsItem === reader) {
+      renderNewsModal(reader);
+      renderNewsAction(reader);
+      updateRestaurantNav();
+    }
+  }
+}
+
+function navigatePdfPage(step) {
+  if (!newsItem?.pdf || newsItem.articleLoading) return;
+  const next = (Number(newsItem.pdfPage) || 1) + step;
+  if (next < 1) return;
+  if (newsItem.pdfPages && next > newsItem.pdfPages) return;
+  loadPdfBookPage(newsItem, next);
+}
+
 function formatBookLibrarySize(bytes) {
   const value = Number(bytes) || 0;
   if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
@@ -11898,6 +12045,7 @@ function addBookLibraryEvent(entry, data) {
   const type = String(data.type || "");
   if (type === "start") {
     entry.bookLibraryDirectory = String(data.directory || "");
+    entry.bookLibraryPdf = Boolean(data.pdf);
     scheduleRender(entry);
     return;
   }
@@ -11909,6 +12057,7 @@ function addBookLibraryEvent(entry, data) {
       url: String(data.url || ""),
       size: Number(data.size) || 0,
       modified: String(data.modified || ""),
+      pdf: Boolean(data.pdf || entry.bookLibraryPdf),
     });
     scheduleRender(entry);
     return;
@@ -11939,12 +12088,14 @@ function renderBookLibrary(entry) {
 
   const head = document.createElement("div");
   head.className = "book-list-head";
+  const pdfLibrary = Boolean(entry.bookLibraryPdf)
+    || items.some((item) => item.pdf);
   const label = document.createElement("strong");
-  label.textContent = "Books";
+  label.textContent = pdfLibrary ? "PDF books" : "Books";
   const note = document.createElement("span");
   note.className = "book-list-note";
   note.textContent = entry.bookLibraryDone
-    ? `${items.length} book${items.length === 1 ? "" : "s"} · click to read here`
+    ? `${items.length} book${items.length === 1 ? "" : "s"} · click to ${pdfLibrary ? "read page by page" : "read here"}`
     : `${items.length} loaded…`;
   head.appendChild(label);
   head.appendChild(note);
@@ -11958,8 +12109,14 @@ function renderBookLibrary(entry) {
     card.href = item.url || "#";
     card.target = "_blank";
     card.rel = "noopener noreferrer";
-    card.title = `Read ${item.name || item.title} here`;
-    openWrittenBookReaderOnClick(card, item);
+    card.title = item.pdf
+      ? `Read ${item.name || item.title} page by page`
+      : `Read ${item.name || item.title} here`;
+    if (item.pdf) {
+      openPdfBookReaderOnClick(card, item);
+    } else {
+      openWrittenBookReaderOnClick(card, item);
+    }
 
     const title = document.createElement("div");
     title.className = "book-title";
@@ -11974,9 +12131,20 @@ function renderBookLibrary(entry) {
     meta.textContent = metaParts.join(" · ");
     card.appendChild(meta);
 
+    if (item.pdf && item.url) {
+      const url = document.createElement("div");
+      url.className = "book-url";
+      try {
+        url.textContent = new URL(item.url, window.location.href).href;
+      } catch {
+        url.textContent = item.url;
+      }
+      card.appendChild(url);
+    }
+
     const action = document.createElement("span");
     action.className = "book-action";
-    action.textContent = "Read book →";
+    action.textContent = item.pdf ? "Read PDF →" : "Read book →";
     card.appendChild(action);
     cards.appendChild(card);
   }
@@ -14670,14 +14838,23 @@ function appendNewsFigure(block, target) {
   if (!url) return;
   const figure = document.createElement("figure");
   figure.className = "news-figure";
+  if (block?.pdfPage) {
+    figure.classList.add("pdf-page");
+  }
   const link = document.createElement("a");
   link.href = url;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
-  link.title = "Open the image in a new tab";
+  link.title = block?.pdfPage
+    ? "Open this PDF page image in a new tab"
+    : "Open the image in a new tab";
   const image = document.createElement("img");
   image.src = url;
-  image.alt = String(block?.alt || block?.caption || "Wikivoyage article image");
+  image.alt = String(
+    block?.alt
+    || block?.caption
+    || (block?.pdfPage ? "PDF page" : "Wikivoyage article image")
+  );
   image.loading = "lazy";
   image.referrerPolicy = "no-referrer";
   image.addEventListener("error", () => figure.remove(), { once: true });
@@ -15266,6 +15443,21 @@ function cancelNewsPodcastGeneration(item) {
 }
 
 function updateRestaurantNav() {
+  if (newsItem?.pdf) {
+    const page = Number(newsItem.pdfPage) || 1;
+    const pages = Number(newsItem.pdfPages) || 0;
+    newsPrevEl.hidden = false;
+    newsNextEl.hidden = false;
+    newsPrevEl.disabled = Boolean(newsItem.articleLoading) || page <= 1;
+    newsNextEl.disabled = Boolean(newsItem.articleLoading)
+      || !pages
+      || page >= pages;
+    newsPrevEl.title = "Previous page";
+    newsPrevEl.setAttribute("aria-label", "Previous page");
+    newsNextEl.title = "Next page";
+    newsNextEl.setAttribute("aria-label", "Next page");
+    return;
+  }
   const isNavigable = Boolean(newsItem?.osm || newsItem?.map);
   const noun = newsItem?.osm ? "restaurant" : "place";
   newsPrevEl.hidden = !isNavigable;
@@ -17823,8 +18015,44 @@ newsBackEl.addEventListener("click", (event) => {
   event.stopPropagation();
   closeNewsModal();
 });
-newsPrevEl.addEventListener("click", () => navigateRestaurant(-1));
-newsNextEl.addEventListener("click", () => navigateRestaurant(1));
+newsPrevEl.addEventListener("click", () => {
+  if (newsItem?.pdf) {
+    navigatePdfPage(-1);
+    return;
+  }
+  navigateRestaurant(-1);
+});
+newsNextEl.addEventListener("click", () => {
+  if (newsItem?.pdf) {
+    navigatePdfPage(1);
+    return;
+  }
+  navigateRestaurant(1);
+});
+
+// PDF readers use the left/right arrow keys for page navigation. Text fields
+// inside the modal (Find, chat) keep their native cursor movement.
+document.addEventListener("keydown", (event) => {
+  if (
+    event.defaultPrevented
+    || event.isComposing
+    || event.altKey
+    || event.ctrlKey
+    || event.metaKey
+    || newsPanelEl.hidden
+    || !newsItem?.pdf
+  ) return;
+  if (event.target?.closest?.(
+    "input, textarea, select, [contenteditable='true']"
+  )) return;
+  if (event.key === "ArrowRight") {
+    event.preventDefault();
+    navigatePdfPage(1);
+  } else if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    navigatePdfPage(-1);
+  }
+});
 newsTtsBtn.addEventListener("click", (event) => {
   event.preventDefault();
   event.stopPropagation();

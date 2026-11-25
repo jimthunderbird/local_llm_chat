@@ -7,7 +7,7 @@ Ollama streaming, transcript/article scoping, history, /memory,
 /stackoverflow, /reddit, /tablelog, /stock, /googlenews, /gkg, /medium,
 /gutenberg, /openlibrary, /internet_archive, /changelog, /wikivoyage, /map,
 /game, /wiki,
-/wiki_article, /deepresearch, /write_a_book, /books, /robinhood,
+/wiki_article, /deepresearch, /write_a_book, /books, /pdf_books, /robinhood,
 /article, /dict, /dictionary_history, and /ask. The browser is a
 pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
 
@@ -31,7 +31,10 @@ Endpoints:
     GET  /api/changelog_file     ?name=<summary.html> one completed-task page
                                   used by /changelog's detail modal
     GET  /api/book_file          ?name=<book.html> one book written by
-                                  /write_a_book, served as an HTML page
+                                  /write_a_book
+    GET  /api/pdf_book_file      ?name=<book.pdf> one PDF from .chat/pdf_books
+    GET  /api/pdf_book_page      ?name=<book.pdf>&page=N one page of PDF text
+                                  for the page-by-page reader, served as an HTML page
     GET  /api/gutenberg_book     ?id=<book_id>&url=<plaintext_url>&title=...
                                   the cached plaintext used by the book modal
     POST /api/ask                SSE: question or slash-command stream
@@ -365,6 +368,7 @@ WEB_COMMANDS = {
     "/united_healthcare": "search the UnitedHealthcare provider directory by NPI, doctor name, specialty, or hospital; each result opens a provider profile; /united_healthcare <question>; /united_healthcare off",
     "/write_a_book": "ask for every book setting (model, directory, words, chapters, sub-questions, articles per sub-question), then research recent news and write a book: /write_a_book [<subject>]",
     "/books": "list the books written by /write_a_book in .chat/books: /books [keyword]",
+    "/pdf_books": "list the PDF books in .chat/pdf_books and read them page by page",
     "/settings": "set English Corner options: /settings english_words_to_learn <range> (3k, 5k, 10k, 20k, 30k, 50k, 100k, or a range such as 10k..50k; default 10k..50k; off disables highlighting)",
 }
 
@@ -767,6 +771,7 @@ WRITE_A_BOOK_MODEL = os.environ.get(
     "OLLAMA_BOOK_MODEL", chat.ANSWER_MODEL
 )
 WRITE_A_BOOK_DIR = SCRIPT_DIR / ".chat" / "books"
+PDF_BOOKS_DIR = SCRIPT_DIR / ".chat" / "pdf_books"
 # task.more_horizontal_exploration in prompts/write_a_book.prompt asks for
 # ten distinct research questions instead of six. task.refactor asks each of
 # those questions to contribute an equal share of the research references.
@@ -1089,6 +1094,233 @@ def list_written_books(directory: str | Path | None = None) -> list[dict]:
         )
     entries.sort(key=lambda item: item["mtime"], reverse=True)
     return entries
+
+
+def pdf_book_path(name: str) -> Path | None:
+    """Resolve one PDF book inside .chat/pdf_books without traversal."""
+    name = str(name or "").strip()
+    if (
+        not name
+        or "/" in name
+        or "\\" in name
+        or name != Path(name).name
+        or not name.lower().endswith(".pdf")
+    ):
+        return None
+    book_dir = PDF_BOOKS_DIR.resolve()
+    path = (book_dir / name).resolve()
+    try:
+        path.relative_to(book_dir)
+    except ValueError:
+        return None
+    return path
+
+
+def _pdf_book_title(name: str) -> str:
+    """Use a readable filename stem as the PDF book title."""
+    stem = re.sub(r"[_-]+", " ", Path(name).stem)
+    return " ".join(stem.split()) or Path(name).stem
+
+
+def list_pdf_books() -> list[dict]:
+    """List every PDF in .chat/pdf_books, newest first."""
+    if not PDF_BOOKS_DIR.is_dir():
+        return []
+    entries: list[dict] = []
+    for path in PDF_BOOKS_DIR.iterdir():
+        try:
+            if not path.is_file() or path.suffix.lower() != ".pdf":
+                continue
+            stat = path.stat()
+        except OSError:
+            continue
+        name = path.name
+        entries.append(
+            {
+                "id": name,
+                "name": name,
+                "title": _pdf_book_title(name),
+                "url": f"/api/pdf_book_file?name={quote(name)}",
+                "size": stat.st_size,
+                "mtime": stat.st_mtime,
+                "modified": time.strftime(
+                    "%Y-%m-%d %H:%M", time.localtime(stat.st_mtime)
+                ),
+            }
+        )
+    entries.sort(key=lambda item: item["mtime"], reverse=True)
+    return entries
+
+
+# Page extraction opens the PDF once per file version. pypdf extracts one page
+# in milliseconds after that, so navigation can stay page-by-page without
+# rebuilding the whole book text for every click.
+_PDF_BOOK_READERS: dict[tuple[str, float], tuple[object, int]] = {}
+_PDF_BOOK_READER_LOCK = threading.Lock()
+
+
+def _pdf_book_reader(path: Path) -> tuple[object, int]:
+    """Return a cached pypdf reader and its page count."""
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        raise RuntimeError(
+            "PDF support requires pypdf. Install it with pip install pypdf."
+        ) from exc
+    key = (str(path), path.stat().st_mtime)
+    with _PDF_BOOK_READER_LOCK:
+        cached = _PDF_BOOK_READERS.get(key)
+        if cached is not None:
+            return cached
+        # Drop stale readers for this same book when its file changes.
+        for old_key in list(_PDF_BOOK_READERS):
+            if old_key[0] == key[0] and old_key != key:
+                del _PDF_BOOK_READERS[old_key]
+        reader = PdfReader(str(path))
+        cached = (reader, len(reader.pages))
+        _PDF_BOOK_READERS[key] = cached
+        return cached
+
+
+def _pdf_page_paragraphs(text: str) -> list[str]:
+    """Join PDF line wraps into readable paragraphs for one page."""
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    paragraphs: list[str] = []
+    current: list[str] = []
+    for raw in normalized.split("\n"):
+        line = " ".join(raw.split())
+        if line:
+            current.append(line)
+            continue
+        if current:
+            paragraphs.append(" ".join(current))
+            current = []
+    if current:
+        paragraphs.append(" ".join(current))
+    # Bare page numbers and repeated running headers are page furniture.
+    cleaned = [
+        paragraph
+        for paragraph in paragraphs
+        if paragraph and not re.fullmatch(r"\d{1,4}", paragraph)
+    ]
+    if cleaned:
+        return cleaned
+    return ["This page has no extractable text."]
+
+
+def read_pdf_book_page(name: str, page: int) -> dict:
+    """Return one page of a PDF book as paragraphs and page metadata."""
+    path = pdf_book_path(name)
+    if path is None or not path.is_file():
+        raise ValueError("PDF book not found")
+    reader, count = _pdf_book_reader(path)
+    if count <= 0:
+        raise RuntimeError("The PDF has no pages")
+    page_number = max(1, min(int(page), count))
+    with _PDF_BOOK_READER_LOCK:
+        text = reader.pages[page_number - 1].extract_text() or ""
+    paragraphs = _pdf_page_paragraphs(text)
+    return {
+        "name": path.name,
+        "title": _pdf_book_title(path.name),
+        "page": page_number,
+        "pages": count,
+        "paragraphs": paragraphs,
+        "text": "\n\n".join(paragraphs),
+        "image_url": (
+            f"/api/pdf_book_page_image?name={quote(path.name)}"
+            f"&page={page_number}"
+        ),
+    }
+
+
+# PDF pages are rendered as images so figures, diagrams, syntax colors, and
+# bold fonts survive extraction. The rendered PNGs are cached per PDF version.
+PDF_PAGE_RENDER_DPI = 180
+PDF_PAGE_CACHE_DIR = PDF_BOOKS_DIR / ".pages"
+_PDF_PAGE_RENDER_LOCK = threading.Lock()
+
+
+def _pdf_page_cache_path(path: Path, page: int, dpi: int) -> Path:
+    key = (
+        f"{path.name}:{path.stat().st_mtime}:{dpi}:{page}".encode("utf-8")
+    )
+    return PDF_PAGE_CACHE_DIR / (hashlib.sha1(key).hexdigest() + ".png")
+
+
+def render_pdf_book_page(
+    name: str, page: int, dpi: int = PDF_PAGE_RENDER_DPI
+) -> Path:
+    """Render one PDF page to a cached PNG image."""
+    path = pdf_book_path(name)
+    if path is None or not path.is_file():
+        raise ValueError("PDF book not found")
+    _reader, count = _pdf_book_reader(path)
+    if count <= 0:
+        raise RuntimeError("The PDF has no pages")
+    page_number = max(1, min(int(page), count))
+    dpi = max(72, min(int(dpi), 300))
+    cache_path = _pdf_page_cache_path(path, page_number, dpi)
+    with _PDF_PAGE_RENDER_LOCK:
+        try:
+            if cache_path.is_file() and cache_path.stat().st_size > 0:
+                return cache_path
+        except OSError:
+            pass
+        try:
+            PDF_PAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Cannot create the PDF page cache: {exc}"
+            ) from exc
+        tmp_prefix = PDF_PAGE_CACHE_DIR / (
+            f"tmp-{os.getpid()}-{threading.get_ident()}-{page_number}"
+        )
+        tmp_path = Path(str(tmp_prefix) + ".png")
+        command = [
+            "pdftoppm",
+            "-f",
+            str(page_number),
+            "-l",
+            str(page_number),
+            "-png",
+            "-r",
+            str(dpi),
+            "-singlefile",
+            str(path),
+            str(tmp_prefix),
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "PDF page rendering requires poppler's pdftoppm command"
+            ) from exc
+        except subprocess.SubprocessError as exc:
+            raise RuntimeError(f"Could not render the PDF page: {exc}") from exc
+        if result.returncode != 0 or not tmp_path.is_file():
+            detail = " ".join(
+                (result.stderr or result.stdout or "").split()
+            )[:300]
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise RuntimeError(
+                "Could not render the PDF page" + (f": {detail}" if detail else "")
+            )
+        try:
+            tmp_path.replace(cache_path)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not store the rendered PDF page: {exc}"
+            ) from exc
+        return cache_path
 
 
 def _book_news_timestamp(value: str) -> float | None:
@@ -28815,6 +29047,41 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             directory = (params.get("dir") or [""])[0]
             self._send_written_book(name, directory)
             return
+        if path == "/api/pdf_book_file":
+            params = parse_qs(parsed.query)
+            name = (params.get("name") or [""])[0]
+            self._send_pdf_book(name)
+            return
+        if path == "/api/pdf_book_page":
+            params = parse_qs(parsed.query)
+            name = (params.get("name") or [""])[0]
+            try:
+                page = int((params.get("page") or ["1"])[0])
+            except (TypeError, ValueError):
+                self._send_error_json("Missing or invalid PDF page", 400)
+                return
+            try:
+                payload = read_pdf_book_page(name, page)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 404)
+                return
+            except (OSError, RuntimeError) as exc:
+                self._send_error_json(
+                    f"Could not read the PDF book: {exc}", 502
+                )
+                return
+            self._send_json(payload)
+            return
+        if path == "/api/pdf_book_page_image":
+            params = parse_qs(parsed.query)
+            name = (params.get("name") or [""])[0]
+            try:
+                page = int((params.get("page") or ["1"])[0])
+            except (TypeError, ValueError):
+                self._send_error_json("Missing or invalid PDF page", 400)
+                return
+            self._send_pdf_page_image(name, page)
+            return
         if path == "/api/wiki":
             params = parse_qs(parsed.query)
             word = (params.get("word") or [""])[0].strip()
@@ -28886,6 +29153,60 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _send_pdf_book(self, name: str) -> None:
+        """Serve one PDF book from .chat/pdf_books."""
+        path = pdf_book_path(name)
+        if path is None or not path.is_file():
+            self._send_error_json("PDF book not found", 404)
+            return
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            self._send_error_json(f"Cannot read PDF book: {exc}", 500)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header(
+            "Content-Disposition",
+            f"inline; filename*=UTF-8''{quote(path.name)}",
+        )
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _send_pdf_page_image(self, name: str, page: int) -> None:
+        """Render and serve one PDF page as a PNG image."""
+        try:
+            path = render_pdf_book_page(name, page)
+        except ValueError as exc:
+            self._send_error_json(str(exc), 404)
+            return
+        except (OSError, RuntimeError) as exc:
+            self._send_error_json(
+                f"Could not render the PDF page: {exc}", 502
+            )
+            return
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            self._send_error_json(
+                f"Cannot read the rendered PDF page: {exc}", 500
+            )
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -31179,6 +31500,8 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._command_write_a_book(argument)
         elif name == "/books":
             self._command_books(argument)
+        elif name == "/pdf_books":
+            self._command_pdf_books(argument)
         else:
             self._sse_text(
                 "output",
@@ -33654,6 +33977,67 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "\n"
                 + hint
                 + "Use /write_a_book <subject> to write one.\n",
+            )
+
+    def _command_pdf_books(self, argument: str) -> None:
+        """List every PDF book in ./.chat/pdf_books.
+
+        Each card links to the raw PDF and opens the page-by-page reader in
+        the browser. The optional argument filters titles and filenames.
+        """
+        keyword = " ".join(argument.split()).casefold()
+        entries = list_pdf_books()
+        if keyword:
+            entries = [
+                entry
+                for entry in entries
+                if keyword in entry["title"].casefold()
+                or keyword in entry["name"].casefold()
+            ]
+        self._sse(
+            "book_library",
+            {
+                "type": "start",
+                "source": "PDF books",
+                "directory": str(PDF_BOOKS_DIR),
+                "pdf": True,
+            },
+        )
+        for index, entry in enumerate(entries, 1):
+            self._sse(
+                "book_library",
+                {
+                    "type": "item",
+                    "index": index,
+                    "name": entry["name"],
+                    "title": entry["title"],
+                    "url": entry["url"],
+                    "size": entry["size"],
+                    "modified": entry["modified"],
+                    "pdf": True,
+                },
+            )
+        self._sse(
+            "book_library",
+            {
+                "type": "done",
+                "count": len(entries),
+                "keyword": keyword,
+                "directory": str(PDF_BOOKS_DIR),
+                "pdf": True,
+            },
+        )
+        if not entries:
+            hint = (
+                f"No PDF books matched {keyword!r}.\n"
+                if keyword
+                else "No PDF books found.\n"
+            )
+            self._sse_text(
+                "output",
+                "\n"
+                + hint
+                + f"Add PDFs to {PDF_BOOKS_DIR}.\n",
             )
 
     def _command_refresh(self) -> None:
