@@ -1157,6 +1157,8 @@ def list_pdf_books() -> list[dict]:
 # rebuilding the whole book text for every click.
 _PDF_BOOK_READERS: dict[tuple[str, float], tuple[object, int]] = {}
 _PDF_BOOK_READER_LOCK = threading.Lock()
+_PDF_BOOK_WORDS: dict[tuple[str, float, int], list[dict]] = {}
+_PDF_BOOK_CHAPTERS: dict[tuple[str, float], list[dict]] = {}
 
 
 def _pdf_book_reader(path: Path) -> tuple[object, int]:
@@ -1208,6 +1210,530 @@ def _pdf_page_paragraphs(text: str) -> list[str]:
     return ["This page has no extractable text."]
 
 
+def _pdf_page_words(path: Path, page: int) -> list[dict]:
+    """Return normalized, clickable word boxes for one PDF page.
+
+    poppler's ``pdftotext -bbox`` emits one box per word in PDF points. The
+    coordinates are normalized to the page so the browser can place an
+    invisible text layer directly over the rendered page image.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return []
+    key = (str(path), stat.st_mtime, page)
+    with _PDF_BOOK_READER_LOCK:
+        cached = _PDF_BOOK_WORDS.get(key)
+        if cached is not None:
+            return cached
+    try:
+        result = subprocess.run(
+            [
+                "pdftotext",
+                "-f",
+                str(page),
+                "-l",
+                str(page),
+                "-bbox",
+                str(path),
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    page_match = re.search(
+        r'<page\s+width="([0-9.]+)"\s+height="([0-9.]+)"',
+        result.stdout,
+    )
+    if page_match is None:
+        return []
+    page_width = float(page_match.group(1)) or 1.0
+    page_height = float(page_match.group(2)) or 1.0
+    words: list[dict] = []
+    for match in re.finditer(
+        r'<word\s+xMin="([0-9.]+)"\s+yMin="([0-9.]+)"'
+        r'\s+xMax="([0-9.]+)"\s+yMax="([0-9.]+)">(.*?)</word>',
+        result.stdout,
+        re.DOTALL,
+    ):
+        text = html.unescape(match.group(5)).strip()
+        if not text:
+            continue
+        x_min = float(match.group(1))
+        y_min = float(match.group(2))
+        x_max = float(match.group(3))
+        y_max = float(match.group(4))
+        words.append(
+            {
+                "text": text,
+                "x": max(0.0, x_min / page_width),
+                "y": max(0.0, y_min / page_height),
+                "w": max(0.0, (x_max - x_min) / page_width),
+                "h": max(0.0, (y_max - y_min) / page_height),
+            }
+        )
+        if len(words) >= 5000:
+            break
+    with _PDF_BOOK_READER_LOCK:
+        _PDF_BOOK_WORDS[key] = words
+    return words
+
+
+def _pdf_book_chapters(path: Path, reader) -> list[dict]:
+    """Return the PDF's top-level chapter outline entries with page numbers."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return []
+    key = (str(path), stat.st_mtime)
+    with _PDF_BOOK_READER_LOCK:
+        cached = _PDF_BOOK_CHAPTERS.get(key)
+        if cached is not None:
+            return cached
+    chapters: list[dict] = []
+    try:
+        outline = reader.outline or []
+    except (AttributeError, TypeError):
+        outline = []
+    for item in outline:
+        title = " ".join(str(getattr(item, "title", "") or "").split())
+        if not title.lower().startswith("chapter"):
+            continue
+        try:
+            page = reader.get_destination_page_number(item) + 1
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if page < 1:
+            continue
+        chapters.append({"title": title, "page": page})
+    chapters.sort(key=lambda chapter: chapter["page"])
+    with _PDF_BOOK_READER_LOCK:
+        _PDF_BOOK_CHAPTERS[key] = chapters
+    return chapters
+
+
+_PDF_GRAPH_STOPWORDS = frozenset(
+    """
+    a an and are as at be been being but by can could did do does doing for
+    from had has have having he her here hers him his how i if in into is it
+    its itself just like may me more most much must my no nor not now of off on
+    once only or other our ours over same she should so some such than that the
+    their theirs them then there these they this those through to too under
+    until up very was we were what when where which while who whom why will
+    with would you your yours chapter figure table section page book example
+    examples using used also each any all both few many several such than
+    http https www com org net html pdf
+    """.split()
+)
+_PDF_KNOWLEDGE_GRAPH_LOCK = threading.Lock()
+
+
+def pdf_knowledge_graph_path(name: str) -> Path | None:
+    """Return the cached knowledge-graph JSON path for one PDF book."""
+    path = pdf_book_path(name)
+    if path is None:
+        return None
+    return PDF_BOOKS_DIR / f"{path.name}.knowlege_graph.json"
+
+
+def _pdf_outline_nodes(reader) -> list[dict]:
+    """Turn the PDF outline into chapter and section concept nodes."""
+    nodes: list[dict] = []
+    chapter_counter = -1
+
+    def walk(items, parent=None, depth=0, chapter=-1):
+        nonlocal chapter_counter
+        index = 0
+        while index < len(items):
+            item = items[index]
+            if isinstance(item, list):
+                index += 1
+                continue
+            title = " ".join(str(getattr(item, "title", "") or "").split())
+            if not title:
+                index += 1
+                continue
+            is_chapter = depth == 0 and title.lower().startswith("chapter")
+            if depth == 0 and not is_chapter:
+                index += 1
+                continue
+            try:
+                page = reader.get_destination_page_number(item) + 1
+            except (AttributeError, TypeError, ValueError):
+                page = None
+            if page is None:
+                index += 1
+                continue
+            if is_chapter:
+                chapter_counter += 1
+                chapter = chapter_counter
+            node_id = f"n{len(nodes) + 1}"
+            nodes.append(
+                {
+                    "id": node_id,
+                    "label": title,
+                    "page": int(page),
+                    "level": depth,
+                    "parent": parent,
+                    "chapter": chapter,
+                }
+            )
+            index += 1
+            if index < len(items) and isinstance(items[index], list):
+                walk(items[index], node_id, depth + 1, chapter)
+                index += 1
+
+    try:
+        outline = reader.outline or []
+    except (AttributeError, TypeError):
+        outline = []
+    walk(outline)
+    return nodes
+
+
+def _pdf_graph_term_counts(text: str) -> dict[str, int]:
+    """Count meaningful lower-case terms in one concept's section text."""
+    counts: dict[str, int] = {}
+    for raw in re.findall(r"[A-Za-z][A-Za-z0-9'-]{3,}", text):
+        term = raw.lower().strip("-'")
+        if len(term) < 4 or term in _PDF_GRAPH_STOPWORDS:
+            continue
+        counts[term] = counts.get(term, 0) + 1
+    return counts
+
+
+def build_pdf_knowledge_graph(
+    name: str,
+    progress: Callable[[int, str], None] | None = None,
+    *,
+    rebuild: bool = False,
+) -> dict:
+    """Build and cache concepts and related-concept links for one PDF."""
+    path = pdf_book_path(name)
+    if path is None or not path.is_file():
+        raise ValueError("PDF book not found")
+    graph_path = pdf_knowledge_graph_path(name)
+    if graph_path is None:
+        raise ValueError("PDF book not found")
+
+    def report(percent: int, message: str) -> None:
+        if progress is not None:
+            progress(max(0, min(100, int(percent))), message)
+
+    if not rebuild and graph_path.is_file():
+        try:
+            cached = json.loads(graph_path.read_text(encoding="utf-8"))
+            if isinstance(cached, dict) and cached.get("nodes"):
+                report(100, "Knowledge graph loaded")
+                return cached
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    with _PDF_KNOWLEDGE_GRAPH_LOCK:
+        if not rebuild and graph_path.is_file():
+            try:
+                cached = json.loads(graph_path.read_text(encoding="utf-8"))
+                if isinstance(cached, dict) and cached.get("nodes"):
+                    report(100, "Knowledge graph loaded")
+                    return cached
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        reader, count = _pdf_book_reader(path)
+        if count <= 0:
+            raise RuntimeError("The PDF has no pages")
+        report(2, "Reading book outline")
+        nodes = _pdf_outline_nodes(reader)
+        if not nodes:
+            raise RuntimeError(
+                "This PDF has no chapter/section outline to build a graph"
+            )
+
+        page_texts: list[str] = []
+        for index in range(count):
+            if index % 5 == 0:
+                report(
+                    5 + int(50 * index / max(1, count)),
+                    f"Reading page {index + 1} of {count}",
+                )
+            with _PDF_BOOK_READER_LOCK:
+                text = reader.pages[index].extract_text() or ""
+            page_texts.append(text)
+        report(60, "Identifying concepts")
+
+        concept_texts: list[str] = []
+        for index, node in enumerate(nodes):
+            start = max(0, int(node["page"]) - 1)
+            if index + 1 < len(nodes):
+                next_page = int(nodes[index + 1]["page"])
+            else:
+                next_page = count + 1
+            end = max(start + 1, min(count, next_page - 1))
+            concept_texts.append(" ".join(page_texts[start:end]))
+        report(70, "Ranking key terms")
+
+        term_counts = [_pdf_graph_term_counts(text) for text in concept_texts]
+        document_frequency: dict[str, int] = {}
+        for counts in term_counts:
+            for term in counts:
+                document_frequency[term] = (
+                    document_frequency.get(term, 0) + 1
+                )
+        total_nodes = max(1, len(nodes))
+        keyword_sets: list[set[str]] = []
+        for counts in term_counts:
+            scored = sorted(
+                (
+                    (frequency * math.log((total_nodes + 1)
+                                         / (document_frequency[term] + 1)), term)
+                    for term, frequency in counts.items()
+                ),
+                reverse=True,
+            )
+            keyword_sets.append({term for _score, term in scored[:8]})
+        report(80, "Linking related concepts")
+
+        edges: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for node in nodes:
+            parent = node.get("parent")
+            if parent:
+                edges.append(
+                    {"source": parent, "target": node["id"], "type": "parent"}
+                )
+                seen.add((parent, node["id"]))
+        for index, node in enumerate(nodes):
+            candidates: list[tuple[int, int]] = []
+            for other_index, other in enumerate(nodes):
+                if other_index == index:
+                    continue
+                shared = len(keyword_sets[index] & keyword_sets[other_index])
+                if shared >= 2:
+                    candidates.append((shared, other_index))
+            candidates.sort(key=lambda item: (-item[0], item[1]))
+            for shared, other_index in candidates[:6]:
+                left, right = sorted((node["id"], nodes[other_index]["id"]))
+                if (left, right) in seen:
+                    continue
+                seen.add((left, right))
+                edges.append(
+                    {
+                        "source": left,
+                        "target": right,
+                        "type": "related",
+                        "weight": shared,
+                    }
+                )
+            if index % 20 == 0:
+                report(
+                    80 + int(15 * index / total_nodes),
+                    "Linking related concepts",
+                )
+
+        report(96, "Saving knowledge graph")
+        payload = {
+            "name": path.name,
+            "title": _pdf_book_title(path.name),
+            "pages": count,
+            "generated": datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            ),
+            "nodes": nodes,
+            "edges": edges,
+        }
+        try:
+            PDF_BOOKS_DIR.mkdir(parents=True, exist_ok=True)
+            temp_path = graph_path.with_name(graph_path.name + ".tmp")
+            temp_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            temp_path.replace(graph_path)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not save the knowledge graph: {exc}"
+            ) from exc
+        report(100, "Knowledge graph ready")
+        return payload
+
+
+def read_pdf_concept(name: str, node_id: str) -> dict:
+    """Return the PDF text belonging to one knowledge-graph concept."""
+    path = pdf_book_path(name)
+    graph_path = pdf_knowledge_graph_path(name)
+    if path is None or not path.is_file():
+        raise ValueError("PDF book not found")
+    if graph_path is None or not graph_path.is_file():
+        raise ValueError("Build the knowledge graph first")
+    try:
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Cannot read the knowledge graph: {exc}") from exc
+    nodes = graph.get("nodes") if isinstance(graph, dict) else None
+    if not isinstance(nodes, list):
+        raise RuntimeError("The knowledge graph has no nodes")
+    index = None
+    for position, node in enumerate(nodes):
+        if isinstance(node, dict) and str(node.get("id")) == str(node_id):
+            index = position
+            break
+    if index is None:
+        raise ValueError("Concept not found")
+    node = nodes[index]
+    reader, count = _pdf_book_reader(path)
+    if count <= 0:
+        raise RuntimeError("The PDF has no pages")
+    start = max(1, min(count, int(node.get("page") or 1)))
+    level = int(node.get("level") or 0)
+    next_page = count + 1
+    for candidate in nodes[index + 1:]:
+        if not isinstance(candidate, dict):
+            continue
+        page = int(candidate.get("page") or 0)
+        candidate_level = int(candidate.get("level") or 0)
+        if page > start and candidate_level <= level:
+            next_page = page
+            break
+    full_end = min(count, next_page - 1)
+    end = min(full_end, start + 9)
+    truncated = end < full_end
+    paragraphs: list[str] = []
+    used = 0
+    for page_number in range(start, end + 1):
+        with _PDF_BOOK_READER_LOCK:
+            text = reader.pages[page_number - 1].extract_text() or ""
+        for paragraph in _pdf_page_paragraphs(text):
+            if paragraph == "This page has no extractable text.":
+                continue
+            if used + len(paragraph) > 30000:
+                truncated = True
+                break
+            paragraphs.append(paragraph)
+            used += len(paragraph) + 2
+        if truncated and used >= 30000:
+            break
+    if not paragraphs:
+        paragraphs = ["No extractable text for this concept."]
+    return {
+        "id": str(node.get("id")),
+        "title": str(node.get("label") or "Concept"),
+        "page": start,
+        "end_page": end,
+        "pages": end - start + 1,
+        "paragraphs": paragraphs,
+        "text": "\n\n".join(paragraphs),
+        "truncated": truncated,
+    }
+
+
+def _pdf_destination_page(reader, destination, page_map: dict) -> int | None:
+    """Resolve a PDF destination or named destination to a 1-based page."""
+    if destination is None:
+        return None
+    if isinstance(destination, (str, bytes)):
+        name = destination.decode("utf-8", "replace") if isinstance(
+            destination, bytes
+        ) else destination
+        named = getattr(reader, "named_destinations", {}).get(name)
+        if named is None:
+            return None
+        destination = named
+        if isinstance(named, dict):
+            destination = named.get("/D") or named.get("D")
+        elif hasattr(named, "page"):
+            return _pdf_destination_page(reader, named.page, page_map)
+    if not hasattr(destination, "__getitem__"):
+        return None
+    try:
+        target = destination[0]
+    except (IndexError, KeyError, TypeError):
+        return None
+    if hasattr(target, "idnum"):
+        return page_map.get((target.idnum, target.generation))
+    if isinstance(target, int):
+        return target + 1
+    if isinstance(target, float):
+        return int(target) + 1
+    return None
+
+
+def _pdf_page_links(reader, page_number: int) -> list[dict]:
+    """Return normalized internal link rectangles for one PDF page."""
+    try:
+        page = reader.pages[page_number - 1]
+        page_width = float(page.mediabox.width) or 1.0
+        page_height = float(page.mediabox.height) or 1.0
+    except (IndexError, TypeError, ValueError):
+        return []
+    page_map: dict[tuple[int, int], int] = {}
+    try:
+        pages = reader.pages
+    except (AttributeError, TypeError):
+        return []
+    for index, candidate in enumerate(pages, 1):
+        reference = getattr(candidate, "indirect_reference", None)
+        if reference is not None:
+            page_map[(reference.idnum, reference.generation)] = index
+    links: list[dict] = []
+    seen: set[tuple[int, int, int, int, int]] = set()
+    annots = page.get("/Annots") or []
+    for annot in annots:
+        try:
+            obj = annot.get_object()
+            if obj.get("/Subtype") != "/Link":
+                continue
+            destination = obj.get("/Dest")
+            if destination is None:
+                action = obj.get("/A")
+                if action is None:
+                    continue
+                action = action.get_object()
+                if action.get("/S") != "/GoTo":
+                    continue
+                destination = action.get("/D")
+            target_page = _pdf_destination_page(
+                reader, destination, page_map
+            )
+            if not target_page:
+                continue
+            rect = obj.get("/Rect")
+            if rect is None or len(rect) < 4:
+                continue
+            x1, y1, x2, y2 = [float(value) for value in rect[:4]]
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            continue
+        left = max(0.0, min(x1, x2) / page_width)
+        top = max(0.0, 1.0 - max(y1, y2) / page_height)
+        width = max(0.0, abs(x2 - x1) / page_width)
+        height = max(0.0, abs(y2 - y1) / page_height)
+        if width <= 0 or height <= 0:
+            continue
+        key = (
+            round(left * 1000), round(top * 1000),
+            round(width * 1000), round(height * 1000), target_page,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        links.append(
+            {
+                "x": left,
+                "y": top,
+                "w": width,
+                "h": height,
+                "page": int(target_page),
+            }
+        )
+        if len(links) >= 500:
+            break
+    return links
+
+
 def read_pdf_book_page(name: str, page: int) -> dict:
     """Return one page of a PDF book as paragraphs and page metadata."""
     path = pdf_book_path(name)
@@ -1220,6 +1746,9 @@ def read_pdf_book_page(name: str, page: int) -> dict:
     with _PDF_BOOK_READER_LOCK:
         text = reader.pages[page_number - 1].extract_text() or ""
     paragraphs = _pdf_page_paragraphs(text)
+    words = _pdf_page_words(path, page_number)
+    links = _pdf_page_links(reader, page_number)
+    chapters = _pdf_book_chapters(path, reader)
     return {
         "name": path.name,
         "title": _pdf_book_title(path.name),
@@ -1227,6 +1756,9 @@ def read_pdf_book_page(name: str, page: int) -> dict:
         "pages": count,
         "paragraphs": paragraphs,
         "text": "\n\n".join(paragraphs),
+        "words": words,
+        "links": links,
+        "chapters": chapters,
         "image_url": (
             f"/api/pdf_book_page_image?name={quote(path.name)}"
             f"&page={page_number}"
@@ -29082,6 +29614,40 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_pdf_page_image(name, page)
             return
+        if path == "/api/pdf_concept":
+            params = parse_qs(parsed.query)
+            name = (params.get("name") or [""])[0]
+            node_id = (params.get("id") or [""])[0]
+            try:
+                payload = read_pdf_concept(name, node_id)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 404)
+                return
+            except (OSError, RuntimeError) as exc:
+                self._send_error_json(
+                    f"Could not read the concept: {exc}", 502
+                )
+                return
+            self._send_json(payload)
+            return
+        if path == "/api/pdf_knowledge_graph":
+            params = parse_qs(parsed.query)
+            name = (params.get("name") or [""])[0]
+            graph_path = pdf_knowledge_graph_path(name)
+            if graph_path is None or not graph_path.is_file():
+                self._send_error_json("Knowledge graph not built", 404)
+                return
+            try:
+                payload = json.loads(
+                    graph_path.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError) as exc:
+                self._send_error_json(
+                    f"Cannot read the knowledge graph: {exc}", 500
+                )
+                return
+            self._send_json(payload)
+            return
         if path == "/api/wiki":
             params = parse_qs(parsed.query)
             word = (params.get("word") or [""])[0].strip()
@@ -29214,6 +29780,36 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+    def _handle_pdf_knowledge_graph(
+        self, name: str, rebuild: bool = False
+    ) -> None:
+        """Stream knowledge-graph build progress and the finished graph."""
+        self._begin_sse()
+        self._sse("kg_start", {"name": name})
+
+        def progress(percent: int, message: str) -> None:
+            self._sse(
+                "kg_progress",
+                {"progress": percent, "message": message},
+            )
+
+        try:
+            graph = build_pdf_knowledge_graph(
+                name, progress, rebuild=rebuild
+            )
+        except ValueError as exc:
+            self._sse("kg_error", {"message": str(exc)})
+            return
+        except ClientDisconnected:
+            return
+        except (OSError, RuntimeError) as exc:
+            self._sse(
+                "kg_error",
+                {"message": f"Could not build the knowledge graph: {exc}"},
+            )
+            return
+        self._sse("kg_done", {"graph": graph})
 
     def _autocomplete(self, kind: str, query: str) -> list[dict]:
         query = query.strip()
@@ -29514,6 +30110,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._handle_ask(question, image=image)
+            return
+        if parsed.path == "/api/pdf_knowledge_graph":
+            payload = self._read_json()
+            if payload is None:
+                return
+            name = str(payload.get("name") or "").strip()
+            rebuild = bool(payload.get("rebuild"))
+            self._handle_pdf_knowledge_graph(name, rebuild)
             return
         if parsed.path == "/api/dict":
             payload = self._read_json()

@@ -1,7 +1,71 @@
 pdf_books_dir: {directory_of_this_prompt}/../.chat/pdf_books
 
+task.dictionary_on_knowledge_point_modal (completed) {
+  reference task.chapter_modal:
+  - in the knowledge point modal, if I click on a word, it should show the dictionary modal on top with the word definition
+}
+
+task.chapter_modal (completed) {
+  when clicking on each point in knowledge graph, open up modal showing the related content for this point of knowledge only! UI should be similar to the dictionary word definition modal
+}
+
+task.knowledge_graph_builder (completed) {
+  on the left side of the chapter selector:
+  - add a button "Knowledge Graph", when click {
+    - extract all key main concepts in this pdf book
+    - for each concept, link related concepts in the book content
+    - the conept and linked concept should be stored as {pdf_books_dir}/{the book pdf file name}.knowlege_graph.json
+    - when building the knowledge graph, show me a progressing bar from 0% to 100%
+    - once the knowlege_graph is built, next time when we open the book modal and click on this button, directory load the knowledge graph json
+
+    - when the knowlege graph is loaded, open a new modal on top of the book modal, in this modal {
+      - draw a linked diagram for all the concepts and related concepts
+      - user should be able to use the arrow keys to navigate the knowlege graph like navigating a map
+    }
+  }
+}
+
+task.chapter_selector (completed) {
+  - make the book loading modal 10% wider
+  - in the bottom, add a chapter selector with the list of chapters as options, I can use the chapter selector to jump to any chapter
+}
+
+task.arbitrary_page_jumper (completed) {
+  in the bottom of the book loader modal, please add a page number jumper so that user can jump to any page
+}
+
+task.chapter_navigation_links_background (completed) {
+  - refere to task.preserve_chapter_navigation_links
+    - the background of navigation links should be the same as the page (transparent)
+}
+
+task.preserve_chapter_navigation_links (completed) {
+  please preserve navigation links in the pdf content so that I can jump to arbitrary chaters
+}
+
+task.focs_on_book_on_load (completed) {
+  once the book loader modal is open, set focus on it so that I can use arrow keys to navigate right away
+}
+
+task.default_font_size (completed) {
+  set default font size for the pdf book loder to 20px
+}
+
+task.font_control (completed) {
+  on top of the book loading modal, add controls for font size, default font size should be the same as the font size in the news article modal
+}
+
 task.bugs (completed) {
-  - the book loader does not show any images 
+  when clicking on the book, it opens up pages like:
+  http://127.0.0.1:8765/api/pdf_book_page_image?name=Designing_AI_Systems_v5_MEAP.pdf&page=4
+
+  do not do that, instead, restrict the books inside the modal
+
+  - also please add dictionary word searching for words in the book content
+}
+
+task.bugs (completed) {
+  - the book loader does not show any images
   - the book content does not have bold fonts
 }
 

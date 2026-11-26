@@ -1138,10 +1138,10 @@
 
   #popup {
     position: fixed;
-    /* Must sit above every modal (video panel 58, learn panel 59, maximized
-     * video 70) so word clicks in in-modal answers actually show the
-     * streaming /dict popup instead of painting it behind the modal. */
-    z-index: 80;
+    /* Must sit above every modal (knowledge graph 80, concept reader 85,
+     * video panel 58, learn panel 59, maximized video 70) so word clicks in
+     * in-modal answers actually show the streaming /dict popup on top. */
+    z-index: 95;
     width: min(440px, calc(100vw - 24px));
     max-height: min(56vh, 520px);
     display: flex;
@@ -2116,6 +2116,7 @@
     box-shadow: 0 24px 80px rgba(0,0,0,.7);
     overflow: hidden;
   }
+  #news-panel.is-pdf-book .news-card { width: min(1478px, 100%); }
   .news-head {
     display: flex;
     align-items: flex-start;
@@ -2242,6 +2243,299 @@
   }
   #news-back:hover { color: var(--text); border-color: var(--accent-2); }
   #news-back[hidden] { display: none; }
+  #news-font-controls {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-top: 3px;
+  }
+  #news-font-controls[hidden] { display: none; }
+  #news-font-controls button {
+    background: transparent;
+    border: 1px solid #2b4056;
+    border-radius: 4px;
+    color: var(--accent-2);
+    font-size: 10.5px;
+    line-height: 1;
+    padding: 3px 5px;
+    cursor: pointer;
+  }
+  #news-font-controls button:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--accent-2);
+  }
+  #news-font-controls button:disabled {
+    opacity: .35;
+    cursor: default;
+  }
+  #news-font-size {
+    min-width: 28px;
+    text-align: center;
+    color: var(--dim);
+    font-size: 10px;
+  }
+  .news-page-jumper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 14px;
+    background: #101b26;
+    border-top: 1px solid #223344;
+    color: var(--dim);
+    font-size: 11.5px;
+    flex: 0 0 auto;
+  }
+  .news-page-jumper[hidden] { display: none; }
+  .news-chapter-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .news-chapter-control[hidden] { display: none; }
+  .news-page-jumper select {
+    max-width: min(46vw, 520px);
+    background: #0b131b;
+    color: var(--text);
+    border: 1px solid #2b4056;
+    border-radius: 4px;
+    padding: 3px 6px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .news-page-jumper select:focus {
+    outline: 1px solid var(--accent-2);
+  }
+  .news-page-jumper input {
+    width: 68px;
+    background: #0b131b;
+    color: var(--text);
+    border: 1px solid #2b4056;
+    border-radius: 4px;
+    padding: 3px 6px;
+    font: inherit;
+    text-align: center;
+  }
+  .news-page-jumper input:focus {
+    outline: 1px solid var(--accent-2);
+  }
+  .news-page-jumper button {
+    background: transparent;
+    border: 1px solid #2b4056;
+    border-radius: 4px;
+    color: var(--accent-2);
+    padding: 3px 9px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .news-page-jumper button:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--accent-2);
+  }
+  .news-page-jumper button:disabled,
+  .news-page-jumper input:disabled { opacity: .45; cursor: default; }
+  .news-page-total { min-width: 46px; text-align: left; }
+  .news-kg-progress {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 128px;
+  }
+  .news-kg-progress[hidden] { display: none; }
+  .news-kg-track {
+    width: 90px;
+    height: 7px;
+    border-radius: 999px;
+    background: #0b131b;
+    border: 1px solid #2b4056;
+    overflow: hidden;
+  }
+  .news-kg-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    transition: width .15s ease;
+  }
+  #news-knowledge-percent {
+    min-width: 28px;
+    text-align: right;
+    font-size: 10px;
+    color: var(--dim);
+  }
+  #knowledge-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    background: rgba(2, 6, 10, .78);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  #knowledge-panel[hidden] { display: none; }
+  .knowledge-card {
+    width: min(1600px, 100%);
+    height: min(88vh, 1100px);
+    display: flex;
+    flex-direction: column;
+    background: #0d151e;
+    border: 1px solid #2b4056;
+    border-radius: 10px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.72);
+    overflow: hidden;
+  }
+  .knowledge-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 11px 14px;
+    background: #101b26;
+    border-bottom: 1px solid #223344;
+  }
+  .knowledge-head-main { min-width: 0; flex: 1; }
+  .knowledge-hint {
+    flex: 0 0 auto;
+    color: var(--dim);
+    font-size: 10.5px;
+    margin-top: 4px;
+    white-space: nowrap;
+  }
+  #knowledge-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+  }
+  #knowledge-close:hover { color: var(--text); }
+  .knowledge-canvas {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    outline: none;
+    background:
+      radial-gradient(circle at 50% 40%, #12283c 0%, transparent 55%),
+      #081018;
+  }
+  #knowledge-svg { display: block; width: 100%; height: 100%; }
+  .kg-edge {
+    stroke: #31506b;
+    stroke-width: 1;
+    opacity: .5;
+    vector-effect: non-scaling-stroke;
+  }
+  .kg-edge.related {
+    stroke: #5b7d9a;
+    stroke-width: .8;
+    stroke-dasharray: 3 4;
+    opacity: .35;
+  }
+  .kg-node circle {
+    stroke: #081018;
+    stroke-width: 1.5;
+    cursor: pointer;
+    vector-effect: non-scaling-stroke;
+  }
+  .kg-node { cursor: pointer; }
+  .kg-node:hover circle { stroke: #fff; stroke-width: 2; }
+  .kg-node text {
+    fill: #dbe8f5;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: var(--kg-label-size, 9px);
+    paint-order: stroke;
+    stroke: #081018;
+    stroke-width: 3px;
+    stroke-linejoin: round;
+    pointer-events: auto;
+    opacity: 0;
+  }
+  .kg-node.level-0 text {
+    opacity: 1;
+    font-size: var(--kg-label-size-large, 11px);
+    font-weight: 700;
+  }
+  .kg-node.show-label text, .kg-node:hover text { opacity: 1; }
+  .knowledge-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--dim);
+    font-size: 12px;
+  }
+  .knowledge-empty[hidden] { display: none; }
+  #concept-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 85;
+    background: rgba(2, 6, 10, .46);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  #concept-panel[hidden] { display: none; }
+  .concept-card {
+    width: min(660px, 100%);
+    max-height: min(68vh, 760px);
+    display: flex;
+    flex-direction: column;
+    background: #0c131b;
+    border: 1px solid #35506b;
+    border-radius: 9px;
+    box-shadow: 0 18px 60px rgba(0,0,0,.62), 0 0 0 1px rgba(121,192,255,.06);
+    overflow: hidden;
+  }
+  .concept-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 11px;
+    background: #101b26;
+    border-bottom: 1px solid #223344;
+  }
+  .concept-head-main { min-width: 0; flex: 1; }
+  .concept-title {
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 14px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+  .concept-meta { color: var(--dim); font-size: 11px; margin-top: 4px; }
+  #concept-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+  }
+  #concept-close:hover { color: var(--text); }
+  .concept-body {
+    padding: 11px 13px 14px;
+    overflow-y: auto;
+    font-size: 13px;
+    color: #cfdae5;
+    outline: none;
+  }
+  .concept-body p:first-child { margin-top: 0; }
+  .concept-loading {
+    padding: 0 13px 14px;
+    color: var(--warn);
+    font-size: 12px;
+  }
+  .concept-loading[hidden] { display: none; }
   #news-close {
     flex: 0 0 auto;
     background: transparent;
@@ -2335,12 +2629,63 @@
     object-fit: contain;
     background: #060a0e;
   }
-  .news-figure.pdf-page { margin-bottom: 0; }
-  .news-figure.pdf-page a { background: #fff; }
+  .news-figure.pdf-page { margin-bottom: 0; overflow-x: auto; }
+  .news-figure.pdf-page .pdf-page-frame {
+    position: relative;
+    width: 100%;
+    margin: 0 auto;
+    overflow: hidden;
+    border: 1px solid #223344;
+    border-radius: 6px;
+    background: #fff;
+  }
   .news-figure.pdf-page img {
+    display: block;
+    width: 100%;
+    height: auto;
     max-height: none;
     background: #fff;
   }
+  .pdf-word-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  .pdf-word {
+    position: absolute;
+    display: block;
+    color: transparent;
+    background: transparent;
+    border-radius: 2px;
+    cursor: pointer;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: 1px;
+    line-height: 1;
+    pointer-events: auto;
+  }
+  .pdf-word:hover { background: rgba(245, 215, 110, .38); }
+  .pdf-word::selection {
+    background: rgba(245, 215, 110, .45);
+    color: transparent;
+  }
+  .pdf-link-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  .pdf-link {
+    position: absolute;
+    display: block;
+    border-radius: 2px;
+    cursor: pointer;
+    pointer-events: auto;
+  }
+  .pdf-link:hover {
+    background: transparent;
+    outline: none;
+  }
+  #news-body:focus { outline: none; }
   .news-figure figcaption {
     margin-top: .35em;
     color: #93a6b8;
@@ -4416,6 +4761,13 @@
       </div>
       <button id="news-back" type="button"
               title="Back to the book (Esc)" aria-label="Back to the book" hidden>‹ Back</button>
+      <span id="news-font-controls" hidden>
+        <button id="news-font-dec" type="button"
+                title="Decrease PDF font size" aria-label="Decrease font size">A−</button>
+        <span id="news-font-size" title="PDF text size">20px</span>
+        <button id="news-font-inc" type="button"
+                title="Increase PDF font size" aria-label="Increase font size">A+</button>
+      </span>
       <button id="news-prev" class="news-nav" type="button"
               title="Previous restaurant" aria-label="Previous restaurant" hidden>‹</button>
       <button id="news-next" class="news-nav" type="button"
@@ -4460,7 +4812,7 @@
               title="Close find (Esc)" aria-label="Close find">×</button>
     </div>
     <div class="news-layout">
-      <div id="news-body" class="news-body">
+      <div id="news-body" class="news-body" tabindex="-1">
         <div id="news-translation" hidden>
           <div id="news-translation-label" class="translation-label">中文翻译</div>
           <div id="news-translation-body" class="markdown"></div>
@@ -4488,6 +4840,54 @@
         </div>
       </div>
     </div>
+    <div id="news-page-jumper" class="news-page-jumper" hidden>
+      <button id="news-knowledge-btn" type="button"
+              title="Build or open this book's knowledge graph">Knowledge Graph</button>
+      <div id="news-knowledge-progress" class="news-kg-progress" hidden>
+        <div class="news-kg-track"><div id="news-knowledge-fill" class="news-kg-fill"></div></div>
+        <span id="news-knowledge-percent">0%</span>
+      </div>
+      <span id="news-chapter-control" class="news-chapter-control" hidden>
+        <label for="news-chapter-select">Chapter</label>
+        <select id="news-chapter-select"></select>
+      </span>
+      <label for="news-page-input">Page</label>
+      <input id="news-page-input" type="number" min="1" step="1"
+             inputmode="numeric" autocomplete="off" spellcheck="false">
+      <span id="news-page-total" class="news-page-total"></span>
+      <button id="news-page-go" type="button">Go</button>
+    </div>
+  </div>
+</div>
+
+<div id="knowledge-panel" hidden>
+  <div class="knowledge-card" role="dialog" aria-modal="true" aria-labelledby="knowledge-title">
+    <div class="knowledge-head">
+      <div class="knowledge-head-main">
+        <div id="knowledge-title" class="news-modal-title">Knowledge Graph</div>
+        <div id="knowledge-meta" class="news-modal-meta"></div>
+      </div>
+      <span class="knowledge-hint">Arrow keys pan · + / − zoom · 0 reset · Esc close</span>
+      <button id="knowledge-close" type="button" title="Close (Esc)">×</button>
+    </div>
+    <div id="knowledge-canvas" class="knowledge-canvas" tabindex="-1">
+      <svg id="knowledge-svg" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Book knowledge graph"></svg>
+      <div id="knowledge-empty" class="knowledge-empty" hidden>Loading knowledge graph…</div>
+    </div>
+  </div>
+</div>
+
+<div id="concept-panel" hidden>
+  <div class="concept-card" role="dialog" aria-modal="true" aria-labelledby="concept-title">
+    <div class="concept-head">
+      <div class="concept-head-main">
+        <div id="concept-title" class="concept-title">Concept</div>
+        <div id="concept-meta" class="concept-meta"></div>
+      </div>
+      <button id="concept-close" type="button" title="Close (Esc)">×</button>
+    </div>
+    <div id="concept-body" class="concept-body markdown" tabindex="-1"></div>
+    <div id="concept-loading" class="concept-loading" hidden>Loading concept…</div>
   </div>
 </div>
 
@@ -4864,6 +5264,33 @@ const gameContextSetLocationEl = $("#game-context-set-location");
 const newsTitleEl = $("#news-title");
 const newsMetaEl = $("#news-meta");
 const newsBackEl = $("#news-back");
+const newsFontControlsEl = $("#news-font-controls");
+const newsFontDecEl = $("#news-font-dec");
+const newsFontIncEl = $("#news-font-inc");
+const newsFontSizeEl = $("#news-font-size");
+const newsPageJumperEl = $("#news-page-jumper");
+const newsPageInputEl = $("#news-page-input");
+const newsPageTotalEl = $("#news-page-total");
+const newsPageGoEl = $("#news-page-go");
+const newsChapterControlEl = $("#news-chapter-control");
+const newsChapterSelectEl = $("#news-chapter-select");
+const newsKnowledgeBtn = $("#news-knowledge-btn");
+const newsKnowledgeProgressEl = $("#news-knowledge-progress");
+const newsKnowledgeFillEl = $("#news-knowledge-fill");
+const newsKnowledgePercentEl = $("#news-knowledge-percent");
+const knowledgePanelEl = $("#knowledge-panel");
+const knowledgeTitleEl = $("#knowledge-title");
+const knowledgeMetaEl = $("#knowledge-meta");
+const knowledgeCloseEl = $("#knowledge-close");
+const knowledgeCanvasEl = $("#knowledge-canvas");
+const knowledgeSvgEl = $("#knowledge-svg");
+const knowledgeEmptyEl = $("#knowledge-empty");
+const conceptPanelEl = $("#concept-panel");
+const conceptTitleEl = $("#concept-title");
+const conceptMetaEl = $("#concept-meta");
+const conceptCloseEl = $("#concept-close");
+const conceptBodyEl = $("#concept-body");
+const conceptLoadingEl = $("#concept-loading");
 const newsPrevEl = $("#news-prev");
 const newsNextEl = $("#news-next");
 const newsLinkEl = $("#news-link");
@@ -5022,10 +5449,18 @@ let popupMinimized = false;
 let popupAnchorEl = null;
 let popupAnchorRect = null;
 let newsItem = null;
-// Article modals opened from a book's Research sources stack on top of the
-// book reader. Closing the article (X, backdrop, or Esc) pops back to the
-// book instead of closing the whole reader.
 const newsModalStack = [];
+// PDF book text starts at 20px so the rendered page is comfortable to read.
+const PDF_BOOK_FONT_SIZES = [13, 15, 17, 20, 24, 28];
+const PDF_BOOK_DEFAULT_FONT_SIZE = 20;
+let bookFontSize = PDF_BOOK_DEFAULT_FONT_SIZE;
+let knowledgeGraphData = null;
+let knowledgeGraphBusy = false;
+let knowledgeGraphController = null;
+let knowledgeView = { x: 0, y: 0, zoom: 1 };
+let knowledgeLayoutBounds = { width: 1, height: 1 };
+let conceptText = "";
+let conceptRequestId = 0;
 // Restaurants opened from the /map modal form a back/forward history, just
 // like the dictionary popup's looked-up-word history.
 const restaurantHistory = [];
@@ -11934,9 +12369,13 @@ function openPdfBookReader(item) {
     pdfName: name,
     pdfPage: 1,
     pdfPages: 0,
+    pdfChapters: [],
     pdfRequestId: 0,
   };
   openNewsModal(reader);
+  // Put keyboard focus inside the reader immediately so the left/right
+  // arrow keys navigate pages without an extra click.
+  newsBodyEl.focus({ preventScroll: true });
   loadPdfBookPage(reader, 1);
 }
 
@@ -11989,6 +12428,23 @@ async function loadPdfBookPage(reader, page) {
     reader.pdfPage = Number(data.page) || page;
     reader.pdfPages = Number(data.pages) || 0;
     reader.paragraphs = paragraphs;
+    const words = Array.isArray(data.words) ? data.words : [];
+    const wordHeights = words
+      .map((word) => Number(word?.h))
+      .filter((height) => Number.isFinite(height)
+        && height > 0.004 && height < 0.08)
+      .sort((a, b) => a - b);
+    reader.pdfRefWordHeight = wordHeights.length
+      ? wordHeights[Math.floor(wordHeights.length / 2)]
+      : 0.018;
+    reader.pdfChapters = Array.isArray(data.chapters)
+      ? data.chapters
+        .map((chapter) => ({
+          title: String(chapter?.title || "").trim(),
+          page: Number(chapter?.page) || 0,
+        }))
+        .filter((chapter) => chapter.title && chapter.page > 0)
+      : [];
     const imageUrl = String(data.image_url || "").trim();
     // The rendered page preserves images, colors, and bold fonts. Keep the
     // extracted paragraphs for read-aloud and translation, but render the
@@ -11999,6 +12455,8 @@ async function loadPdfBookPage(reader, page) {
         url: imageUrl,
         alt: `${reader.title} — page ${reader.pdfPage}`,
         pdfPage: true,
+        words,
+        links: Array.isArray(data.links) ? data.links : [],
       }]
       : paragraphs.map((text) => ({ type: "paragraph", text }));
     reader.section = `Page ${reader.pdfPage}`
@@ -12009,6 +12467,7 @@ async function loadPdfBookPage(reader, page) {
       renderNewsModal(reader);
       renderNewsAction(reader);
       updateRestaurantNav();
+      window.requestAnimationFrame(applyPdfFontScale);
       newsBodyEl.scrollTop = 0;
     }
   } catch (error) {
@@ -12026,12 +12485,20 @@ async function loadPdfBookPage(reader, page) {
   }
 }
 
+function goToPdfPage(page) {
+  if (!newsItem?.pdf || newsItem.articleLoading) return;
+  const target = Number(page);
+  if (!Number.isFinite(target) || target < 1) return;
+  if (newsItem.pdfPages && target > newsItem.pdfPages) return;
+  loadPdfBookPage(newsItem, target);
+}
+
 function navigatePdfPage(step) {
   if (!newsItem?.pdf || newsItem.articleLoading) return;
   const next = (Number(newsItem.pdfPage) || 1) + step;
   if (next < 1) return;
   if (newsItem.pdfPages && next > newsItem.pdfPages) return;
-  loadPdfBookPage(newsItem, next);
+  goToPdfPage(next);
 }
 
 function formatBookLibrarySize(bytes) {
@@ -14838,16 +15305,6 @@ function appendNewsFigure(block, target) {
   if (!url) return;
   const figure = document.createElement("figure");
   figure.className = "news-figure";
-  if (block?.pdfPage) {
-    figure.classList.add("pdf-page");
-  }
-  const link = document.createElement("a");
-  link.href = url;
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  link.title = block?.pdfPage
-    ? "Open this PDF page image in a new tab"
-    : "Open the image in a new tab";
   const image = document.createElement("img");
   image.src = url;
   image.alt = String(
@@ -14858,8 +15315,71 @@ function appendNewsFigure(block, target) {
   image.loading = "lazy";
   image.referrerPolicy = "no-referrer";
   image.addEventListener("error", () => figure.remove(), { once: true });
-  link.appendChild(image);
-  figure.appendChild(link);
+
+  if (block?.pdfPage) {
+    // Keep PDF pages inside the reader modal. The image is deliberately not
+    // wrapped in a link; an invisible word layer over it makes every word a
+    // normal /dict lookup target without changing the rendered page.
+    figure.classList.add("pdf-page");
+    const frame = document.createElement("div");
+    frame.className = "pdf-page-frame";
+    frame.appendChild(image);
+    const words = Array.isArray(block.words) ? block.words : [];
+    if (words.length) {
+      const layer = document.createElement("div");
+      layer.className = "pdf-word-layer";
+      for (const word of words) {
+        const text = String(word?.text || "").trim();
+        if (!text) continue;
+        const span = document.createElement("span");
+        span.className = "word pdf-word";
+        span.dataset.word = text;
+        span.textContent = text;
+        span.style.left = `${Math.max(0, Number(word.x) || 0) * 100}%`;
+        span.style.top = `${Math.max(0, Number(word.y) || 0) * 100}%`;
+        span.style.width = `${Math.max(0, Number(word.w) || 0) * 100}%`;
+        span.style.height = `${Math.max(0, Number(word.h) || 0) * 100}%`;
+        span.title = text;
+        layer.appendChild(span);
+      }
+      if (layer.children.length) frame.appendChild(layer);
+    }
+    const links = Array.isArray(block.links) ? block.links : [];
+    if (links.length) {
+      const linkLayer = document.createElement("div");
+      linkLayer.className = "pdf-link-layer";
+      for (const link of links) {
+        const target = Number(link?.page);
+        if (!Number.isFinite(target) || target < 1) continue;
+        const anchor = document.createElement("a");
+        anchor.className = "pdf-link";
+        anchor.href = "#";
+        anchor.title = `Go to page ${target}`;
+        anchor.setAttribute("aria-label", `Go to page ${target}`);
+        anchor.style.left = `${Math.max(0, Number(link.x) || 0) * 100}%`;
+        anchor.style.top = `${Math.max(0, Number(link.y) || 0) * 100}%`;
+        anchor.style.width = `${Math.max(0, Number(link.w) || 0) * 100}%`;
+        anchor.style.height = `${Math.max(0, Number(link.h) || 0) * 100}%`;
+        anchor.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          goToPdfPage(target);
+        });
+        linkLayer.appendChild(anchor);
+      }
+      if (linkLayer.children.length) frame.appendChild(linkLayer);
+    }
+    figure.appendChild(frame);
+  } else {
+    const link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.title = "Open the image in a new tab";
+    link.appendChild(image);
+    figure.appendChild(link);
+  }
+
   const caption = String(block?.caption || "").trim();
   if (caption) {
     const figcaption = document.createElement("figcaption");
@@ -15299,6 +15819,7 @@ function renderNewsModal(item) {
       "is-docs",
       Boolean(item.docs && !item.learnable)
     );
+    newsPanelEl.classList.toggle("is-pdf-book", Boolean(item.pdf));
   }
   newsTitleEl.textContent = "";
   // Title words are dictionary-searchable too, just like the story body.
@@ -15429,6 +15950,13 @@ function renderNewsModal(item) {
   renderNewsPodcast(item);
   syncNewsTtsButton();
   syncNewsPodcastButton();
+  updateBookFontControls();
+  updatePdfPageJumper();
+  if (item.pdf) {
+    window.requestAnimationFrame(() => {
+      if (newsItem === item) applyPdfFontScale();
+    });
+  }
   newsFindScheduleRefresh();
 }
 
@@ -15440,6 +15968,573 @@ function cancelNewsPodcastGeneration(item) {
     state.controller = null;
     state.busy = false;
   }
+}
+
+function updateBookFontControls() {
+  if (!newsFontControlsEl) return;
+  const pdf = Boolean(newsItem?.pdf);
+  newsFontControlsEl.hidden = !pdf;
+  if (!pdf) return;
+  let index = PDF_BOOK_FONT_SIZES.indexOf(bookFontSize);
+  if (index < 0) index = 0;
+  newsFontSizeEl.textContent = `${bookFontSize}px`;
+  newsFontDecEl.disabled = index <= 0;
+  newsFontIncEl.disabled = index >= PDF_BOOK_FONT_SIZES.length - 1;
+}
+
+function updatePdfPageJumper() {
+  if (!newsPageJumperEl) return;
+  const pdf = Boolean(newsItem?.pdf);
+  newsPageJumperEl.hidden = !pdf;
+  if (!pdf) return;
+  const page = Number(newsItem.pdfPage) || 1;
+  const pages = Number(newsItem.pdfPages) || 0;
+  if (pages) {
+    newsPageInputEl.max = String(pages);
+  } else {
+    newsPageInputEl.removeAttribute("max");
+  }
+  if (document.activeElement !== newsPageInputEl) {
+    newsPageInputEl.value = String(page);
+  }
+  newsPageTotalEl.textContent = pages ? `of ${pages}` : "of ?";
+  const disabled = Boolean(newsItem.articleLoading) || !pages;
+  newsPageInputEl.disabled = disabled;
+  newsPageGoEl.disabled = disabled;
+  const chapters = Array.isArray(newsItem.pdfChapters)
+    ? newsItem.pdfChapters
+    : [];
+  newsChapterControlEl.hidden = !chapters.length;
+  if (chapters.length) {
+    const signature = chapters
+      .map((chapter) => `${chapter.page}:${chapter.title}`)
+      .join("|");
+    if (newsChapterSelectEl.dataset.signature !== signature) {
+      newsChapterSelectEl.textContent = "";
+      newsChapterSelectEl.appendChild(
+        new Option("Jump to chapter…", "")
+      );
+      for (const chapter of chapters) {
+        newsChapterSelectEl.appendChild(
+          new Option(
+            `${chapter.title} (p. ${chapter.page})`,
+            String(chapter.page)
+          )
+        );
+      }
+      newsChapterSelectEl.dataset.signature = signature;
+    }
+    const exact = chapters.find(
+      (chapter) => Number(chapter.page) === page
+    );
+    newsChapterSelectEl.value = exact ? String(exact.page) : "";
+    newsChapterSelectEl.disabled = Boolean(newsItem.articleLoading);
+  }
+}
+
+function jumpToPdfPageFromInput() {
+  if (!newsItem?.pdf || newsItem.articleLoading) return;
+  const pages = Number(newsItem.pdfPages) || 0;
+  if (!pages) return;
+  const requested = Number.parseInt(newsPageInputEl.value, 10);
+  if (!Number.isFinite(requested)) {
+    newsPageInputEl.value = String(newsItem.pdfPage || 1);
+    return;
+  }
+  const target = Math.max(1, Math.min(pages, requested));
+  newsPageInputEl.value = String(target);
+  goToPdfPage(target);
+  newsBodyEl.focus({ preventScroll: true });
+}
+
+function setKnowledgeProgress(percent, message) {
+  const value = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+  newsKnowledgeProgressEl.hidden = false;
+  newsKnowledgeFillEl.style.width = `${value}%`;
+  newsKnowledgePercentEl.textContent = `${value}%`;
+  newsKnowledgePercentEl.title = message || "";
+  newsKnowledgeBtn.textContent = value < 100 ? "Building…" : "Knowledge Graph";
+}
+
+function resetKnowledgeProgress() {
+  newsKnowledgeProgressEl.hidden = true;
+  newsKnowledgeFillEl.style.width = "0%";
+  newsKnowledgePercentEl.textContent = "0%";
+  newsKnowledgePercentEl.title = "";
+  newsKnowledgeBtn.textContent = "Knowledge Graph";
+}
+
+function finishKnowledgeGraph(graph) {
+  knowledgeGraphBusy = false;
+  knowledgeGraphController = null;
+  newsKnowledgeBtn.disabled = false;
+  resetKnowledgeProgress();
+  if (!graph || !Array.isArray(graph.nodes) || !graph.nodes.length) {
+    toast("The knowledge graph has no concepts.");
+    return;
+  }
+  openKnowledgeGraph(graph);
+}
+
+function failKnowledgeGraph(error) {
+  knowledgeGraphBusy = false;
+  knowledgeGraphController = null;
+  newsKnowledgeBtn.disabled = false;
+  resetKnowledgeProgress();
+  toast(`Knowledge graph: ${error?.message || String(error)}`);
+}
+
+function buildKnowledgeGraph(name) {
+  const controller = new AbortController();
+  knowledgeGraphController = controller;
+  setKnowledgeProgress(0, "Starting knowledge graph…");
+  streamSSE(
+    "/api/pdf_knowledge_graph",
+    { name },
+    {
+      kg_start: () => setKnowledgeProgress(0, "Starting knowledge graph…"),
+      kg_progress: (data) => setKnowledgeProgress(
+        Number(data?.progress) || 0,
+        String(data?.message || "")
+      ),
+      kg_done: (data) => {
+        setKnowledgeProgress(100, "Knowledge graph ready");
+        window.setTimeout(
+          () => finishKnowledgeGraph(data?.graph || data),
+          350
+        );
+      },
+      kg_error: (data) => failKnowledgeGraph(
+        new Error(data?.message || "Could not build the knowledge graph")
+      ),
+    },
+    controller.signal
+  ).catch((error) => {
+    if (error?.name === "AbortError") return;
+    failKnowledgeGraph(error);
+  });
+}
+
+async function startKnowledgeGraph() {
+  if (!newsItem?.pdf || knowledgeGraphBusy) return;
+  const name = newsItem.pdfName;
+  knowledgeGraphBusy = true;
+  newsKnowledgeBtn.disabled = true;
+  setKnowledgeProgress(0, "Loading knowledge graph…");
+  let cached = null;
+  try {
+    const response = await fetch(
+      `/api/pdf_knowledge_graph?name=${encodeURIComponent(name)}`,
+      { cache: "no-store" }
+    );
+    if (response.ok) {
+      cached = await response.json();
+    } else if (response.status !== 404) {
+      let detail = `HTTP ${response.status}`;
+      try {
+        const payload = await response.json();
+        if (payload?.error) detail = payload.error;
+      } catch { /* ignore */ }
+      throw new Error(detail);
+    }
+  } catch (error) {
+    failKnowledgeGraph(error);
+    return;
+  }
+  if (cached) {
+    finishKnowledgeGraph(cached);
+    return;
+  }
+  buildKnowledgeGraph(name);
+}
+
+function knowledgeShortLabel(label, max = 48) {
+  const text = String(label || "").trim();
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function knowledgeColor(chapter) {
+  const palette = [
+    "#4f9cf9", "#e0a37c", "#7fd1a0", "#c792ea", "#f0b429",
+    "#56d4dd", "#ff8fa3", "#a3be8c", "#d08770", "#b48ead",
+  ];
+  return palette[Math.abs(Number(chapter) || 0) % palette.length];
+}
+
+function layoutKnowledgeGraph(graph) {
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  const edges = Array.isArray(graph.edges) ? graph.edges : [];
+  const positions = new Map();
+  const byChapter = new Map();
+  for (const node of nodes) {
+    const key = Number(node.chapter) || 0;
+    if (!byChapter.has(key)) byChapter.set(key, []);
+    byChapter.get(key).push(node);
+  }
+  const chapterKeys = [...byChapter.keys()];
+  const hubRadius = Math.max(180, Math.min(620, chapterKeys.length * 46));
+  const hubs = new Map();
+  chapterKeys.forEach((chapter, index) => {
+    const angle = (index / Math.max(1, chapterKeys.length)) * Math.PI * 2
+      - Math.PI / 2;
+    hubs.set(chapter, {
+      x: Math.cos(angle) * hubRadius,
+      y: Math.sin(angle) * hubRadius,
+    });
+  });
+  const rand = (seed) => {
+    const value = Math.sin(seed * 12.9898 + 78.233) * 43758.5453;
+    return value - Math.floor(value);
+  };
+  nodes.forEach((node, index) => {
+    const hub = hubs.get(Number(node.chapter) || 0) || { x: 0, y: 0 };
+    const level = Number(node.level) || 0;
+    if (level === 0) {
+      positions.set(node.id, { x: hub.x, y: hub.y });
+      return;
+    }
+    const angle = rand(index + 1) * Math.PI * 2;
+    const radius = 34 + level * 24 + rand(index + 2) * 44;
+    positions.set(node.id, {
+      x: hub.x + Math.cos(angle) * radius,
+      y: hub.y + Math.sin(angle) * radius,
+    });
+  });
+  const velocity = new Map(
+    nodes.map((node) => [node.id, { x: 0, y: 0 }])
+  );
+  const activeEdges = edges.filter(
+    (edge) => positions.has(edge.source) && positions.has(edge.target)
+  );
+  const iterations = nodes.length > 300 ? 120 : 180;
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    for (let i = 0; i < nodes.length; i += 1) {
+      const left = nodes[i].id;
+      const a = positions.get(left);
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const right = nodes[j].id;
+        const b = positions.get(right);
+        let dx = a.x - b.x;
+        let dy = a.y - b.y;
+        let distance2 = dx * dx + dy * dy;
+        if (distance2 < 1) {
+          dx = rand(i + j + 1) - 0.5;
+          dy = rand(i - j + 1) - 0.5;
+          distance2 = 1;
+        }
+        if (distance2 > 160000) continue;
+        const force = 900 / distance2;
+        const fx = dx * force;
+        const fy = dy * force;
+        const va = velocity.get(left);
+        const vb = velocity.get(right);
+        va.x += fx; va.y += fy;
+        vb.x -= fx; vb.y -= fy;
+      }
+    }
+    for (const edge of activeEdges) {
+      const a = positions.get(edge.source);
+      const b = positions.get(edge.target);
+      let dx = b.x - a.x;
+      let dy = b.y - a.y;
+      const distance = Math.hypot(dx, dy) || 1;
+      const desired = edge.type === "parent" ? 110 : 150;
+      const force = (distance - desired) * 0.006;
+      const fx = (dx / distance) * force;
+      const fy = (dy / distance) * force;
+      const va = velocity.get(edge.source);
+      const vb = velocity.get(edge.target);
+      va.x += fx; va.y += fy;
+      vb.x -= fx; vb.y -= fy;
+    }
+    for (const node of nodes) {
+      const v = velocity.get(node.id);
+      const point = positions.get(node.id);
+      v.x = Math.max(-30, Math.min(30, v.x * 0.86 - point.x * 0.0008));
+      v.y = Math.max(-30, Math.min(30, v.y * 0.86 - point.y * 0.0008));
+      point.x += v.x;
+      point.y += v.y;
+    }
+  }
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const point of positions.values()) {
+    minX = Math.min(minX, point.x);
+    minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+  }
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  for (const point of positions.values()) {
+    point.x -= centerX;
+    point.y -= centerY;
+  }
+  knowledgeLayoutBounds = {
+    width: Math.max(1, maxX - minX),
+    height: Math.max(1, maxY - minY),
+  };
+  return positions;
+}
+
+function renderKnowledgeGraph(graph) {
+  const positions = layoutKnowledgeGraph(graph);
+  const namespace = "http://www.w3.org/2000/svg";
+  knowledgeSvgEl.textContent = "";
+  const viewport = document.createElementNS(namespace, "g");
+  viewport.setAttribute("id", "knowledge-viewport");
+  knowledgeSvgEl.appendChild(viewport);
+  for (const edge of graph.edges || []) {
+    const a = positions.get(edge.source);
+    const b = positions.get(edge.target);
+    if (!a || !b) continue;
+    const line = document.createElementNS(namespace, "line");
+    line.setAttribute("x1", String(a.x));
+    line.setAttribute("y1", String(a.y));
+    line.setAttribute("x2", String(b.x));
+    line.setAttribute("y2", String(b.y));
+    line.setAttribute(
+      "class",
+      edge.type === "related" ? "kg-edge related" : "kg-edge"
+    );
+    viewport.appendChild(line);
+  }
+  for (const node of graph.nodes || []) {
+    const point = positions.get(node.id);
+    if (!point) continue;
+    const level = Number(node.level) || 0;
+    const radius = level === 0 ? 12 : level === 1 ? 7.5 : 5;
+    const group = document.createElementNS(namespace, "g");
+    group.setAttribute("class", `kg-node level-${level}`);
+    group.dataset.level = String(level);
+    group.dataset.id = String(node.id);
+    group.dataset.x = String(point.x);
+    group.dataset.y = String(point.y);
+    group.dataset.radius = String(radius);
+    const title = document.createElementNS(namespace, "title");
+    title.textContent = `${node.label} (page ${node.page})`;
+    group.appendChild(title);
+    const circle = document.createElementNS(namespace, "circle");
+    circle.setAttribute("cx", String(point.x));
+    circle.setAttribute("cy", String(point.y));
+    circle.setAttribute("r", String(radius));
+    circle.setAttribute("fill", knowledgeColor(node.chapter));
+    group.appendChild(circle);
+    const label = document.createElementNS(namespace, "text");
+    label.setAttribute("x", String(point.x + radius + 4));
+    label.setAttribute("y", String(point.y + 3));
+    label.textContent = knowledgeShortLabel(
+      node.label,
+      level === 0 ? 64 : 44
+    );
+    group.appendChild(label);
+    group.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openConceptModal(node);
+    });
+    viewport.appendChild(group);
+  }
+  resetKnowledgeView();
+}
+
+function updateKnowledgeLabels() {
+  const zoom = knowledgeView.zoom;
+  for (const group of knowledgeSvgEl.querySelectorAll(".kg-node")) {
+    const level = Number(group.dataset.level) || 0;
+    const show = level === 0
+      || (level === 1 && zoom >= 0.75)
+      || (level >= 2 && zoom >= 1.25);
+    group.classList.toggle("show-label", show);
+  }
+}
+
+function applyKnowledgeView() {
+  const viewport = knowledgeSvgEl.querySelector("#knowledge-viewport");
+  if (!viewport) return;
+  const width = knowledgeCanvasEl.clientWidth || 1;
+  const height = knowledgeCanvasEl.clientHeight || 1;
+  viewport.setAttribute(
+    "transform",
+    `translate(${width / 2 + knowledgeView.x} ${height / 2 + knowledgeView.y}) `
+      + `scale(${knowledgeView.zoom})`
+  );
+  const zoom = Math.max(0.05, knowledgeView.zoom);
+  knowledgeSvgEl.style.setProperty("--kg-label-size", `${9 / zoom}px`);
+  knowledgeSvgEl.style.setProperty(
+    "--kg-label-size-large", `${11 / zoom}px`
+  );
+  for (const group of knowledgeSvgEl.querySelectorAll(".kg-node")) {
+    const circle = group.querySelector("circle");
+    const text = group.querySelector("text");
+    if (!circle || !text) continue;
+    const x = Number(group.dataset.x) || 0;
+    const y = Number(group.dataset.y) || 0;
+    const radius = (Number(group.dataset.radius) || 5) / zoom;
+    circle.setAttribute("r", String(radius));
+    text.setAttribute("x", String(x + radius + 4 / zoom));
+    text.setAttribute("y", String(y + 3 / zoom));
+  }
+  updateKnowledgeLabels();
+}
+
+function resetKnowledgeView() {
+  const width = knowledgeCanvasEl.clientWidth || 1200;
+  const height = knowledgeCanvasEl.clientHeight || 800;
+  const padding = 80;
+  const zoom = Math.min(
+    (width - padding * 2) / Math.max(1, knowledgeLayoutBounds.width),
+    (height - padding * 2) / Math.max(1, knowledgeLayoutBounds.height),
+    1.2
+  );
+  knowledgeView = {
+    x: 0,
+    y: 0,
+    // Start at a readable map scale instead of shrinking the whole graph
+    // into an unreadable overview. Arrow keys pan; − zooms out to the fit.
+    zoom: Math.max(0.4, Math.min(1, zoom * 2.5)),
+  };
+  applyKnowledgeView();
+}
+
+function panKnowledgeGraph(dx, dy) {
+  knowledgeView.x += dx;
+  knowledgeView.y += dy;
+  applyKnowledgeView();
+}
+
+function zoomKnowledgeGraph(factor) {
+  knowledgeView.zoom = Math.max(
+    0.15,
+    Math.min(4, knowledgeView.zoom * factor)
+  );
+  applyKnowledgeView();
+}
+
+function openConceptModal(node) {
+  if (!newsItem?.pdf || !node?.id) return;
+  const requestId = conceptRequestId + 1;
+  conceptRequestId = requestId;
+  conceptTitleEl.textContent = String(node.label || "Concept");
+  conceptMetaEl.textContent = `Page ${node.page}`;
+  conceptBodyEl.textContent = "";
+  conceptLoadingEl.hidden = false;
+  conceptLoadingEl.textContent = "Loading concept…";
+  conceptPanelEl.hidden = false;
+  conceptBodyEl.focus({ preventScroll: true });
+  const url = "/api/pdf_concept?name="
+    + encodeURIComponent(newsItem.pdfName)
+    + `&id=${encodeURIComponent(node.id)}`;
+  fetch(url, { cache: "no-store" })
+    .then(async (response) => {
+      if (!response.ok) {
+        let detail = `HTTP ${response.status}`;
+        try {
+          const payload = await response.json();
+          if (payload?.error) detail = payload.error;
+        } catch { /* ignore */ }
+        throw new Error(detail);
+      }
+      return response.json();
+    })
+    .then((data) => {
+      if (conceptRequestId !== requestId) return;
+      conceptTitleEl.textContent = String(data.title || node.label);
+      const pages = Number(data.pages) || 1;
+      const range = Number(data.page) === Number(data.end_page)
+        ? `Page ${data.page}`
+        : `Pages ${data.page}–${data.end_page}`;
+      conceptMetaEl.textContent = `${range} · ${pages} page${pages === 1 ? "" : "s"}`
+        + (data.truncated ? " · showing first part" : "");
+      conceptText = String(data.text || "");
+      conceptBodyEl.textContent = "";
+      conceptBodyEl.appendChild(renderMarkdown(conceptText, true));
+      conceptLoadingEl.hidden = true;
+    })
+    .catch((error) => {
+      if (conceptRequestId !== requestId) return;
+      conceptLoadingEl.hidden = false;
+      conceptLoadingEl.textContent = `Could not load concept: ${error?.message || String(error)}`;
+    });
+}
+
+function closeConceptModal() {
+  conceptRequestId += 1;
+  conceptPanelEl.hidden = true;
+  conceptBodyEl.textContent = "";
+  conceptText = "";
+  conceptLoadingEl.hidden = true;
+  if (!knowledgePanelEl.hidden) {
+    knowledgeCanvasEl.focus({ preventScroll: true });
+  }
+}
+
+function openKnowledgeGraph(graph) {
+  knowledgeGraphData = graph;
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  const edges = Array.isArray(graph.edges) ? graph.edges : [];
+  knowledgeTitleEl.textContent = `${graph.title || "Book"} — Knowledge Graph`;
+  knowledgeMetaEl.textContent = `${nodes.length} concepts · ${edges.length} links · ${graph.pages || 0} pages`;
+  knowledgeEmptyEl.hidden = true;
+  knowledgePanelEl.hidden = false;
+  renderKnowledgeGraph(graph);
+  knowledgeCanvasEl.focus({ preventScroll: true });
+}
+
+function closeKnowledgeGraph() {
+  if (!conceptPanelEl.hidden) closeConceptModal();
+  if (knowledgeGraphController) {
+    knowledgeGraphController.abort();
+    knowledgeGraphController = null;
+  }
+  knowledgeGraphBusy = false;
+  newsKnowledgeBtn.disabled = false;
+  resetKnowledgeProgress();
+  knowledgePanelEl.hidden = true;
+  knowledgeSvgEl.textContent = "";
+  knowledgeGraphData = null;
+  if (newsItem?.pdf) newsBodyEl.focus({ preventScroll: true });
+}
+
+function applyPdfFontScale() {
+  if (!newsItem?.pdf) return;
+  const frame = newsBodyEl.querySelector(".pdf-page-frame");
+  const image = frame?.querySelector("img");
+  if (!frame || !image) return;
+  if (!image.complete || !image.naturalWidth) {
+    if (!image.dataset.fontScaleBound) {
+      image.dataset.fontScaleBound = "1";
+      image.addEventListener("load", applyPdfFontScale, { once: true });
+    }
+    return;
+  }
+  const referenceHeight = Number(newsItem.pdfRefWordHeight) || 0.018;
+  const available = Math.max(240, newsBodyEl.clientWidth - 8);
+  const fullHeight = available * image.naturalHeight / image.naturalWidth;
+  const fullFontPx = referenceHeight * fullHeight;
+  if (!(fullFontPx > 0)) return;
+  const scale = bookFontSize / fullFontPx;
+  const width = Math.max(
+    240, Math.min(available * 2.5, available * scale)
+  );
+  frame.style.width = `${Math.round(width)}px`;
+}
+
+function changeBookFontSize(delta) {
+  const index = PDF_BOOK_FONT_SIZES.indexOf(bookFontSize);
+  const next = Math.max(
+    0,
+    Math.min(
+      PDF_BOOK_FONT_SIZES.length - 1,
+      (index < 0 ? 0 : index) + delta
+    )
+  );
+  if (next === index) return;
+  bookFontSize = PDF_BOOK_FONT_SIZES[next];
+  updateBookFontControls();
+  applyPdfFontScale();
 }
 
 function updateRestaurantNav() {
@@ -17560,6 +18655,8 @@ function closeNewsModal() {
   resetNewsAction();
   newsModalStack.length = 0;
   updateNewsBackButton();
+  updateBookFontControls();
+  updatePdfPageJumper();
   newsPanelEl.hidden = true;
   newsBodyEl.textContent = "";
   if (newsTranslationEl.parentNode !== newsBodyEl) {
@@ -18015,6 +19112,117 @@ newsBackEl.addEventListener("click", (event) => {
   event.stopPropagation();
   closeNewsModal();
 });
+newsFontDecEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  changeBookFontSize(-1);
+});
+newsFontIncEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  changeBookFontSize(1);
+});
+newsPageGoEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  jumpToPdfPageFromInput();
+});
+newsPageInputEl.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.isComposing) return;
+  event.preventDefault();
+  event.stopPropagation();
+  jumpToPdfPageFromInput();
+});
+newsChapterSelectEl.addEventListener("change", (event) => {
+  const target = Number(newsChapterSelectEl.value);
+  if (!Number.isFinite(target) || target < 1) return;
+  event.stopPropagation();
+  goToPdfPage(target);
+  newsBodyEl.focus({ preventScroll: true });
+});
+newsKnowledgeBtn.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  startKnowledgeGraph();
+});
+knowledgeCloseEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  closeKnowledgeGraph();
+});
+knowledgePanelEl.addEventListener("click", (event) => {
+  if (event.target === knowledgePanelEl) closeKnowledgeGraph();
+});
+conceptCloseEl.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  closeConceptModal();
+});
+conceptPanelEl.addEventListener("click", (event) => {
+  if (event.target === conceptPanelEl) closeConceptModal();
+});
+conceptBodyEl.addEventListener("click", (event) => {
+  const wordEl = event.target.closest?.(".word");
+  if (!wordEl) return;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && String(selection).trim()) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openDictionaryPopup(
+    wordEl.dataset.word || wordEl.textContent,
+    conceptText,
+    wordEl
+  );
+});
+knowledgeCanvasEl.addEventListener("wheel", (event) => {
+  if (knowledgePanelEl.hidden) return;
+  event.preventDefault();
+  zoomKnowledgeGraph(event.deltaY < 0 ? 1.12 : 0.89);
+}, { passive: false });
+window.addEventListener("resize", () => {
+  if (!knowledgePanelEl.hidden) resetKnowledgeView();
+});
+// Capture arrow keys while the graph is open so they pan the map instead of
+// changing the PDF page underneath the graph modal.
+document.addEventListener("keydown", (event) => {
+  if (
+    knowledgePanelEl.hidden
+    || event.defaultPrevented
+    || event.isComposing
+  ) return;
+  // The dictionary popup can open over the concept modal; let its own
+  // Escape/close handling run before closing the concept or graph.
+  if (!popupEl.hidden) return;
+  if (!conceptPanelEl.hidden) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeConceptModal();
+    }
+    return;
+  }
+  if (event.target?.closest?.(
+    "input, textarea, select, [contenteditable='true']"
+  )) return;
+  const key = event.key;
+  let handled = true;
+  if (key === "Escape") closeKnowledgeGraph();
+  else if (key === "ArrowLeft") panKnowledgeGraph(70, 0);
+  else if (key === "ArrowRight") panKnowledgeGraph(-70, 0);
+  else if (key === "ArrowUp") panKnowledgeGraph(0, 70);
+  else if (key === "ArrowDown") panKnowledgeGraph(0, -70);
+  else if (key === "+" || key === "=") zoomKnowledgeGraph(1.18);
+  else if (key === "-" || key === "_") zoomKnowledgeGraph(0.85);
+  else if (key === "0") resetKnowledgeView();
+  else handled = false;
+  if (handled) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}, true);
+window.addEventListener("resize", () => {
+  if (newsItem?.pdf && !newsPanelEl.hidden) applyPdfFontScale();
+});
 newsPrevEl.addEventListener("click", () => {
   if (newsItem?.pdf) {
     navigatePdfPage(-1);
@@ -18040,6 +19248,7 @@ document.addEventListener("keydown", (event) => {
     || event.ctrlKey
     || event.metaKey
     || newsPanelEl.hidden
+    || !knowledgePanelEl.hidden
     || !newsItem?.pdf
   ) return;
   if (event.target?.closest?.(
