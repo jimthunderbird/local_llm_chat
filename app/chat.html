@@ -2116,7 +2116,52 @@
     box-shadow: 0 24px 80px rgba(0,0,0,.7);
     overflow: hidden;
   }
-  #news-panel.is-pdf-book .news-card { width: min(1478px, 100%); }
+  #news-panel.is-pdf-book .news-card { width: min(1478px, 100%);
+    min-height: min(70vh, 760px); }
+  /* The PDF page bar is always in the layout so switching pages never changes
+     the modal height. Only the fill and label animate while a page loads. */
+  .pdf-page-loading { display: none; }
+  #news-panel.is-pdf-book .pdf-page-loading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 21px;
+    padding: 0 14px;
+    background: #0d151e;
+    border-bottom: 1px solid #1c2f40;
+    box-sizing: border-box;
+  }
+  .pdf-page-loading-track {
+    flex: 1;
+    height: 3px;
+    border-radius: 999px;
+    background: #0b131b;
+    overflow: hidden;
+  }
+  .pdf-page-loading-fill {
+    width: 30%;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--accent);
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+  .pdf-page-loading.is-loading .pdf-page-loading-fill {
+    opacity: 1;
+    animation: pdf-page-loading-sweep 1.1s linear infinite;
+  }
+  .pdf-page-loading-label {
+    min-width: 92px;
+    line-height: 1;
+    text-align: right;
+    color: var(--dim);
+    font-size: 10px;
+    white-space: nowrap;
+  }
+  @keyframes pdf-page-loading-sweep {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(340%); }
+  }
   .news-head {
     display: flex;
     align-items: flex-start;
@@ -4854,6 +4899,10 @@
               title="Translate this story into Simplified Chinese with the local LLM">中文</button>
       <button id="news-close" type="button" title="Close (Esc)">×</button>
     </div>
+    <div id="pdf-page-loading" class="pdf-page-loading" aria-live="polite">
+      <div class="pdf-page-loading-track"><div id="pdf-page-loading-fill" class="pdf-page-loading-fill"></div></div>
+      <span id="pdf-page-loading-label" class="pdf-page-loading-label"></span>
+    </div>
     <div id="news-find-bar" class="news-find-bar" role="search" hidden>
       <span class="news-find-label">Find</span>
       <input id="news-find-input" type="search" autocomplete="off" spellcheck="false"
@@ -5327,6 +5376,8 @@ const newsPageJumperEl = $("#news-page-jumper");
 const newsPageInputEl = $("#news-page-input");
 const newsPageTotalEl = $("#news-page-total");
 const newsPageGoEl = $("#news-page-go");
+const pdfPageLoadingEl = $("#pdf-page-loading");
+const pdfPageLoadingLabelEl = $("#pdf-page-loading-label");
 const newsChapterControlEl = $("#news-chapter-control");
 const newsChapterSelectEl = $("#news-chapter-select");
 const newsKnowledgeBtn = $("#news-knowledge-btn");
@@ -12427,6 +12478,8 @@ function openPdfBookReader(item) {
     pdfPage: 1,
     pdfPages: 0,
     pdfChapters: [],
+    pdfPageLoading: false,
+    pdfLoadingPage: 0,
     pdfRequestId: 0,
   };
   openNewsModal(reader);
@@ -12457,12 +12510,23 @@ async function loadPdfBookPage(reader, page) {
   if (!reader?.pdf || !reader.pdfName) return;
   const requestId = (reader.pdfRequestId || 0) + 1;
   reader.pdfRequestId = requestId;
-  reader.articleLoading = true;
+  const hasVisiblePage = Array.isArray(reader.blocks)
+    && reader.blocks.length > 0;
+  reader.pdfPageLoading = true;
+  reader.pdfLoadingPage = Number(page) || 1;
+  // Keep the current page visible while the next one loads. Only the very
+  // first page uses the normal article loading placeholder.
+  reader.articleLoading = !hasVisiblePage;
   reader.articleError = "";
   if (newsItem === reader) {
-    renderNewsModal(reader);
+    if (hasVisiblePage) {
+      updatePdfPageLoading(reader);
+    } else {
+      renderNewsModal(reader);
+    }
     renderNewsAction(reader);
     updateRestaurantNav();
+    updatePdfPageJumper();
   }
   try {
     const url = "/api/pdf_book_page?name="
@@ -12518,6 +12582,8 @@ async function loadPdfBookPage(reader, page) {
       : paragraphs.map((text) => ({ type: "paragraph", text }));
     reader.section = `Page ${reader.pdfPage}`
       + (reader.pdfPages ? ` of ${reader.pdfPages}` : "");
+    reader.pdfPageLoading = false;
+    reader.pdfLoadingPage = 0;
     reader.articleLoading = false;
     reader.complete = true;
     if (newsItem === reader) {
@@ -12529,11 +12595,15 @@ async function loadPdfBookPage(reader, page) {
     }
   } catch (error) {
     if (reader.pdfRequestId !== requestId) return;
+    reader.pdfPageLoading = false;
+    reader.pdfLoadingPage = 0;
     reader.articleLoading = false;
     reader.complete = true;
     reader.articleError = error?.message || String(error);
-    reader.paragraphs = [];
-    reader.blocks = [];
+    if (!hasVisiblePage) {
+      reader.paragraphs = [];
+      reader.blocks = [];
+    }
     if (newsItem === reader) {
       renderNewsModal(reader);
       renderNewsAction(reader);
@@ -12543,7 +12613,7 @@ async function loadPdfBookPage(reader, page) {
 }
 
 function goToPdfPage(page) {
-  if (!newsItem?.pdf || newsItem.articleLoading) return;
+  if (!newsItem?.pdf || newsItem.articleLoading || newsItem.pdfPageLoading) return;
   const target = Number(page);
   if (!Number.isFinite(target) || target < 1) return;
   if (newsItem.pdfPages && target > newsItem.pdfPages) return;
@@ -12551,7 +12621,7 @@ function goToPdfPage(page) {
 }
 
 function navigatePdfPage(step) {
-  if (!newsItem?.pdf || newsItem.articleLoading) return;
+  if (!newsItem?.pdf || newsItem.articleLoading || newsItem.pdfPageLoading) return;
   const next = (Number(newsItem.pdfPage) || 1) + step;
   if (next < 1) return;
   if (newsItem.pdfPages && next > newsItem.pdfPages) return;
@@ -16148,8 +16218,20 @@ document.addEventListener("keydown", (event) => {
   closeNewsFind();
 }, true);
 
+function updatePdfPageLoading(item) {
+  if (!pdfPageLoadingEl) return;
+  const loading = Boolean(item?.pdf && item.pdfPageLoading);
+  pdfPageLoadingEl.classList.toggle("is-loading", loading);
+  if (pdfPageLoadingLabelEl) {
+    pdfPageLoadingLabelEl.textContent = loading
+      ? `Loading page ${Number(item.pdfLoadingPage) || "…"}…`
+      : "";
+  }
+}
+
 function renderNewsModal(item) {
   syncNewsFindButton(item);
+  updatePdfPageLoading(item);
   if (newsPanelEl) {
     newsPanelEl.classList.toggle(
       "is-docs",
@@ -16334,7 +16416,9 @@ function updatePdfPageJumper() {
     newsPageInputEl.value = String(page);
   }
   newsPageTotalEl.textContent = pages ? `of ${pages}` : "of ?";
-  const disabled = Boolean(newsItem.articleLoading) || !pages;
+  const disabled = Boolean(newsItem.articleLoading)
+    || Boolean(newsItem.pdfPageLoading)
+    || !pages;
   newsPageInputEl.disabled = disabled;
   newsPageGoEl.disabled = disabled;
   const chapters = Array.isArray(newsItem.pdfChapters)
@@ -16364,12 +16448,13 @@ function updatePdfPageJumper() {
       (chapter) => Number(chapter.page) === page
     );
     newsChapterSelectEl.value = exact ? String(exact.page) : "";
-    newsChapterSelectEl.disabled = Boolean(newsItem.articleLoading);
+    newsChapterSelectEl.disabled = Boolean(newsItem.articleLoading)
+      || Boolean(newsItem.pdfPageLoading);
   }
 }
 
 function jumpToPdfPageFromInput() {
-  if (!newsItem?.pdf || newsItem.articleLoading) return;
+  if (!newsItem?.pdf || newsItem.articleLoading || newsItem.pdfPageLoading) return;
   const pages = Number(newsItem.pdfPages) || 0;
   if (!pages) return;
   const requested = Number.parseInt(newsPageInputEl.value, 10);
@@ -16879,8 +16964,11 @@ function updateRestaurantNav() {
     const pages = Number(newsItem.pdfPages) || 0;
     newsPrevEl.hidden = false;
     newsNextEl.hidden = false;
-    newsPrevEl.disabled = Boolean(newsItem.articleLoading) || page <= 1;
+    newsPrevEl.disabled = Boolean(newsItem.articleLoading)
+      || Boolean(newsItem.pdfPageLoading)
+      || page <= 1;
     newsNextEl.disabled = Boolean(newsItem.articleLoading)
+      || Boolean(newsItem.pdfPageLoading)
       || !pages
       || page >= pages;
     newsPrevEl.title = "Previous page";

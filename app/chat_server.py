@@ -1523,6 +1523,457 @@ def _pdf_page_paragraphs(text: str) -> list[str]:
     return ["This page has no extractable text."]
 
 
+_PDF_LAYOUT_BULLET_RE = re.compile(r"^([¡•●‣▪◦·]|[-*+])\s+(.*)$")
+_PDF_LAYOUT_NUMBERED_RE = re.compile(r"^(\d{1,2}[.)]|\d{1,2}\s{2,})\s*(.*)$")
+_PDF_LAYOUT_SECTION_RE = re.compile(
+    r"^(\d+(?:\.\d+)+)\s{2,}(.+)$|^(\d+)\s{2,}(.+)$"
+)
+_PDF_LAYOUT_CAPTION_RE = re.compile(
+    r"^(Listing|Figure|Table)\s+\d+(?:\.\d+)?\b", re.IGNORECASE
+)
+_PDF_LAYOUT_CODE_RE = re.compile(
+    r"^\s*(?:"
+    r"def\s+\w+|class\s+\w+|import\s+|from\s+\S+\s+import\s+|"
+    r"return\b|yield\b|raise\b|try:|except\b|finally:|"
+    r"with\s+.+:|if\s+.+:|elif\s+.+:|else:|for\s+.+ in\s+.+:|"
+    r"while\s+.+:|[A-Za-z_][\w.\[\]\'\"]*\s*=\s*|#\s|"
+    r"[)}{\]\[]|>>>|\.\.\.|"
+    r"(?:pip|python3?|uv|git|curl|npm|ollama)\s|"
+    r"print\(|console\.log\(|SELECT\b|INSERT\b|UPDATE\b|DELETE\b"
+    r")"
+)
+
+
+def _pdf_page_layout_text(path: Path, page: int) -> str:
+    """Return one PDF page's text with poppler's column layout preserved."""
+    try:
+        result = subprocess.run(
+            [
+                "pdftotext",
+                "-f",
+                str(page),
+                "-l",
+                str(page),
+                "-layout",
+                "-enc",
+                "UTF-8",
+                str(path),
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.replace("\f", "\n")
+
+
+def _pdf_join_lines(left: str, right: str) -> str:
+    """Join two visual PDF lines, repairing a hyphenated word break."""
+    left = left.rstrip()
+    right = right.lstrip()
+    if not left:
+        return right
+    if not right:
+        return left
+    match = re.search(r"(\w)\s*-\s*$", left)
+    if match:
+        if right[:1].islower():
+            return left[: match.start()] + match.group(1) + right
+        return left[: match.start()] + match.group(1) + "-" + right
+    return f"{left} {right}"
+
+
+def _pdf_layout_word_groups(line: str) -> list[list]:
+    """Group words separated by two or more spaces into table columns."""
+    words = [
+        (match.start(), match.end(), match.group(0))
+        for match in re.finditer(r"\S+", line)
+    ]
+    groups: list[list] = []
+    for start, end, word in words:
+        if not groups or start - groups[-1][1] >= 2:
+            groups.append([start, end, word])
+        else:
+            groups[-1][1] = end
+            groups[-1][2] = f"{groups[-1][2]} {word}"
+    return groups
+
+
+def _pdf_layout_table_markdown(raw_lines: list[str]) -> str:
+    """Turn one layout-preserved table block into a Markdown pipe table."""
+    lines = [line.rstrip() for line in raw_lines if line.strip()]
+    if len(lines) < 2:
+        return ""
+    header_groups = _pdf_layout_word_groups(lines[0])
+    if len(header_groups) < 2:
+        return ""
+    header = [str(group[2]) for group in header_groups]
+    boundaries = [
+        (header_groups[index][1] + header_groups[index + 1][0]) / 2
+        for index in range(len(header_groups) - 1)
+    ]
+    rows: list[list[str]] = []
+    for line in lines[1:]:
+        cells = [""] * len(header)
+        for match in re.finditer(r"\S+", line):
+            position = match.start()
+            word = match.group(0)
+            column = len(boundaries)
+            for index, boundary in enumerate(boundaries):
+                if position < boundary:
+                    column = index
+                    break
+            cells[column] = _pdf_join_lines(cells[column], word)
+        nonempty = [index for index, cell in enumerate(cells) if cell]
+        if not nonempty:
+            continue
+        if (
+            rows
+            and cells[0]
+            and rows[-1][0].lower().endswith(
+                ("to", "and", "or", "of", "the", "-", ",", "/")
+            )
+        ):
+            for index in nonempty:
+                rows[-1][index] = _pdf_join_lines(
+                    rows[-1][index], cells[index]
+                )
+            continue
+        if rows and len(nonempty) == 1 and nonempty[0] > 0:
+            index = nonempty[0]
+            rows[-1][index] = _pdf_join_lines(rows[-1][index], cells[index])
+            continue
+        rows.append(cells)
+    if not rows:
+        return ""
+
+    def cell(value: str) -> str:
+        return str(value).replace("|", "\\|").strip()
+
+    output = [
+        "| " + " | ".join(cell(value) for value in header) + " |",
+        "| " + " | ".join("---" for _value in header) + " |",
+    ]
+    for row in rows:
+        output.append("| " + " | ".join(cell(value) for value in row) + " |")
+    return "\n".join(output)
+
+
+def _pdf_layout_page_markdown(text: str, page_number: int = 0) -> str:
+    """Format one layout-preserved PDF page as readable Markdown."""
+    raw_lines = str(text or "").replace("\f", "\n").splitlines()
+    items: list[tuple[int, str, str] | None] = []
+    first_nonblank = False
+    for raw_line in raw_lines:
+        raw_line = raw_line.rstrip()
+        if not raw_line.strip():
+            items.append(None)
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        line = raw_line.strip()
+        if re.fullmatch(r"\d{1,4}", line):
+            continue
+        if re.match(
+            r"(?i)^(licensed to|all rights reserved|©|copyright)\b", line
+        ):
+            continue
+        if not first_nonblank:
+            first_nonblank = True
+            drop = False
+            if line.endswith("-"):
+                drop = False
+            elif (
+                indent >= 15
+                and len(line.split()) <= 15
+                and not line.endswith((".", "?", "!", ":", ";"))
+            ):
+                drop = True
+            elif re.match(rf"^{page_number}\s{{2,}}\S", line):
+                drop = True
+            elif re.match(
+                r"^\d{1,4}\s{2,}(Chapter|Contents|Index)\b", line, re.I
+            ):
+                drop = True
+            elif (
+                re.match(r"^Chapter\s+\d+\b", line, re.I)
+                and len(line) <= 110
+            ):
+                drop = True
+            if drop:
+                continue
+        items.append((indent, line, raw_line))
+
+    indents: list[int] = []
+    for item in items:
+        if item is None:
+            continue
+        indent, line, _raw = item
+        if indent <= 0 or len(line) < 30:
+            continue
+        if (
+            _PDF_LAYOUT_BULLET_RE.match(line)
+            or _PDF_LAYOUT_NUMBERED_RE.match(line)
+            or _PDF_LAYOUT_CAPTION_RE.match(line)
+        ):
+            continue
+        if _PDF_LAYOUT_CODE_RE.match(line):
+            continue
+        indents.append(indent)
+    base_indent = min(indents) if indents else 6
+
+    output: list[str] = []
+    paragraph: str | None = None
+    paragraph_indent = 0
+    bullet: str | None = None
+    bullet_indent = 0
+    code: list[str] | None = None
+    code_indent = 0
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph
+        if paragraph is not None:
+            output.append(paragraph)
+            paragraph = None
+
+    def flush_bullet() -> None:
+        nonlocal bullet
+        if bullet is not None:
+            output.append(bullet)
+            bullet = None
+
+    def flush_code() -> None:
+        nonlocal code, code_indent
+        if code is None:
+            return
+        body = "\n".join(code).rstrip()
+        if body.strip():
+            language = "python" if re.search(
+                r"\b(def|class|import|from)\b", body
+            ) else ""
+            output.append(f"```{language}\n{body}\n```")
+        code = None
+        code_indent = 0
+
+    def flush_all() -> None:
+        flush_paragraph()
+        flush_bullet()
+        flush_code()
+
+    index = 0
+    while index < len(items):
+        item = items[index]
+        if item is None:
+            flush_all()
+            index += 1
+            continue
+        indent, line, raw_line = item
+
+        if code is not None:
+            if indent > base_indent or _PDF_LAYOUT_CODE_RE.match(line):
+                code.append(" " * max(0, indent - code_indent) + line)
+                index += 1
+                continue
+            flush_code()
+
+        section = _PDF_LAYOUT_SECTION_RE.match(line)
+        heading = False
+        if section:
+            required = base_indent + 2 if section.group(1) else base_indent
+            if indent <= required and len(line) <= 120:
+                heading = True
+        if (
+            not heading
+            and indent <= max(0, base_indent - 2)
+            and len(line) <= 100
+            and not line.endswith((".", "?", "!", ":", ";", ","))
+            and not line[:1].islower()
+            and not _PDF_LAYOUT_BULLET_RE.match(line)
+            and not _PDF_LAYOUT_NUMBERED_RE.match(line)
+        ):
+            heading = True
+        if heading:
+            flush_paragraph()
+            flush_bullet()
+            if section:
+                number = section.group(1) or section.group(3)
+                heading_text = section.group(2) or section.group(4)
+                level = number.count(".")
+                hashes = "##" if level == 0 else ("###" if level == 1 else "####")
+                output.append(f"{hashes} {heading_text}")
+            else:
+                output.append(f"## {line}")
+            index += 1
+            continue
+
+        if _PDF_LAYOUT_CODE_RE.match(line) and (
+            indent > base_indent
+            or line.lstrip().startswith(
+                ("def ", "class ", "import ", "from ", "#", "{", "}", "[", "]")
+            )
+        ):
+            flush_paragraph()
+            flush_bullet()
+            code = [line]
+            code_indent = indent
+            index += 1
+            while index < len(items):
+                next_item = items[index]
+                if next_item is None:
+                    lookahead = index + 1
+                    while (
+                        lookahead < len(items)
+                        and items[lookahead] is None
+                    ):
+                        lookahead += 1
+                    if lookahead < len(items):
+                        candidate = items[lookahead]
+                        if candidate is not None and (
+                            candidate[0] > base_indent
+                            or _PDF_LAYOUT_CODE_RE.match(candidate[1])
+                        ):
+                            code.append("")
+                            index += 1
+                            continue
+                    break
+                next_indent, next_line, _next_raw = next_item
+                if next_indent > base_indent or _PDF_LAYOUT_CODE_RE.match(
+                    next_line
+                ):
+                    code.append(
+                        " " * max(0, next_indent - code_indent) + next_line
+                    )
+                    index += 1
+                    continue
+                break
+            flush_code()
+            continue
+
+        bullet_match = _PDF_LAYOUT_BULLET_RE.match(line)
+        if bullet_match:
+            flush_paragraph()
+            flush_bullet()
+            bullet = f"- {bullet_match.group(2)}"
+            bullet_indent = indent
+            index += 1
+            continue
+
+        numbered_match = _PDF_LAYOUT_NUMBERED_RE.match(line)
+        if numbered_match:
+            flush_paragraph()
+            flush_bullet()
+            marker = numbered_match.group(1).strip()
+            if not re.match(r"^\d+[.)]$", marker):
+                marker = f"{marker}."
+            bullet = f"{marker} {numbered_match.group(2)}"
+            bullet_indent = indent
+            index += 1
+            continue
+
+        if bullet is not None:
+            if indent > bullet_indent:
+                bullet = _pdf_join_lines(bullet, line)
+                index += 1
+                continue
+            flush_bullet()
+
+        if (
+            _PDF_LAYOUT_CAPTION_RE.match(line)
+            and len(line) <= 110
+            and not re.search(r"[.!?]\s+[A-Z]", line)
+        ):
+            flush_paragraph()
+            language = line.split(None, 1)[0].casefold()
+            output.append(f"*{line}*")
+            index += 1
+            if language == "table":
+                # A blank line often separates the caption from the table.
+                while index < len(items) and items[index] is None:
+                    index += 1
+                table_lines: list[str] = []
+                while index < len(items):
+                    table_item = items[index]
+                    if table_item is None:
+                        break
+                    table_indent, table_line, table_raw = table_item
+                    if (
+                        _PDF_LAYOUT_SECTION_RE.match(table_line)
+                        or table_indent <= max(0, base_indent - 2)
+                    ):
+                        break
+                    table_lines.append(table_raw)
+                    index += 1
+                table = _pdf_layout_table_markdown(table_lines)
+                if table:
+                    output.append(table)
+                elif table_lines:
+                    output.append(
+                        " ".join(
+                            " ".join(line.split()) for line in table_lines
+                        )
+                    )
+            continue
+
+        if paragraph is None:
+            paragraph = line
+            paragraph_indent = indent
+        elif (
+            base_indent + 2 <= indent <= base_indent + 8
+            and indent > paragraph_indent
+        ) or indent < base_indent - 1:
+            flush_paragraph()
+            paragraph = line
+            paragraph_indent = indent
+        else:
+            paragraph = _pdf_join_lines(paragraph, line)
+        index += 1
+
+    flush_all()
+    return "\n\n".join(value for value in output if value.strip())
+
+
+def _merge_pdf_page_blocks(blocks: list[str]) -> list[str]:
+    """Join a sentence that poppler wrapped across a page boundary."""
+    merged: list[str] = []
+    for block in blocks:
+        if merged:
+            previous = merged[-1]
+            previous_last = previous.rsplit("\n\n", 1)[-1]
+            next_first = block.split("\n\n", 1)[0]
+            if (
+                previous_last
+                and next_first
+                and next_first[:1].islower()
+                and not previous_last.endswith(
+                    (".", "?", "!", ":", ";", '"', "”", ")", "]", "}", "```")
+                )
+            ):
+                merged[-1] = (
+                    previous[: -len(previous_last)]
+                    + _pdf_join_lines(previous_last, next_first)
+                    + block[len(next_first):]
+                )
+                continue
+        merged.append(block)
+    return merged
+
+
+def _truncate_pdf_markdown(text: str, limit: int) -> str:
+    """Cut Markdown at a block boundary and keep a code fence balanced."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    split = cut.rfind("\n\n")
+    if split > limit // 2:
+        cut = cut[:split]
+    if cut.count("```") % 2:
+        cut += "\n```"
+    return cut
+
+
 def _pdf_page_words(path: Path, page: int) -> list[dict]:
     """Return normalized, clickable word boxes for one PDF page.
 
@@ -2088,20 +2539,35 @@ def read_pdf_concept(name: str, node_id: str) -> dict:
     paragraphs: list[str] = []
     used = 0
     for page_number in range(start, end + 1):
-        with _PDF_BOOK_READER_LOCK:
-            text = reader.pages[page_number - 1].extract_text() or ""
-        for paragraph in _pdf_page_paragraphs(text):
-            if paragraph == "This page has no extractable text.":
-                continue
-            if used + len(paragraph) > 30000:
-                truncated = True
-                break
-            paragraphs.append(paragraph)
-            used += len(paragraph) + 2
-        if truncated and used >= 30000:
+        formatted = _pdf_layout_page_markdown(
+            _pdf_page_layout_text(path, page_number), page_number
+        )
+        if not formatted:
+            # poppler's layout extractor can fail on unusual PDFs. Fall back
+            # to pypdf so the concept modal still has readable content.
+            with _PDF_BOOK_READER_LOCK:
+                raw_text = reader.pages[page_number - 1].extract_text() or ""
+            formatted = "\n\n".join(
+                paragraph
+                for paragraph in _pdf_page_paragraphs(raw_text)
+                if paragraph != "This page has no extractable text."
+            )
+        if not formatted:
+            continue
+        if used + len(formatted) + 2 > 30000:
+            remaining = max(0, 30000 - used)
+            if remaining > 200:
+                paragraphs.append(
+                    _truncate_pdf_markdown(formatted, remaining)
+                )
+            truncated = True
             break
+        paragraphs.append(formatted)
+        used += len(formatted) + 2
     if not paragraphs:
         paragraphs = ["No extractable text for this concept."]
+    else:
+        paragraphs = _merge_pdf_page_blocks(paragraphs)
     return {
         "id": str(node.get("id")),
         "title": str(node.get("label") or "Concept"),

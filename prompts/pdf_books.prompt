@@ -1,5 +1,14 @@
 pdf_books_dir: {directory_of_this_prompt}/../.chat/pdf_books
 
+task.smooth_page_loading (completed) {
+  currently when each page is fetching, the book loading modal collapse and then load the book
+  please, DO NOT collapse it, make a loading bar when the next page is still loading, when the page is loading, do not shrink the height of the modal
+}
+
+task.format_content_in_knoledge_point_modal (completed) {
+  the content in the knowledge point modal is not formatted, please format it nicely similar to the book
+}
+
 task.maning_free_pdf_books (completed) {
   after typing /pdf_books command:
   - show 2 sections:
