@@ -136,6 +136,7 @@ WEB_COMMANDS = {
     "/stock": "show a stock symbol profile, financial details, and related news articles: /stock <stock_symbol>",
     "/robinhood": "show your Robinhood holdings, pending orders, and recent transactions for a symbol through the Robinhood MCP server: /robinhood <stock_symbol>",
     "/zillow": "show nearby for-sale and rental listings from Zillow's official MCP server: /zillow <latitude,longitude> [radius_miles]",
+    "/moonbit": "ask about the MoonBit programming language using the official docs; /moonbit off returns to normal chat",
     "/deepresearch": "run a bounded multi-round research report on <topic>: /deepresearch <topic>",
     "/research_with_the_news": "research a topic from recent news, Wikipedia, or a doctor's hospital website, then keep doing so for each follow-up: /research_with_the_news <topic>; /research_with_the_news on; /research_with_the_news off",
     "/anthem": "search the Anthem Provider Directory for doctors by name, specialty, hospital, or location; each result opens a provider profile; follow-up questions keep the provider context: /anthem <question>; /anthem off",

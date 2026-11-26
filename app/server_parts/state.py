@@ -70,6 +70,9 @@ class ChatState:
         # the accumulated research context until the user turns it off. The
         # Mode selector defaults to Online, so the browser starts in this mode.
         self.research_with_news_mode = True
+        # /moonbit answers questions from the official MoonBit documentation
+        # in its own conversation thread until /moonbit off.
+        self.moonbit_mode = False
         self.conversation: list[dict] = []
         self.conversation_summary: str = ""
         self.conversation_summary_turns: int = 0
@@ -141,8 +144,11 @@ class ChatState:
         mode a newly loaded page sees.
         """
         provider_mode_was_on = (
-            self.anthem_mode or self.united_healthcare_mode
+            self.anthem_mode
+            or self.united_healthcare_mode
+            or self.moonbit_mode
         )
+        self.moonbit_mode = False
         self.research_with_news_mode = True
         self.anthem_mode = False
         self.anthem_context = ""
@@ -358,6 +364,7 @@ class ChatState:
                 self.united_healthcare_context
             ),
             "research_with_news_mode": self.research_with_news_mode,
+            "moonbit_mode": self.moonbit_mode,
             "english_words_to_learn": self.english_words_to_learn,
             "english_words_label": self.english_words_label,
             "has_answer": self.latest_answer is not None,

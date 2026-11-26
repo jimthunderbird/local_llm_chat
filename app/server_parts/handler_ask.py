@@ -431,6 +431,11 @@ class HandlerAskMixin:
 
     def _run_question(self, question: str) -> None:
         state = self.state
+        if state.moonbit_mode:
+            # /moonbit keeps its own docs-only thread. It takes precedence
+            # over the other modes until /moonbit off is entered.
+            self._run_moonbit_question(question)
+            return
         if state.united_healthcare_mode:
             self._run_united_healthcare_question(question)
             return
@@ -1502,6 +1507,8 @@ class HandlerAskMixin:
             self._command_robinhood(argument)
         elif name == "/zillow":
             self._command_zillow(argument)
+        elif name == "/moonbit":
+            self._command_moonbit(argument)
         elif name == "/wikivoyage":
             self._command_wikivoyage(argument)
         elif name == "/map":

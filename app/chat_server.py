@@ -207,6 +207,7 @@ from server_parts.handler_youtube import HandlerYoutubeMixin
 from server_parts.handler_commands_a import HandlerCommandsAMixin
 from server_parts.handler_commands_b import HandlerCommandsBMixin
 from server_parts.handler_commands_c import HandlerCommandsCMixin
+from server_parts.handler_moonbit import HandlerMoonbitMixin
 from server_parts.article import _iterative_paragraph_chunks
 from server_parts.tts import _keepalive_watchdog, _prewarm_tts
 
@@ -221,6 +222,7 @@ class ChatRequestHandler(
     HandlerCommandsAMixin,
     HandlerCommandsBMixin,
     HandlerCommandsCMixin,
+    HandlerMoonbitMixin,
     BaseHTTPRequestHandler,
 ):
     """One HTTP handler per request; SSE responses stream from Ollama."""

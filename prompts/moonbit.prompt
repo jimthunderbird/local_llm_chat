@@ -1,0 +1,16 @@
+moonbit_doc: https://docs.moonbitlang.com/en/latest/
+
+task (completed) {
+  as answer is streaming, do not scroll the screen
+}
+
+task (completed) {
+  create command /moonbit {
+    - after typing /moonbit, it will start a fresh context to answer question about the Moonbit Programming Language {
+      when a question is asked, search {moonbit_doc} to return the answer, including concept explanation and code samples
+    }
+
+    - /moonbit off
+      turn off the moonbit and back to the main chat
+  }
+}

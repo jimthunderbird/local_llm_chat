@@ -37,6 +37,7 @@ The split follows the feature requirements in `prompts/*.prompt`:
 | `programming.py` | Coding-question and language detection | `programming*.prompt` |
 | `github.py` | GitHub code-snippet fallback | `programming*.prompt` |
 | `programming_docs.py` | Official Go, Rust, and PHP documentation lookups | `performance_improvement.prompt`, `programming*.prompt` |
+| `moonbit.py` | MoonBit documentation index search and page extraction | `moonbit.prompt` |
 | `conversation.py` | Follow-up rewriting and conversation memory | `chat_common.prompt` |
 | `answer.py` | Answer block splitting and source annotations | `chat_common.prompt` |
 | `article.py` | Article loading, section routing, iterative evidence | `article_loading.prompt`, `article_based_question_and_answer.prompt` |
@@ -55,6 +56,7 @@ The split follows the feature requirements in `prompts/*.prompt`:
 | `handler_commands_a.py` | News, docs, travel, map commands | `news.prompt`, `map.prompt`, `game.prompt`, `stackoverflow.prompt`, `wikivoyage.prompt` |
 | `handler_commands_b.py` | Reddit, finance, library, podcast commands | `reddit.prompt`, `stock.prompt`, `robinhood.prompt`, `zillow.prompt`, `project_gutenberg.prompt`, `openlibrary.prompt`, `internet_archive.prompt`, `ai_cohosted_podcast.prompt` |
 | `handler_commands_c.py` | Article, dictionary, code, video, settings commands | `article_loading.prompt`, `dictionary.prompt`, `code_snippet_block.prompt`, `programming*.prompt`, `youtube.prompt` |
+| `handler_moonbit.py` | MoonBit documentation mode requests | `moonbit.prompt` |
 
 ## Dependency direction
 

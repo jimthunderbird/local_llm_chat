@@ -20870,6 +20870,10 @@ function submitText(text, fromChoice = false) {
     || commandName === "changelog" || commandName === "dictionary_history";
 
   const isCommand = question.startsWith("/");
+  // MoonBit questions are answers, not commands, but they must not drag the
+  // viewport down while the documentation answer streams. Pin the answer to
+  // its start instead, just like a command result.
+  const moonbitAnswer = !isCommand && Boolean(appState?.moonbit_mode);
   // /write_a_book streams a long research log before writing any chapter.
   // Unlike result-list commands, it must follow the stream so the user can
   // see which news URLs are being fetched and whether each fetch succeeded.
@@ -20880,7 +20884,7 @@ function submitText(text, fromChoice = false) {
     // every log/output update to the bottom.
     stickToBottom = false;
   }
-  addUserEcho(question, image, !isCommand);
+  addUserEcho(question, image, !isCommand && !moonbitAnswer);
   // /ask answers are plain text like a regular assistant reply: keep every
   // word clickable for /dict and omit the command "Output" heading.
   // /research_with_the_news <topic> likewise streams an answer, not a command
@@ -20947,6 +20951,7 @@ function submitText(text, fromChoice = false) {
     (isCommand && !followsBookProgress)
     || commandName === "wiki_article"
     || pinsNewsSearch
+    || moonbitAnswer
   ) {
     // Every command result is anchored at its start and never follows the
     // stream. This replaces the old per-command allowlist. /write_a_book is
