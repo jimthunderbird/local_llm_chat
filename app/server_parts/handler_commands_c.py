@@ -731,6 +731,89 @@ class HandlerCommandsCMixin:
         if trailing:
             self._sse_text("delta", trailing)
 
+    # ---- SSE: simple-English article rewrite --------------------------
+    def _handle_simplify(self, text: str) -> None:
+        """Rewrite an article in simple English paragraph by paragraph."""
+        self._begin_sse()
+        try:
+            if len(text) > MAX_SIMPLIFY_CHARS:
+                raise RuntimeError(
+                    f"Article is too long to simplify (limit "
+                    f"{MAX_SIMPLIFY_CHARS:,} characters)."
+                )
+            paragraphs = split_simplify_paragraphs(text)
+            if not paragraphs:
+                raise RuntimeError("There is no article text to simplify.")
+            self._sse(
+                "start",
+                {"model": SIMPLIFY_MODEL, "paragraphs": len(paragraphs)},
+            )
+            for index, paragraph in enumerate(paragraphs):
+                if index:
+                    self._sse_text("delta", "\n\n")
+                self._stream_simplify_paragraph(paragraph)
+                self._sse(
+                    "paragraph",
+                    {"index": index + 1, "total": len(paragraphs)},
+                )
+            self._sse("done", {"paragraphs": len(paragraphs)})
+        except ClientDisconnected:
+            pass
+        except Exception as exc:
+            try:
+                self._sse("error", {"message": f"Simplification failed: {exc}"})
+                self._sse("done", {})
+            except ClientDisconnected:
+                pass
+
+    def _stream_simplify_paragraph(self, paragraph: str) -> None:
+        """Stream one paragraph's simple-English rewrite."""
+        payload = {
+            "model": SIMPLIFY_MODEL,
+            "prompt": SIMPLIFY_PROMPT.format(text=paragraph),
+            "stream": True,
+            "think": False,
+            "keep_alive": chat.OLLAMA_KEEP_ALIVE,
+            "options": {
+                "temperature": 0.2,
+                "num_ctx": SIMPLIFY_NUM_CTX,
+            },
+        }
+        prefix_filter = SimplificationPrefixFilter()
+        try:
+            with requests.post(
+                f"{chat.OLLAMA_HOST}/api/generate",
+                json=payload,
+                stream=True,
+                timeout=(10, 900),
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("error"):
+                        raise RuntimeError(f"Ollama error: {event['error']}")
+                    token = event.get("response", "")
+                    if token:
+                        cleaned = prefix_filter.feed(token)
+                        if cleaned:
+                            self._sse_text("delta", cleaned)
+                    if event.get("done"):
+                        break
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"Could not reach Ollama at {chat.OLLAMA_HOST}. "
+                f"Is it running? ({exc})"
+            ) from exc
+
+        trailing = prefix_filter.flush()
+        if trailing:
+            self._sse_text("delta", trailing)
+
     # ---- SSE: single code-line explanation ---------------------------
     def _handle_explain_line(self, payload: dict) -> None:
         """Explain one line of a Go, Rust, or PHP code snippet."""
@@ -1156,5 +1239,6 @@ from .podcast import AI_NEWS_PODCAST_LIMIT, AI_NEWS_PODCAST_MODEL, AI_NEWS_PODCA
 from .programming import language_code_fence, language_coding_model, language_uses_official_docs, normalize_language
 from .programming_docs import split_translation_paragraphs
 from .retrieval import ClientDisconnected, news_id_for_item, news_is_learned
+from .simplify import MAX_SIMPLIFY_CHARS, SIMPLIFY_MODEL, SIMPLIFY_NUM_CTX, SIMPLIFY_PROMPT, SimplificationPrefixFilter, split_simplify_paragraphs
 from .translation import ANSWER_TRANSLATION_MODEL, ANSWER_TRANSLATION_NUM_CTX, MAX_TRANSLATION_CHARS, TranslationPrefixFilter
 from .video import MAX_VIDEO_SUMMARY_TRANSCRIPT_CHARS, VIDEO_SUMMARY_MODEL, VIDEO_SUMMARY_NUM_CTX, VIDEO_SUMMARY_PROMPT

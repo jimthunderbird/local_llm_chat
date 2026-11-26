@@ -1466,6 +1466,16 @@ class HandlerCoreMixin:
                 return
             self._handle_translate(text)
             return
+        if parsed.path == "/api/simplify":
+            payload = self._read_json()
+            if payload is None:
+                return
+            text = payload.get("text")
+            if not isinstance(text, str) or not text.strip():
+                self._send_error_json("Missing article text to simplify", 400)
+                return
+            self._handle_simplify(text)
+            return
         if parsed.path == "/api/tts":
             payload = self._read_json()
             if payload is None:

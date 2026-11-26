@@ -1,3 +1,10 @@
+task.simplified_version_and_original_version (completed) {
+  in the article loader, next to the article title, add a button "Simplified", once clicked {
+    - use the local llm ornith:35b to rewrite the article using the 2500 most common words in English
+    - once rewriting is completed, the button will change to "Original", once click on the "Original", toggle between original and simplified
+  }
+}
+
 task.find_words_in_article (completed) {
   inside of the article loader modal, in the top bar of the modal, allow finding word in the current article
 }

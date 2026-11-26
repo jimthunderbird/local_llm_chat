@@ -40,6 +40,7 @@ The split follows the feature requirements in `prompts/*.prompt`:
 | `conversation.py` | Follow-up rewriting and conversation memory | `chat_common.prompt` |
 | `answer.py` | Answer block splitting and source annotations | `chat_common.prompt` |
 | `article.py` | Article loading, section routing, iterative evidence | `article_loading.prompt`, `article_based_question_and_answer.prompt` |
+| `simplify.py` | Simple-English article rewrites | `article_loading.prompt` |
 | `library.py` | Gutenberg, Open Library, Internet Archive | `project_gutenberg.prompt`, `openlibrary.prompt`, `internet_archive.prompt` |
 | `directory_anthem.py` | Anthem provider directory | `anthem_bluecross.prompt` |
 | `directory_uhc.py` | UnitedHealthcare provider directory | `united_healthcare.prompt` |

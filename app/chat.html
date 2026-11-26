@@ -2176,6 +2176,25 @@
     user-select: none;
   }
   .news-head-main { min-width: 0; flex: 1; }
+  .news-title-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+  }
+  .news-title-row .news-modal-title {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  .news-simplify { flex: 0 0 auto; }
+  .news-simplify.is-busy { color: var(--warn); }
+  .news-simplified-label {
+    color: var(--dim);
+    font-size: 10.5px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
   .news-modal-title { color: var(--accent); font-weight: 700; font-size: 14px; line-height: 1.35; }
   .news-modal-meta { color: var(--dim); font-size: 11px; margin-top: 4px; }
   .news-link {
@@ -4860,7 +4879,11 @@
   <div class="news-card" role="dialog" aria-modal="true" aria-labelledby="news-title">
     <div class="news-head">
       <div class="news-head-main">
-        <div id="news-title" class="news-modal-title">News</div>
+        <div class="news-title-row">
+          <div id="news-title" class="news-modal-title">News</div>
+          <button id="news-simplify" class="news-find-btn news-simplify" type="button" hidden
+                  title="Rewrite this article with the 2,500 most common English words">Simplified</button>
+        </div>
         <div id="news-meta" class="news-modal-meta"></div>
       </div>
       <button id="news-back" type="button"
@@ -5415,6 +5438,7 @@ const newsBodyEl = $("#news-body");
 const newsTtsBtn = $("#news-tts");
 const newsPodcastBtn = $("#news-podcast");
 const newsTranslateBtn = $("#news-translate");
+const newsSimplifyBtn = $("#news-simplify");
 const newsTranslationEl = $("#news-translation");
 const newsTranslationLabelEl = $("#news-translation-label");
 const newsTranslationBodyEl = $("#news-translation-body");
@@ -5577,12 +5601,23 @@ const restaurantHistory = [];
 let restaurantHistoryIndex = -1;
 let newsTranslationGeneration = 0;
 let newsTranslationRenderPending = false;
+let newsSimplifyGeneration = 0;
+let newsSimplifyRenderPending = false;
 let newsTtsGeneration = 0;
 let newsTtsRun = null;
 let newsPodcastGeneration = 0;
 let newsPodcastRun = null;
 let newsPodcastRenderTimer = 0;
 const newsTranslation = {
+  text: "",
+  sourceText: "",
+  error: "",
+  busy: false,
+  done: false,
+  visible: false,
+  controller: null,
+};
+const newsSimplify = {
   text: "",
   sourceText: "",
   error: "",
@@ -15664,6 +15699,186 @@ function toggleNewsTranslation() {
   newsTranslationEl.scrollIntoView({ block: "nearest" });
 }
 
+/* ------------------------------------------------------------------ *
+ *  Simple-English article rewrite
+ * ------------------------------------------------------------------ */
+function syncNewsSimplifyButton(item = newsItem) {
+  const button = newsSimplifyBtn;
+  if (!button) return;
+  const text = newsArticleText(item);
+  const applicable = Boolean(
+    item
+    && !item.pdf
+    && !item.osm
+    && !item.map
+    && text.trim().length > 0
+  );
+  button.hidden = !applicable;
+  if (!applicable) return;
+  const state = newsSimplify;
+  if (state.busy) {
+    button.textContent = "Simplifying…";
+    button.disabled = true;
+    button.classList.add("is-busy");
+    button.title = "Rewriting the article with the 2,500 most common English words…";
+    return;
+  }
+  button.classList.remove("is-busy");
+  button.disabled = false;
+  const reusable = state.done && state.text && state.sourceText === text;
+  if (reusable) {
+    button.textContent = state.visible ? "Original" : "Simplified";
+    button.title = state.visible
+      ? "Show the original article"
+      : "Show the simplified article";
+  } else {
+    button.textContent = "Simplified";
+    button.title = "Rewrite this article with the 2,500 most common English words";
+  }
+}
+
+function buildNewsSimplifiedContent() {
+  const container = document.createElement("div");
+  container.className = "news-simplified";
+  const label = document.createElement("div");
+  label.className = "news-simplified-label";
+  label.textContent = newsSimplify.busy
+    ? "Simplified English · streaming"
+    : "Simplified English";
+  container.appendChild(label);
+  if (newsSimplify.text) {
+    container.appendChild(renderMarkdown(newsSimplify.text, true));
+  } else if (newsSimplify.busy) {
+    const loading = document.createElement("div");
+    loading.className = "news-loading";
+    loading.textContent = "Writing a simpler version…";
+    container.appendChild(loading);
+  }
+  if (newsSimplify.busy) {
+    const caret = document.createElement("span");
+    caret.className = "caret";
+    container.appendChild(caret);
+  }
+  if (newsSimplify.error) {
+    const error = document.createElement("div");
+    error.className = "error-text";
+    error.textContent = newsSimplify.error;
+    container.appendChild(error);
+  }
+  return container;
+}
+
+function updateNewsSimplifiedBody() {
+  if (!newsItem) return;
+  const existing = newsBodyEl.querySelector(".news-simplified");
+  if (!newsSimplify.visible || !existing) {
+    renderNewsModal(newsItem);
+    return;
+  }
+  existing.replaceWith(buildNewsSimplifiedContent());
+  syncNewsSimplifyButton();
+}
+
+function scheduleNewsSimplifyRender() {
+  if (newsSimplifyRenderPending) return;
+  newsSimplifyRenderPending = true;
+  const generation = newsSimplifyGeneration;
+  window.setTimeout(() => {
+    newsSimplifyRenderPending = false;
+    if (generation !== newsSimplifyGeneration) return;
+    updateNewsSimplifiedBody();
+  }, 70);
+}
+
+function resetNewsSimplify() {
+  if (newsSimplify.controller) {
+    newsSimplify.controller.abort();
+    newsSimplify.controller = null;
+  }
+  newsSimplifyGeneration += 1;
+  newsSimplify.text = "";
+  newsSimplify.sourceText = "";
+  newsSimplify.error = "";
+  newsSimplify.busy = false;
+  newsSimplify.done = false;
+  newsSimplify.visible = false;
+  newsSimplifyRenderPending = false;
+  syncNewsSimplifyButton();
+}
+
+function startNewsSimplification() {
+  const text = newsArticleText(newsItem);
+  if (!text || newsSimplify.busy) return;
+  if (newsSimplify.controller) newsSimplify.controller.abort();
+
+  const state = newsSimplify;
+  state.sourceText = text;
+  state.text = "";
+  state.error = "";
+  state.busy = true;
+  state.done = false;
+  state.visible = true;
+  renderNewsModal(newsItem);
+
+  const controller = new AbortController();
+  state.controller = controller;
+  const generation = ++newsSimplifyGeneration;
+  const isCurrent = () => generation === newsSimplifyGeneration;
+  const handlers = {
+    delta: (data) => {
+      if (!isCurrent() || !data?.text) return;
+      state.text += data.text;
+      scheduleNewsSimplifyRender();
+    },
+    error: (data) => {
+      if (!isCurrent()) return;
+      state.error = data?.message || "Simplification failed.";
+      scheduleNewsSimplifyRender();
+    },
+    done: () => {
+      if (!isCurrent()) return;
+      state.busy = false;
+      state.done = Boolean(state.text);
+      updateNewsSimplifiedBody();
+    },
+  };
+
+  streamSSE("/api/simplify", { text }, handlers, controller.signal)
+    .catch((error) => {
+      if (!isCurrent()) return;
+      state.error = error?.name === "AbortError"
+        ? "Simplification cancelled."
+        : (error?.message || String(error));
+    })
+    .finally(() => {
+      if (!isCurrent()) return;
+      state.busy = false;
+      state.controller = null;
+      state.done = Boolean(state.text);
+      if (!state.text) {
+        state.visible = false;
+        renderNewsModal(newsItem);
+        if (state.error) toast(state.error);
+        return;
+      }
+      updateNewsSimplifiedBody();
+    });
+}
+
+function toggleNewsSimplify() {
+  if (!newsItem || newsSimplify.busy) return;
+  const text = newsArticleText(newsItem);
+  if (!text) return;
+  const state = newsSimplify;
+  if (state.done && state.text && state.sourceText === text) {
+    state.visible = !state.visible;
+    renderNewsModal(newsItem);
+    newsBodyEl.scrollTop = 0;
+    return;
+  }
+  startNewsSimplification();
+}
+
 function appendNewsHeading(text, level, target) {
   const value = String(text || "").trim();
   if (!value) return;
@@ -16234,6 +16449,13 @@ function updatePdfPageLoading(item) {
 }
 
 function renderNewsModal(item) {
+  const currentArticleText = newsArticleText(item);
+  if (
+    newsSimplify.sourceText
+    && currentArticleText !== newsSimplify.sourceText
+  ) {
+    resetNewsSimplify();
+  }
   syncNewsFindButton(item);
   updatePdfPageLoading(item);
   if (newsPanelEl) {
@@ -16267,6 +16489,10 @@ function renderNewsModal(item) {
   }
 
   newsBodyEl.textContent = "";
+  const simplifiedVisible = Boolean(
+    newsSimplify.visible
+    && (newsSimplify.busy || newsSimplify.text || newsSimplify.error)
+  );
   const blocks = Array.isArray(item.blocks) ? item.blocks : [];
   const images = Array.isArray(item.images)
     ? item.images.map((url) => String(url || "").trim()).filter(Boolean)
@@ -16277,7 +16503,9 @@ function renderNewsModal(item) {
     : [];
   const summary = String(item.summary || "");
   const hasPlaceSources = Boolean(item.wikipedia || item.website);
-  if (blocks.length) {
+  if (simplifiedVisible) {
+    newsBodyEl.appendChild(buildNewsSimplifiedContent());
+  } else if (blocks.length) {
     // Full article view: headings, text, lists, and figures stay in the
     // order they appear in the source article.
     appendNewsBlocks(blocks);
@@ -16319,28 +16547,30 @@ function renderNewsModal(item) {
       }
     }
   }
-  if (!item.complete || item.articleLoading) {
-    const loading = document.createElement("div");
-    loading.className = "news-loading";
-    loading.textContent = item.articleLoading
-      ? "loading full article…"
-      : "loading paragraphs…";
-    newsBodyEl.appendChild(loading);
-  } else if (!paragraphs.length && !blocks.length && item.articleError) {
-    if (item.iframeUrl) {
-      appendRedditEmbed(item, newsBodyEl, true);
-    } else {
+  if (!simplifiedVisible) {
+    if (!item.complete || item.articleLoading) {
+      const loading = document.createElement("div");
+      loading.className = "news-loading";
+      loading.textContent = item.articleLoading
+        ? "loading full article…"
+        : "loading paragraphs…";
+      newsBodyEl.appendChild(loading);
+    } else if (!paragraphs.length && !blocks.length && item.articleError) {
+      if (item.iframeUrl) {
+        appendRedditEmbed(item, newsBodyEl, true);
+      } else {
+        const empty = document.createElement("div");
+        empty.className = "news-loading";
+        empty.textContent = "The full article could not be loaded. Use the article link above to open it directly.";
+        empty.title = item.articleError;
+        newsBodyEl.appendChild(empty);
+      }
+    } else if (!paragraphs.length && !blocks.length && !summary && !hasPlaceSources) {
       const empty = document.createElement("div");
       empty.className = "news-loading";
-      empty.textContent = "The full article could not be loaded. Use the article link above to open it directly.";
-      empty.title = item.articleError;
+      empty.textContent = "This story has no readable paragraphs in the feed.";
       newsBodyEl.appendChild(empty);
     }
-  } else if (!paragraphs.length && !blocks.length && !summary && !hasPlaceSources) {
-    const empty = document.createElement("div");
-    empty.className = "news-loading";
-    empty.textContent = "This story has no readable paragraphs in the feed.";
-    newsBodyEl.appendChild(empty);
   }
   // Reddit's own page is cross-origin, so its DOM cannot be read from an
   // iframe. The server extracts the thread from JSON/Atom/embed first, and
@@ -16372,6 +16602,7 @@ function renderNewsModal(item) {
   renderNewsPodcast(item);
   syncNewsTtsButton();
   syncNewsPodcastButton();
+  syncNewsSimplifyButton(item);
   updateBookFontControls();
   updatePdfPageJumper();
   if (item.pdf) {
@@ -17058,6 +17289,7 @@ function openNewsModal(item, options = {}) {
   );
   resetNewsTts();
   resetNewsTranslation();
+  resetNewsSimplify();
   resetNewsChat();
   resetNewsPodcastPlayback();
   // Show the panel before rendering so the OSM tile map can measure the body
@@ -19078,6 +19310,7 @@ function closeNewsModal() {
   updateRestaurantNav();
   resetNewsTts();
   resetNewsTranslation();
+  resetNewsSimplify();
   resetNewsChat();
   resetNewsPodcastPlayback();
   resetNewsAction();
@@ -19704,6 +19937,11 @@ newsTranslateBtn.addEventListener("click", (event) => {
   event.preventDefault();
   event.stopPropagation();
   toggleNewsTranslation();
+});
+newsSimplifyBtn.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  toggleNewsSimplify();
 });
 newsPanelEl.addEventListener("click", (event) => {
   if (event.target === newsPanelEl) closeNewsModal();
