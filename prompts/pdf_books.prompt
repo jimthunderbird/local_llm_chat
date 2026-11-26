@@ -1,6 +1,14 @@
 pdf_books_dir: {directory_of_this_prompt}/../.chat/pdf_books
 
-task.knowlege_graph_building {
+task.maning_free_pdf_books (completed) {
+  after typing /pdf_books command:
+  - show 2 sections:
+    - Downloaded PDF Books (the pdf books that are already on {pdf_books_dir})
+    - Manning Free PDF Books
+      - use "https://www.manning.com/free-ebooks" to get all free pdf books (sort by publish date in descending order) with the link to download, when clicking on the link, download the corresponding book to {pdf_books_dir}
+}
+
+task.knowlege_graph_building (completed) {
   for a book {pdf_books_dir}/LLM_Fine-Tuning_for_Engineers.pdf, find an alternative way to build the knowledge graph!
 }
 

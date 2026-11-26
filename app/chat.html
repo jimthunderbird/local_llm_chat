@@ -4204,6 +4204,57 @@
     font-size: 11.5px;
     line-height: 1.45;
   }
+  .book-card.manning {
+    cursor: default;
+    user-select: text;
+  }
+  .book-card.manning .book-description {
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .book-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 2px;
+  }
+  .book-download {
+    padding: 4px 9px;
+    color: var(--accent);
+    background: #14283a;
+    border: 1px solid #2f5a7a;
+    border-radius: 5px;
+    font: inherit;
+    font-size: 10.5px;
+    cursor: pointer;
+  }
+  .book-download:hover:not(:disabled) {
+    background: #1a344a;
+    border-color: #3b648a;
+  }
+  .book-download:disabled { cursor: default; opacity: .72; }
+  .book-download.saved {
+    color: #7fd1a0;
+    background: #12261c;
+    border-color: #2f5a43;
+    opacity: 1;
+  }
+  .book-download-status {
+    color: var(--dim);
+    font-size: 10.5px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+  .book-download-status.error { color: var(--warn); }
+  .book-open-link {
+    color: var(--accent-2);
+    font-size: 10.5px;
+    text-decoration: none;
+    border-bottom: 1px dotted #3d6b8f;
+  }
   .book-excerpts {
     display: flex;
     flex-direction: column;
@@ -7775,9 +7826,11 @@ function makeEntry(kind, options = {}) {
     booksNote: "",
     booksError: "",
     bookLibraryItems: [],
+    bookLibraryGroups: [],
     bookLibraryDirectory: "",
     bookLibraryDone: false,
     bookLibraryPdf: false,
+    bookLibraryError: "",
     writtenBook: null,
     mathtutor: null,
     mathtutorState: null,
@@ -12517,24 +12570,55 @@ function addBookLibraryEvent(entry, data) {
   if (type === "start") {
     entry.bookLibraryDirectory = String(data.directory || "");
     entry.bookLibraryPdf = Boolean(data.pdf);
+    entry.bookLibraryGroups = Array.isArray(data.groups)
+      ? data.groups
+        .map((group) => ({
+          id: String(group?.id || ""),
+          title: String(group?.title || ""),
+          empty: String(group?.empty || ""),
+        }))
+        .filter((group) => group.id)
+      : [];
+    entry.bookLibraryItems = [];
+    entry.bookLibraryDone = false;
+    entry.bookLibraryError = "";
     scheduleRender(entry);
     return;
   }
   if (type === "item") {
+    const section = String(data.section || "downloaded");
     entry.bookLibraryItems.push({
       index: Number(data.index) || entry.bookLibraryItems.length + 1,
+      section,
       name: String(data.name || ""),
+      slug: String(data.slug || ""),
       title: String(data.title || data.name || "(untitled)"),
+      subtitle: String(data.subtitle || ""),
+      description: String(data.description || ""),
+      pages: String(data.pages || ""),
+      published: String(data.published || ""),
+      cover: String(data.cover || ""),
+      bookUrl: String(data.book_url || ""),
+      pdfReady: Boolean(data.pdf_ready),
       url: String(data.url || ""),
       size: Number(data.size) || 0,
       modified: String(data.modified || ""),
-      pdf: Boolean(data.pdf || entry.bookLibraryPdf),
+      pdf: section === "manning"
+        ? false
+        : Boolean(data.pdf || entry.bookLibraryPdf),
+      downloading: false,
+      downloaded: Boolean(data.downloaded),
+      savedName: "",
+      savedUrl: "",
+      savedTitle: "",
+      downloadError: "",
     });
     scheduleRender(entry);
     return;
   }
   if (type === "done") {
     entry.bookLibraryDone = true;
+    entry.bookLibraryError = String(data.manning_error || "");
     entry.thinking = false;
     scheduleRender(entry);
     return;
@@ -12544,6 +12628,221 @@ function addBookLibraryEvent(entry, data) {
   }
 }
 
+function renderDownloadedPdfCard(item) {
+  const card = document.createElement("a");
+  card.className = "book-card";
+  card.href = item.url || "#";
+  card.target = "_blank";
+  card.rel = "noopener noreferrer";
+  card.title = `Read ${item.name || item.title} page by page`;
+  openPdfBookReaderOnClick(card, item);
+
+  const title = document.createElement("div");
+  title.className = "book-title";
+  title.textContent = item.title;
+  card.appendChild(title);
+
+  const meta = document.createElement("div");
+  meta.className = "book-authors";
+  const metaParts = [];
+  if (item.modified) metaParts.push(`Saved ${item.modified}`);
+  metaParts.push(formatBookLibrarySize(item.size));
+  meta.textContent = metaParts.join(" · ");
+  card.appendChild(meta);
+
+  if (item.url) {
+    const url = document.createElement("div");
+    url.className = "book-url";
+    try {
+      url.textContent = new URL(item.url, window.location.href).href;
+    } catch {
+      url.textContent = item.url;
+    }
+    card.appendChild(url);
+  }
+
+  const action = document.createElement("span");
+  action.className = "book-action";
+  action.textContent = "Read PDF →";
+  card.appendChild(action);
+  return card;
+}
+
+function renderManningBookCard(entry, item) {
+  const card = document.createElement("div");
+  card.className = "book-card manning";
+
+  if (item.cover) {
+    const cover = document.createElement("img");
+    cover.className = "book-cover";
+    cover.src = item.cover;
+    cover.alt = `${item.title} cover`;
+    cover.loading = "lazy";
+    card.appendChild(cover);
+  }
+
+  const body = document.createElement("div");
+  body.className = "book-body";
+
+  const titleRow = document.createElement("div");
+  titleRow.className = "book-title-row";
+  const title = document.createElement("div");
+  title.className = "book-title";
+  title.textContent = item.title;
+  titleRow.appendChild(title);
+  if (item.published) {
+    const published = document.createElement("span");
+    published.className = "book-publish-date";
+    published.textContent = item.published;
+    titleRow.appendChild(published);
+  }
+  body.appendChild(titleRow);
+
+  const meta = document.createElement("div");
+  meta.className = "book-authors";
+  const metaParts = [];
+  if (item.subtitle) metaParts.push(item.subtitle);
+  if (item.pages) metaParts.push(item.pages);
+  metaParts.push("Manning free ebook");
+  meta.textContent = metaParts.join(" · ");
+  body.appendChild(meta);
+
+  if (item.description) {
+    const description = document.createElement("div");
+    description.className = "book-description";
+    description.textContent = item.description;
+    body.appendChild(description);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "book-actions";
+
+  const download = document.createElement("button");
+  download.type = "button";
+  download.className = "book-download";
+  if (item.downloaded) {
+    download.classList.add("saved");
+    download.disabled = true;
+    download.textContent = "Downloaded ✓";
+  } else if (item.downloading) {
+    download.disabled = true;
+    download.textContent = "Downloading…";
+  } else if (!item.pdfReady) {
+    download.disabled = true;
+    download.textContent = "PDF unavailable";
+  } else {
+    download.textContent = "Download PDF";
+    download.addEventListener("click", () => downloadManningBook(entry, item));
+  }
+  actions.appendChild(download);
+
+  if (item.bookUrl) {
+    const pageLink = document.createElement("a");
+    pageLink.className = "book-open-link";
+    pageLink.href = item.bookUrl;
+    pageLink.target = "_blank";
+    pageLink.rel = "noopener noreferrer";
+    pageLink.textContent = "Manning page ↗";
+    actions.appendChild(pageLink);
+  }
+
+  if (item.downloaded && item.savedName) {
+    const readLink = document.createElement("a");
+    readLink.className = "book-open-link";
+    readLink.href = "#";
+    readLink.textContent = "Read now →";
+    readLink.addEventListener("click", (event) => {
+      event.preventDefault();
+      openPdfBookReader({
+        name: item.savedName,
+        title: item.savedTitle || item.title,
+        url: item.savedUrl,
+      });
+    });
+    actions.appendChild(readLink);
+  }
+  body.appendChild(actions);
+
+  if (item.downloadError || (item.downloaded && item.savedName)) {
+    const status = document.createElement("div");
+    status.className = "book-download-status";
+    if (item.downloadError) status.classList.add("error");
+    status.textContent = item.downloadError
+      ? `Download failed: ${item.downloadError}`
+      : `Saved ${item.savedName}`;
+    body.appendChild(status);
+  }
+
+  card.appendChild(body);
+  return card;
+}
+
+function renderBookLibraryGrid(entry, group, items) {
+  const cards = document.createElement("div");
+  cards.className = "book-cards";
+  for (const item of items) {
+    const manning = group.id === "manning" || item.section === "manning";
+    cards.appendChild(
+      manning ? renderManningBookCard(entry, item) : renderDownloadedPdfCard(item)
+    );
+  }
+  return cards;
+}
+
+async function downloadManningBook(entry, item) {
+  if (!item || item.downloading || item.downloaded) return;
+  item.downloading = true;
+  item.downloadError = "";
+  scheduleRender(entry);
+  try {
+    const response = await fetch("/api/pdf_books/download", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug: item.slug }),
+    });
+    let data = {};
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+    if (!response.ok) {
+      throw new Error(data?.error || `HTTP ${response.status}`);
+    }
+    const saved = data?.item;
+    item.downloading = false;
+    item.downloaded = true;
+    item.savedName = String(saved?.name || "");
+    item.savedUrl = String(saved?.url || "");
+    item.savedTitle = String(saved?.title || item.title || item.savedName);
+    if (saved && saved.name) {
+      const exists = entry.bookLibraryItems.some(
+        (candidate) => String(candidate.section || "downloaded") === "downloaded"
+          && candidate.name === saved.name
+      );
+      if (!exists) {
+        entry.bookLibraryItems.unshift({
+          ...saved,
+          section: "downloaded",
+          pdf: true,
+          downloading: false,
+          downloaded: true,
+          savedName: "",
+          savedUrl: "",
+          savedTitle: "",
+          downloadError: "",
+        });
+      }
+    }
+    toast(`Saved ${item.savedName || item.title} to PDF books.`);
+  } catch (error) {
+    item.downloading = false;
+    item.downloadError = error?.message || String(error);
+    toast(`Download failed: ${item.downloadError}`);
+  }
+  scheduleRender(entry);
+}
+
 function renderBookLibrary(entry) {
   const container = entry.bookLibraryEl;
   if (!container) return;
@@ -12551,11 +12850,44 @@ function renderBookLibrary(entry) {
   const items = Array.isArray(entry.bookLibraryItems)
     ? entry.bookLibraryItems
     : [];
-  if (!items.length) {
+  const groups = Array.isArray(entry.bookLibraryGroups)
+    ? entry.bookLibraryGroups
+    : [];
+  if (!items.length && !groups.length) {
     container.hidden = true;
     return;
   }
   container.hidden = false;
+
+  if (groups.length) {
+    for (const group of groups) {
+      const groupItems = items.filter(
+        (item) => String(item.section || "downloaded") === group.id
+      );
+      const section = document.createElement("section");
+      section.className = "book-group";
+
+      const head = document.createElement("div");
+      head.className = "book-group-head";
+      const label = document.createElement("strong");
+      label.textContent = `${group.title || group.id} (${groupItems.length})`;
+      head.appendChild(label);
+      section.appendChild(head);
+
+      if (groupItems.length) {
+        section.appendChild(renderBookLibraryGrid(entry, group, groupItems));
+      } else {
+        const empty = document.createElement("div");
+        empty.className = "book-group-empty";
+        empty.textContent = entry.bookLibraryDone
+          ? (group.empty || "Nothing to show.")
+          : "Loading…";
+        section.appendChild(empty);
+      }
+      container.appendChild(section);
+    }
+    return;
+  }
 
   const head = document.createElement("div");
   head.className = "book-list-head";

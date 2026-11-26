@@ -35,6 +35,8 @@ Endpoints:
     GET  /api/pdf_book_file      ?name=<book.pdf> one PDF from .chat/pdf_books
     GET  /api/pdf_book_page      ?name=<book.pdf>&page=N one page of PDF text
                                   for the page-by-page reader, served as an HTML page
+    POST /api/pdf_books/download  {slug} download one Manning free ebook into
+                                  .chat/pdf_books and return its reader card
     GET  /api/gutenberg_book     ?id=<book_id>&url=<plaintext_url>&title=...
                                   the cached plaintext used by the book modal
     POST /api/ask                SSE: question or slash-command stream
@@ -1152,6 +1154,317 @@ def list_pdf_books() -> list[dict]:
     return entries
 
 
+MANNING_FREE_EBOOKS_URL = "https://www.manning.com/free-ebooks"
+MANNING_BLOG_BASE_URL = "https://blog.manning.com"
+MANNING_FREE_EBOOKS_TTL = 60 * 60
+MANNING_FREE_EBOOKS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+# The Manning catalogue changes rarely. Cache the parsed cards together with
+# the direct HubSpot PDF links so /pdf_books does not refetch every page on
+# every command.
+_MANNING_FREE_EBOOKS_CACHE: dict[str, object] = {"built": 0.0, "books": []}
+_MANNING_FREE_EBOOKS_LOCK = threading.Lock()
+# Two cards use a blog slug that does not follow the usual free-ebook-<slug>
+# convention. Keep the aliases here so the rest of the lookup stays generic.
+_MANNING_BLOG_SLUG_ALIASES = {
+    "inside-the-llm": ["inside-the-llm"],
+    "modern-web-development": [
+        "free-ebook-modern-web-development-sampler",
+        "modern-web-development-sampler",
+    ],
+}
+
+
+def _manning_text(fragment: str) -> str:
+    """Return readable text from one small HTML fragment."""
+    text = re.sub(r"<[^>]+>", " ", fragment or "")
+    return " ".join(html.unescape(text).split())
+
+
+def _parse_manning_free_ebooks(page: str) -> list[dict]:
+    """Parse the free-ebook cards from https://www.manning.com/free-ebooks."""
+    books: list[dict] = []
+    blocks = re.findall(
+        r'<article class="free-ebook-card">(.*?)</article>', page, re.S
+    )
+    for block in blocks:
+        slug_match = re.search(r'data-slug="([^"]+)"', block)
+        if not slug_match:
+            continue
+        slug = html.unescape(slug_match.group(1)).strip()
+        if not slug:
+            continue
+        title_match = re.search(r'data-title="([^"]+)"', block)
+        if title_match:
+            title = html.unescape(title_match.group(1)).strip()
+        else:
+            title_match = re.search(
+                r'free-ebook-card-title[^>]*>\s*<a[^>]*>(.*?)</a>', block, re.S
+            )
+            title = _manning_text(title_match.group(1)) if title_match else slug
+
+        cover_match = re.search(r'data-cover="([^"]+)"', block)
+        cover = html.unescape(cover_match.group(1)).strip() if cover_match else ""
+        subtitle_match = re.search(
+            r'free-ebook-card-subtitle">(.*?)</p>', block, re.S
+        )
+        lead_match = re.search(r'free-ebook-card-lead">(.*?)</p>', block, re.S)
+        rest_match = re.search(r'free-ebook-card-rest">(.*?)</p>', block, re.S)
+        meta_match = re.search(
+            r'free-ebook-card-meta">(.*?)</div>', block, re.S
+        )
+        book_match = re.search(
+            r'<a href="([^"]+)" class="free-ebook-card-cover"', block
+        )
+        book_url = (
+            html.unescape(book_match.group(1)).strip() if book_match else ""
+        )
+        if book_url.startswith("/"):
+            book_url = f"https://www.manning.com{book_url}"
+
+        description = _manning_text(
+            rest_match.group(1) if rest_match else ""
+        ) or _manning_text(lead_match.group(1) if lead_match else "")
+        pages = _manning_text(meta_match.group(1) if meta_match else "")
+        books.append(
+            {
+                "slug": slug,
+                "title": title,
+                "subtitle": _manning_text(
+                    subtitle_match.group(1) if subtitle_match else ""
+                ),
+                "description": description,
+                "pages": pages,
+                "cover": cover,
+                "book_url": book_url,
+                "published": "",
+                "pdf_url": "",
+            }
+        )
+    return books
+
+
+def _manning_blog_slugs(slug: str) -> list[str]:
+    """Return blog URL slugs that may hold the direct PDF for one card."""
+    candidates = list(_MANNING_BLOG_SLUG_ALIASES.get(slug, []))
+    candidates.extend(
+        [
+            f"free-ebook-{slug}",
+            slug,
+            f"free-ebook-{slug}-sampler",
+            f"free-ebook-{slug}-sample",
+            f"{slug}-sampler",
+        ]
+    )
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in candidates:
+        candidate = candidate.strip("/")
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return ordered
+
+
+def _find_manning_pdf(slug: str) -> tuple[str, str]:
+    """Find the direct PDF link published on the Manning blog page."""
+    for blog_slug in _manning_blog_slugs(slug):
+        url = f"{MANNING_BLOG_BASE_URL}/{blog_slug}"
+        try:
+            response = requests.get(
+                url,
+                headers=MANNING_FREE_EBOOKS_HEADERS,
+                timeout=(8, 25),
+                allow_redirects=True,
+            )
+        except requests.RequestException:
+            continue
+        if response.status_code != 200:
+            continue
+        page = response.text.replace("\\/", "/")
+        pdfs: list[str] = []
+        for raw in re.findall(r'https?://[^"\'\\\s<>]+\.pdf', page, re.I):
+            candidate = html.unescape(raw).replace("\\/", "/")
+            if candidate not in pdfs:
+                pdfs.append(candidate)
+        if pdfs:
+            return pdfs[0], url
+    return "", ""
+
+
+def _manning_published_date(book_url: str) -> str:
+    """Read the release date from the book page's schema.org metadata."""
+    if not book_url:
+        return ""
+    try:
+        response = requests.get(
+            book_url,
+            headers=MANNING_FREE_EBOOKS_HEADERS,
+            timeout=(8, 25),
+            allow_redirects=True,
+        )
+    except requests.RequestException:
+        return ""
+    if response.status_code != 200:
+        return ""
+    dates = re.findall(
+        r'"(?:releaseDate|datePublished)"\s*:\s*"([^"]+)"', response.text
+    )
+    dates = sorted({value.strip() for value in dates if value.strip()})
+    return dates[-1] if dates else ""
+
+
+def _enrich_manning_book(book: dict) -> dict:
+    """Add the direct PDF link and publish date to one catalogue card."""
+    enriched = dict(book)
+    pdf_url, _blog_url = _find_manning_pdf(enriched["slug"])
+    enriched["pdf_url"] = pdf_url
+    enriched["published"] = _manning_published_date(
+        str(enriched.get("book_url") or "")
+    )
+    return enriched
+
+
+def list_manning_free_ebooks(force: bool = False) -> list[dict]:
+    """Return Manning's free ebooks, newest publication date first."""
+    now = time.time()
+    with _MANNING_FREE_EBOOKS_LOCK:
+        built = float(_MANNING_FREE_EBOOKS_CACHE.get("built") or 0.0)
+        cached = _MANNING_FREE_EBOOKS_CACHE.get("books")
+        if (
+            not force
+            and isinstance(cached, list)
+            and cached
+            and now - built < MANNING_FREE_EBOOKS_TTL
+        ):
+            return [dict(book) for book in cached]
+
+        try:
+            response = requests.get(
+                MANNING_FREE_EBOOKS_URL,
+                headers=MANNING_FREE_EBOOKS_HEADERS,
+                timeout=(10, 35),
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"Could not load Manning free ebooks: {exc}"
+            ) from exc
+
+        books = _parse_manning_free_ebooks(response.text)
+        if not books:
+            raise RuntimeError("Manning returned no free ebooks.")
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            enriched = list(executor.map(_enrich_manning_book, books))
+        enriched.sort(key=lambda book: str(book.get("title") or "").casefold())
+        enriched.sort(
+            key=lambda book: str(book.get("published") or ""), reverse=True
+        )
+        _MANNING_FREE_EBOOKS_CACHE["built"] = time.time()
+        _MANNING_FREE_EBOOKS_CACHE["books"] = [dict(book) for book in enriched]
+        return [dict(book) for book in enriched]
+
+
+def _manning_pdf_filename(title: str) -> str:
+    """Turn an ebook title into a safe PDF filename."""
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(title or ""))
+    stem = stem.strip("._")
+    return f"{stem or 'manning_free_ebook'}.pdf"
+
+
+def download_manning_free_ebook(slug: str) -> dict:
+    """Download one Manning free ebook into .chat/pdf_books."""
+    slug = str(slug or "").strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,119}", slug):
+        raise ValueError("Invalid Manning ebook slug.")
+    books = list_manning_free_ebooks()
+    book = next((item for item in books if item.get("slug") == slug), None)
+    if book is None:
+        raise ValueError("That Manning free ebook is not in the catalogue.")
+    pdf_url = str(book.get("pdf_url") or "").strip()
+    if not pdf_url:
+        raise RuntimeError(
+            "Manning does not expose a direct PDF link for this ebook yet."
+        )
+
+    target = PDF_BOOKS_DIR / _manning_pdf_filename(str(book.get("title") or ""))
+    if target.is_file():
+        try:
+            with target.open("rb") as handle:
+                header = handle.read(5)
+            if header.startswith(b"%PDF-"):
+                entries = list_pdf_books()
+                item = next(
+                    (entry for entry in entries if entry["name"] == target.name),
+                    None,
+                )
+                return {
+                    "downloaded": False,
+                    "already_downloaded": True,
+                    "item": item,
+                    "pdf_url": pdf_url,
+                }
+        except OSError:
+            pass
+
+    PDF_BOOKS_DIR.mkdir(parents=True, exist_ok=True)
+    part = target.with_name(target.name + ".part")
+    try:
+        with requests.get(
+            pdf_url,
+            headers=MANNING_FREE_EBOOKS_HEADERS,
+            stream=True,
+            timeout=(10, 180),
+            allow_redirects=True,
+        ) as response:
+            response.raise_for_status()
+            first = True
+            total = 0
+            with part.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=65536):
+                    if not chunk:
+                        continue
+                    if first:
+                        if not chunk.startswith(b"%PDF-"):
+                            raise RuntimeError(
+                                "The Manning download is not a PDF file."
+                            )
+                        first = False
+                    total += len(chunk)
+                    if total > 400 * 1024 * 1024:
+                        raise RuntimeError(
+                            "The Manning PDF is too large to download."
+                        )
+                    handle.write(chunk)
+        if not part.is_file() or part.stat().st_size == 0:
+            raise RuntimeError("The Manning PDF download was empty.")
+        os.replace(part, target)
+    except Exception:
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+    entries = list_pdf_books()
+    item = next(
+        (entry for entry in entries if entry["name"] == target.name), None
+    )
+    return {
+        "downloaded": True,
+        "already_downloaded": False,
+        "item": item,
+        "pdf_url": pdf_url,
+    }
+
+
 # Page extraction opens the PDF once per file version. pypdf extracts one page
 # in milliseconds after that, so navigation can stay page-by-page without
 # rebuilding the whole book text for every click.
@@ -1396,6 +1709,170 @@ def _pdf_outline_nodes(reader) -> list[dict]:
     return nodes
 
 
+def _pdf_heading_nodes(path: Path) -> list[dict]:
+    """Detect chapter/section/subsection headings when a PDF has no outline.
+
+    pdftohtml reports the font used by every text run. This fallback groups
+    text by font size: large display text becomes chapters, medium text becomes
+    sections, and smaller numbered text becomes subsections. It is intended for
+    compiled or exported books that omit PDF bookmarks.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "pdftohtml",
+                "-xml",
+                "-hidden",
+                "-i",
+                "-stdout",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0 or not result.stdout:
+        return []
+    font_sizes = {
+        font_id: int(size)
+        for font_id, size in re.findall(
+            r'<fontspec id="(\d+)" size="(\d+)"', result.stdout
+        )
+    }
+    pages = re.findall(
+        r'<page number="(\d+)".*?>(.*?)</page>',
+        result.stdout,
+        re.DOTALL,
+    )
+    headings: list[dict] = []
+    for page_text, body in pages:
+        page = int(page_text)
+        elements: list[tuple[float, float, int, str]] = []
+        for match in re.finditer(
+            r'<text top="(-?[0-9.]+)" left="(-?[0-9.]+)"'
+            r' width="[0-9.]+" height="[0-9.]+" font="(\d+)">'
+            r'(.*?)</text>',
+            body,
+            re.DOTALL,
+        ):
+            top = float(match.group(1))
+            left = float(match.group(2))
+            size = font_sizes.get(match.group(3), 0)
+            text = html.unescape(
+                re.sub(r"<[^>]+>", "", match.group(4))
+            ).strip()
+            if text:
+                elements.append((top, left, size, text))
+        elements.sort(key=lambda item: (item[0], item[1]))
+
+        large = [
+            element for element in elements
+            if 40 <= element[2] <= 50
+        ]
+        if large:
+            title = " ".join(element[3] for element in large)
+            if title.casefold() not in {"contents", "introduction"}:
+                headings.append(
+                    {
+                        "kind": "chapter",
+                        "page": page,
+                        "top": large[0][0],
+                        "title": title,
+                    }
+                )
+
+        # Sections: a number line and its title line(s) share a font size and
+        # sit at the same top coordinate; wrapped titles continue just below.
+        section_groups: list[dict] = []
+        for top, _left, size, text in elements:
+            if size != 19:
+                continue
+            is_number = bool(re.fullmatch(r"\d+(?:\.\d+)*", text))
+            if is_number:
+                section_groups.append(
+                    {"top": top, "last_top": top, "number": text, "lines": []}
+                )
+            elif section_groups and top - section_groups[-1]["last_top"] <= 30:
+                section_groups[-1]["lines"].append(text)
+                section_groups[-1]["last_top"] = top
+            else:
+                section_groups.append(
+                    {"top": top, "last_top": top, "number": "", "lines": [text]}
+                )
+        for group in section_groups:
+            title = " ".join(group["lines"]).strip()
+            if group["number"]:
+                title = f"{group['number']} {title}".strip()
+            if title:
+                headings.append(
+                    {
+                        "kind": "section",
+                        "page": page,
+                        "top": group["top"],
+                        "title": title,
+                    }
+                )
+
+        for top, _left, size, text in elements:
+            if size != 16:
+                continue
+            if not re.match(r"^\d+(?:\.\d+)+\s+\S", text):
+                continue
+            headings.append(
+                {
+                    "kind": "subsection",
+                    "page": page,
+                    "top": top,
+                    "title": " ".join(text.split()),
+                }
+            )
+
+    headings.sort(
+        key=lambda item: (
+            item["page"],
+            0 if item["kind"] == "chapter" else 1,
+            item["top"],
+        )
+    )
+    nodes: list[dict] = []
+    chapter_index = -1
+    chapter_id: str | None = None
+    section_id: str | None = None
+    for heading in headings:
+        node_id = f"h{len(nodes) + 1}"
+        kind = heading["kind"]
+        if kind == "chapter":
+            chapter_index += 1
+            chapter_id = node_id
+            section_id = None
+            level = 0
+            parent = None
+        elif kind == "section":
+            if chapter_id is None:
+                continue
+            section_id = node_id
+            level = 1
+            parent = chapter_id
+        else:
+            if chapter_id is None:
+                continue
+            level = 2
+            parent = section_id or chapter_id
+        nodes.append(
+            {
+                "id": node_id,
+                "label": heading["title"],
+                "page": heading["page"],
+                "level": level,
+                "parent": parent,
+                "chapter": max(0, chapter_index),
+            }
+        )
+    return nodes
+
+
 def _pdf_graph_term_counts(text: str) -> dict[str, int]:
     """Count meaningful lower-case terms in one concept's section text."""
     counts: dict[str, int] = {}
@@ -1450,8 +1927,14 @@ def build_pdf_knowledge_graph(
         report(2, "Reading book outline")
         nodes = _pdf_outline_nodes(reader)
         if not nodes:
+            report(
+                3,
+                "No PDF outline; detecting headings from page layout",
+            )
+            nodes = _pdf_heading_nodes(path)
+        if not nodes:
             raise RuntimeError(
-                "This PDF has no chapter/section outline to build a graph"
+                "This PDF has no outline or detectable headings to build a graph"
             )
 
         page_texts: list[str] = []
@@ -30119,6 +30602,23 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             rebuild = bool(payload.get("rebuild"))
             self._handle_pdf_knowledge_graph(name, rebuild)
             return
+        if parsed.path == "/api/pdf_books/download":
+            payload = self._read_json()
+            if payload is None:
+                return
+            slug = str(payload.get("slug") or "").strip()
+            try:
+                result = download_manning_free_ebook(slug)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except (requests.RequestException, OSError, RuntimeError) as exc:
+                self._send_error_json(
+                    f"Could not download the Manning ebook: {exc}", 502
+                )
+                return
+            self._send_json(result)
+            return
         if parsed.path == "/api/dict":
             payload = self._read_json()
             if payload is None:
@@ -34584,20 +35084,37 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
 
     def _command_pdf_books(self, argument: str) -> None:
-        """List every PDF book in ./.chat/pdf_books.
+        """Show downloaded PDFs and Manning's free ebook catalogue.
 
-        Each card links to the raw PDF and opens the page-by-page reader in
-        the browser. The optional argument filters titles and filenames.
+        The first section lists every PDF in ./.chat/pdf_books. The second
+        section lists Manning's free ebooks newest-first; each card downloads
+        the publisher's direct PDF into ./.chat/pdf_books when clicked. The
+        optional argument filters both sections by title or filename/slug.
         """
         keyword = " ".join(argument.split()).casefold()
-        entries = list_pdf_books()
+        downloaded = list_pdf_books()
         if keyword:
-            entries = [
+            downloaded = [
                 entry
-                for entry in entries
+                for entry in downloaded
                 if keyword in entry["title"].casefold()
                 or keyword in entry["name"].casefold()
             ]
+
+        manning_books: list[dict] = []
+        manning_error = ""
+        try:
+            manning_books = list_manning_free_ebooks()
+        except (requests.RequestException, RuntimeError, OSError) as exc:
+            manning_error = str(exc)
+        if keyword and manning_books:
+            manning_books = [
+                entry
+                for entry in manning_books
+                if keyword in str(entry.get("title") or "").casefold()
+                or keyword in str(entry.get("slug") or "").casefold()
+            ]
+
         self._sse(
             "book_library",
             {
@@ -34605,13 +35122,38 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "source": "PDF books",
                 "directory": str(PDF_BOOKS_DIR),
                 "pdf": True,
+                "groups": [
+                    {
+                        "id": "downloaded",
+                        "title": "Downloaded PDF Books",
+                        "empty": (
+                            f"No downloaded PDF books matched {keyword!r}."
+                            if keyword
+                            else "No PDF books downloaded yet."
+                        ),
+                    },
+                    {
+                        "id": "manning",
+                        "title": "Manning Free PDF Books",
+                        "empty": (
+                            manning_error
+                            or (
+                                f"No Manning free ebooks matched {keyword!r}."
+                                if keyword
+                                else "Manning's free ebook list is empty."
+                            )
+                        ),
+                    },
+                ],
             },
         )
-        for index, entry in enumerate(entries, 1):
+
+        for index, entry in enumerate(downloaded, 1):
             self._sse(
                 "book_library",
                 {
                     "type": "item",
+                    "section": "downloaded",
                     "index": index,
                     "name": entry["name"],
                     "title": entry["title"],
@@ -34621,17 +35163,40 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     "pdf": True,
                 },
             )
+        for index, entry in enumerate(manning_books, 1):
+            self._sse(
+                "book_library",
+                {
+                    "type": "item",
+                    "section": "manning",
+                    "index": index,
+                    "name": entry.get("slug", ""),
+                    "slug": entry.get("slug", ""),
+                    "title": entry.get("title", ""),
+                    "subtitle": entry.get("subtitle", ""),
+                    "description": entry.get("description", ""),
+                    "pages": entry.get("pages", ""),
+                    "published": entry.get("published", ""),
+                    "cover": entry.get("cover", ""),
+                    "book_url": entry.get("book_url", ""),
+                    "pdf_ready": bool(entry.get("pdf_url")),
+                    "pdf": False,
+                },
+            )
         self._sse(
             "book_library",
             {
                 "type": "done",
-                "count": len(entries),
+                "count": len(downloaded) + len(manning_books),
+                "downloaded_count": len(downloaded),
+                "manning_count": len(manning_books),
+                "manning_error": manning_error,
                 "keyword": keyword,
                 "directory": str(PDF_BOOKS_DIR),
                 "pdf": True,
             },
         )
-        if not entries:
+        if not downloaded and not manning_books and not manning_error:
             hint = (
                 f"No PDF books matched {keyword!r}.\n"
                 if keyword
