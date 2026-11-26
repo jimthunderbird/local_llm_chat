@@ -1,5 +1,22 @@
 pdf_books_dir: {directory_of_this_prompt}/../.chat/pdf_books
 
+task (completed) {
+  - remove animated flip through effects
+  - load one page instead of 2 pages at a time
+}
+
+task (completed) {
+  reference task.better_ux_flip_through:
+  - add animated flip through effect
+}
+
+task.better_ux_flip_through (completed) {
+  in the book loader:
+  - set the default front size to 22px
+  - increase the height of the book loader by 20%
+  - prevent 2 pages at a time (left and right) with a flip through effect
+}
+
 task.smooth_page_loading (completed) {
   currently when each page is fetching, the book loading modal collapse and then load the book
   please, DO NOT collapse it, make a loading bar when the next page is still loading, when the page is loading, do not shrink the height of the modal
