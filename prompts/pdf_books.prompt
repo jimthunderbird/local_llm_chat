@@ -1,5 +1,9 @@
 pdf_books_dir: {directory_of_this_prompt}/../.chat/pdf_books
 
+task.chapter_navigation_links_background_issue (completed) {
+  the book chapters navigation links still seem to have black background, please change the background to the same background as the book page
+}
+
 task.dictionary_on_knowledge_point_modal (completed) {
   reference task.chapter_modal:
   - in the knowledge point modal, if I click on a word, it should show the dictionary modal on top with the word definition
