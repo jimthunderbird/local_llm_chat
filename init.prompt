@@ -10,6 +10,12 @@ restrictions:
 - if a task is persistent, DO NOT mark it as completed
 
 group app/chat.html and app/chat_server.py {
+  task.refactor_smaller_subcomponents (completed) {
+    result: analyze each {file} with extension "*.prompt" in ./prompts directory:
+    for app/chat_server.py, break it down to smaller components based on {result}, each component should handle one aspect of the requirement
+    the goal is to make app/chat_server.py more maintainable
+  }
+
   task (persistent) {
     for each {file} with extension "*.prompt" in ./prompts directory:
       complete tasks in {file}
