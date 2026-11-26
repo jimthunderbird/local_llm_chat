@@ -2,6 +2,10 @@ dictionary_llm: ollama local model ornith-1.5:35b with no thinking
 
 dictionary_history_directory: {directory_of_this_prompt}/../.chat/dictionary_history
 
+task.bug (completed) {
+  now for each article, the number of words highlighted seem to be a lot, it used to be not that many, please fix it!
+}
+
 task.highlight_word_in_context_and_meaning (completed) {
   for each entry in /dictionary_history command:
   - highligh the word in its related context and meaning section
