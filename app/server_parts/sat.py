@@ -9,6 +9,7 @@ import difflib
 import random
 from collections import defaultdict
 from .core import *
+from .sat_rw import RW_DOMAIN_NAMES, sat_rw_domains, sat_rw_question
 
 SAT_CACHE_DIR = SCRIPT_DIR / ".chat" / "sat"
 SAT_CACHE_TTL_SECONDS = 6 * 60 * 60
@@ -66,9 +67,10 @@ Requirements:
 
 Answer:"""
 
-SAT_ANALYSIS_PROMPT = """You are a professional SAT math teacher.
+SAT_ANALYSIS_PROMPT = """You are a professional SAT teacher. The question below
+comes from either the SAT Math bank or the SAT Reading and Writing bank.
 
-Solve the SAT math question below yourself from the prompt and choices. No
+Solve the SAT question below yourself from the passage/prompt and choices. No
 official answer is provided, so do not assume any bank answer is available or
 correct. Your own answer is the single source of truth.
 
@@ -77,15 +79,16 @@ of the question and only give the answer after that analysis is complete.
 
 Output format:
 ### Analysis
-Write a deep Analysis that teaches the math concepts behind the question and
-how to solve this type of problem on the SAT.
+Write a deep Analysis that teaches the concepts behind the question and how
+to solve this type of problem on the SAT (test-taking logic for reading and
+writing questions, formulas and rules for math questions).
 
 Requirements:
 - Explain the concept(s) or rule(s) being tested and why they apply here.
-- Walk through the solution logic step by step, including any formula or
-  definition a student should remember.
+- Walk through the solution logic step by step, including any formula,
+  definition, or evidence from the passage a student should remember.
 - Point out likely mistakes or traps for this question type.
-- Give a short, practical takeaway for future SAT math questions.
+- Give a short, practical takeaway for future SAT questions like this one.
 
 ### Correct answer
 After the analysis, end with exactly one highlighted line:
@@ -816,12 +819,30 @@ def sat_domains() -> list[dict]:
     ]
 
 
-def sat_domain_question(domain: str, index: int = 0) -> dict | None:
-    """Return one question for a domain navigation request."""
+def sat_domain_question(
+    domain: str, index: int = 0, random_pick: bool = False
+) -> dict | None:
+    """Return one question for a domain navigation request.
+
+    With ``random_pick`` the question is drawn randomly from the domain
+    instead of taking the index-th slot — used when the user clicks a
+    section link, so every click presents a fresh question rather than the
+    pool's first item (prompts/sat.prompt: questions are not shown in a
+    preset numbered order).
+    """
+    # task.reading_and_writing_section (prompts/sat.prompt): the "Reading"
+    # and "Writing" domains are served from the sample-test PDF bank and
+    # share the math card's payload contract, so the question view, the
+    # streamed Answer/analysis, and Previous/Next keep working unchanged.
+    normalized = str(domain or "").strip().casefold()
+    if normalized in RW_DOMAIN_NAMES:
+        return sat_rw_question(normalized, index, random_pick=random_pick)
     questions = _sat_domain_questions(domain)
     if not questions:
         return None
     total = len(questions)
+    if random_pick:
+        index = random.randrange(total)
     index = int(index) % total
     selected = questions[index]
     category = selected.get("category") or {}

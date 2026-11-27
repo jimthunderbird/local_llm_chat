@@ -17,6 +17,7 @@ from .sat import (
     sat_question_request_answer,
     sat_random_question_answer,
     sat_reveal_prompt,
+    sat_rw_domains,
     sat_topic_list_answer,
 )
 
@@ -59,6 +60,7 @@ class HandlerSatMixin:
                 {
                     "view": "domains",
                     "domains": domains,
+                    "rw_domains": sat_rw_domains(),
                 },
             )
             self._sse_text(
@@ -67,8 +69,9 @@ class HandlerSatMixin:
                     "\nSAT subjects are listed above.\n"
                     if was_on
                     else "\nSAT mode is on. Choose a subject above to "
-                    "practice, or ask an SAT math question. Use /sat off to "
-                    "return to normal chat.\n"
+                    "practice, or ask an SAT math question. The Reading and "
+                    "Writing sections below practice the sample-test bank. "
+                    "Use /sat off to return to normal chat.\n"
                 ),
             )
             return

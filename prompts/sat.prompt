@@ -2,8 +2,35 @@ question_bank_source: https://1600.now/bank
 pinesat_math_api: https://pinesat.duckdns.org/api/questions?section=MATH
 question_llm: ollama local model flint:40b
 questions_cache_dir: {directory_of_this_prompt}/../.chat/sat
+sat_test_samples: {
+  - {directory_of_this_prompt}/../.chat/sat/sample-2026
+}
 
 command: /sat
+
+task (completed) {
+  when a question is about text completion, show a solid underline inside the question text!
+}
+
+task (completed) {
+  - when clicking on each section:
+    - show that section as active section
+    - show a new question on that section
+  - each section should not have preset numbers of questions, each question should be randomly generated
+}
+
+task (completed) {
+  when showing each question, the sections are disappear, we should still show all the sections on top
+}
+
+task.reading_and_writing_section (completed) {
+  create a new section "SAT Reading And Writing" {
+    - below it will have "Reading" and "Writing" sections
+    - when click on "Reading", show a reading question that is similar to the problems in the pdf files in {sat_test_samples}
+    - when click on "Writing", show a writing question that is similar to the problems in the pdf files in {sat_test_samples}
+    the UI experience should be very similar to the one that is in math question, it should allow me to navigate to next and previous question
+  }
+}
 
 task (completed) {
   currently the anser has something like:

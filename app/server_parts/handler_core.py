@@ -1000,8 +1000,14 @@ class HandlerCoreMixin:
                 index = int((params.get("index") or ["0"])[0])
             except (TypeError, ValueError):
                 index = 0
+            random_pick = (
+                (params.get("random") or [""])[0].strip().casefold()
+                in {"1", "true", "yes"}
+            )
             try:
-                payload = sat_domain_question(domain, index)
+                payload = sat_domain_question(
+                    domain, index, random_pick=random_pick
+                )
             except Exception as exc:
                 self._send_error_json(f"SAT question lookup failed: {exc}", 502)
                 return

@@ -4461,6 +4461,13 @@
     border-color: var(--accent-2);
     background: var(--panel-2);
   }
+  /* The section the question is currently shown from stays highlighted
+     (prompts/sat.prompt: clicking a section marks it as the active one). */
+  .sat-domain-link.active {
+    border-color: var(--accent);
+    background: var(--panel-2);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
   .sat-domain-name {
     display: block;
     color: var(--accent);
@@ -12149,7 +12156,7 @@ function startMathtutorAnswer(entry, reveal) {
     });
 }
 
-async function loadSatQuestion(entry, domain, index) {
+async function loadSatQuestion(entry, domain, index, useRandom = false) {
   resetSatAnalysis(entry);
   const requestId = (entry.satRequestId || 0) + 1;
   entry.satRequestId = requestId;
@@ -12157,7 +12164,8 @@ async function loadSatQuestion(entry, domain, index) {
   entry.sat = { view: "loading", domain, index: nextIndex };
   scheduleRender(entry);
   try {
-    const url = `/api/sat_question?domain=${encodeURIComponent(domain)}&index=${nextIndex}`;
+    const url = `/api/sat_question?domain=${encodeURIComponent(domain)}&index=${nextIndex}`
+      + (useRandom ? "&random=1" : "");
     const response = await fetch(url, { cache: "no-store" });
     let payload = null;
     try {
@@ -12247,6 +12255,104 @@ async function ensureSatAnalysis(entry, data) {
   }
 }
 
+// task (prompts/sat.prompt): when showing each question, the section
+// lists must not disappear — the PineSAT math subjects and the sample-test
+// Reading/Writing banks stay rendered on top of the question card, so the
+// user can jump to another section without typing /sat again.
+function renderSatSections(container, entry) {
+  const data = entry.satDomainData;
+  if (!data) return;
+
+  const head = document.createElement("div");
+  head.className = "sat-head";
+  const title = document.createElement("strong");
+  title.className = "sat-title";
+  title.textContent = "SAT Math Subjects";
+  const meta = document.createElement("span");
+  meta.className = "sat-meta";
+  const count = Array.isArray(data.domains) ? data.domains.length : 0;
+  meta.textContent = `${count} subject${count === 1 ? "" : "s"} · PineSAT`;
+  head.appendChild(title);
+  head.appendChild(meta);
+  container.appendChild(head);
+
+  const list = document.createElement("div");
+  list.className = "sat-domain-list";
+  for (const item of data.domains || []) {
+    const domain = String(item.domain || "");
+    if (!domain) continue;
+    const link = document.createElement("a");
+    link.className = "sat-domain-link"
+      + (entry.satActiveDomain === domain ? " active" : "");
+    link.href = item.url
+      || `/api/sat_question?domain=${encodeURIComponent(domain)}&index=0&random=1`;
+    link.title = `Show a random ${domain} question`;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      entry.satActiveDomain = domain;
+      void loadSatQuestion(entry, domain, 0, true);
+    });
+    const name = document.createElement("span");
+    name.className = "sat-domain-name";
+    name.textContent = domain;
+    const url = document.createElement("span");
+    url.className = "sat-domain-url";
+    url.textContent = item.url || link.href;
+    link.appendChild(name);
+    link.appendChild(url);
+    list.appendChild(link);
+  }
+  container.appendChild(list);
+
+  // task.reading_and_writing_section (prompts/sat.prompt): a separate
+  // "SAT Reading And Writing" block with Reading and Writing subsections
+  // served from the sample-test PDF bank.  Clicking uses the same
+  // question card, Answer/analysis stream, and Previous/Next buttons as
+  // the math subjects.
+  const rwDomains = Array.isArray(data.rw_domains) ? data.rw_domains : [];
+  if (rwDomains.length) {
+    const rwHead = document.createElement("div");
+    rwHead.className = "sat-head";
+    const rwTitle = document.createElement("strong");
+    rwTitle.className = "sat-title";
+    rwTitle.textContent = "SAT Reading And Writing";
+    const rwMeta = document.createElement("span");
+    rwMeta.className = "sat-meta";
+    rwMeta.textContent = "sample-2026 · Test Ninjas practice exam";
+    rwHead.appendChild(rwTitle);
+    rwHead.appendChild(rwMeta);
+    container.appendChild(rwHead);
+
+    const rwList = document.createElement("div");
+    rwList.className = "sat-domain-list";
+    for (const item of rwDomains) {
+      const rwSection = String(item.domain || "");
+      if (!rwSection) continue;
+      const rwLink = document.createElement("a");
+      rwLink.className = "sat-domain-link"
+        + (entry.satActiveDomain === rwSection ? " active" : "");
+      rwLink.href = item.url
+        || `/api/sat_question?domain=${encodeURIComponent(rwSection)}&index=0&random=1`;
+      rwLink.title = `Show a random ${rwSection} question`;
+      rwLink.addEventListener("click", (event) => {
+        event.preventDefault();
+        entry.satActiveDomain = rwSection;
+        void loadSatQuestion(entry, rwSection, 0, true);
+      });
+      const rwName = document.createElement("span");
+      rwName.className = "sat-domain-name";
+      rwName.textContent = rwSection;
+      const rwUrl = document.createElement("span");
+      rwUrl.className = "sat-domain-url";
+      rwUrl.textContent = item.url || rwLink.href;
+      rwLink.appendChild(rwName);
+      rwLink.appendChild(rwUrl);
+      rwList.appendChild(rwLink);
+    }
+    container.appendChild(rwList);
+  }
+}
+
 function renderSat(entry) {
   const container = entry.satEl;
   if (!container) return;
@@ -12260,53 +12366,19 @@ function renderSat(entry) {
   container.textContent = "";
 
   if (data.view === "domains") {
-    const head = document.createElement("div");
-    head.className = "sat-head";
-    const title = document.createElement("strong");
-    title.className = "sat-title";
-    title.textContent = "SAT Math Subjects";
-    const meta = document.createElement("span");
-    meta.className = "sat-meta";
-    const count = Array.isArray(data.domains) ? data.domains.length : 0;
-    meta.textContent = `${count} subject${count === 1 ? "" : "s"} · PineSAT`;
-    head.appendChild(title);
-    head.appendChild(meta);
-    container.appendChild(head);
-
-    const list = document.createElement("div");
-    list.className = "sat-domain-list";
-    for (const item of data.domains || []) {
-      const domain = String(item.domain || "");
-      if (!domain) continue;
-      const link = document.createElement("a");
-      link.className = "sat-domain-link";
-      link.href = item.url
-        || `/api/sat_question?domain=${encodeURIComponent(domain)}&index=0`;
-      link.title = `Show a ${domain} question`;
-      link.addEventListener("click", (event) => {
-        event.preventDefault();
-        void loadSatQuestion(entry, domain, 0);
-      });
-      const name = document.createElement("span");
-      name.className = "sat-domain-name";
-      name.textContent = domain;
-      const total = document.createElement("span");
-      total.className = "sat-domain-count";
-      const n = Number(item.count) || 0;
-      total.textContent = `${n} question${n === 1 ? "" : "s"}`;
-      const url = document.createElement("span");
-      url.className = "sat-domain-url";
-      url.textContent = item.url || link.href;
-      link.appendChild(name);
-      link.appendChild(total);
-      link.appendChild(url);
-      list.appendChild(link);
-    }
-    container.appendChild(list);
+    entry.satDomainData = {
+      domains: Array.isArray(data.domains) ? data.domains : [],
+      rw_domains: Array.isArray(data.rw_domains) ? data.rw_domains : [],
+    };
+    renderSatSections(container, entry);
     return;
   }
 
   if (data.view === "loading") {
+    if (String(data.domain || "").trim()) {
+      entry.satActiveDomain = String(data.domain).trim();
+    }
+    renderSatSections(container, entry);
     const head = document.createElement("div");
     head.className = "sat-head";
     const title = document.createElement("strong");
@@ -12322,6 +12394,7 @@ function renderSat(entry) {
   }
 
   if (data.view === "error") {
+    renderSatSections(container, entry);
     const head = document.createElement("div");
     head.className = "sat-head";
     const title = document.createElement("strong");
@@ -12337,7 +12410,11 @@ function renderSat(entry) {
   }
 
   if (data.view !== "question") return;
+  renderSatSections(container, entry);
   const question = data.question || {};
+  if (String(question.domain || "").trim()) {
+    entry.satActiveDomain = String(question.domain).trim();
+  }
   const total = Math.max(1, Number(data.total) || 1);
   const index = Math.max(0, Number(data.index) || 0);
   const head = document.createElement("div");
@@ -12419,7 +12496,7 @@ function renderSat(entry) {
     const model = document.createElement("span");
     model.className = "sat-analysis-model";
     model.textContent = displayModelName(
-      data.analysis_model || "qwen3.6:35b-a3b"
+      data.analysis_model || "flint:40b"
     );
     head.appendChild(title);
     head.appendChild(model);
