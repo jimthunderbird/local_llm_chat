@@ -3,6 +3,12 @@ pdf_books_trunks_dir: {directory_of_this_prompt}/../.chat/pdf_books/trunks
 pdf_books_chathistory_dir: {directory_of_this_prompt}/../.chat/pdf_books/chat_history
 
 task (completed) {
+  add a "Refresh" button next to "Downloaded PDF Books", when click {
+    refresh the book list
+  }
+}
+
+task (completed) {
   after clicking open a book and close it, the book listing view in /pdf_books should reflect the new sorting since the book that's just closed has the latest open time, so it should show up as the first book in the list
 }
 

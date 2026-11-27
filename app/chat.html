@@ -4191,6 +4191,24 @@
     text-transform: uppercase;
   }
   .book-group-head strong { color: #c5d5e3; font-weight: 700; }
+  .book-group-refresh {
+    margin-left: 8px;
+    padding: 1px 8px;
+    color: var(--accent);
+    background: #14283a;
+    border: 1px solid #2f5a7a;
+    border-radius: 5px;
+    font: inherit;
+    font-size: 10px;
+    letter-spacing: .02em;
+    cursor: pointer;
+    vertical-align: middle;
+  }
+  .book-group-refresh:hover:not(:disabled) {
+    background: #1a344a;
+    border-color: #3b648a;
+  }
+  .book-group-refresh:disabled { cursor: default; opacity: .72; }
   .book-group-empty {
     color: var(--dimmer);
     font-size: 10.5px;
@@ -14003,6 +14021,82 @@ async function downloadManningBook(entry, item) {
   scheduleRender(entry);
 }
 
+function buildPdfBooksRefreshButton(entry) {
+  const refresh = document.createElement("button");
+  refresh.type = "button";
+  refresh.className = "book-group-refresh";
+  refresh.textContent = "Refresh";
+  refresh.title = "Re-read .chat/pdf_books and refresh this list";
+  refresh.addEventListener("click", () => {
+    refreshDownloadedPdfBooks(entry, refresh);
+  });
+  return refresh;
+}
+
+async function refreshDownloadedPdfBooks(entry, button) {
+  if (!entry || entry.pdfBooksRefreshing) return;
+  entry.pdfBooksRefreshing = true;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Refreshing…";
+  }
+  try {
+    const response = await fetch("/api/pdf_books_list", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const books = Array.isArray(payload?.books) ? payload.books : [];
+    // Keep the Manning catalogue as-is; only the downloaded section is
+    // re-read from .chat/pdf_books.
+    const manning = (Array.isArray(entry.bookLibraryItems)
+      ? entry.bookLibraryItems
+      : []
+    ).filter((item) => String(item?.section || "downloaded") === "manning");
+    entry.bookLibraryItems = books.map((book, index) => ({
+      index: index + 1,
+      section: "downloaded",
+      name: String(book.name || ""),
+      slug: "",
+      title: String(book.title || book.name || "(untitled)"),
+      subtitle: "",
+      description: "",
+      pages: "",
+      published: "",
+      cover: "",
+      bookUrl: "",
+      pdfReady: false,
+      url: String(book.url || ""),
+      size: Number(book.size) || 0,
+      modified: String(book.modified || ""),
+      lastOpened: String(book.last_opened || ""),
+      pdf: true,
+      downloading: false,
+      downloaded: false,
+      savedName: "",
+      savedUrl: "",
+      savedTitle: "",
+      downloadError: "",
+    })).concat(manning);
+    entry.bookLibraryDone = true;
+    entry.bookLibraryError = "";
+    renderBookLibrary(entry);
+    toast(
+      `Refreshed ${books.length} downloaded PDF book${
+        books.length === 1 ? "" : "s"
+      }.`
+    );
+  } catch (error) {
+    toast(
+      `Could not refresh the PDF book list: ${error?.message || error}`
+    );
+  } finally {
+    entry.pdfBooksRefreshing = false;
+    if (button && button.isConnected) {
+      button.disabled = false;
+      button.textContent = "Refresh";
+    }
+  }
+}
+
 function renderBookLibrary(entry) {
   const container = entry.bookLibraryEl;
   if (!container) return;
@@ -14032,6 +14126,9 @@ function renderBookLibrary(entry) {
       const label = document.createElement("strong");
       label.textContent = `${group.title || group.id} (${groupItems.length})`;
       head.appendChild(label);
+      if (group.id === "downloaded") {
+        head.appendChild(buildPdfBooksRefreshButton(entry));
+      }
       section.appendChild(head);
 
       if (groupItems.length) {
