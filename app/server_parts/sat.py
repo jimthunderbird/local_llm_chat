@@ -1,4 +1,7 @@
-"""1600.now SAT question-bank search for the /sat_1600 chat mode."""
+"""SAT math question-bank search for the /sat chat mode.
+
+Math questions come from PineSAT and are cached one JSON file per question.
+"""
 
 from __future__ import annotations
 
@@ -6,29 +9,23 @@ import difflib
 from collections import defaultdict
 from .core import *
 
-SAT1600_BANK_URL = "https://1600.now/bank"
-SAT1600_BANK_ORIGIN = "https://1600.now"
-SAT1600_POOL_URLS = {
-    "math": "https://1600.now/generated/bank-pools/math.json",
-    "reading": "https://1600.now/generated/bank-pools/reading.json",
-}
-SAT1600_CACHE_DIR = SCRIPT_DIR / ".chat" / "sat_1600"
-SAT1600_CACHE_TTL_SECONDS = 6 * 60 * 60
-SAT1600_USER_AGENT = (
+SAT_CACHE_DIR = SCRIPT_DIR / ".chat" / "sat"
+SAT_CACHE_TTL_SECONDS = 6 * 60 * 60
+SAT_PINESAT_MATH_URL = "https://pinesat.duckdns.org/api/questions?section=MATH"
+SAT_PINESAT_CACHE_DIR = SAT_CACHE_DIR / "pinesat"
+SAT_PINESAT_META_FILE = "_meta.json"
+SAT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0 Safari/537.36"
 )
-SAT1600_MODEL = chat.ANSWER_MODEL
-SAT1600_NUM_CTX = chat.ANSWER_NUM_CTX
-SAT1600_TOP_MATCHES = 5
-SAT1600_CONTEXT_BUDGET_CHARS = 24_000
-SAT1600_QUESTION_BUDGET_CHARS = 4_000
-SAT1600_IMAGE_PROXY_PATH = "/api/sat1600_image?url="
-SAT1600_IMAGE_CACHE_TTL_SECONDS = 24 * 60 * 60
-SAT1600_IMAGE_CACHE_MAX_ITEMS = 100
+SAT_MODEL = chat.ANSWER_MODEL
+SAT_NUM_CTX = chat.ANSWER_NUM_CTX
+SAT_TOP_MATCHES = 5
+SAT_CONTEXT_BUDGET_CHARS = 24_000
+SAT_QUESTION_BUDGET_CHARS = 4_000
 
-SAT1600_STOPWORDS = {
+SAT_STOPWORDS = {
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
     "to", "of", "and", "or", "for", "in", "on", "with", "how", "what",
     "why", "when", "where", "which", "who", "can", "i", "you", "it",
@@ -47,16 +44,15 @@ SAT1600_STOPWORDS = {
     "new", "another", "different", "next", "again",
 }
 
-SAT1600_ANSWER_PROMPT = """You are an SAT tutor using the official 1600.now question bank.
+SAT_ANSWER_PROMPT = """You are an SAT math tutor using the official PineSAT question bank.
 
-Use the question-bank excerpts below when they are relevant.
+Use the PineSAT math question-bank excerpts below when they are relevant.
 Requirements:
-- If the student pasted or described an SAT question, solve it step by step and state the correct answer clearly.
+- If the student pasted or described an SAT math question, solve it step by step and state the correct answer clearly.
 - If a matching bank question has an official correct answer or rationale, use it and say why the answer is correct.
-- For math, show the calculations. For reading and writing, explain why the correct choice fits the passage or the grammar/meaning rule.
+- Show the calculations clearly.
 - Do not invent an official bank answer. If the excerpts do not settle the question, give your best reasoning and say what is missing.
-- If a question depends on a figure that is not available, say which figure or detail is needed.
-- Mention the matching question ID(s) and that they come from 1600.now.
+- Mention the matching question ID(s) and that they come from PineSAT.
 - Use Markdown and keep the explanation focused.
 
 <question_bank>
@@ -67,22 +63,22 @@ Requirements:
 
 Answer:"""
 
-_SAT1600_LOCK = threading.Lock()
-_SAT1600_QUESTIONS: list[dict] | None = None
-_SAT1600_INDEX: dict[str, set[int]] | None = None
-_SAT1600_IDF: dict[str, float] = {}
-_SAT1600_BY_ID: dict[str, dict] = {}
-_SAT1600_VOCAB: list[str] = []
-_SAT1600_FUZZY_CACHE: dict[str, tuple[str, ...]] = {}
-_SAT1600_FUZZY_LOCK = threading.Lock()
-_SAT1600_LOADED_AT = 0.0
+_SAT_LOCK = threading.Lock()
+_SAT_QUESTIONS: list[dict] | None = None
+_SAT_INDEX: dict[str, set[int]] | None = None
+_SAT_IDF: dict[str, float] = {}
+_SAT_BY_ID: dict[str, dict] = {}
+_SAT_VOCAB: list[str] = []
+_SAT_FUZZY_CACHE: dict[str, tuple[str, ...]] = {}
+_SAT_FUZZY_LOCK = threading.Lock()
+_SAT_LOADED_AT = 0.0
 
 
-def _sat1600_get_json(url: str):
+def _sat_get_json(url: str):
     try:
         response = requests.get(
             url,
-            headers={"User-Agent": SAT1600_USER_AGENT},
+            headers={"User-Agent": SAT_USER_AGENT},
             timeout=90,
         )
         response.raise_for_status()
@@ -93,57 +89,205 @@ def _sat1600_get_json(url: str):
         raise RuntimeError(f"{url} did not return valid JSON.") from exc
 
 
-def _sat1600_cached_pool(subject: str) -> list[dict]:
-    SAT1600_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path = SAT1600_CACHE_DIR / f"{subject}.json"
-    try:
-        fresh = (
-            path.is_file()
-            and time.time() - path.stat().st_mtime
-            < SAT1600_CACHE_TTL_SECONDS
-        )
-    except OSError:
-        fresh = False
-    if fresh:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return data
-        except (OSError, ValueError, json.JSONDecodeError):
-            pass
+def _sat_question_source(question: dict | None = None) -> tuple[str, str]:
+    """Return the display name and URL for a PineSAT question."""
+    return "PineSAT", SAT_PINESAT_MATH_URL
 
-    url = SAT1600_POOL_URLS[subject]
+
+def _sat_pinesat_digest(raw: dict) -> str:
+    """Return a stable content digest so duplicate PineSAT IDs stay distinct."""
+    payload = json.dumps(
+        raw, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _sat_pinesat_filename(pinesat_id: str, digest: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", pinesat_id).strip("._")
+    safe = (safe or "question")[:100]
+    return f"{safe}-{digest}.json"
+
+
+def _sat_normalize_pinesat_question(raw: object) -> dict | None:
+    """Convert one PineSAT API record to the internal bank shape."""
+    if not isinstance(raw, dict):
+        return None
+    payload = raw.get("question")
+    if not isinstance(payload, dict):
+        return None
+    digest = _sat_pinesat_digest(raw)
+    pinesat_id = str(raw.get("id") or digest).strip()
+    question_text = str(
+        payload.get("question")
+        or payload.get("questionText")
+        or payload.get("text")
+        or ""
+    ).strip()
+    if not pinesat_id or not question_text:
+        return None
+
+    choices: list[dict[str, str]] = []
+    raw_choices = payload.get("choices")
+    if isinstance(raw_choices, dict):
+        choice_items = list(raw_choices.items())
+    elif isinstance(raw_choices, list):
+        choice_items = list(enumerate(raw_choices))
+    else:
+        choice_items = []
+    for index, item in enumerate(choice_items):
+        key, value = item
+        if isinstance(value, dict):
+            letter = value.get("id") or key
+            text = value.get("text") or ""
+        else:
+            letter = key
+            text = value
+        if text is None:
+            continue
+        letter_text = str(letter)
+        if not isinstance(raw_choices, dict):
+            letter_text = chr(ord("A") + index)
+        choices.append({"id": letter_text, "text": str(text)})
+
+    paragraph = payload.get("paragraph")
+    if paragraph is None or str(paragraph).strip().lower() in {
+        "", "null", "none", "undefined"
+    }:
+        paragraph = ""
+    domain = str(raw.get("domain") or "").strip()
+    rationale = str(
+        payload.get("explanation") or payload.get("rationale") or ""
+    ).strip()
+    correct_answer = str(
+        payload.get("correct_answer") or payload.get("correctAnswer") or ""
+    ).strip()
+    return {
+        "stableId": f"pinesat-{pinesat_id}-{digest}",
+        "questionNumber": pinesat_id,
+        "prompt": question_text,
+        "questionText": question_text,
+        "passage": str(paragraph).strip(),
+        "type": "multiple-choice" if choices else "free-response",
+        "correctAnswer": correct_answer,
+        "rationale": rationale,
+        "difficulty": str(raw.get("difficulty") or "").strip(),
+        "hiddenFromBank": False,
+        "category": {
+            "subject": "Math",
+            "domain": domain,
+            "skill": "",
+        },
+        "subject": "math",
+        "source": "pinesat",
+        "sourceName": "PineSAT",
+        "sourceUrl": SAT_PINESAT_MATH_URL,
+        "pinesatId": pinesat_id,
+    }
+
+
+def _sat_pinesat_cache_fresh() -> bool:
+    meta_path = SAT_PINESAT_CACHE_DIR / SAT_PINESAT_META_FILE
     try:
-        data = _sat1600_get_json(url)
-        if not isinstance(data, list):
-            raise RuntimeError(f"{url} returned an unexpected shape.")
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        fetched_at = float(meta.get("fetched_at") or 0)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    return time.time() - fetched_at < SAT_CACHE_TTL_SECONDS
+
+
+def _sat_load_pinesat_cache() -> list[dict]:
+    if not SAT_PINESAT_CACHE_DIR.is_dir():
+        return []
+    questions: list[dict] = []
+    for path in sorted(SAT_PINESAT_CACHE_DIR.glob("*.json")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        normalized = _sat_normalize_pinesat_question(raw)
+        if normalized is not None:
+            questions.append(normalized)
+    return questions
+
+
+def _sat_fetch_pinesat_questions() -> list[dict]:
+    """Fetch PineSAT math questions and cache each one as its own JSON file."""
+    data = _sat_get_json(SAT_PINESAT_MATH_URL)
+    if not isinstance(data, list):
+        raise RuntimeError(
+            f"{SAT_PINESAT_MATH_URL} returned an unexpected shape."
+        )
+    SAT_PINESAT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    written: set[str] = set()
+    for raw in data:
+        if not isinstance(raw, dict):
+            continue
+        pinesat_id = str(raw.get("id") or "").strip()
+        if not pinesat_id:
+            continue
+        digest = _sat_pinesat_digest(raw)
+        filename = _sat_pinesat_filename(pinesat_id, digest)
+        if filename in written:
+            filename = filename[:-5] + "-duplicate.json"
+        path = SAT_PINESAT_CACHE_DIR / filename
         temporary = path.with_name(path.name + ".tmp")
         temporary.write_text(
-            json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n",
+            json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
         temporary.replace(path)
-        return data
+        written.add(filename)
+    for path in SAT_PINESAT_CACHE_DIR.glob("*.json"):
+        if path.name not in written:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    meta_path = SAT_PINESAT_CACHE_DIR / SAT_PINESAT_META_FILE
+    temporary = meta_path.with_name(meta_path.name + ".tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "count": len(written),
+                "source": SAT_PINESAT_MATH_URL,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(meta_path)
+    return _sat_load_pinesat_cache()
+
+
+def _sat_pinesat_questions() -> list[dict]:
+    """Return cached PineSAT math questions, refreshing them when stale."""
+    cached = _sat_load_pinesat_cache()
+    if cached and _sat_pinesat_cache_fresh():
+        return cached
+    try:
+        fetched = _sat_fetch_pinesat_questions()
+        if fetched:
+            return fetched
     except Exception:
-        # A stale cache is better than failing the whole mode.
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return data
-        except (OSError, ValueError, json.JSONDecodeError):
-            pass
+        if cached:
+            return cached
         raise
+    return cached
 
 
-def _sat1600_question_tokens(text: object) -> list[str]:
+def _sat_question_tokens(text: object) -> list[str]:
     return [
         token
         for token in re.findall(r"[a-z0-9]+", str(text or "").lower())
-        if len(token) > 1 and token not in SAT1600_STOPWORDS
+        if len(token) > 1 and token not in SAT_STOPWORDS
     ]
 
 
-def _sat1600_search_text(question: dict) -> str:
+def _sat_search_text(question: dict) -> str:
     category = question.get("category") or {}
     parts = [
         question.get("prompt"),
@@ -159,12 +303,12 @@ def _sat1600_search_text(question: dict) -> str:
     return " ".join(str(part) for part in parts if part)
 
 
-def _sat1600_build_index(questions: list[dict]) -> None:
-    global _SAT1600_INDEX, _SAT1600_IDF, _SAT1600_BY_ID, _SAT1600_VOCAB
+def _sat_build_index(questions: list[dict]) -> None:
+    global _SAT_INDEX, _SAT_IDF, _SAT_BY_ID, _SAT_VOCAB
     index: dict[str, set[int]] = defaultdict(set)
     by_id: dict[str, dict] = {}
     for doc_index, question in enumerate(questions):
-        for token in set(_sat1600_question_tokens(_sat1600_search_text(question))):
+        for token in set(_sat_question_tokens(_sat_search_text(question))):
             index[token].add(doc_index)
         for key in (
             question.get("stableId"),
@@ -174,79 +318,70 @@ def _sat1600_build_index(questions: list[dict]) -> None:
             if key:
                 by_id[key] = question
     total = max(1, len(questions))
-    _SAT1600_IDF = {
+    _SAT_IDF = {
         token: math.log((total + 1) / (len(docs) + 1)) + 1.0
         for token, docs in index.items()
     }
-    _SAT1600_INDEX = index
-    _SAT1600_BY_ID = by_id
-    _SAT1600_VOCAB = sorted(index.keys())
-    with _SAT1600_FUZZY_LOCK:
-        _SAT1600_FUZZY_CACHE.clear()
+    _SAT_INDEX = index
+    _SAT_BY_ID = by_id
+    _SAT_VOCAB = sorted(index.keys())
+    with _SAT_FUZZY_LOCK:
+        _SAT_FUZZY_CACHE.clear()
 
 
-def load_sat1600_bank() -> list[dict]:
-    """Load the 1600.now question pools and build the search index."""
-    global _SAT1600_QUESTIONS, _SAT1600_LOADED_AT
-    with _SAT1600_LOCK:
-        if _SAT1600_QUESTIONS is not None:
-            return _SAT1600_QUESTIONS
-        pools: dict[str, list[dict]] = {}
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = {
-                subject: pool.submit(_sat1600_cached_pool, subject)
-                for subject in ("math", "reading")
-            }
-            for subject, future in futures.items():
-                pools[subject] = future.result()
+def load_sat_bank() -> list[dict]:
+    """Load the PineSAT math questions and build the search index."""
+    global _SAT_QUESTIONS, _SAT_LOADED_AT
+    with _SAT_LOCK:
+        if _SAT_QUESTIONS is not None:
+            return _SAT_QUESTIONS
         questions: list[dict] = []
-        for subject in ("math", "reading"):
-            for question in pools[subject]:
-                if not isinstance(question, dict):
-                    continue
-                if question.get("hiddenFromBank"):
-                    continue
-                question.setdefault("subject", subject)
-                questions.append(question)
+        for question in _sat_pinesat_questions():
+            if not isinstance(question, dict):
+                continue
+            if question.get("hiddenFromBank"):
+                continue
+            question.setdefault("subject", "math")
+            questions.append(question)
         if not questions:
-            raise RuntimeError("The 1600.now question bank is empty.")
-        _sat1600_build_index(questions)
-        _SAT1600_QUESTIONS = questions
-        _SAT1600_LOADED_AT = time.time()
+            raise RuntimeError("The PineSAT math question bank is empty.")
+        _sat_build_index(questions)
+        _SAT_QUESTIONS = questions
+        _SAT_LOADED_AT = time.time()
         return questions
 
 
-def _sat1600_expand_query_tokens(tokens: set[str]) -> set[str]:
+def _sat_expand_query_tokens(tokens: set[str]) -> set[str]:
     """Add close bank-vocabulary spellings for unknown topic tokens."""
     expanded = set(tokens)
-    if _SAT1600_INDEX is None:
+    if _SAT_INDEX is None:
         return expanded
     for token in tokens:
         if (
-            token in _SAT1600_INDEX
+            token in _SAT_INDEX
             or len(token) < 5
             or not token.isalpha()
         ):
             continue
-        with _SAT1600_FUZZY_LOCK:
-            cached = _SAT1600_FUZZY_CACHE.get(token)
+        with _SAT_FUZZY_LOCK:
+            cached = _SAT_FUZZY_CACHE.get(token)
         if cached is None:
             cached = tuple(
                 difflib.get_close_matches(
-                    token, _SAT1600_VOCAB, n=3, cutoff=0.8
+                    token, _SAT_VOCAB, n=3, cutoff=0.8
                 )
             )
-            with _SAT1600_FUZZY_LOCK:
-                _SAT1600_FUZZY_CACHE[token] = cached
+            with _SAT_FUZZY_LOCK:
+                _SAT_FUZZY_CACHE[token] = cached
         expanded.update(cached)
     return expanded
 
 
-def sat1600_bank_ready() -> bool:
-    return _SAT1600_QUESTIONS is not None
+def sat_bank_ready() -> bool:
+    return _SAT_QUESTIONS is not None
 
 
-def _sat1600_direct_match(question: str) -> dict | None:
+def _sat_direct_match(question: str) -> dict | None:
     match = re.search(
         r"\b(?:bank-(?:math|reading)-)?([0-9a-f]{8})\b",
         question,
@@ -254,26 +389,26 @@ def _sat1600_direct_match(question: str) -> dict | None:
     )
     if not match:
         return None
-    return _SAT1600_BY_ID.get(match.group(1).lower())
+    return _SAT_BY_ID.get(match.group(1).lower())
 
 
-def search_sat1600(question: str, limit: int = SAT1600_TOP_MATCHES) -> list[dict]:
+def search_sat(question: str, limit: int = SAT_TOP_MATCHES) -> list[dict]:
     """Return bank questions most relevant to one student question."""
-    questions = load_sat1600_bank()
-    assert _SAT1600_INDEX is not None
-    tokens = _sat1600_expand_query_tokens(
-        set(_sat1600_question_tokens(question))
+    questions = load_sat_bank()
+    assert _SAT_INDEX is not None
+    tokens = _sat_expand_query_tokens(
+        set(_sat_question_tokens(question))
     )
     scores: dict[int, float] = defaultdict(float)
     for token in tokens:
-        for doc_index in _SAT1600_INDEX.get(token, ()):
-            scores[doc_index] += _SAT1600_IDF.get(token, 0.0)
+        for doc_index in _SAT_INDEX.get(token, ()):
+            scores[doc_index] += _SAT_IDF.get(token, 0.0)
     ranked = sorted(
         scores.items(),
         key=lambda item: (-item[1], questions[item[0]].get("id") or 0),
     )
     results: list[dict] = []
-    direct = _sat1600_direct_match(question)
+    direct = _sat_direct_match(question)
     if direct is not None:
         results.append(direct)
     for doc_index, _score in ranked:
@@ -286,7 +421,7 @@ def search_sat1600(question: str, limit: int = SAT1600_TOP_MATCHES) -> list[dict
     return results
 
 
-def _sat1600_format_question(question: dict) -> str:
+def _sat_format_question(question: dict) -> str:
     category = question.get("category") or {}
     subject = str(question.get("subject") or "").title() or "SAT"
     domain = str(category.get("domain") or "") if isinstance(category, dict) else ""
@@ -322,51 +457,35 @@ def _sat1600_format_question(question: dict) -> str:
     rationale = str(question.get("rationale") or "").strip()
     if rationale:
         parts.append(f"Official rationale: {rationale}")
-    images = question.get("questionImages") or []
-    if images:
-        image_lines = []
-        for image in images:
-            if not isinstance(image, dict):
-                continue
-            alt = str(image.get("alt") or "SAT question figure").strip()
-            src = str(image.get("optimizedSrc") or image.get("src") or "").strip()
-            if src.startswith("/"):
-                src = SAT1600_BANK_ORIGIN + src
-            image_lines.append(f"{alt} ({src})" if src else alt)
-        if image_lines:
-            parts.append(
-                "Figure(s), not visible to the text model: "
-                + "; ".join(image_lines)
-            )
     number = str(question.get("questionNumber") or "").strip()
+    source_name, source_url = _sat_question_source(question)
     parts.append(
-        "Source: 1600.now"
-        + (f" — {SAT1600_BANK_URL}?q={quote(number)}" if number else "")
+        f"Source: {source_name}" + (f" — {source_url}" if source_url else "")
     )
     text = "\n\n".join(parts)
-    if len(text) > SAT1600_QUESTION_BUDGET_CHARS:
-        text = text[:SAT1600_QUESTION_BUDGET_CHARS].rstrip() + "\n…"
+    if len(text) > SAT_QUESTION_BUDGET_CHARS:
+        text = text[:SAT_QUESTION_BUDGET_CHARS].rstrip() + "\n…"
     return text
 
 
-_SAT1600_TOPIC_WORD_RE = re.compile(
+_SAT_TOPIC_WORD_RE = re.compile(
     r"\b(?:topics?|subjects?|areas?|categories?|skills?|domains)\b",
     re.IGNORECASE,
 )
-_SAT1600_TOPIC_TRIGGER_RE = re.compile(
+_SAT_TOPIC_TRIGGER_RE = re.compile(
     r"\b(?:list|show|give|tell|what|which|name|enumerate|cover|covered|"
     r"covers|include|includes|included|all|tested|test|appear|appears)\b",
     re.IGNORECASE,
 )
 
 
-def _sat1600_topic_subjects(question: str) -> list[str]:
+def _sat_topic_subjects(question: str) -> list[str]:
     text = " ".join(str(question or "").lower().split())
     if "topic sentence" in text:
         return []
-    if not _SAT1600_TOPIC_WORD_RE.search(text):
+    if not _SAT_TOPIC_WORD_RE.search(text):
         return []
-    if not _SAT1600_TOPIC_TRIGGER_RE.search(text):
+    if not _SAT_TOPIC_TRIGGER_RE.search(text):
         return []
     wants_math = bool(re.search(
         r"\b(?:math|mathematics|maths|algebra|geometry|advanced math|"
@@ -379,8 +498,8 @@ def _sat1600_topic_subjects(question: str) -> list[str]:
         r"standard english conventions)\b",
         text,
     ))
-    if "trigonometry" in _sat1600_expand_query_tokens(
-        set(_sat1600_question_tokens(text))
+    if "trigonometry" in _sat_expand_query_tokens(
+        set(_sat_question_tokens(text))
     ):
         wants_math = True
     if wants_math and not wants_reading:
@@ -390,59 +509,42 @@ def _sat1600_topic_subjects(question: str) -> list[str]:
     return ["math", "reading"]
 
 
-_SAT1600_QUESTION_WORD_RE = re.compile(
+_SAT_QUESTION_WORD_RE = re.compile(
     r"\b(?:questions?|problems?|exercises?)\b", re.IGNORECASE
 )
-_SAT1600_QUESTION_VERB_RE = re.compile(
+_SAT_QUESTION_VERB_RE = re.compile(
     r"\b(?:show|give|find|get|pick|pull|suggest|provide|display|send|"
     r"want|need|have|what|which)\b",
     re.IGNORECASE,
 )
-_SAT1600_REVEAL_RE = re.compile(
+_SAT_REVEAL_RE = re.compile(
     r"\b(?:show|give|reveal|tell|check|what(?:'s| is))\b[\s\S]{0,60}"
     r"\b(?:answer|solution|explanation)\b",
     re.IGNORECASE,
 )
-_SAT1600_NEGATED_ANSWER_RE = re.compile(
+_SAT_NEGATED_ANSWER_RE = re.compile(
     r"\b(?:do not|don't|dont|without|not)\b[\s\S]{0,40}"
     r"\b(?:answer|solution|explanation)\b",
     re.IGNORECASE,
 )
 
 
-def _sat1600_is_question_request(question: str) -> bool:
+def _sat_is_question_request(question: str) -> bool:
     text = " ".join(str(question or "").lower().split())
     return bool(
-        _SAT1600_QUESTION_WORD_RE.search(text)
-        and _SAT1600_QUESTION_VERB_RE.search(text)
+        _SAT_QUESTION_WORD_RE.search(text)
+        and _SAT_QUESTION_VERB_RE.search(text)
     )
 
 
-def _sat1600_is_reveal_request(question: str) -> bool:
+def _sat_is_reveal_request(question: str) -> bool:
     text = str(question or "")
-    if _SAT1600_NEGATED_ANSWER_RE.search(text):
+    if _SAT_NEGATED_ANSWER_RE.search(text):
         return False
-    return bool(_SAT1600_REVEAL_RE.search(text))
+    return bool(_SAT_REVEAL_RE.search(text))
 
 
-def _sat1600_question_figure_markdown(question: dict) -> list[str]:
-    lines: list[str] = []
-    for figure in _sat1600_question_figures(question)[:4]:
-        url = str(figure.get("url") or "").strip()
-        if not url:
-            continue
-        alt = (
-            str(figure.get("alt") or "SAT question figure")
-            .replace("[", "")
-            .replace("]", "")
-        )
-        lines.append(f"![{alt}]({sat1600_image_url(url)})")
-    if lines:
-        lines.append("*Figure from the 1600.now question bank.*")
-    return lines
-
-
-def _sat1600_question_meta(question: dict) -> tuple[str, str, str, str]:
+def _sat_question_meta(question: dict) -> tuple[str, str, str, str]:
     category = question.get("category") or {}
     subject = str(question.get("subject") or "").title() or "SAT"
     domain = str(category.get("domain") or "") if isinstance(category, dict) else ""
@@ -451,7 +553,7 @@ def _sat1600_question_meta(question: dict) -> tuple[str, str, str, str]:
     return subject, domain, skill, stable_id
 
 
-def _sat1600_select_question_for_request(
+def _sat_select_question_for_request(
     question: str, exclude_ids: list[str] | None = None
 ) -> dict | None:
     exclude = {
@@ -471,20 +573,20 @@ def _sat1600_select_question_for_request(
     for limit in (80, 200):
         candidates = [
             candidate
-            for candidate in search_sat1600(question, limit=limit)
+            for candidate in search_sat(question, limit=limit)
             if not is_excluded(candidate)
         ]
         if candidates:
             break
     if not candidates:
         return None
-    topic_tokens = _sat1600_expand_query_tokens(
-        set(_sat1600_question_tokens(question))
+    topic_tokens = _sat_expand_query_tokens(
+        set(_sat_question_tokens(question))
     )
     if not topic_tokens:
         return candidates[0]
 
-    scored: list[tuple[float, int, int, dict]] = []
+    scored: list[tuple[float, int, dict]] = []
     for index, candidate in enumerate(candidates):
         category = candidate.get("category") or {}
         skill = str(category.get("skill") or "").lower()
@@ -501,32 +603,28 @@ def _sat1600_select_question_for_request(
                 value += 3
             if token in passage:
                 value += 1
-        scored.append(
-            (value, len(candidate.get("questionImages") or []), index, candidate)
-        )
-    scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
-    return scored[0][3] if scored else None
+        scored.append((value, index, candidate))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return scored[0][2] if scored else None
 
 
-def sat1600_question_request_answer(
+def sat_question_request_answer(
     question: str, exclude_ids: list[str] | None = None
 ) -> tuple[str, list[dict], dict] | None:
     """Return one bank question without its answer for a question request."""
-    if not _sat1600_is_question_request(question):
+    if not _sat_is_question_request(question):
         return None
-    selected = _sat1600_select_question_for_request(
+    selected = _sat_select_question_for_request(
         question, exclude_ids=exclude_ids
     )
     if selected is None:
         return None
-    subject, domain, skill, stable_id = _sat1600_question_meta(selected)
+    subject, domain, skill, stable_id = _sat_question_meta(selected)
+    source_name, source_url = _sat_question_source(selected)
     lines = [
-        f"## {subject} question from the 1600.now bank",
+        f"## {subject} question from the {source_name} bank",
         "",
     ]
-    lines.extend(_sat1600_question_figure_markdown(selected))
-    if len(lines) > 2:
-        lines.append("")
     details = [stable_id]
     if selected.get("difficulty"):
         details.append(str(selected["difficulty"]))
@@ -553,14 +651,7 @@ def sat1600_question_request_answer(
             )
     number = str(selected.get("questionNumber") or "").strip()
     lines.append("")
-    lines.append(
-        "Source: "
-        + (
-            f"{SAT1600_BANK_URL}?q={quote(number)}"
-            if number
-            else SAT1600_BANK_URL
-        )
-    )
+    lines.append("Source: " + (source_url or source_name))
     lines.append("")
     lines.append(
         "Solve it when you are ready, then ask **show the answer** to reveal "
@@ -571,28 +662,22 @@ def sat1600_question_request_answer(
             "stable_id": stable_id,
             "subject": str(selected.get("subject") or ""),
             "question_number": number,
-            "url": (
-                f"{SAT1600_BANK_URL}?q={quote(number)}"
-                if number
-                else SAT1600_BANK_URL
-            ),
-            "figures": _sat1600_question_figures(selected),
+            "source": source_name,
+            "url": source_url,
         }
     ]
     return "\n".join(lines).strip() + "\n", sources, selected
 
 
-def sat1600_reveal_answer(
+def sat_reveal_answer(
     question: str, pending: dict | None
 ) -> tuple[str, list[dict]] | None:
     """Reveal the official answer for the pending bank question."""
-    if not pending or not _sat1600_is_reveal_request(question):
+    if not pending or not _sat_is_reveal_request(question):
         return None
-    subject, domain, skill, stable_id = _sat1600_question_meta(pending)
+    subject, domain, skill, stable_id = _sat_question_meta(pending)
+    source_name, source_url = _sat_question_source(pending)
     lines = [f"## Official answer — {stable_id}", ""]
-    lines.extend(_sat1600_question_figure_markdown(pending))
-    if len(lines) > 2:
-        lines.append("")
     lines.append(
         f"**Correct answer:** {pending.get('correctAnswer') or '(not provided)'}"
     )
@@ -603,39 +688,28 @@ def sat1600_reveal_answer(
     else:
         lines.append("")
         lines.append(
-            "The 1600.now bank does not include a written rationale for this "
-            "question; the official answer above is the bank answer."
+            f"The {source_name} bank does not include a written rationale for "
+            "this question; the official answer above is the bank answer."
         )
     number = str(pending.get("questionNumber") or "").strip()
     lines.append("")
-    lines.append(
-        "Source: "
-        + (
-            f"{SAT1600_BANK_URL}?q={quote(number)}"
-            if number
-            else SAT1600_BANK_URL
-        )
-    )
+    lines.append("Source: " + (source_url or source_name))
     sources = [
         {
             "stable_id": stable_id,
             "subject": str(pending.get("subject") or ""),
             "question_number": number,
-            "url": (
-                f"{SAT1600_BANK_URL}?q={quote(number)}"
-                if number
-                else SAT1600_BANK_URL
-            ),
-            "figures": _sat1600_question_figures(pending),
+            "source": source_name,
+            "url": source_url,
         }
     ]
     return "\n".join(lines).strip() + "\n", sources
 
 
-def sat1600_topic_list_answer(question: str) -> tuple[str, list[dict]] | None:
+def sat_topic_list_answer(question: str) -> tuple[str, list[dict]] | None:
     """Return a deterministic topic list from the bank's domain/skill taxonomy."""
-    questions = load_sat1600_bank()
-    subjects = _sat1600_topic_subjects(question)
+    questions = load_sat_bank()
+    subjects = _sat_topic_subjects(question)
     if not subjects:
         return None
     groups: dict[str, dict[str, dict[str, int]]] = {
@@ -658,6 +732,10 @@ def sat1600_topic_list_answer(question: str) -> tuple[str, list[dict]] | None:
         )
         groups[subject][domain][skill] += 1
 
+    subjects = [subject for subject in subjects if groups.get(subject)]
+    if not subjects:
+        return None
+
     lines: list[str] = []
     if subjects == ["math"]:
         title = "Math"
@@ -665,7 +743,7 @@ def sat1600_topic_list_answer(question: str) -> tuple[str, list[dict]] | None:
         title = "Reading and Writing"
     else:
         title = "Math and Reading"
-    lines.append(f"## {title} topics in the 1600.now question bank")
+    lines.append(f"## {title} topics in the PineSAT math question bank")
     lines.append("")
     for subject in subjects:
         subject_groups = groups.get(subject) or {}
@@ -687,140 +765,93 @@ def sat1600_topic_list_answer(question: str) -> tuple[str, list[dict]] | None:
             for skill, count in sorted(
                 skill_counts.items(), key=lambda item: (-item[1], item[0])
             ):
+                if skill in {"", "Other", domain}:
+                    continue
                 lines.append(f"  - {skill} — {count:,}")
         lines.append("")
-    lines.append(f"Source: {SAT1600_BANK_URL}")
+    source_links: dict[str, str] = {}
+    for subject in subjects:
+        sample = next(
+            (
+                row
+                for row in questions
+                if str(row.get("subject") or "") == subject
+            ),
+            None,
+        )
+        source_name, source_url = _sat_question_source(sample or {})
+        source_links[f"{source_name} ({subject})"] = source_url
+    lines.append(
+        "Sources: "
+        + "; ".join(
+            f"{name} — {url}" for name, url in source_links.items()
+        )
+    )
     answer = "\n".join(lines).strip() + "\n"
     sources = [
         {
             "stable_id": "",
             "subject": subject,
             "question_number": "",
-            "url": SAT1600_BANK_URL,
+            "source": next(
+                (
+                    name
+                    for name in source_links
+                    if name.endswith(f"({subject})")
+                ),
+                "",
+            ),
+            "url": next(
+                (
+                    url
+                    for name, url in source_links.items()
+                    if name.endswith(f"({subject})")
+                ),
+                SAT_PINESAT_MATH_URL,
+            ),
         }
         for subject in subjects
     ]
     return answer, sources
 
 
-_SAT1600_IMAGE_LOCK = threading.Lock()
-_SAT1600_IMAGE_CACHE: dict[str, tuple[float, bytes, str]] = {}
-
-
-def sat1600_image_url(url: str) -> str:
-    """Return a same-origin proxy URL for one 1600.now figure."""
-    return SAT1600_IMAGE_PROXY_PATH + quote(str(url), safe="")
-
-
-def sat1600_allowed_image_url(url: str) -> bool:
-    parsed = urlparse(str(url or ""))
-    if parsed.scheme != "https" or parsed.netloc != "1600.now":
-        return False
-    path = unquote(parsed.path or "")
-    return (
-        path.startswith("/generated/sat-images/")
-        or path.startswith("/images/SAT-Style Questions/")
-        or path.startswith("/images/SAT-Style%20Questions/")
-    )
-
-
-def fetch_sat1600_image(url: str) -> tuple[bytes, str]:
-    """Fetch and cache one allowed 1600.now figure for the browser."""
-    if not sat1600_allowed_image_url(url):
-        raise ValueError("Only 1600.now SAT question figures are allowed.")
-    now = time.time()
-    with _SAT1600_IMAGE_LOCK:
-        cached = _SAT1600_IMAGE_CACHE.get(url)
-        if cached and now - cached[0] < SAT1600_IMAGE_CACHE_TTL_SECONDS:
-            return cached[1], cached[2]
-    try:
-        response = requests.get(
-            url,
-            headers={"User-Agent": SAT1600_USER_AGENT},
-            timeout=60,
-        )
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Could not fetch the SAT figure: {exc}") from exc
-    data = response.content
-    if not data:
-        raise RuntimeError("The SAT figure was empty.")
-    if len(data) > 12 * 1024 * 1024:
-        raise RuntimeError("The SAT figure is too large.")
-    content_type = (
-        response.headers.get("content-type", "").split(";")[0].strip()
-        or "image/webp"
-    )
-    if not content_type.startswith("image/"):
-        raise RuntimeError("The SAT figure URL did not return an image.")
-    with _SAT1600_IMAGE_LOCK:
-        _SAT1600_IMAGE_CACHE[url] = (now, data, content_type)
-        if len(_SAT1600_IMAGE_CACHE) > SAT1600_IMAGE_CACHE_MAX_ITEMS:
-            oldest = sorted(
-                _SAT1600_IMAGE_CACHE.items(), key=lambda item: item[1][0]
-            )[:20]
-            for cached_url, _value in oldest:
-                _SAT1600_IMAGE_CACHE.pop(cached_url, None)
-    return data, content_type
-
-
-def _sat1600_question_figures(question: dict) -> list[dict]:
-    figures: list[dict] = []
-    for image in question.get("questionImages") or []:
-        if not isinstance(image, dict):
-            continue
-        src = str(
-            image.get("optimizedSrc") or image.get("src") or ""
-        ).strip()
-        if not src:
-            continue
-        if src.startswith("/"):
-            src = SAT1600_BANK_ORIGIN + src
-        if not re.match(r"^https?://", src, re.IGNORECASE):
-            continue
-        alt = str(image.get("alt") or "SAT question figure").strip()
-        figures.append({"url": src, "alt": alt})
-    return figures
-
-
-def build_sat1600_context(
+def build_sat_context(
     question: str,
-    limit: int = SAT1600_TOP_MATCHES,
-    budget: int = SAT1600_CONTEXT_BUDGET_CHARS,
+    limit: int = SAT_TOP_MATCHES,
+    budget: int = SAT_CONTEXT_BUDGET_CHARS,
 ) -> tuple[str, list[dict]]:
-    matches = search_sat1600(question, limit=limit)
+    matches = search_sat(question, limit=limit)
     context_parts: list[str] = []
     sources: list[dict] = []
     used = 0
     for match in matches:
-        part = _sat1600_format_question(match)
+        part = _sat_format_question(match)
         if context_parts and used + len(part) > budget:
             break
         context_parts.append(part)
         used += len(part) + 2
         number = str(match.get("questionNumber") or "").strip()
+        source_name, source_url = _sat_question_source(match)
         sources.append(
             {
                 "stable_id": str(match.get("stableId") or ""),
                 "subject": str(match.get("subject") or ""),
                 "question_number": number,
-                "url": (
-                    f"{SAT1600_BANK_URL}?q={quote(number)}" if number else SAT1600_BANK_URL
-                ),
-                "figures": _sat1600_question_figures(match),
+                "source": source_name,
+                "url": source_url,
             }
         )
     return "\n\n".join(context_parts), sources
 
 
-def sat1600_answer_prompt(
+def sat_answer_prompt(
     question: str, context: str, conversation: str = ""
 ) -> str:
     conversation_block = (
         f"Recent conversation:\n{conversation}\n\n" if conversation else ""
     )
-    return SAT1600_ANSWER_PROMPT.format(
-        context=context or "(No matching 1600.now bank questions were found.)",
+    return SAT_ANSWER_PROMPT.format(
+        context=context or "(No matching PineSAT math questions were found.)",
         conversation=conversation_block,
         question=question,
     )

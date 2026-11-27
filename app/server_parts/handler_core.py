@@ -980,11 +980,6 @@ class HandlerCoreMixin:
                 return
             self._send_json(payload)
             return
-        if path == "/api/sat1600_image":
-            params = parse_qs(parsed.query)
-            url = (params.get("url") or [""])[0]
-            self._send_sat1600_image(url)
-            return
         if path == "/api/wiki":
             params = parse_qs(parsed.query)
             word = (params.get("word") or [""])[0].strip()

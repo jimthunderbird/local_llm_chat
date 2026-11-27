@@ -39,7 +39,7 @@ The split follows the feature requirements in `prompts/*.prompt`:
 | `github.py` | GitHub code-snippet fallback | `programming*.prompt` |
 | `programming_docs.py` | Official Go, Rust, and PHP documentation lookups | `performance_improvement.prompt`, `programming*.prompt` |
 | `moonbit.py` | MoonBit documentation index search and page extraction | `moonbit.prompt` |
-| `sat1600.py` | 1600.now SAT question-bank search and indexing | `sat_1600.prompt` |
+| `sat.py` | PineSAT SAT math question-bank search, caching, and indexing | `sat.prompt` |
 | `conversation.py` | Follow-up rewriting and conversation memory | `chat_common.prompt` |
 | `answer.py` | Answer block splitting and source annotations | `chat_common.prompt` |
 | `article.py` | Article loading, section routing, iterative evidence | `article_loading.prompt`, `article_based_question_and_answer.prompt` |
@@ -59,7 +59,7 @@ The split follows the feature requirements in `prompts/*.prompt`:
 | `handler_commands_b.py` | Reddit, finance, library, podcast commands | `reddit.prompt`, `stock.prompt`, `robinhood.prompt`, `zillow.prompt`, `project_gutenberg.prompt`, `openlibrary.prompt`, `internet_archive.prompt`, `ai_cohosted_podcast.prompt` |
 | `handler_commands_c.py` | Article, dictionary, code, video, settings commands | `article_loading.prompt`, `dictionary.prompt`, `code_snippet_block.prompt`, `programming*.prompt`, `youtube.prompt` |
 | `handler_moonbit.py` | MoonBit documentation mode requests | `moonbit.prompt` |
-| `handler_sat1600.py` | 1600.now SAT question-bank mode requests | `sat_1600.prompt` |
+| `handler_sat.py` | PineSAT SAT math question-bank mode requests | `sat.prompt` |
 
 ## Dependency direction
 

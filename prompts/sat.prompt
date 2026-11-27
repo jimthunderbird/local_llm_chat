@@ -1,7 +1,22 @@
 question_bank_source: https://1600.now/bank
+pinesat_math_api: https://pinesat.duckdns.org/api/questions?section=MATH
 question_llm: ollama local model ornith-1.5:35b
+questions_cache_dir: {directory_of_this_prompt}/../.chat/sat
 
-command: /sat_1600
+command: /sat
+
+task.no_more_1600_now (completed) {
+  please remove all the context from {question_bank_source}, this source is deprecated!
+}
+
+task (completed) {
+  refactor: 
+  - the command should be changed to {command}
+  - please also change the related python file name and source code to reflect this change
+  - please also change the old sat_1600 directory in .chat to sat
+  - the math question will serve primarily from {questions_cache}/pinesat
+  - we need to save the result from {pinesat_math_api} into {questions_cache_dir}/pinesat, each question in the result should store as an individual json file
+}
 
 task.shrink_figure_more (completed) {
   reference task.shrink_figure {

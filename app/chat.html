@@ -7851,19 +7851,6 @@ function renderMarkdown(text, clickable = true, annotations = null, options = nu
       image.loading = "lazy";
       image.referrerPolicy = "no-referrer";
       image.addEventListener("error", () => figure.remove(), { once: true });
-      // Bank figures are displayed at 50% of their natural size so they take
-      // much less vertical space in the answer.
-      const isSatFigure = /\/api\/sat1600_image\b/.test(imageMatch[2]);
-      const fitSatFigure = () => {
-        if (!isSatFigure || !image.naturalWidth) return;
-        image.style.width = `${Math.round(image.naturalWidth * 0.5)}px`;
-        image.style.height = "auto";
-      };
-      if (isSatFigure) {
-        figure.classList.add("sat1600-figure");
-        if (image.complete && image.naturalWidth) fitSatFigure();
-        else image.addEventListener("load", fitSatFigure, { once: true });
-      }
       link.appendChild(image);
       figure.appendChild(link);
       container.appendChild(figure);

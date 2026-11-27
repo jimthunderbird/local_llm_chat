@@ -74,13 +74,13 @@ class ChatState:
         # /moonbit answers questions from the official MoonBit documentation
         # in its own conversation thread until /moonbit off.
         self.moonbit_mode = False
-        # /sat_1600 answers SAT questions using the 1600.now question bank.
-        self.sat1600_mode = False
+        # /sat answers SAT math questions using the PineSAT question bank.
+        self.sat_mode = False
         # A question shown without its answer can be revealed on a follow-up.
-        self.sat1600_pending_question: dict | None = None
+        self.sat_pending_question: dict | None = None
         # Recently presented question IDs, so "show me a new question"
         # returns a different bank question.
-        self.sat1600_recent_question_ids: list[str] = []
+        self.sat_recent_question_ids: list[str] = []
         self.conversation: list[dict] = []
         self.conversation_summary: str = ""
         self.conversation_summary_turns: int = 0
@@ -155,10 +155,10 @@ class ChatState:
             self.anthem_mode
             or self.united_healthcare_mode
             or self.moonbit_mode
-            or self.sat1600_mode
+            or self.sat_mode
         )
         self.moonbit_mode = False
-        self.sat1600_mode = False
+        self.sat_mode = False
         self.research_with_news_mode = True
         self.anthem_mode = False
         self.anthem_context = ""
@@ -380,7 +380,7 @@ class ChatState:
             ),
             "research_with_news_mode": self.research_with_news_mode,
             "moonbit_mode": self.moonbit_mode,
-            "sat1600_mode": self.sat1600_mode,
+            "sat_mode": self.sat_mode,
             "english_words_to_learn": self.english_words_to_learn,
             "english_words_label": self.english_words_label,
             "has_answer": self.latest_answer is not None,
