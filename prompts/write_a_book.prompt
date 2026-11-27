@@ -7,6 +7,10 @@ settings {
   sub_questions_article_search_limit: 10
 }
 
+task.exact_sub_questions_article_search_limit (completed) {
+  we need to search exactly {sub_questions_article_search_limit} number of articles, no more, no less!
+}
+
 task.book_modal_research_sources_url (completed) {
   in the book loading modal:
   - in "Research sources", show list of urls, when click on each url, open a new modal on top of the existing one, the new modal is the article modal with chat and learn feature

@@ -44,6 +44,13 @@ WRITE_A_BOOK_MIN_SUB_QUESTIONS = 1
 
 WRITE_A_BOOK_MIN_SUB_QUESTION_ARTICLES = 1
 
+# task.exact_sub_questions_article_search_limit in
+# prompts/write_a_book.prompt: each keyword query over-fetches up to this
+# raw result window so every planning question can still be credited with
+# exactly ``WRITE_A_BOOK_SUB_QUESTION_ARTICLE_LIMIT`` distinct articles after
+# deduplication, the publication cutoff, and cross-question overlaps.
+WRITE_A_BOOK_RAW_SEARCH_WINDOW_MAX = 100
+
 WRITE_A_BOOK_RESEARCH_YEARS = 2
 
 # task.do_not_include_2024 in prompts/write_a_book.prompt: only 2025 and 2026
@@ -2703,10 +2710,16 @@ def _book_search_candidates(
 
     Matches task.evenly_distributed_horizontal_search and task.refactor in
     prompts/write_a_book.prompt: each planning question must contribute an
-    equal share of the research material. Results are therefore collected
-    into one bucket per keyword and then taken round-robin across the buckets
-    with a per-question quota, so a single prolific query cannot fill the
-    article budget on its own and starve the other questions.
+    equal share of the research material. task.exact_sub_questions_article_search_limit
+    tightens that share to an exact number: every planning question must
+    contribute exactly ``per_question_limit`` distinct articles to the pool,
+    never more and never fewer (short of what the search engine can supply,
+    which is reported). Two mechanisms keep the number exact. First, each
+    keyword is queried with a wider raw window so that intra-query duplicates,
+    the publication-date cutoff, and stories shared across questions cannot
+    starve a question's share. Second, the round-robin selection stops taking
+    from a question the moment its exact share is reached, so a prolific
+    query can neither fill the pool on its own nor exceed its own limit.
     """
     script = SCRIPT_DIR / "news_fetch.php"
     if not script.exists():
@@ -2714,6 +2727,16 @@ def _book_search_candidates(
     limit = max(0, int(limit))
     keyword_limit = max(1, int(keyword_limit))
     per_question_limit = max(1, int(per_question_limit))
+    # task.exact_sub_questions_article_search_limit: the raw query window is
+    # deliberately wider than the per-question share. Reaching exactly
+    # ``per_question_limit`` distinct articles per question requires spare
+    # results to replace intra-query duplicates, stories older than the
+    # publication cutoff, and stories shared by several planning questions.
+    # The extra raw results never enter the pool; only the exact share does.
+    raw_window = min(
+        WRITE_A_BOOK_RAW_SEARCH_WINDOW_MAX,
+        max(4 * per_question_limit, per_question_limit + 10),
+    )
     if limit <= 0:
         return []
 
@@ -2758,7 +2781,7 @@ def _book_search_candidates(
             "--search",
             query,
             "--limit",
-            str(per_question_limit),
+            str(raw_window),
         ]
         try:
             result = subprocess.run(
@@ -2812,34 +2835,29 @@ def _book_search_candidates(
                     ),
                 }
             )
-            if len(bucket) >= per_question_limit:
+            if len(bucket) >= raw_window:
                 break
         buckets.append(bucket)
 
     # Round-robin across the question buckets. Every pass takes at most one
-    # article per question and no question may exceed its quota, so the final
-    # list reflects every sub-question equally even when some questions have
-    # far more results than others.
-    quota = 0
-    if buckets:
-        quota = min(
-            per_question_limit,
-            max(1, math.ceil(limit / len(buckets))),
-        )
+    # article per question, skips stories another question already selected,
+    # and stops consuming a bucket once its question has contributed exactly
+    # ``per_question_limit`` distinct articles. The loop runs until every
+    # question has reached its exact share or its raw window is exhausted,
+    # so the pool reflects every sub-question with precisely its own share:
+    # never more than its limit, and never fewer unless the search engine
+    # ran out of distinct usable stories for it.
     selected: list[dict] = []
     selected_keys: set[str] = set()
     cursors = [0] * len(buckets)
     contributed = [0] * len(buckets)
 
-    def take_one_pass(per_question_cap: int | None) -> bool:
+    def take_one_pass() -> bool:
         progressed = False
         for index, bucket in enumerate(buckets):
             if len(selected) >= limit:
                 break
-            if (
-                per_question_cap is not None
-                and contributed[index] >= per_question_cap
-            ):
+            if contributed[index] >= per_question_limit:
                 continue
             while cursors[index] < len(bucket):
                 item = bucket[cursors[index]]
@@ -2857,24 +2875,33 @@ def _book_search_candidates(
                 break
         return progressed
 
-    # First honor the equal per-question quota, then let any question with
-    # spare articles fill a budget left unused by questions with too few
-    # results.
-    while len(selected) < limit and take_one_pass(quota):
-        pass
-    while len(selected) < limit and take_one_pass(None):
+    while len(selected) < limit and take_one_pass():
         pass
     if len(buckets) > 1 and selected:
         log(
             "[book: evenly distributed "
             f"{len(selected)} article(s) across {len(buckets)} "
-            f"planning question(s), up to {quota} each]"
+            f"planning question(s), exactly {per_question_limit} each]"
         )
         log(
             "[book: articles per planning question: "
             + ", ".join(str(count) for count in contributed)
             + "]"
         )
+    else:
+        for index in range(len(buckets)):
+            log(
+                f"[book: articles for planning question "
+                f"{index + 1}: {contributed[index]}]"
+            )
+    for index in range(len(buckets)):
+        if contributed[index] < per_question_limit:
+            log(
+                "[book: only "
+                f"{contributed[index]} of {per_question_limit} distinct "
+                f"article(s) were available for planning question "
+                f"{index + 1}]"
+            )
     return selected
 
 def _book_load_source(

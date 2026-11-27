@@ -48,8 +48,8 @@ class HandlerBooksMixin:
             f"[book: planning {subject!r} with {book_model} "
             f"({chapter_count} chapter(s), about {words_per_chapter} words "
             f"each, learn up to {research_budget} article(s) across "
-            f"up to {options.sub_question_count} sub-question(s), "
-            f"up to {options.sub_question_article_limit} article(s) per "
+            f"{options.sub_question_count} sub-question(s), "
+            f"exactly {options.sub_question_article_limit} article(s) per "
             f"sub-question; saving to {book_directory})]",
         )
         try:
