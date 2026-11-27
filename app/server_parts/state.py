@@ -74,6 +74,8 @@ class ChatState:
         # /moonbit answers questions from the official MoonBit documentation
         # in its own conversation thread until /moonbit off.
         self.moonbit_mode = False
+        # /sat_1600 answers SAT questions using the 1600.now question bank.
+        self.sat1600_mode = False
         self.conversation: list[dict] = []
         self.conversation_summary: str = ""
         self.conversation_summary_turns: int = 0
@@ -148,8 +150,10 @@ class ChatState:
             self.anthem_mode
             or self.united_healthcare_mode
             or self.moonbit_mode
+            or self.sat1600_mode
         )
         self.moonbit_mode = False
+        self.sat1600_mode = False
         self.research_with_news_mode = True
         self.anthem_mode = False
         self.anthem_context = ""
@@ -371,6 +375,7 @@ class ChatState:
             ),
             "research_with_news_mode": self.research_with_news_mode,
             "moonbit_mode": self.moonbit_mode,
+            "sat1600_mode": self.sat1600_mode,
             "english_words_to_learn": self.english_words_to_learn,
             "english_words_label": self.english_words_label,
             "has_answer": self.latest_answer is not None,

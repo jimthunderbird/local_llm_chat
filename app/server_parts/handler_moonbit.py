@@ -61,6 +61,9 @@ class HandlerMoonbitMixin:
 
     def _enter_moonbit_mode(self) -> None:
         state = self.state
+        if state.sat1600_mode:
+            state.sat1600_mode = False
+            self._reset_sat1600_context()
         if state.anthem_mode:
             state.anthem_mode = False
             self._reset_anthem_context()

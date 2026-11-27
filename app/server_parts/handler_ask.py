@@ -431,6 +431,10 @@ class HandlerAskMixin:
 
     def _run_question(self, question: str) -> None:
         state = self.state
+        if state.sat1600_mode:
+            # /sat_1600 keeps its own SAT question-bank thread.
+            self._run_sat1600_question(question)
+            return
         if state.moonbit_mode:
             # /moonbit keeps its own docs-only thread. It takes precedence
             # over the other modes until /moonbit off is entered.
@@ -1517,6 +1521,8 @@ class HandlerAskMixin:
             self._command_zillow(argument)
         elif name == "/moonbit":
             self._command_moonbit(argument)
+        elif name == "/sat_1600":
+            self._command_sat_1600(argument)
         elif name == "/wikivoyage":
             self._command_wikivoyage(argument)
         elif name == "/map":

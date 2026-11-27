@@ -1,0 +1,14 @@
+question_bank_source: https://1600.now/bank
+question_llm: ollama local model ornith-1.5:35b
+
+command: /sat_1600
+
+task (completed) {
+  create command {command} {
+    - if the command is typed, it will clear the existing chat context and use {question_bank_source} together with {question_llm} to help get the answer
+
+    - {command} off {
+      clear up the context and back to the main chat
+    }
+  }
+}

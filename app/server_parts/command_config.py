@@ -26,6 +26,7 @@ COMMAND_ARGUMENTS = {
     "/robinhood",
     "/zillow",
     "/moonbit",
+    "/sat_1600",
     "/medium",
     "/gutenberg",
     "/openlibrary",

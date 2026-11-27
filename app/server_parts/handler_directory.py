@@ -41,6 +41,7 @@ class HandlerDirectoryMixin:
                 )
                 return
             state.moonbit_mode = False
+            state.sat1600_mode = False
             state.anthem_mode = True
             if state.united_healthcare_mode:
                 state.united_healthcare_mode = False
@@ -57,6 +58,7 @@ class HandlerDirectoryMixin:
             return
         if not value:
             state.moonbit_mode = False
+            state.sat1600_mode = False
             state.anthem_mode = True
             if state.united_healthcare_mode:
                 state.united_healthcare_mode = False
@@ -73,6 +75,7 @@ class HandlerDirectoryMixin:
             return
         was_on = state.anthem_mode
         state.moonbit_mode = False
+        state.sat1600_mode = False
         state.anthem_mode = True
         if state.united_healthcare_mode:
             state.united_healthcare_mode = False
@@ -143,6 +146,7 @@ class HandlerDirectoryMixin:
                 )
                 return
             state.moonbit_mode = False
+            state.sat1600_mode = False
             state.united_healthcare_mode = True
             if state.anthem_mode:
                 state.anthem_mode = False
@@ -158,6 +162,7 @@ class HandlerDirectoryMixin:
             return
         if not value:
             state.moonbit_mode = False
+            state.sat1600_mode = False
             state.united_healthcare_mode = True
             if state.anthem_mode:
                 state.anthem_mode = False
@@ -173,6 +178,7 @@ class HandlerDirectoryMixin:
             return
         was_on = state.united_healthcare_mode
         state.moonbit_mode = False
+        state.sat1600_mode = False
         state.united_healthcare_mode = True
         if state.anthem_mode:
             state.anthem_mode = False
