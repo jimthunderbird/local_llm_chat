@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import deque
+
 from .core import *
 from .core import SCRIPT_DIR
 from .state import ChatState
@@ -434,11 +436,13 @@ def _run_video_learn_job(
                 bufsize=1,
             )
             assert process.stdout is not None
+            captured: deque[str] = deque(maxlen=80)
             try:
                 for line in process.stdout:
                     clean = line.strip()
                     if not clean:
                         continue
+                    captured.append(clean)
                     _update_video_learn_job(
                         state, video_id, message=clean[:200]
                     )
@@ -449,8 +453,12 @@ def _run_video_learn_job(
                     process.wait()
 
             if returncode != 0:
+                import youtube_video_learn as learn
+
                 raise RuntimeError(
-                    f"{script} failed with exit code {returncode}"
+                    f"{script} failed for video {video_id} with exit code "
+                    f"{returncode}. The step's own output explains why:\n"
+                    f"{learn.step_error_detail(captured)}"
                 )
             progress = end
             _update_video_learn_job(

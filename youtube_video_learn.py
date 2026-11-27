@@ -30,6 +30,7 @@ import argparse
 import re
 import subprocess
 import sys
+from collections import deque
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -179,6 +180,54 @@ def generated_artifacts(
     return sorted(artifacts)
 
 
+# Lines that carry the real reason why a pipeline step failed.  Steps print
+# long progress logs ([transcript] ..., === script ===, Saved/Finished ...);
+# the failure detail is the few lines that explain the error.
+STEP_ERROR_LINE_HINTS = (
+    "error:",
+    "traceback (most recent call last)",
+    "exception",
+    "failed",
+    "blocked",
+    "no transcript",
+    "could not",
+    "refusing",
+    "invalid",
+    "timed out",
+    "timeout",
+    "connection",
+)
+
+
+def step_error_detail(lines, max_chars: int = 1600, max_lines: int = 24) -> str:
+    """Summarize captured step output into the lines that explain a failure.
+
+    Prefers lines that name the error (see STEP_ERROR_LINE_HINTS); when no
+    line matches, falls back to the tail of the output, which is where a
+    step prints its final error.  Used by youtube_video_learn.py's CLI and
+    by the chat server's background learn jobs so a failed learn reports
+    what actually happened instead of just the step's exit code.
+    """
+    cleaned = [line.rstrip() for line in lines if line and line.strip()]
+    if not cleaned:
+        return "  (the step produced no output)"
+
+    relevant = [
+        line
+        for line in cleaned
+        if any(hint in line.lower() for hint in STEP_ERROR_LINE_HINTS)
+    ]
+    if not relevant:
+        relevant = cleaned[-min(max_lines, len(cleaned)) :]
+
+    detail_lines = relevant[-max_lines:]
+    detail = "\n".join(f"  | {line}" for line in detail_lines)
+    if len(detail) > max_chars:
+        detail = detail[-max_chars:]
+        detail = detail[detail.index("\n") + 1 :] if "\n" in detail else detail
+    return detail
+
+
 def remove_generated_artifacts(
     youtube_video_hash: str, output_dir: Path = ARTICLES_DIR
 ) -> list[Path]:
@@ -230,18 +279,46 @@ def remove_generated_artifacts(
 
 
 def run_step(script: str, script_args: list[str], youtube_video_hash: str) -> None:
-    """Run a pipeline step, streaming its output; abort on failure."""
+    """Run a pipeline step, streaming its output; abort on failure.
+
+    The step's stdout and stderr are streamed through to the console as they
+    arrive (unchanged behavior) and kept in a bounded tail, so a failing
+    step exits with the detailed reason — which script failed, for which
+    video, the exit code, and the error lines the step itself printed —
+    instead of the script name and exit code only.
+    """
     path = SCRIPT_DIR / script
     argv = [arg.replace("<hash>", youtube_video_hash) for arg in script_args]
 
     print(f"\n=== {script} {' '.join(argv)} ===", flush=True)
-    result = subprocess.run(
+    process = subprocess.Popen(
         [sys.executable, str(path), *argv],
         cwd=SCRIPT_DIR,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
     )
+    tail: deque[str] = deque(maxlen=80)
+    assert process.stdout is not None
+    try:
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            if line.strip():
+                tail.append(line.rstrip("\n"))
+        returncode = process.wait()
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        raise
 
-    if result.returncode != 0:
-        sys.exit(f"{script} failed with exit code {result.returncode}")
+    if returncode != 0:
+        sys.exit(
+            f"{script} failed for video {youtube_video_hash} with exit code "
+            f"{returncode}. The step's own output explains why:\n"
+            f"{step_error_detail(tail)}"
+        )
 
 
 def main() -> None:
