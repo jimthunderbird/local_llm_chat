@@ -1,9 +1,30 @@
 question_bank_source: https://1600.now/bank
 pinesat_math_api: https://pinesat.duckdns.org/api/questions?section=MATH
-question_llm: ollama local model gpt-oss:20b
+question_llm: ollama local model qwen3.6:35b-a3b
 questions_cache_dir: {directory_of_this_prompt}/../.chat/sat
 
 command: /sat
+
+task (completed) {
+  currently the anser has something like:
+  $$ f(4) = \frac{4^2 - 4}{4 - 2} $$
+
+  please render them nicely!
+  fix in a systematic way
+}
+
+task.give_answer_only_after_analysis (completed) {
+  - do not give the answer right away, only give the answer after deep analysis
+  - highlight the correct answer at the end of the deep analysis
+}
+
+task (completed) {
+  update {question_llm}
+}
+
+task (completed) {
+  when providing the final answer to the question, omit the "correct_answer" key in the question json since it might not be correct, use the llm's answer as the single source of truth
+}
 
 task (completed) {
   update {question_llm}

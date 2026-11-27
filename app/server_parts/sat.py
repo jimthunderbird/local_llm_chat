@@ -20,7 +20,7 @@ SAT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0 Safari/537.36"
 )
-SAT_MODEL = "gpt-oss:20b"
+SAT_MODEL = "qwen3.6:35b-a3b"
 SAT_NUM_CTX = chat.ANSWER_NUM_CTX
 SAT_TOP_MATCHES = 5
 SAT_CONTEXT_BUDGET_CHARS = 24_000
@@ -45,15 +45,17 @@ SAT_STOPWORDS = {
     "new", "another", "different", "next", "again",
 }
 
-SAT_ANSWER_PROMPT = """You are an SAT math tutor using the official PineSAT question bank.
+SAT_ANSWER_PROMPT = """You are an SAT math tutor using the PineSAT question bank.
 
-Use the PineSAT math question-bank excerpts below when they are relevant.
+Use the PineSAT math question-bank excerpts below when they are relevant. The
+excerpts do not include official answers; solve every question yourself from
+the prompt and choices.
 Requirements:
-- If the student pasted or described an SAT math question, solve it step by step and state the correct answer clearly.
-- If a matching bank question has an official correct answer or rationale, use it and say why the answer is correct.
+- If the student pasted or described an SAT math question, solve it step by step. Do not lead with the final answer; put it at the end and highlight it.
+- Base your reasoning on the question text and choices.
 - Show the calculations clearly.
-- Do not invent an official bank answer. If the excerpts do not settle the question, give your best reasoning and say what is missing.
-- Mention the matching question ID(s) and that they come from PineSAT.
+- If the excerpts do not settle the question, give your best reasoning and say what is missing.
+- Mention the matching question ID(s) when useful.
 - Use Markdown and keep the explanation focused.
 
 <question_bank>
@@ -66,24 +68,36 @@ Answer:"""
 
 SAT_ANALYSIS_PROMPT = """You are a professional SAT math teacher.
 
-The student has just seen the official answer to an SAT math question. Write a
-focused Analysis that teaches the math concepts behind it and how to solve this
-type of problem on the SAT.
+Solve the SAT math question below yourself from the prompt and choices. No
+official answer is provided, so do not assume any bank answer is available or
+correct. Your own answer is the single source of truth.
+
+Do not reveal or state the answer at the beginning. Begin with a deep analysis
+of the question and only give the answer after that analysis is complete.
+
+Output format:
+### Analysis
+Write a deep Analysis that teaches the math concepts behind the question and
+how to solve this type of problem on the SAT.
 
 Requirements:
 - Explain the concept(s) or rule(s) being tested and why they apply here.
 - Walk through the solution logic step by step, including any formula or
   definition a student should remember.
 - Point out likely mistakes or traps for this question type.
-- End with a short, practical takeaway for future SAT math questions.
-- Do not change or dispute the official answer.
-- Use Markdown. Use LaTeX with $...$ for math when helpful.
-- Keep it clear and instructional, not a restatement of the official rationale.
+- Give a short, practical takeaway for future SAT math questions.
+
+### Correct answer
+After the analysis, end with exactly one highlighted line:
+**Correct answer: <choice letter>) <choice text>** (or the numeric answer)
+
+The correct-answer line must be the very last line of your response.
+Use Markdown. Use LaTeX with $...$ for math when helpful.
 """
 
 
 def sat_analysis_prompt(question: dict) -> str:
-    """Build the teacher-analysis prompt for one answered SAT question."""
+    """Build the solve-and-analyze prompt for one SAT question."""
     parts = [
         SAT_ANALYSIS_PROMPT,
         "",
@@ -103,18 +117,9 @@ def sat_analysis_prompt(question: dict) -> str:
                 f"{choice.get('id') or '?'}) {choice.get('text') or ''}"
             )
         parts.append("")
-    parts.extend(
-        [
-            f"Official answer: {question.get('answer') or '(not provided)'}",
-            "",
-            "Official rationale:",
-            str(
-                question.get("rationale")
-                or "(The bank did not provide a rationale.)"
-            ),
-            "",
-            "Write the Analysis now.",
-        ]
+    parts.append(
+        "Write the deep Analysis first, then give the highlighted correct "
+        "answer only at the very end."
     )
     return "\n".join(parts)
 
@@ -509,11 +514,6 @@ def _sat_format_question(question: dict) -> str:
             )
         if choice_lines:
             parts.append("Choices:\n" + "\n".join(choice_lines))
-    if question.get("correctAnswer") is not None:
-        parts.append(f"Official correct answer: {question.get('correctAnswer')}")
-    rationale = str(question.get("rationale") or "").strip()
-    if rationale:
-        parts.append(f"Official rationale: {rationale}")
     number = str(question.get("questionNumber") or "").strip()
     source_name, source_url = _sat_question_source(question)
     parts.append(
@@ -702,8 +702,8 @@ def _sat_question_answer(selected: dict) -> tuple[str, list[dict], dict]:
     lines.append("Source: " + (source_url or source_name))
     lines.append("")
     lines.append(
-        "Solve it when you are ready, then ask **show the answer** to reveal "
-        "the official answer and explanation."
+        "Solve it when you are ready, then ask **show the answer** to have "
+        "the local model solve and explain it."
     )
     sources = [
         {
@@ -817,7 +817,7 @@ def sat_domains() -> list[dict]:
 
 
 def sat_domain_question(domain: str, index: int = 0) -> dict | None:
-    """Return one question and its answer for a domain navigation request."""
+    """Return one question for a domain navigation request."""
     questions = _sat_domain_questions(domain)
     if not questions:
         return None
@@ -863,49 +863,39 @@ def sat_domain_question(domain: str, index: int = 0) -> dict | None:
                 or ""
             ),
             "choices": choices,
-            "answer": str(selected.get("correctAnswer") or ""),
-            "rationale": str(selected.get("rationale") or ""),
             "source": source_name,
             "source_url": source_url,
         },
     }
 
 
-def sat_reveal_answer(
-    question: str, pending: dict | None
-) -> tuple[str, list[dict]] | None:
-    """Reveal the official answer for the pending bank question."""
+def sat_reveal_prompt(question: str, pending: dict | None) -> str | None:
+    """Return the local-model solve-and-analyze prompt for a pending question."""
     if not pending or not _sat_is_reveal_request(question):
         return None
-    subject, domain, skill, stable_id = _sat_question_meta(pending)
-    source_name, source_url = _sat_question_source(pending)
-    lines = [f"## Official answer — {stable_id}", ""]
-    lines.append(
-        f"**Correct answer:** {pending.get('correctAnswer') or '(not provided)'}"
-    )
-    rationale = str(pending.get("rationale") or "").strip()
-    if rationale:
-        lines.append("")
-        lines.append(f"**Official rationale:** {rationale}")
-    else:
-        lines.append("")
-        lines.append(
-            f"The {source_name} bank does not include a written rationale for "
-            "this question; the official answer above is the bank answer."
-        )
-    number = str(pending.get("questionNumber") or "").strip()
-    lines.append("")
-    lines.append("Source: " + (source_url or source_name))
-    sources = [
+    _subject, domain, _skill, stable_id = _sat_question_meta(pending)
+    choices = [
+        {
+            "id": str(choice.get("id") or "?"),
+            "text": str(choice.get("text") or ""),
+        }
+        for choice in pending.get("choices") or []
+        if isinstance(choice, dict)
+    ]
+    return sat_analysis_prompt(
         {
             "stable_id": stable_id,
-            "subject": str(pending.get("subject") or ""),
-            "question_number": number,
-            "source": source_name,
-            "url": source_url,
+            "domain": domain,
+            "difficulty": str(pending.get("difficulty") or ""),
+            "prompt": str(
+                pending.get("prompt")
+                or pending.get("questionText")
+                or pending.get("text")
+                or ""
+            ),
+            "choices": choices,
         }
-    ]
-    return "\n".join(lines).strip() + "\n", sources
+    )
 
 
 def sat_topic_list_answer(question: str) -> tuple[str, list[dict]] | None:

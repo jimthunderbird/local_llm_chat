@@ -16,7 +16,7 @@ from .sat import (
     sat_is_next_question_request,
     sat_question_request_answer,
     sat_random_question_answer,
-    sat_reveal_answer,
+    sat_reveal_prompt,
     sat_topic_list_answer,
 )
 
@@ -134,17 +134,15 @@ class HandlerSatMixin:
                 "may take a few seconds…\n",
             )
         try:
-            reveal = sat_reveal_answer(
+            reveal_prompt = sat_reveal_prompt(
                 resolved, state.sat_pending_question
             )
-            if reveal is not None:
-                answer, sources = reveal
+            if reveal_prompt is not None:
                 self._sse_text(
                     "log",
-                    "[sat: revealing the official answer for the "
-                    "pending question]",
+                    "[sat: solving the pending question with the local model]",
                 )
-                self._sse_text("delta", answer)
+                answer = self._stream_sat_answer(reveal_prompt)
                 state.latest_answer = answer
                 state.latest_sources = []
                 state.latest_benchmark = None
@@ -261,7 +259,7 @@ class HandlerSatMixin:
         state.record_turn(question, resolved, answer)
 
     def _handle_sat_analysis(self, payload: dict) -> None:
-        """Stream a professional SAT math analysis for an answered question."""
+        """Stream the local model's answer and teacher analysis for a question."""
         domain = str(payload.get("domain") or "").strip()
         try:
             index = int(payload.get("index") or 0)

@@ -4537,6 +4537,14 @@
   .sat-analysis-model { color: var(--dimmer); font-size: 11px; }
   .sat-analysis-body p { margin: 0 0 6px; }
   .sat-analysis-body p:last-child { margin-bottom: 0; }
+  .sat-analysis-body .sat-correct-answer {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 3px 7px;
+    border-radius: 5px;
+    background: rgba(126, 231, 135, .14);
+    color: var(--accent);
+  }
   .sat-analysis-status { color: var(--dim); font-size: 12px; }
   .sat-analysis-error { color: var(--error); font-size: 12px; }
   .sat-loading, .sat-error { color: var(--dim); font-size: 12px; }
@@ -7253,7 +7261,7 @@ function appendInline(parent, text, clickable, highlight = false) {
   // Keep an escaped dollar (\$) as literal currency instead of treating it as
   // a math delimiter. The placeholder is restored by wordNodes().
   text = String(text || "").replace(/\\\$/g, ESCAPED_DOLLAR);
-  const inlineRe = /(`[^`\n]+`|\$\$?[^$\n]+\$\$?|\\\(.+?\\\)|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|_[^_\n]+_|\[[^\]\n]+\]\([^)\s]+\)|\b(?:https?:\/\/|www\.)[^\s<>"'`]+)/g;
+  const inlineRe = /(`[^`\n]+`|\$\$[^$\n]+\$\$|\\\[.+?\\\]|\\\(.+?\\\)|\$[^$\n]+\$|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|_[^_\n]+_|\[[^\]\n]+\]\([^)\s]+\)|\b(?:https?:\/\/|www\.)[^\s<>"'`]+)/g;
   let last = 0;
   let match;
   while ((match = inlineRe.exec(text)) !== null) {
@@ -7265,13 +7273,21 @@ function appendInline(parent, text, clickable, highlight = false) {
       const code = document.createElement("code");
       code.textContent = restoreEscapedDollars(token.slice(1, -1));
       parent.appendChild(code);
-    } else if (token.startsWith("$") || token.startsWith("\\(")) {
-      const wrapped = token.startsWith("$$");
-      const body = restoreEscapedDollars(token.startsWith("\\(")
-        ? token.slice(2, -2)
-        : token.slice(wrapped ? 2 : 1, wrapped ? -2 : -1));
-      if (looksLikeMath(body)) {
-        parent.appendChild(makeMathElement(body, false));
+    } else if (
+      token.startsWith("$")
+      || token.startsWith("\\(")
+      || token.startsWith("\\[")
+    ) {
+      const isDisplay = token.startsWith("$$") || token.startsWith("\\[");
+      const body = restoreEscapedDollars(
+        token.startsWith("\\(") || token.startsWith("\\[")
+          ? token.slice(2, -2)
+          : token.startsWith("$$")
+            ? token.slice(2, -2)
+            : token.slice(1, -1)
+      ).trim();
+      if (isDisplay || looksLikeMath(body)) {
+        parent.appendChild(makeMathElement(body, isDisplay));
       } else {
         parent.appendChild(wordNodes(token, clickable, highlight));
       }
@@ -12329,12 +12345,6 @@ function renderSat(entry) {
     for (const choice of question.choices) {
       const row = document.createElement("div");
       row.className = "sat-choice";
-      if (
-        data.answerVisible
-        && String(choice.id) === String(question.answer)
-      ) {
-        row.classList.add("correct");
-      }
       const id = document.createElement("span");
       id.className = "sat-choice-id";
       id.textContent = `${choice.id})`;
@@ -12381,65 +12391,59 @@ function renderSat(entry) {
   if (data.answerVisible) {
     const answer = document.createElement("div");
     answer.className = "sat-answer";
-    const title = document.createElement("div");
-    title.className = "sat-answer-title";
-    title.textContent = `Answer: ${question.answer || "(not provided)"}`;
-    answer.appendChild(title);
-    const rationale = document.createElement("div");
-    rationale.className = "sat-answer-rationale markdown";
-    rationale.appendChild(
-      renderMarkdown(
-        question.rationale
-          || "The PineSAT bank does not include a written rationale for this question.",
-        false
-      )
+    const box = document.createElement("div");
+    box.className = "sat-analysis";
+    const head = document.createElement("div");
+    head.className = "sat-analysis-head";
+    const title = document.createElement("strong");
+    title.className = "sat-analysis-title";
+    title.textContent = "Deep Analysis & Answer";
+    const model = document.createElement("span");
+    model.className = "sat-analysis-model";
+    model.textContent = displayModelName(
+      data.analysis_model || "qwen3.6:35b-a3b"
     );
-    answer.appendChild(rationale);
+    head.appendChild(title);
+    head.appendChild(model);
+    box.appendChild(head);
+
+    const analysis = entry.satAnalysis;
+    const current = analysis && analysis.key === satAnalysisKey(data);
+    if (current && analysis.error) {
+      const error = document.createElement("div");
+      error.className = "sat-analysis-error";
+      error.textContent = analysis.error;
+      box.appendChild(error);
+    } else if (current && analysis.text) {
+      const body = document.createElement("div");
+      body.className = "sat-analysis-body markdown";
+      const rendered = renderMarkdown(analysis.text, false);
+      const answerNodes = rendered.querySelectorAll(
+        "h1, h2, h3, h4, h5, h6, strong, p"
+      );
+      for (const node of answerNodes) {
+        if (/^\s*correct answer\s*:/i.test(node.textContent || "")) {
+          node.classList.add("sat-correct-answer");
+        }
+      }
+      body.appendChild(rendered);
+      box.appendChild(body);
+    }
+    if (!current || analysis.busy) {
+      const status = document.createElement("div");
+      status.className = "sat-analysis-status";
+      status.textContent = current && analysis.text
+        ? "Continuing answer and analysis…"
+        : "Solving the question with the local model…";
+      box.appendChild(status);
+    }
     if (question.source) {
       const source = document.createElement("div");
       source.className = "sat-meta";
       source.textContent = `Source: ${question.source}`;
-      answer.appendChild(source);
+      box.appendChild(source);
     }
-
-    const analysis = entry.satAnalysis;
-    if (analysis && analysis.key === satAnalysisKey(data)) {
-      const box = document.createElement("div");
-      box.className = "sat-analysis";
-      const head = document.createElement("div");
-      head.className = "sat-analysis-head";
-      const title = document.createElement("strong");
-      title.className = "sat-analysis-title";
-      title.textContent = "Analysis";
-      const model = document.createElement("span");
-      model.className = "sat-analysis-model";
-      model.textContent = displayModelName(
-        data.analysis_model || "gpt-oss:20b"
-      );
-      head.appendChild(title);
-      head.appendChild(model);
-      box.appendChild(head);
-      if (analysis.error) {
-        const error = document.createElement("div");
-        error.className = "sat-analysis-error";
-        error.textContent = analysis.error;
-        box.appendChild(error);
-      } else if (analysis.text) {
-        const body = document.createElement("div");
-        body.className = "sat-analysis-body markdown";
-        body.appendChild(renderMarkdown(analysis.text, false));
-        box.appendChild(body);
-      }
-      if (analysis.busy) {
-        const status = document.createElement("div");
-        status.className = "sat-analysis-status";
-        status.textContent = analysis.text
-          ? "Continuing analysis…"
-          : "Preparing a teacher analysis…";
-        box.appendChild(status);
-      }
-      answer.appendChild(box);
-    }
+    answer.appendChild(box);
     container.appendChild(answer);
   }
 }
