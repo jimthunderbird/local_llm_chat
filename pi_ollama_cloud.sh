@@ -12,4 +12,4 @@ fi
 
 export OLLAMA_DEBUG=1
 export OLLAMA_CLOUD_API_KEY
-pi --model deepseek-v4.1-flash "run init.prompt"
+pi --model glm-5.3-flash "run init.prompt"
