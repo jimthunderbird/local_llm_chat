@@ -3,6 +3,12 @@ question_llm: ollama local model ornith-1.5:35b
 
 command: /sat_1600
 
+task.bug.math_topics {
+  the {question_bank_source} does contain a lot of math related topics, but when i ask question:
+  "show me a list of topics in math"
+  i got "I don't have a list of math topics to show you,..."
+}
+
 task (completed) {
   create command {command} {
     - if the command is typed, it will clear the existing chat context and use {question_bank_source} together with {question_llm} to help get the answer
