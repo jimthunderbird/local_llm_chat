@@ -13210,6 +13210,7 @@ function addBookLibraryEvent(entry, data) {
       url: String(data.url || ""),
       size: Number(data.size) || 0,
       modified: String(data.modified || ""),
+      lastOpened: String(data.last_opened || ""),
       pdf: section === "manning"
         ? false
         : Boolean(data.pdf || entry.bookLibraryPdf),
@@ -13252,7 +13253,8 @@ function renderDownloadedPdfCard(item) {
   const meta = document.createElement("div");
   meta.className = "book-authors";
   const metaParts = [];
-  if (item.modified) metaParts.push(`Saved ${item.modified}`);
+  if (item.lastOpened) metaParts.push(`Opened ${item.lastOpened}`);
+  else if (item.modified) metaParts.push(`Saved ${item.modified}`);
   metaParts.push(formatBookLibrarySize(item.size));
   meta.textContent = metaParts.join(" · ");
   card.appendChild(meta);
@@ -13536,7 +13538,8 @@ function renderBookLibrary(entry) {
     const meta = document.createElement("div");
     meta.className = "book-authors";
     const metaParts = [];
-    if (item.modified) metaParts.push(`Saved ${item.modified}`);
+    if (item.lastOpened) metaParts.push(`Opened ${item.lastOpened}`);
+    else if (item.modified) metaParts.push(`Saved ${item.modified}`);
     metaParts.push(formatBookLibrarySize(item.size));
     meta.textContent = metaParts.join(" · ");
     card.appendChild(meta);

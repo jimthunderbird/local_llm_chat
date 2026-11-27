@@ -549,6 +549,8 @@ class HandlerBooksMixin:
                     "url": entry["url"],
                     "size": entry["size"],
                     "modified": entry["modified"],
+                    "last_open": entry.get("last_open", 0.0),
+                    "last_opened": entry.get("last_opened", ""),
                     "pdf": True,
                 },
             )

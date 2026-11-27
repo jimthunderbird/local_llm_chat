@@ -2,6 +2,10 @@ pdf_books_dir: {directory_of_this_prompt}/../.chat/pdf_books
 pdf_books_trunks_dir: {directory_of_this_prompt}/../.chat/pdf_books/trunks
 pdf_books_chathistory_dir: {directory_of_this_prompt}/../.chat/pdf_books/chat_history
 
+task.sort_books_by_last_open_time (completed) {
+  after typing the /pdf_books command, the list of books should be sorted by the book pdf file's last open time, in descending order
+}
+
 task.navigate_question_history_with_arrows (completed) {
   when the question history column get focus, allow using up and down arrows to navigate the question history
   up arrow: go to the newer question

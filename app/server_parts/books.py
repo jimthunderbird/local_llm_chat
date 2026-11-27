@@ -16,6 +16,8 @@ WRITE_A_BOOK_MODEL = os.environ.get(
 WRITE_A_BOOK_DIR = SCRIPT_DIR / ".chat" / "books"
 
 PDF_BOOKS_DIR = SCRIPT_DIR / ".chat" / "pdf_books"
+PDF_BOOKS_LAST_OPEN_PATH = PDF_BOOKS_DIR / "last_open.json"
+_PDF_LAST_OPEN_LOCK = threading.Lock()
 
 # task.more_horizontal_exploration in prompts/write_a_book.prompt asks for
 # ten distinct research questions instead of six. task.refactor asks each of
@@ -377,10 +379,52 @@ def _pdf_book_title(name: str) -> str:
     stem = re.sub(r"[_-]+", " ", Path(name).stem)
     return " ".join(stem.split()) or Path(name).stem
 
+def _load_pdf_last_open() -> dict[str, float]:
+    """Read the persisted PDF last-open timestamps, tolerating bad files."""
+    try:
+        raw = json.loads(PDF_BOOKS_LAST_OPEN_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, float] = {}
+    for name, value in raw.items():
+        try:
+            result[str(name)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def record_pdf_open(name: str) -> None:
+    """Record that one PDF was opened in the reader."""
+    path = pdf_book_path(name)
+    if path is None:
+        return
+    with _PDF_LAST_OPEN_LOCK:
+        mapping = _load_pdf_last_open()
+        mapping[path.name] = time.time()
+        try:
+            PDF_BOOKS_LAST_OPEN_PATH.parent.mkdir(
+                parents=True, exist_ok=True
+            )
+            temporary = PDF_BOOKS_LAST_OPEN_PATH.with_name(
+                PDF_BOOKS_LAST_OPEN_PATH.name + ".tmp"
+            )
+            temporary.write_text(
+                json.dumps(mapping, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(PDF_BOOKS_LAST_OPEN_PATH)
+        except OSError:
+            pass
+
+
 def list_pdf_books() -> list[dict]:
-    """List every PDF in .chat/pdf_books, newest first."""
+    """List every PDF in .chat/pdf_books by last open time, newest first."""
     if not PDF_BOOKS_DIR.is_dir():
         return []
+    last_open_map = _load_pdf_last_open()
     entries: list[dict] = []
     for path in PDF_BOOKS_DIR.iterdir():
         try:
@@ -390,6 +434,7 @@ def list_pdf_books() -> list[dict]:
         except OSError:
             continue
         name = path.name
+        last_open = last_open_map.get(name, 0.0)
         entries.append(
             {
                 "id": name,
@@ -401,9 +446,20 @@ def list_pdf_books() -> list[dict]:
                 "modified": time.strftime(
                     "%Y-%m-%d %H:%M", time.localtime(stat.st_mtime)
                 ),
+                "last_open": last_open,
+                "last_opened": (
+                    time.strftime(
+                        "%Y-%m-%d %H:%M", time.localtime(last_open)
+                    )
+                    if last_open
+                    else ""
+                ),
             }
         )
-    entries.sort(key=lambda item: item["mtime"], reverse=True)
+    entries.sort(
+        key=lambda item: (item["last_open"] or item["mtime"], item["mtime"]),
+        reverse=True,
+    )
     return entries
 
 MANNING_FREE_EBOOKS_URL = "https://www.manning.com/free-ebooks"
@@ -1922,6 +1978,7 @@ def read_pdf_book_page(name: str, page: int) -> dict:
     path = pdf_book_path(name)
     if path is None or not path.is_file():
         raise ValueError("PDF book not found")
+    record_pdf_open(path.name)
     reader, count = _pdf_book_reader(path)
     if count <= 0:
         raise RuntimeError("The PDF has no pages")
