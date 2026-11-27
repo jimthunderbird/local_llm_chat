@@ -1,5 +1,14 @@
 pdf_books_dir: {directory_of_this_prompt}/../.chat/pdf_books
 pdf_books_trunks_dir: {directory_of_this_prompt}/../.chat/pdf_books/trunks
+pdf_books_chathistory_dir: {directory_of_this_prompt}/../.chat/pdf_books/chat_history
+
+task.pdf_book_chat_history {
+  - for each question asked in the chat on a particular pdf book, we need to keep track of the question history, the history should be a json file containing the question and answer
+  question: <the question text>
+  answer: <the answer key>
+  - in the left cloumn of the chat modal, show list of questions that are asked in time descending order
+    when clicking on each question, load the answer from the question/answer json file directly
+}
 
 task (completed) {
   in the pdf book loader, add "Learn" and "Chat" feature, similar to how the youtube video transcript
