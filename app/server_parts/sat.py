@@ -20,7 +20,7 @@ SAT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0 Safari/537.36"
 )
-SAT_MODEL = "qwen3.6:35b-a3b"
+SAT_MODEL = "flint:40b"
 SAT_NUM_CTX = chat.ANSWER_NUM_CTX
 SAT_TOP_MATCHES = 5
 SAT_CONTEXT_BUDGET_CHARS = 24_000
