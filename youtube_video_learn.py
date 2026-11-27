@@ -6,6 +6,11 @@ Usage:
     python3 youtube_video_learn.py --relearn <youtube_video_hash>
     python3 youtube_video_learn.py https://www.youtube.com/watch?v=T594Cg4sTq4
     python3 youtube_video_learn.py https://youtu.be/T594Cg4sTq4?t=227
+    python3 youtube_video_learn.py <url1> <url2> ...
+
+One or more videos may be given at once.  IDs and URLs may also be glued
+together in a single argument (for example when two links are pasted
+without a separator); every video ID found is learned in order.
 
 Runs, in order:
     1. fetch_youtube_transcript.py
@@ -97,6 +102,47 @@ def extract_video_hash(value: str) -> str:
     raise ValueError(
         f"Could not extract a YouTube video ID from {value!r}. "
         "Expected an 11-character ID or a YouTube URL."
+    )
+
+
+# URL contexts that contain a video ID.  Used to pull every ID out of a
+# mangled or multi-URL argument, such as two watch links pasted together
+# as one string (watch?v=IDhttps://www.youtube.com/watch?v=ID).
+URL_ID_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"[?&]v=([A-Za-z0-9_-]{11})",
+        r"youtu\.be/([A-Za-z0-9_-]{11})",
+        r"/(?:shorts|embed|live|v)/([A-Za-z0-9_-]{11})",
+    )
+)
+
+
+def extract_video_hashes(value: str) -> list[str]:
+    """Extract every YouTube video ID contained in the argument.
+
+    A single ID or URL yields a one-element list.  When that fails (for
+    example several watch URLs pasted as one string), the whole argument
+    is scanned for known YouTube URL contexts and every ID is returned in
+    the order it appears.
+    """
+    try:
+        return [extract_video_hash(value)]
+    except ValueError:
+        pass
+
+    hashes: list[str] = []
+    for pattern in URL_ID_PATTERNS:
+        for match in pattern.finditer(value):
+            video_hash = match.group(1)
+            if video_hash not in hashes:
+                hashes.append(video_hash)
+    if hashes:
+        return hashes
+
+    raise ValueError(
+        f"Could not extract any YouTube video ID from {value!r}. "
+        "Expected 11-character IDs or YouTube URLs."
     )
 
 
@@ -204,7 +250,10 @@ def main() -> None:
     )
     parser.add_argument(
         "youtube_video_hash",
-        help="YouTube video ID or URL, e.g. FTwxtyOEGyM or https://youtu.be/FTwxtyOEGyM",
+        nargs="+",
+        help="one or more YouTube video IDs and/or URLs, e.g. FTwxtyOEGyM "
+        "or https://youtu.be/FTwxtyOEGyM; multiple arguments, or several "
+        "URLs glued together in one argument, are all learned in order",
     )
     parser.add_argument(
         "--relearn",
@@ -215,23 +264,32 @@ def main() -> None:
     args = parser.parse_args(normalize_argv(sys.argv[1:]))
 
     try:
-        youtube_video_hash = extract_video_hash(args.youtube_video_hash)
+        hashes: list[str] = []
+        for argument in args.youtube_video_hash:
+            for video_hash in extract_video_hashes(argument):
+                if video_hash not in hashes:
+                    hashes.append(video_hash)
     except ValueError as exc:
         sys.exit(str(exc))
 
-    print(f"Video ID: {youtube_video_hash}")
+    print(
+        f"Video ID(s): {', '.join(hashes)}"
+        if len(hashes) > 1
+        else f"Video ID: {hashes[0]}"
+    )
 
-    if args.relearn:
-        removed = remove_generated_artifacts(youtube_video_hash)
-        print(
-            f"Relearn: removed {len(removed)} generated file(s); "
-            "the transcript is unchanged."
-        )
+    for youtube_video_hash in hashes:
+        if args.relearn:
+            removed = remove_generated_artifacts(youtube_video_hash)
+            print(
+                f"Relearn: removed {len(removed)} generated file(s); "
+                "the transcript is unchanged."
+            )
 
-    for script, script_args in steps_for(args.relearn):
-        run_step(script, script_args, youtube_video_hash)
+        for script, script_args in steps_for(args.relearn):
+            run_step(script, script_args, youtube_video_hash)
 
-    print(f"\nDone: {youtube_video_hash} is ready for chat.py")
+        print(f"\nDone: {youtube_video_hash} is ready for chat.py")
 
 
 if __name__ == "__main__":

@@ -13,7 +13,11 @@ Transcript providers, tried in order:
     1. youtube-transcript-api (fast when YouTube is not blocking this IP)
     2. yt-dlp (works through different player clients, so it still succeeds
        when the transcript API is IP-blocked)
-    3. An original-language caption track translated to English with the
+    3. A third-party transcript site (youtubetotranscript.com) fetched
+       server-side through the Ollama Cloud web-fetch API. The site downloads
+       the captions from YouTube on its own network, so this works even when
+       every direct YouTube request from this IP is blocked (HTTP 429).
+    4. An original-language caption track translated to English with the
        local Ollama model. This handles videos whose only English option is
        a YouTube translated track (for example en-zh) that YouTube refuses to
        serve.
@@ -25,6 +29,10 @@ Optional environment variables:
     YT_COOKIES_FROM_BROWSER   e.g. "chrome" for the yt-dlp fallback
     YT_COOKIES_FILE           path to a Netscape cookies.txt for yt-dlp
     OLLAMA_YOUTUBE_MODEL      title-summary model (default: ornith-1.5:35b)
+    OLLAMA_CLOUD_API_KEY      Ollama key enabling the third-party-site
+                              fallback (OLLAMA_API_KEY also accepted)
+    OLLAMA_WEB_FETCH_URL      web-fetch endpoint (default:
+                              https://ollama.com/api/web_fetch)
 """
 
 import argparse
@@ -557,6 +565,91 @@ def _fetch_with_ytdlp(video_id: str) -> str:
     return _fetch_with_ytdlp_languages(video_id, "en.*")
 
 
+# Third-party transcript fallback.  This site renders a plain-text
+# transcript for any publicly available YouTube video.  It is fetched
+# server-side through Ollama's cloud web-fetch endpoint, so YouTube's
+# rate limit/block on a local IP does not apply.
+TRANSCRIPT_SITE_URL = "https://youtubetotranscript.com/transcript?v={video_id}"
+OLLAMA_WEB_FETCH_URL = os.environ.get(
+    "OLLAMA_WEB_FETCH_URL", "https://ollama.com/api/web_fetch"
+).rstrip("/")
+OLLAMA_WEB_FETCH_TIMEOUT = 180
+
+
+def _ollama_cloud_key() -> str | None:
+    """Return the Ollama API key used for server-side web fetching, if any."""
+    return (
+        os.environ.get("OLLAMA_CLOUD_API_KEY")
+        or os.environ.get("OLLAMA_API_KEY")
+        or None
+    )
+
+
+def _parse_transcript_site_page(content: str) -> str | None:
+    """Extract the transcript body from a youtubetotranscript.com page.
+
+    The page is markdown with a "## Transcript" heading followed by the
+    caption paragraphs, then an "## AI Features" section of site chrome
+    that must be trimmed.  Returns None when the page carries no
+    transcript (for example a video without captions).
+    """
+    text = str(content or "")
+    lowered = text.lower()
+    if "just a moment" in lowered or "performing security verification" in lowered:
+        raise RuntimeError(
+            "third-party transcript site returned a bot-check page"
+        )
+    if "## transcript" not in lowered:
+        return None
+    body = text[lowered.index("## transcript") + len("## transcript") :]
+    for marker in ("## AI Features", "Links found:"):
+        index = body.find(marker)
+        if index >= 0:
+            body = body[:index]
+    transcript = " ".join(body.split()).strip()
+    # A page with the heading but no caption body means the video has no
+    # captions; a very short body means the scrape caught a partial page.
+    if len(transcript) < 40:
+        return None
+    return transcript
+
+
+def _fetch_with_transcript_site(video_id: str) -> str:
+    """Fetch captions through a third-party site via Ollama's web fetch.
+
+    Ollama downloads the page on its own infrastructure, so this succeeds
+    even when YouTube blocks direct requests from this IP.
+    """
+    if requests is None:
+        raise RuntimeError("requests is not installed")
+    key = _ollama_cloud_key()
+    if not key:
+        raise RuntimeError(
+            "third-party site fallback needs OLLAMA_CLOUD_API_KEY "
+            "(or OLLAMA_API_KEY) to be set"
+        )
+    try:
+        response = requests.post(
+            OLLAMA_WEB_FETCH_URL,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json={"url": TRANSCRIPT_SITE_URL.format(video_id=video_id)},
+            timeout=OLLAMA_WEB_FETCH_TIMEOUT,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Ollama web fetch failed: {exc}") from exc
+    content = str(response.json().get("content") or "")
+    transcript = _parse_transcript_site_page(content)
+    if transcript is None:
+        raise RuntimeError(
+            f"third-party transcript site served no transcript for {video_id}"
+        )
+    return transcript.strip()
+
+
 def _fetch_with_ytdlp_any(video_id: str) -> tuple[str, str, str]:
     """Fetch an original-language transcript when English is unavailable."""
     languages = _ytdlp_original_languages(video_id)
@@ -658,6 +751,23 @@ def fetch_transcript(video_id: str, use_cache: bool = True) -> str:
         _log(f"yt-dlp English failed ({_short_error(exc, 240)})")
 
     try:
+        text = _fetch_with_transcript_site(video_id)
+        if _looks_non_english(text):
+            _log(
+                "third-party transcript site returned a non-English "
+                "transcript; translating it to English"
+            )
+            return _translate_transcript(text, "third-party site")
+        _log("fetched English transcript via third-party site (ollama)")
+        return text
+    except Exception as exc:
+        errors.append(f"third-party site: {_short_error(exc, 360)}")
+        _log(
+            "third-party transcript site failed "
+            f"({_short_error(exc, 240)})"
+        )
+
+    try:
         text, language_code, language_name = _fetch_with_ytdlp_any(
             video_id
         )
@@ -685,11 +795,14 @@ def fetch_transcript(video_id: str, use_cache: bool = True) -> str:
 
     raise RuntimeError(
         f"Could not fetch an English transcript for {video_id}. The "
-        "pipeline also tried translating the original-language transcript "
-        f"with the local {MODEL} model. YouTube may be blocking this "
-        "network; set YT_PROXY_URL (or "
+        "pipeline tried youtube-transcript-api, yt-dlp (multiple player "
+        "clients), the third-party transcript site through Ollama's "
+        "server-side web fetch, and translating the original-language "
+        f"transcript with the local {MODEL} model. YouTube may be blocking "
+        "this network; set YT_PROXY_URL (or "
         "WEBSHARE_PROXY_USERNAME/WEBSHARE_PROXY_PASSWORD), or "
-        "YT_COOKIES_FROM_BROWSER=chrome as a last resort, then retry. "
+        "YT_COOKIES_FROM_BROWSER=chrome, or make sure OLLAMA_CLOUD_API_KEY "
+        "is set for the third-party-site fallback, then retry. "
         f"Details: {'; '.join(errors)}"
     )
 
