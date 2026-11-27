@@ -3,7 +3,52 @@ question_llm: ollama local model ornith-1.5:35b
 
 command: /sat_1600
 
-task.bug.math_topics {
+task.shrink_figure_more (completed) {
+  reference task.shrink_figure {
+    please shrink the figure from {question_bank_source} by 50%
+  }
+}
+
+task.shrink_figure (completed) {
+  please shrink the figure from {question_bank_source} by 20%
+}
+
+task.bug.new_question (completed) {
+  question: show me a new question on trigonometry, do not show me the answer yet
+  expect: there should be a new question on trigonometry
+  actual: unrelated question show up
+  please fix it in a systematic way
+}
+
+task.bug.fuzzy_matching (completed) {
+  question: show me a question on trignometry and geometry, do not show me the answer yet
+  this is working as expected
+
+  question: show me a question on trignometry, do not show me the answer yet
+  expect: it should show one question from question on trignometry
+  actual: no question from the question bank found
+
+  please fix it in a systematic way
+}
+
+task.bug (completed) {
+  question: show me a question on trignometry, do not show me the answer yet
+  expect: there are plenty of questions on trignometry and geometry, we should see one
+  actual: I don't have a trigonometry question in the excerpted material, so I can't pull one directly from the bank.
+}
+
+task.trigonometry_figures.missing (completed) {
+  reference task.trigonometry_figures:
+  - the figure image is still missing
+}
+
+task.trigonometry_figures (completed) {
+  question: In the figure, AC=CD. The measure of angle EBC is 45∘, and the measure of angle ACD is 104∘. What is the value of x?
+
+  it is missing the figure, please draw the figure, or if possible, extract the figure from {question_bank_source}
+}
+
+task.bug.math_topics (completed) {
   the {question_bank_source} does contain a lot of math related topics, but when i ask question:
   "show me a list of topics in math"
   i got "I don't have a list of math topics to show you,..."

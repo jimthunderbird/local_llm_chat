@@ -76,6 +76,11 @@ class ChatState:
         self.moonbit_mode = False
         # /sat_1600 answers SAT questions using the 1600.now question bank.
         self.sat1600_mode = False
+        # A question shown without its answer can be revealed on a follow-up.
+        self.sat1600_pending_question: dict | None = None
+        # Recently presented question IDs, so "show me a new question"
+        # returns a different bank question.
+        self.sat1600_recent_question_ids: list[str] = []
         self.conversation: list[dict] = []
         self.conversation_summary: str = ""
         self.conversation_summary_turns: int = 0
