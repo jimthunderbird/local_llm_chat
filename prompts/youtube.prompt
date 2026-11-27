@@ -1,3 +1,10 @@
+task.third_party_ip (completed) {
+  - in {directory_of_this_prompt}/../fetch_youtube_transcript.py:
+    - do not use youtube-transcript-api
+    - do not use yt-dlp
+    - focus on using A third-party transcript site (youtubetotranscript.com)
+}
+
 task.support_multi_language_transcript_download (completed) {
   I want to use youtube_video_learn.py to learn the english transcript of this video but it does not work:
   https://www.youtube.com/watch?v=eAuansMuUwQ

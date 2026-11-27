@@ -1073,14 +1073,14 @@ class HandlerCommandsCMixin:
                     "url": url,
                 },
             )
-            # Import lazily so a missing youtube-transcript-api dependency
-            # only breaks this endpoint, not the whole chat server.
+            # Import lazily so a missing requests dependency only breaks
+            # this endpoint, not the whole chat server.
             try:
                 import fetch_youtube_transcript as transcript_module
             except ImportError as exc:
                 raise RuntimeError(
-                    "youtube-transcript-api is required for video summaries "
-                    f"({exc})"
+                    "the third-party transcript module is required for video "
+                    f"summaries ({exc})"
                 ) from exc
 
             transcript = transcript_module.fetch_transcript(video_id)
