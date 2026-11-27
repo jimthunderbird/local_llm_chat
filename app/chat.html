@@ -13236,6 +13236,36 @@ function addBookLibraryEvent(entry, data) {
   }
 }
 
+function formatPdfLibraryOpenTime(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+    + `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function refreshPdfBookLibraryOrder(pdfName) {
+  const name = String(pdfName || "").trim();
+  if (!name) return;
+  const opened = formatPdfLibraryOpenTime();
+  for (const el of outputEl.querySelectorAll(".entry")) {
+    const entry = el._chatEntry;
+    if (!entry || !Array.isArray(entry.bookLibraryItems)) continue;
+    const index = entry.bookLibraryItems.findIndex((item) => (
+      String(item?.name || "") === name
+      && String(item?.section || "downloaded") === "downloaded"
+    ));
+    if (index < 0) continue;
+    const item = entry.bookLibraryItems[index];
+    item.lastOpened = opened;
+    entry.bookLibraryItems.splice(index, 1);
+    let insertAt = entry.bookLibraryItems.findIndex((candidate) => (
+      String(candidate?.section || "downloaded") === "downloaded"
+    ));
+    if (insertAt < 0) insertAt = 0;
+    entry.bookLibraryItems.splice(insertAt, 0, item);
+    renderBookLibrary(entry);
+  }
+}
+
 function renderDownloadedPdfCard(item) {
   const card = document.createElement("a");
   card.className = "book-card";
@@ -19825,6 +19855,8 @@ function openNewsStory(newsId, fallbackUrl = "", fallbackTitle = "") {
 }
 
 function closeNewsModal() {
+  const closingPdfName = newsItem?.pdf ? newsItem.pdfName : "";
+  if (closingPdfName) refreshPdfBookLibraryOrder(closingPdfName);
   closeChatModal();
   if (newsModalStack.length) {
     const previous = newsModalStack.pop();

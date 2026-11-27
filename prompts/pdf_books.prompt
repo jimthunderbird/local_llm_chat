@@ -2,6 +2,10 @@ pdf_books_dir: {directory_of_this_prompt}/../.chat/pdf_books
 pdf_books_trunks_dir: {directory_of_this_prompt}/../.chat/pdf_books/trunks
 pdf_books_chathistory_dir: {directory_of_this_prompt}/../.chat/pdf_books/chat_history
 
+task (completed) {
+  after clicking open a book and close it, the book listing view in /pdf_books should reflect the new sorting since the book that's just closed has the latest open time, so it should show up as the first book in the list
+}
+
 task.sort_books_by_last_open_time (completed) {
   after typing the /pdf_books command, the list of books should be sorted by the book pdf file's last open time, in descending order
 }
