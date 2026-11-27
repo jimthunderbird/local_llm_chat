@@ -1,4 +1,11 @@
 pdf_books_dir: {directory_of_this_prompt}/../.chat/pdf_books
+pdf_books_trunks_dir: {directory_of_this_prompt}/../.chat/pdf_books/trunks
+
+task (completed) {
+  in the pdf book loader, add "Learn" and "Chat" feature, similar to how the youtube video transcript
+  - note that we do not have a large context in our local llm, we will need to use iterative way to load related trunks and answer the question
+  - all the trunks should be stored in {pdf_books_trunks_dir}
+}
 
 task (completed) {
   - remove animated flip through effects

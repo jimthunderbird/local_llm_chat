@@ -952,7 +952,11 @@ class HandlerAskMixin:
                         prompt_prefix = (
                             YOUTUBE_ITERATIVE_PROMPT_PREFIX + prompt_prefix
                         )
-                    elif state.news_id is not None or state.transcript is not None:
+                    elif (
+                        state.news_id is not None
+                        or state.transcript is not None
+                        or state.pdf_name is not None
+                    ):
                         # The scoped corpus is small and there is no BM25
                         # match. Answer from its reading-order text rather
                         # than ending the stream with no message at all.
@@ -1070,9 +1074,13 @@ class HandlerAskMixin:
             f"article {state.article_path!r}"
             if article_mode
             else (
-                f"transcript {state.transcript!r}"
-                if state.transcript is not None
-                else "global corpus"
+                f"PDF book {state.pdf_name!r}"
+                if state.pdf_name is not None
+                else (
+                    f"transcript {state.transcript!r}"
+                    if state.transcript is not None
+                    else "global corpus"
+                )
             )
         )
         documentation_language = (

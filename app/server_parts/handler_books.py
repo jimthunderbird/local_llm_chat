@@ -598,8 +598,111 @@ class HandlerBooksMixin:
                 + f"Add PDFs to {PDF_BOOKS_DIR}.\n",
             )
 
+    # ---- PDF Learn / Chat ---------------------------------------------
+    def _handle_pdf_learn(self, name: str) -> None:
+        """Split one PDF into trunks and stream learning progress."""
+        self._begin_sse()
+        try:
+            info = pdf_book_page_info(name)
+            total = int(info["pages"])
+            self._sse(
+                "start",
+                {
+                    "name": info["name"],
+                    "title": info["title"],
+                    "pages": total,
+                },
+            )
+
+            def progress(page: int, pages: int, paragraphs: int) -> None:
+                percent = round(100.0 * page / max(1, pages), 1)
+                self._sse(
+                    "progress",
+                    {
+                        "page": page,
+                        "pages": pages,
+                        "paragraphs": paragraphs,
+                        "percent": percent,
+                    },
+                )
+
+            meta = learn_pdf_book(name, progress=progress)
+            self._sse(
+                "done",
+                {
+                    "id": meta["id"],
+                    "name": meta["name"],
+                    "title": meta["title"],
+                    "pages": meta["pages"],
+                    "paragraphs": meta["paragraphs"],
+                    "learned": True,
+                },
+            )
+        except ClientDisconnected:
+            pass
+        except Exception as exc:
+            try:
+                self._sse("error", {"message": f"PDF learning failed: {exc}"})
+                self._sse("done", {})
+            except ClientDisconnected:
+                pass
+
+    def _handle_pdf_chat(
+        self, name: str, question: str, reset: bool = False
+    ) -> None:
+        """Stream an answer from one learned PDF book inside its modal."""
+        try:
+            session = get_pdf_chat_state(name)
+        except (RuntimeError, ValueError) as exc:
+            self._begin_sse()
+            try:
+                self._sse("error", {"message": str(exc)})
+                self._sse("done", {})
+            except ClientDisconnected:
+                pass
+            return
+
+        previous_state = self.state
+        self.state = session
+        try:
+            with session.lock:
+                if reset:
+                    session.reset_conversation()
+                    session.cache.clear()
+                    session.latest_answer = None
+                    session.latest_sources = []
+                    session.latest_benchmark = None
+                self._begin_sse()
+                try:
+                    self._sse("meta", session.snapshot())
+                    self._run_question(question)
+                    self._sse(
+                        "done",
+                        {
+                            "state": session.snapshot(),
+                            "benchmark": (
+                                chat.format_benchmark_line(
+                                    session.latest_benchmark
+                                )
+                                if session.latest_benchmark is not None
+                                else ""
+                            ),
+                        },
+                    )
+                except ClientDisconnected:
+                    pass
+                except Exception as exc:
+                    try:
+                        self._sse("error", {"message": str(exc)})
+                        self._sse("done", {"state": session.snapshot()})
+                    except ClientDisconnected:
+                        pass
+        finally:
+            self.state = previous_state
+
 
 # Cross-component imports are placed after the definitions so a
 # feature module can depend on another feature module safely.
 from .books import PDF_BOOKS_DIR, WRITE_A_BOOK_ARTICLE_TIMEOUT_SECONDS, WRITE_A_BOOK_CHAPTER_PROMPT, WRITE_A_BOOK_DIGEST_CHARS, WRITE_A_BOOK_DIR, WRITE_A_BOOK_EVIDENCE_CHARS, WRITE_A_BOOK_KEYWORD_PROMPT, WRITE_A_BOOK_OUTLINE_PROMPT, WRITE_A_BOOK_REFERENCE_MAP_CHARS, WRITE_A_BOOK_RESEARCH_BUDGET_SECONDS, WRITE_A_BOOK_RESEARCH_WORKERS, WRITE_A_BOOK_SEARCH_TIMEOUT_SECONDS, _book_chapter_evidence, _book_chapter_titles, _book_filename, _book_html_document, _book_keyword_list, _book_limit_words, _book_load_source, _book_reference_map, _book_search_candidates, _book_source_digest, _book_strip_chapter_heading, _parse_write_a_book_options, _resolve_book_directory, list_manning_free_ebooks, list_pdf_books, list_written_books
+from .pdfbook import get_pdf_chat_state, learn_pdf_book, pdf_book_page_info
 from .retrieval import ClientDisconnected

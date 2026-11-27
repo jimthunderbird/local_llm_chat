@@ -19,6 +19,7 @@ The split follows the feature requirements in `prompts/*.prompt`:
 | `zillow.py` | Zillow MCP nearby listings | `zillow.prompt` |
 | `podcast.py` | `/ai_news_podcast` planning | `ai_cohosted_podcast.prompt` |
 | `books.py` | `/write_a_book`, PDF books, Manning ebooks, PDF graphs | `write_a_book.prompt`, `pdf_books.prompt` |
+| `pdfbook.py` | PDF book trunk learning and scoped chat sessions | `pdf_books.prompt` |
 | `retrieval.py` | Corpus loading, news/article learning, chunk helpers | `chat_common.prompt`, `news.prompt` |
 | `tts.py` | Local text-to-speech cache and engines | `news.prompt` |
 | `stackoverflow.py` | Stack Overflow search and answers | `stackoverflow.prompt` |

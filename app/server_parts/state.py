@@ -24,6 +24,7 @@ class ChatState:
         self.transcript: str | None = None
         # Set on an isolated in-modal session for one learned news story.
         self.news_id: str | None = None
+        self.pdf_name: str | None = None
         self.article_path: str | None = None
         self.article_title: str = ""
         self.article_structure: dict | None = None
@@ -330,15 +331,20 @@ class ChatState:
                 f"news {self.news_id!r}"
                 if self.news_id is not None
                 else (
-                    f"article {self.article_path!r}"
-                    if self.article_path is not None
+                    f"PDF book {self.pdf_name!r}"
+                    if self.pdf_name is not None
                     else (
-                        f"transcript {self.transcript!r}"
-                        if self.transcript is not None
-                        else "global corpus (all learned trunks)"
+                        f"article {self.article_path!r}"
+                        if self.article_path is not None
+                        else (
+                            f"transcript {self.transcript!r}"
+                            if self.transcript is not None
+                            else "global corpus (all learned trunks)"
+                        )
                     )
                 )
             ),
+            "pdf_name": self.pdf_name,
             "article": self.article_path,
             "article_title": self.article_title,
             "article_iterative": self.article_iterative,

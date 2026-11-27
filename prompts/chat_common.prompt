@@ -1,3 +1,15 @@
+task (completed) {
+  reference task.dedicated_chat_modal:
+  - as answer is streaming, do not scroll, only scroll when user drag on the scroll bar!
+}
+
+task.dedicated_chat_modal (completed) {
+  for news article, news, book, video, pdf book chatting in the loader, when click on "Chat" {
+    - instead of having a chatbox on the right column, open up a chat modal on top, this way we have a lot spaces
+    - the chat modal should have the title of the article, news or book or video
+  }
+}
+
 task.default_online_mode (completed) {
   when we first load the chat:
   default chat mode should be Online

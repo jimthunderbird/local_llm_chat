@@ -916,6 +916,18 @@ class HandlerCoreMixin:
                 return
             self._send_json(payload)
             return
+        if path == "/api/pdf_status":
+            params = parse_qs(parsed.query)
+            name = (params.get("name") or [""])[0]
+            try:
+                self._send_json(pdf_book_status(name))
+            except ValueError as exc:
+                self._send_error_json(str(exc), 404)
+            except (OSError, RuntimeError) as exc:
+                self._send_error_json(
+                    f"Could not read the PDF book status: {exc}", 502
+                )
+            return
         if path == "/api/pdf_book_page_image":
             params = parse_qs(parsed.query)
             name = (params.get("name") or [""])[0]
@@ -1448,6 +1460,32 @@ class HandlerCoreMixin:
                 return
             self._send_json(result)
             return
+        if parsed.path == "/api/pdf_learn":
+            payload = self._read_json()
+            if payload is None:
+                return
+            name = str(payload.get("name") or "").strip()
+            if not name:
+                self._send_error_json("Missing PDF book name", 400)
+                return
+            self._handle_pdf_learn(name)
+            return
+        if parsed.path == "/api/pdf_chat":
+            payload = self._read_json()
+            if payload is None:
+                return
+            name = str(payload.get("name") or "").strip()
+            question = str(payload.get("question") or "").strip()
+            if not name:
+                self._send_error_json("Missing PDF book name", 400)
+                return
+            if not question:
+                self._send_error_json("Missing question", 400)
+                return
+            self._handle_pdf_chat(
+                name, question, reset=bool(payload.get("reset"))
+            )
+            return
         if parsed.path == "/api/dict":
             payload = self._read_json()
             if payload is None:
@@ -1843,6 +1881,7 @@ from .map import GAME_NEARBY_LIMIT, GAME_NEARBY_RADIUS_METERS, GAME_NEARBY_RESTA
 from .mathtutor import MATHUTOR_LOCK, MATHUTOR_PROBLEMS_PER_BATCH, _mathtutor_build_session, _mathtutor_generate_problems, _mathtutor_load_session, _mathtutor_public_session, _mathtutor_remove_all_documents, _mathtutor_save_session
 from .news import fetch_news_article
 from .news_research import NEWS_SOURCES
+from .pdfbook import pdf_book_status
 from .reddit import GOOGLE_NEWS_ARTICLE_RE, _reddit_iframe_url, fetch_reddit_post, fetch_stock_reddit_items, resolve_google_news_url
 from .retrieval import ClientDisconnected, NEWS_ID_PATTERN, _read_news_meta, learn_news_article, news_is_learned, news_title
 from .robinhood import ZILLOW_MCP_LIMIT, ZILLOW_MCP_RADIUS_MILES, ZillowMCPError

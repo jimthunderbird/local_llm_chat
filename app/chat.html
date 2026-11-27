@@ -2641,6 +2641,12 @@
      documentation, such as Wikivoyage destinations, keeps the rail. */
   #news-panel.is-docs .news-layout { grid-template-columns: minmax(0, 1fr); }
   #news-panel.is-docs .news-side { display: none; }
+  /* The Learn/Chat rail is useful for a PDF, but keep it compact so the
+     rendered page still has most of the reader width. */
+  #news-panel.is-pdf-book .news-layout {
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 320px);
+  }
+  #news-panel.is-pdf-book .news-body { overflow-x: hidden; }
   .news-side {
     min-width: 0;
     display: flex;
@@ -4624,6 +4630,7 @@
     flex-direction: column;
     min-height: 0;
   }
+  .gutenberg-chat-pane[hidden] { display: none; }
   .gutenberg-text-pane {
     border-right: 1px solid #223344;
     background: #09111a;
@@ -4747,7 +4754,103 @@
     color: #fff;
   }
   .gutenberg-chat-compose button:disabled { opacity: .45; cursor: default; }
+  /* Gutenberg chats now open in the shared top-level chat modal, so the
+     plaintext pane uses the full book width. */
+  #gutenberg-panel .gutenberg-body { grid-template-columns: minmax(0, 1fr); }
+  #gutenberg-panel .gutenberg-text-pane { border-right: 0; }
   .gutenberg-loading { color: var(--warn); font-size: 12px; }
+
+  /* All in-reader chats share one large modal on top of the loader. */
+  #chat-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 3vh 3vw;
+    background: rgba(0, 0, 0, .58);
+    backdrop-filter: blur(2px);
+  }
+  #chat-modal[hidden] { display: none; }
+  .chat-modal-card {
+    width: min(1100px, 94vw);
+    height: min(860px, 88vh);
+    display: flex;
+    flex-direction: column;
+    background: #0d151e;
+    border: 1px solid #2b4056;
+    border-radius: 10px;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, .7);
+    overflow: hidden;
+  }
+  .chat-modal-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 16px;
+    background: #101b26;
+    border-bottom: 1px solid #223344;
+    user-select: none;
+  }
+  .chat-modal-head-main { min-width: 0; flex: 1; }
+  #chat-modal-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+  }
+  #chat-modal-close:hover { color: var(--text); }
+  .chat-modal-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .chat-modal-body > .video-chat,
+  .chat-modal-body > .gutenberg-chat-pane,
+  .chat-modal-body > #news-chat,
+  .chat-modal-body > #video-chat,
+  .chat-modal-body > #gutenberg-chat {
+    flex: 1 1 auto;
+    min-height: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+  }
+  .chat-modal-body > .video-chat > .video-chat-head,
+  .chat-modal-body > .gutenberg-chat-pane > .gutenberg-chat-head {
+    display: none;
+  }
+  .chat-modal-body .video-chat-messages,
+  .chat-modal-body .gutenberg-chat-messages,
+  .chat-modal-body #news-chat .video-chat-messages,
+  .chat-modal-body #video-chat .video-chat-messages,
+  .chat-modal-body #gutenberg-chat .gutenberg-chat-messages {
+    max-height: none;
+    flex: 1;
+    min-height: 0;
+    padding: 16px 18px;
+    font-size: 13px;
+  }
+  .chat-modal-body .video-chat-compose,
+  .chat-modal-body .gutenberg-chat-compose {
+    padding: 12px 18px 16px;
+  }
+  .chat-modal-body .video-chat-empty,
+  .chat-modal-body .gutenberg-chat-empty { font-size: 12.5px; }
+  .chat-modal-body .video-chat-msg.assistant.is-streaming .markdown > :first-child {
+    background: #0d151e;
+  }
+  @media (max-width: 700px) {
+    #chat-modal { padding: 1.5vh 1.5vw; }
+    .chat-modal-card { width: 97vw; height: 92vh; }
+  }
   @media (max-width: 820px) {
     .book-cards { grid-template-columns: 1fr; }
     .gutenberg-body { grid-template-columns: 1fr; }
@@ -4951,13 +5054,13 @@
       </div>
       <div class="news-side">
         <div id="news-action" class="video-action" hidden>
-          <div class="video-action-title">This story</div>
+          <div id="news-action-title" class="video-action-title">This story</div>
           <div id="news-action-note" class="video-action-note"></div>
           <button id="news-action-btn" class="video-action-btn" type="button" hidden></button>
         </div>
         <div id="news-chat" class="video-chat" hidden>
           <div class="video-chat-head">
-            <span class="video-action-title">Chat about this story</span>
+            <span id="news-chat-title" class="video-action-title">Chat about this story</span>
             <button id="news-chat-close" type="button" title="Close chat">×</button>
           </div>
           <div id="news-chat-messages" class="video-chat-messages">
@@ -5099,6 +5202,8 @@
         <div id="gutenberg-title" class="gutenberg-title">Project Gutenberg book</div>
         <div id="gutenberg-meta" class="gutenberg-meta"></div>
       </div>
+      <button id="gutenberg-chat-btn" class="news-find-btn" type="button"
+              title="Chat about this book">Chat</button>
       <a id="gutenberg-link" class="gutenberg-link" href="#" target="_blank" rel="noopener noreferrer">Open on Gutenberg ↗</a>
       <button id="gutenberg-close" type="button" title="Close (Esc)">×</button>
     </div>
@@ -5112,7 +5217,7 @@
         </div>
         <pre id="gutenberg-text">Loading book…</pre>
       </div>
-      <div class="gutenberg-chat-pane">
+      <div id="gutenberg-chat" class="gutenberg-chat-pane" hidden>
         <div class="gutenberg-chat-head">
           <span>Ask this book</span>
           <span class="gutenberg-chat-note">Retrieved excerpts only</span>
@@ -5127,6 +5232,19 @@
         </div>
       </div>
     </div>
+  </div>
+</div>
+
+<div id="chat-modal" hidden>
+  <div class="chat-modal-card" role="dialog" aria-modal="true" aria-labelledby="chat-modal-title">
+    <div class="chat-modal-head">
+      <div class="chat-modal-head-main">
+        <div id="chat-modal-title" class="news-modal-title">Chat</div>
+        <div id="chat-modal-meta" class="news-modal-meta"></div>
+      </div>
+      <button id="chat-modal-close" type="button" title="Close chat (Esc)">×</button>
+    </div>
+    <div id="chat-modal-body" class="chat-modal-body"></div>
   </div>
 </div>
 
@@ -5475,6 +5593,13 @@ const videoActionRelearnEl = $("#video-relearn-btn");
 const videoActionProgressEl = $("#video-action-progress");
 const videoActionFillEl = $("#video-action-fill");
 const videoChatEl = $("#video-chat");
+const gutenbergChatEl = $("#gutenberg-chat");
+const gutenbergChatBtn = $("#gutenberg-chat-btn");
+const chatModalEl = $("#chat-modal");
+const chatModalTitleEl = $("#chat-modal-title");
+const chatModalMetaEl = $("#chat-modal-meta");
+const chatModalBodyEl = $("#chat-modal-body");
+const chatModalCloseEl = $("#chat-modal-close");
 const videoChatMessagesEl = $("#video-chat-messages");
 const videoChatInputEl = $("#video-chat-input");
 const videoChatSendEl = $("#video-chat-send");
@@ -12495,7 +12620,7 @@ function openPdfBookReader(item) {
     link: String(item.url || ""),
     linkLabel: "Open PDF ↗",
     docs: true,
-    learnable: false,
+    learnable: true,
     // PDF pages are rendered as images to preserve figures and bold text;
     // Find would only see the image, so keep it hidden for PDF pages.
     findable: false,
@@ -12520,12 +12645,20 @@ function openPdfBookReader(item) {
     pdfPageLoading: false,
     pdfLoadingPage: 0,
     pdfRequestId: 0,
+    pdfTitle: String(item.title || name),
+    pdfLearned: false,
+    pdfStatusLoading: true,
+    pdfLearning: false,
+    pdfLearnError: "",
+    pdfLearnProgress: null,
+    pdfLearnController: null,
   };
   openNewsModal(reader);
   // Put keyboard focus inside the reader immediately so the left/right
   // arrow keys navigate pages without an extra click.
   newsBodyEl.focus({ preventScroll: true });
   loadPdfBookPage(reader, 1);
+  loadPdfBookStatus(reader);
 }
 
 function openPdfBookReaderOnClick(card, item) {
@@ -12543,6 +12676,134 @@ function openPdfBookReaderOnClick(card, item) {
     event.stopPropagation();
     openPdfBookReader(item);
   });
+}
+
+async function loadPdfBookStatus(reader) {
+  if (!reader?.pdf || !reader.pdfName) return;
+  try {
+    const response = await fetch(
+      `/api/pdf_status?name=${encodeURIComponent(reader.pdfName)}`,
+      { cache: "no-store" }
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    if (newsItem !== reader) return;
+    reader.pdfLearned = Boolean(data?.learned);
+    reader.pdfStatusLoading = false;
+    if (data?.pages) reader.pdfPages = Number(data.pages) || reader.pdfPages;
+    if (data?.title) reader.pdfTitle = String(data.title);
+  } catch (error) {
+    if (newsItem !== reader) return;
+    // A status failure must not prevent the Learn action.
+    reader.pdfStatusLoading = false;
+    reader.pdfLearnError = "";
+  } finally {
+    if (newsItem === reader) renderNewsAction(reader);
+  }
+}
+
+function renderPdfBookAction(item) {
+  if (!newsActionEl || !item || newsItem !== item) return;
+  newsActionEl.hidden = false;
+  const actionTitle = $("#news-action-title");
+  if (actionTitle) actionTitle.textContent = "This book";
+  newsActionBtnEl.hidden = false;
+  newsActionBtnEl.disabled = false;
+  newsActionBtnEl.className = "video-action-btn";
+  newsActionBtnEl.onclick = null;
+  const progress = item.pdfLearnProgress;
+  if (item.pdfLearning) {
+    const page = Number(progress?.page) || 0;
+    const pages = Number(progress?.pages) || Number(item.pdfPages) || 0;
+    const percent = progress?.percent !== undefined
+      ? Number(progress.percent)
+      : (pages ? Math.round((100 * page) / pages) : 0);
+    newsActionNoteEl.textContent = pages
+      ? `Learning this book… page ${page}/${pages} (${percent}%)`
+      : "Learning this book…";
+    newsActionBtnEl.textContent = "Learning…";
+    newsActionBtnEl.disabled = true;
+    return;
+  }
+  if (item.pdfLearned) {
+    newsActionNoteEl.textContent =
+      "This book is learned. Chat here, without leaving this window.";
+    newsActionBtnEl.textContent = "Chat";
+    newsActionBtnEl.classList.add("is-chat");
+    newsActionBtnEl.title = "Chat about this book in this window";
+    newsActionBtnEl.onclick = () => openNewsChat();
+    return;
+  }
+  if (item.pdfStatusLoading) {
+    newsActionNoteEl.textContent =
+      "Checking whether this book is learned…";
+    newsActionBtnEl.textContent = "Learn";
+    newsActionBtnEl.disabled = true;
+    return;
+  }
+  if (item.pdfLearnError) {
+    newsActionNoteEl.textContent = `Learn failed: ${item.pdfLearnError}`;
+    newsActionBtnEl.textContent = "Retry";
+    newsActionBtnEl.title = "Retry learning this book";
+  } else {
+    newsActionNoteEl.textContent =
+      "Learn this book to chat with it here and add it to the PDF trunks.";
+    newsActionBtnEl.textContent = "Learn";
+    newsActionBtnEl.title = "Learn this book";
+  }
+  newsActionBtnEl.onclick = () => startPdfLearn(item);
+}
+
+function startPdfLearn(item) {
+  if (!item?.pdf || item.pdfLearning) return;
+  item.pdfLearning = true;
+  item.pdfLearnError = "";
+  item.pdfLearnProgress = null;
+  renderNewsAction(item);
+  const controller = new AbortController();
+  item.pdfLearnController = controller;
+  const handlers = {
+    start: (data) => {
+      if (data?.pages) item.pdfPages = Number(data.pages) || item.pdfPages;
+      if (data?.title) item.pdfTitle = String(data.title);
+      renderNewsAction(item);
+    },
+    progress: (data) => {
+      item.pdfLearnProgress = data || null;
+      if (data?.pages) item.pdfPages = Number(data.pages) || item.pdfPages;
+      renderNewsAction(item);
+    },
+    error: (data) => {
+      item.pdfLearning = false;
+      item.pdfLearnError = data?.message || "Learning failed.";
+      renderNewsAction(item);
+    },
+    done: (data) => {
+      item.pdfLearning = false;
+      item.pdfLearned = true;
+      item.pdfLearnProgress = null;
+      item.pdfLearnError = "";
+      if (data?.pages) item.pdfPages = Number(data.pages) || item.pdfPages;
+      renderNewsAction(item);
+    },
+  };
+  streamSSE(
+    "/api/pdf_learn",
+    { name: item.pdfName },
+    handlers,
+    controller.signal
+  )
+    .catch((error) => {
+      if (error?.name === "AbortError") return;
+      item.pdfLearning = false;
+      item.pdfLearnError = error?.message || String(error);
+      renderNewsAction(item);
+    })
+    .finally(() => {
+      if (item.pdfLearnController === controller) {
+        item.pdfLearnController = null;
+      }
+    });
 }
 
 async function loadPdfBookPage(reader, page) {
@@ -13825,7 +14086,6 @@ function videoChatRenderMessage(message) {
     error.textContent = message.error;
     message.el.appendChild(error);
   }
-  videoChatScrollToBottom();
 }
 
 function scheduleVideoChatRender(message) {
@@ -13853,9 +14113,12 @@ function resetVideoChat(hide = true) {
 
 function openVideoChat() {
   if (!videoItem?.id) return;
-  videoChatEl.hidden = false;
+  openChatModal(
+    videoChatEl,
+    videoItem?.title || videoModalTitleEl?.textContent || "Video",
+    "Video"
+  );
   videoChatScrollToBottom();
-  videoChatInputEl.focus({ preventScroll: true });
 }
 
 function closeVideoChatPanel() {
@@ -13874,6 +14137,7 @@ function sendVideoChatMessage() {
   videoChatSendEl.disabled = true;
   videoChatAppendUser(question);
   const message = videoChatAppendAssistant();
+  videoChatScrollToBottom();
   const controller = new AbortController();
   videoChatController = controller;
 
@@ -14076,6 +14340,7 @@ async function refreshVideoAction(item) {
 }
 
 function openVideoModal(item, mode = "play", playlistEntry = null) {
+  closeChatModal();
   if (!item?.id) return;
   resetVideoSummary();
   resetVideoAction();
@@ -14148,6 +14413,7 @@ videoNextEl.addEventListener("click", (event) => {
 });
 
 function closeVideoModal() {
+  closeChatModal();
   resetVideoSummary();
   resetVideoAction();
   resetVideoChat();
@@ -14497,7 +14763,6 @@ function gutenbergRenderMessage(message) {
     error.textContent = message.error;
     message.el.appendChild(error);
   }
-  gutenbergChatScrollToBottom();
 }
 
 function scheduleGutenbergChatRender(message) {
@@ -14586,6 +14851,7 @@ async function loadGutenbergText(item) {
 
 function openGutenbergModal(item) {
   if (!item?.id) return;
+  closeChatModal();
   resetGutenbergChat();
   gutenbergItem = item;
   gutenbergTitleEl.textContent = item.title || `Book ${item.id}`;
@@ -14599,10 +14865,10 @@ function openGutenbergModal(item) {
   gutenbergLinkEl.href = item.url || `https://www.gutenberg.org/ebooks/${item.id}`;
   gutenbergPanelEl.hidden = false;
   loadGutenbergText(item);
-  gutenbergChatInputEl.focus({ preventScroll: true });
 }
 
 function closeGutenbergModal() {
+  closeChatModal();
   gutenbergTextGeneration += 1;
   if (gutenbergTextController) {
     gutenbergTextController.abort();
@@ -14617,6 +14883,16 @@ function closeGutenbergModal() {
   clearGutenbergHover();
 }
 
+function openGutenbergChat() {
+  if (!gutenbergItem?.id) return;
+  openChatModal(
+    gutenbergChatEl,
+    gutenbergItem.title || `Book ${gutenbergItem.id}`,
+    "Project Gutenberg"
+  );
+  gutenbergChatScrollToBottom();
+}
+
 function sendGutenbergChatMessage() {
   const item = gutenbergItem;
   const question = String(gutenbergChatInputEl.value || "").trim();
@@ -14629,6 +14905,7 @@ function sendGutenbergChatMessage() {
   gutenbergChatSendEl.disabled = true;
   gutenbergChatAppendUser(question);
   const message = gutenbergChatAppendAssistant();
+  gutenbergChatScrollToBottom();
   const controller = new AbortController();
   gutenbergChatController = controller;
 
@@ -14712,6 +14989,12 @@ gutenbergChatMessagesEl.addEventListener("click", (event) => {
     message?.text || "",
     wordEl
   );
+});
+
+gutenbergChatBtn.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  openGutenbergChat();
 });
 
 gutenbergChatSendEl.addEventListener("click", (event) => {
@@ -17259,6 +17542,7 @@ function navigateRestaurant(step) {
 }
 
 function openNewsModal(item, options = {}) {
+  closeChatModal();
   const historyMode = options.restaurantHistory || "root";
   const stackCurrent = Boolean(options.stackCurrent);
   if (!options.fromStack && !stackCurrent) {
@@ -19293,6 +19577,7 @@ function openNewsStory(newsId, fallbackUrl = "", fallbackTitle = "") {
 }
 
 function closeNewsModal() {
+  closeChatModal();
   if (newsModalStack.length) {
     const previous = newsModalStack.pop();
     openNewsModal(previous.item, {
@@ -19360,6 +19645,14 @@ function resetNewsAction() {
 
 function renderNewsAction(item) {
   if (!newsActionEl || !item || newsItem !== item) return;
+  if (item.pdf) {
+    renderPdfBookAction(item);
+    return;
+  }
+  const actionTitle = $("#news-action-title");
+  if (actionTitle) {
+    actionTitle.textContent = item.docs ? "This article" : "This story";
+  }
   // MDN results are documentation without an article body to learn, so keep
   // the modal's read-aloud and translation controls but no Learn/Chat
   // action. Learnable documentation (for example Wikivoyage destinations)
@@ -19497,9 +19790,29 @@ function newsChatClearMessages() {
   newsChatMessagesEl.textContent = "";
   const empty = document.createElement("div");
   empty.className = "video-chat-empty";
+  const subject = newsItem?.pdf
+    ? "this learned book"
+    : newsItem?.docs
+      ? "this learned article"
+      : "this learned story";
   empty.textContent =
-    "Ask a question and the answer will use only this learned story.";
+    `Ask a question and the answer will use only ${subject}.`;
   newsChatMessagesEl.appendChild(empty);
+  if (newsChatInputEl) {
+    const noun = newsItem?.pdf
+      ? "this book"
+      : newsItem?.docs
+        ? "this article"
+        : "this story";
+    newsChatInputEl.placeholder =
+      `Ask about ${noun}… (Enter to send, Shift+Enter for a new line)`;
+  }
+  const chatTitle = $("#news-chat-title");
+  if (chatTitle) {
+    chatTitle.textContent = newsItem?.pdf
+      ? "Chat about this book"
+      : "Chat about this story";
+  }
 }
 
 function newsChatScrollToBottom() {
@@ -19586,14 +19899,6 @@ function newsChatRenderMessage(message) {
     error.textContent = message.error;
     message.el.appendChild(error);
   }
-  if (
-    message === newsChatPinnedMessage &&
-    !newsChatUserScrolledAway
-  ) {
-    newsChatScrollMessageToTop(message);
-  } else if (newsChatStickToBottom) {
-    newsChatScrollToBottom();
-  }
 }
 
 function scheduleNewsChatRender(message) {
@@ -19636,20 +19941,100 @@ function resetNewsChat(hide = true) {
 }
 
 function openNewsChat() {
-  if (!newsItem?.newsId || !newsItem?.learned) return;
-  newsChatEl.hidden = false;
+  if (newsItem?.pdf) {
+    if (!newsItem.pdfLearned) return;
+  } else if (!newsItem?.newsId || !newsItem?.learned) {
+    return;
+  }
+  const meta = newsItem?.pdf
+    ? "PDF book"
+    : newsItem?.docs
+      ? "Article"
+      : "News";
+  openChatModal(
+    newsChatEl,
+    newsItem?.title || "Chat",
+    meta
+  );
   newsChatScrollToBottom();
-  newsChatInputEl.focus({ preventScroll: true });
 }
 
 function closeNewsChatPanel() {
   resetNewsChat(true);
 }
 
+/* One large chat modal hosts the news/article/PDF/video/Gutenberg chats. The
+ * existing chat panel is moved into the modal and returned to its original
+ * column when the modal closes. */
+let chatModalPanel = null;
+let chatModalHome = null;
+
+function openChatModal(panel, title, meta = "") {
+  if (!chatModalEl || !chatModalBodyEl || !panel) return;
+  if (chatModalPanel && chatModalPanel !== panel) closeChatModal();
+  if (chatModalPanel !== panel) {
+    chatModalHome = {
+      parent: panel.parentNode,
+      nextSibling: panel.nextSibling,
+    };
+    chatModalPanel = panel;
+    chatModalBodyEl.appendChild(panel);
+  }
+  panel.hidden = false;
+  panel.classList.add("in-chat-modal");
+  chatModalTitleEl.textContent = title || "Chat";
+  chatModalMetaEl.textContent = meta || "";
+  chatModalEl.hidden = false;
+  const input = panel.querySelector("textarea");
+  input?.focus({ preventScroll: true });
+}
+
+function closeChatModal() {
+  if (!chatModalEl || chatModalEl.hidden) return;
+  const panel = chatModalPanel;
+  if (panel) {
+    panel.classList.remove("in-chat-modal");
+    panel.hidden = true;
+  }
+  if (panel && chatModalHome?.parent) {
+    const { parent, nextSibling } = chatModalHome;
+    if (nextSibling && nextSibling.parentNode === parent) {
+      parent.insertBefore(panel, nextSibling);
+    } else {
+      parent.appendChild(panel);
+    }
+  }
+  chatModalPanel = null;
+  chatModalHome = null;
+  if (chatModalBodyEl) {
+    while (chatModalBodyEl.firstChild) {
+      chatModalBodyEl.removeChild(chatModalBodyEl.firstChild);
+    }
+  }
+  chatModalEl.hidden = true;
+}
+
+chatModalCloseEl?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  closeChatModal();
+});
+chatModalEl?.addEventListener("click", (event) => {
+  if (event.target === chatModalEl) closeChatModal();
+});
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || chatModalEl?.hidden !== false) return;
+  event.preventDefault();
+  event.stopPropagation();
+  closeChatModal();
+}, true);
+
 function sendNewsChatMessage() {
   const item = newsItem;
   const question = String(newsChatInputEl.value || "").trim();
-  if (!item?.newsId || !question || newsChatBusy) return;
+  const isPdf = Boolean(item?.pdf);
+  if (isPdf ? !item?.pdfName : !item?.newsId) return;
+  if (!question || newsChatBusy) return;
   const generation = newsChatGeneration;
   const reset = newsChatFresh;
   newsChatFresh = false;
@@ -19658,12 +20043,9 @@ function sendNewsChatMessage() {
   newsChatSendEl.disabled = true;
   newsChatAppendUser(question);
   const message = newsChatAppendAssistant();
-  // Show the answer from its first line. The reader can scroll down to follow
-  // the streaming text; the list no longer jumps to the answer's bottom.
-  newsChatStickToBottom = false;
-  newsChatPinnedMessage = message;
-  newsChatUserScrolledAway = false;
-  newsChatScrollMessageToTop(message);
+  // Position the new question/answer once. After this point the streaming
+  // render path never scrolls; only the reader's own scrollbar movement does.
+  newsChatScrollToBottom();
   const controller = new AbortController();
   newsChatController = controller;
 
@@ -19697,8 +20079,10 @@ function sendNewsChatMessage() {
   };
 
   streamSSE(
-    "/api/news_chat",
-    { id: item.newsId, question, reset },
+    isPdf ? "/api/pdf_chat" : "/api/news_chat",
+    isPdf
+      ? { name: item.pdfName, question, reset }
+      : { id: item.newsId, question, reset },
     handlers,
     controller.signal
   )
