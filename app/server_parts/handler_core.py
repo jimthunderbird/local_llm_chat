@@ -980,6 +980,23 @@ class HandlerCoreMixin:
                 return
             self._send_json(payload)
             return
+        if path == "/api/sat_question":
+            params = parse_qs(parsed.query)
+            domain = (params.get("domain") or [""])[0].strip()
+            try:
+                index = int((params.get("index") or ["0"])[0])
+            except (TypeError, ValueError):
+                index = 0
+            try:
+                payload = sat_domain_question(domain, index)
+            except Exception as exc:
+                self._send_error_json(f"SAT question lookup failed: {exc}", 502)
+                return
+            if payload is None:
+                self._send_error_json("Unknown SAT subject or question.", 404)
+                return
+            self._send_json(payload)
+            return
         if path == "/api/wiki":
             params = parse_qs(parsed.query)
             word = (params.get("word") or [""])[0].strip()
@@ -1419,6 +1436,12 @@ class HandlerCoreMixin:
     # ---- POST ---------------------------------------------------------
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlparse(self.path)
+        if parsed.path == "/api/sat_analysis":
+            payload = self._read_json()
+            if payload is None:
+                return
+            self._handle_sat_analysis(payload)
+            return
         if parsed.path == "/api/ask":
             payload = self._read_json()
             if payload is None:
@@ -1891,6 +1914,7 @@ from .news import fetch_news_article
 from .news_research import NEWS_SOURCES
 from .pdfbook import pdf_book_status
 from .reddit import GOOGLE_NEWS_ARTICLE_RE, _reddit_iframe_url, fetch_reddit_post, fetch_stock_reddit_items, resolve_google_news_url
+from .sat import sat_domain_question
 from .retrieval import ClientDisconnected, NEWS_ID_PATTERN, _read_news_meta, learn_news_article, news_is_learned, news_title
 from .robinhood import ZILLOW_MCP_LIMIT, ZILLOW_MCP_RADIUS_MILES, ZillowMCPError
 from .stackoverflow import fetch_stackoverflow_answers

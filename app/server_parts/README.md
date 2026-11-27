@@ -39,7 +39,7 @@ The split follows the feature requirements in `prompts/*.prompt`:
 | `github.py` | GitHub code-snippet fallback | `programming*.prompt` |
 | `programming_docs.py` | Official Go, Rust, and PHP documentation lookups | `performance_improvement.prompt`, `programming*.prompt` |
 | `moonbit.py` | MoonBit documentation index search and page extraction | `moonbit.prompt` |
-| `sat.py` | PineSAT SAT math question-bank search, caching, and indexing | `sat.prompt` |
+| `sat.py` | PineSAT question-bank search, caching, domain navigation, and teacher analysis | `sat.prompt` |
 | `conversation.py` | Follow-up rewriting and conversation memory | `chat_common.prompt` |
 | `answer.py` | Answer block splitting and source annotations | `chat_common.prompt` |
 | `article.py` | Article loading, section routing, iterative evidence | `article_loading.prompt`, `article_based_question_and_answer.prompt` |

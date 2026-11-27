@@ -9,8 +9,13 @@ from .sat import (
     SAT_NUM_CTX,
     build_sat_context,
     sat_answer_prompt,
+    sat_analysis_prompt,
     sat_bank_ready,
+    sat_domain_question,
+    sat_domains,
+    sat_is_next_question_request,
     sat_question_request_answer,
+    sat_random_question_answer,
     sat_reveal_answer,
     sat_topic_list_answer,
 )
@@ -38,19 +43,33 @@ class HandlerSatMixin:
             )
             return
         if normalized in {"", "on", "start", "enable", "enabled"}:
-            if state.sat_mode:
+            was_on = state.sat_mode
+            if not was_on:
+                self._enter_sat_mode()
+                self._sse("meta", state.snapshot())
+            try:
+                domains = sat_domains()
+            except Exception as exc:
                 self._sse_text(
-                    "output",
-                    "\nSAT mode is already on. Ask an SAT question.\n",
+                    "output", f"\nCould not load SAT subjects: {exc}\n"
                 )
                 return
-            self._enter_sat_mode()
-            self._sse("meta", state.snapshot())
+            self._sse(
+                "sat",
+                {
+                    "view": "domains",
+                    "domains": domains,
+                },
+            )
             self._sse_text(
                 "output",
-                "\nSAT mode is on. Ask an SAT math question; I will use the "
-                "PineSAT question bank with the local model to explain and "
-                "solve it. Use /sat off to return to normal chat.\n",
+                (
+                    "\nSAT subjects are listed above.\n"
+                    if was_on
+                    else "\nSAT mode is on. Choose a subject above to "
+                    "practice, or ask an SAT math question. Use /sat off to "
+                    "return to normal chat.\n"
+                ),
             )
             return
 
@@ -131,9 +150,16 @@ class HandlerSatMixin:
                 state.latest_benchmark = None
                 state.record_turn(question, resolved, answer)
                 return
-            question_request = sat_question_request_answer(
-                resolved,
-                exclude_ids=state.sat_recent_question_ids,
+            next_question = sat_is_next_question_request(resolved)
+            question_request = (
+                sat_random_question_answer(
+                    exclude_ids=state.sat_recent_question_ids
+                )
+                if next_question
+                else sat_question_request_answer(
+                    resolved,
+                    exclude_ids=state.sat_recent_question_ids,
+                )
             )
             if question_request is not None:
                 answer, sources, selected = question_request
@@ -150,7 +176,11 @@ class HandlerSatMixin:
                     )
                 self._sse_text(
                     "log",
-                    "[sat: showing a bank question without its answer]",
+                    (
+                        "[sat: presenting a random PineSAT math question]"
+                        if next_question
+                        else "[sat: showing a bank question without its answer]"
+                    ),
                 )
                 self._sse_text("delta", answer)
                 state.latest_answer = answer
@@ -229,6 +259,72 @@ class HandlerSatMixin:
         state.latest_sources = []
         state.latest_benchmark = None
         state.record_turn(question, resolved, answer)
+
+    def _handle_sat_analysis(self, payload: dict) -> None:
+        """Stream a professional SAT math analysis for an answered question."""
+        domain = str(payload.get("domain") or "").strip()
+        try:
+            index = int(payload.get("index") or 0)
+        except (TypeError, ValueError):
+            index = 0
+        try:
+            data = sat_domain_question(domain, index)
+        except Exception as exc:
+            self._send_error_json(f"SAT analysis lookup failed: {exc}", 502)
+            return
+        if data is None:
+            self._send_error_json("Unknown SAT subject or question.", 404)
+            return
+
+        prompt = sat_analysis_prompt(data.get("question") or {})
+        self._begin_sse()
+        request_payload = {
+            "model": SAT_MODEL,
+            "prompt": prompt,
+            "stream": True,
+            "think": False,
+            "keep_alive": chat.OLLAMA_KEEP_ALIVE,
+            "options": {
+                "temperature": 0.3,
+                "num_ctx": SAT_NUM_CTX,
+            },
+        }
+        try:
+            with requests.post(
+                f"{chat.OLLAMA_HOST}/api/generate",
+                json=request_payload,
+                stream=True,
+                timeout=(10, 900),
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("error"):
+                        raise RuntimeError(f"Ollama error: {event['error']}")
+                    token = event.get("response", "")
+                    if token:
+                        self._sse_text("delta", token)
+                    if event.get("done"):
+                        break
+        except requests.RequestException as exc:
+            self._sse(
+                "error",
+                {
+                    "message": (
+                        f"Could not reach Ollama at {chat.OLLAMA_HOST}. "
+                        f"Is it running? ({exc})"
+                    )
+                },
+            )
+        except Exception as exc:
+            self._sse("error", {"message": f"SAT analysis failed: {exc}"})
+        finally:
+            self._sse("done", {})
 
     def _stream_sat_answer(self, prompt: str) -> str:
         payload = {

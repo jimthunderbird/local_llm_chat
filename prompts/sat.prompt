@@ -1,9 +1,34 @@
 question_bank_source: https://1600.now/bank
 pinesat_math_api: https://pinesat.duckdns.org/api/questions?section=MATH
-question_llm: ollama local model ornith-1.5:35b
+question_llm: ollama local model gpt-oss:20b
 questions_cache_dir: {directory_of_this_prompt}/../.chat/sat
 
 command: /sat
+
+task (completed) {
+  update {question_llm}
+}
+
+task (completed) {
+  update {question_llm}, after showing the answer of the question, also show an Analysis from {question_llm} so that we can learn the related math concepts, the {question_llm} will serve as a professional math teacher
+}
+
+task.ui_major_refactor (completed) {
+  - after typing /sat, present me list of subjects (the domain) as url
+  - when click on each domain url, show the question with the choices
+  - present an "Answer" button, when click: show the answer
+  - present "Next" and "Previous" navigation so that we can navigate to next or previous question in the domain
+}
+
+task.bug.next_question (completed) {
+  when we have question "next question", we should search the question bank in {questions_cache_dir} and present a random question 
+}
+
+task.bug.weird_text (completed) {
+  pinesat-52678a95-cbc88e96e8dc · Medium · Problem-Solving and Data AnalysisA group of friends went to a restaurant for dinner. The total bill came to \120.Theywantedtosplitthebillevenly,butoneofthefriendsleftwithoutpaying.Iftheremainingfriendseachpaid15, how many friends were originally in the group?
+
+  why do we have "Theywantedtosplitthebillevenly,butoneofthefriendsleftwithoutpaying" 
+}
 
 task.no_more_1600_now (completed) {
   please remove all the context from {question_bank_source}, this source is deprecated!

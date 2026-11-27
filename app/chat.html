@@ -4407,6 +4407,141 @@
     font-size: 10.5px;
   }
 
+  /* /sat: domain picker and question navigator. */
+  .sat-panel {
+    margin: 11px 0 4px;
+    padding: 12px 13px;
+    background: #0f1a25;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .sat-panel[hidden] { display: none; }
+  .sat-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .sat-title { color: var(--accent-2); font-weight: 700; }
+  .sat-meta { color: var(--dim); font-size: 12px; }
+  .sat-domain-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 8px;
+  }
+  .sat-domain-link {
+    display: block;
+    padding: 9px 10px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--panel);
+    color: var(--text);
+    text-decoration: none;
+  }
+  .sat-domain-link:hover {
+    border-color: var(--accent-2);
+    background: var(--panel-2);
+  }
+  .sat-domain-name {
+    display: block;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .sat-domain-count {
+    display: block;
+    color: var(--dim);
+    font-size: 11.5px;
+  }
+  .sat-domain-url {
+    display: block;
+    margin-top: 4px;
+    color: var(--dimmer);
+    font-size: 10.5px;
+    overflow-wrap: anywhere;
+  }
+  .sat-question { display: flex; flex-direction: column; gap: 8px; }
+  .sat-question-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    color: var(--dim);
+    font-size: 12px;
+  }
+  .sat-question-prompt { color: var(--text); }
+  .sat-question-prompt p { margin: 0 0 6px; }
+  .sat-question-prompt p:last-child { margin-bottom: 0; }
+  .sat-choices { display: flex; flex-direction: column; gap: 5px; }
+  .sat-choice {
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+  }
+  .sat-choice.correct { border-color: var(--accent); }
+  .sat-choice-id {
+    color: var(--accent-2);
+    font-weight: 700;
+    margin-right: 6px;
+  }
+  .sat-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+  }
+  .sat-actions button {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 4px 11px;
+    font-family: var(--mono);
+    cursor: pointer;
+  }
+  .sat-actions button:hover:not(:disabled) {
+    border-color: var(--accent-2);
+    color: var(--accent-2);
+  }
+  .sat-actions button.primary {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .sat-actions button:disabled { opacity: .45; cursor: default; }
+  .sat-answer {
+    padding: 9px 10px;
+    border-left: 3px solid var(--accent);
+    border-radius: 0 6px 6px 0;
+    background: #0c1620;
+  }
+  .sat-answer-title { color: var(--accent); font-weight: 700; }
+  .sat-answer-rationale { margin-top: 5px; color: var(--text); }
+  .sat-answer-rationale p { margin: 0 0 6px; }
+  .sat-answer-rationale p:last-child { margin-bottom: 0; }
+  .sat-analysis {
+    margin-top: 8px;
+    padding: 9px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+  }
+  .sat-analysis-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 5px;
+  }
+  .sat-analysis-title { color: var(--accent-2); font-weight: 700; }
+  .sat-analysis-model { color: var(--dimmer); font-size: 11px; }
+  .sat-analysis-body p { margin: 0 0 6px; }
+  .sat-analysis-body p:last-child { margin-bottom: 0; }
+  .sat-analysis-status { color: var(--dim); font-size: 12px; }
+  .sat-analysis-error { color: var(--error); font-size: 12px; }
+  .sat-loading, .sat-error { color: var(--dim); font-size: 12px; }
+  .sat-error { color: var(--error); }
+
   /* /mathtutor: upload Word test papers, then practice generated problems. */
   .math-tutor {
     margin: 11px 0 4px;
@@ -7056,7 +7191,14 @@ function readDisplayMathBlock(lines, start) {
   return null;
 }
 
+const ESCAPED_DOLLAR = "\uE000";
+
+function restoreEscapedDollars(value) {
+  return String(value ?? "").replace(/\uE000/g, "$");
+}
+
 function wordNodes(text, clickable, highlight = false, highlightWord = "") {
+  text = restoreEscapedDollars(text);
   const frag = document.createDocumentFragment();
   if (!clickable) {
     frag.appendChild(document.createTextNode(text));
@@ -7108,6 +7250,9 @@ function appendAutoLink(parent, raw, clickable, highlight = false) {
 }
 
 function appendInline(parent, text, clickable, highlight = false) {
+  // Keep an escaped dollar (\$) as literal currency instead of treating it as
+  // a math delimiter. The placeholder is restored by wordNodes().
+  text = String(text || "").replace(/\\\$/g, ESCAPED_DOLLAR);
   const inlineRe = /(`[^`\n]+`|\$\$?[^$\n]+\$\$?|\\\(.+?\\\)|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|_[^_\n]+_|\[[^\]\n]+\]\([^)\s]+\)|\b(?:https?:\/\/|www\.)[^\s<>"'`]+)/g;
   let last = 0;
   let match;
@@ -7118,13 +7263,13 @@ function appendInline(parent, text, clickable, highlight = false) {
     const token = match[0];
     if (token.startsWith("`")) {
       const code = document.createElement("code");
-      code.textContent = token.slice(1, -1);
+      code.textContent = restoreEscapedDollars(token.slice(1, -1));
       parent.appendChild(code);
     } else if (token.startsWith("$") || token.startsWith("\\(")) {
       const wrapped = token.startsWith("$$");
-      const body = token.startsWith("\\(")
+      const body = restoreEscapedDollars(token.startsWith("\\(")
         ? token.slice(2, -2)
-        : token.slice(wrapped ? 2 : 1, wrapped ? -2 : -1);
+        : token.slice(wrapped ? 2 : 1, wrapped ? -2 : -1));
       if (looksLikeMath(body)) {
         parent.appendChild(makeMathElement(body, false));
       } else {
@@ -7143,7 +7288,7 @@ function appendInline(parent, text, clickable, highlight = false) {
           link.href = href;
           link.target = "_blank";
           link.rel = "noopener noreferrer";
-          link.textContent = parsed[1];
+          link.textContent = restoreEscapedDollars(parsed[1]);
           parent.appendChild(link);
         } else {
           parent.appendChild(wordNodes(token, clickable, highlight));
@@ -8218,6 +8363,7 @@ function makeEntry(kind, options = {}) {
     writtenBook: null,
     mathtutor: null,
     mathtutorState: null,
+    sat: null,
     newsEl: document.createElement("div"),
     changelogEl: document.createElement("div"),
     dictionaryHistoryEl: document.createElement("div"),
@@ -8339,6 +8485,9 @@ function makeEntry(kind, options = {}) {
   entry.mathtutorEl = document.createElement("div");
   entry.mathtutorEl.className = "math-tutor";
   entry.mathtutorEl.hidden = true;
+  entry.satEl = document.createElement("div");
+  entry.satEl.className = "sat-panel";
+  entry.satEl.hidden = true;
   entry.bodyEl.appendChild(entry.newsEl);
   entry.bodyEl.appendChild(entry.changelogEl);
   entry.bodyEl.appendChild(entry.dictionaryHistoryEl);
@@ -8347,6 +8496,7 @@ function makeEntry(kind, options = {}) {
   entry.bodyEl.appendChild(entry.bookLibraryEl);
   entry.bodyEl.appendChild(entry.writtenBookEl);
   entry.bodyEl.appendChild(entry.mathtutorEl);
+  entry.bodyEl.appendChild(entry.satEl);
   entry.bodyEl.appendChild(entry.choicesEl);
   entry.errorEl.className = "error-text";
   entry.bodyEl.appendChild(entry.errorEl);
@@ -8459,6 +8609,7 @@ function renderEntry(entry) {
   renderBookLibrary(entry);
   renderWrittenBook(entry);
   renderMathTutor(entry);
+  renderSat(entry);
   for (const choice of entry.choices) {
     const button = document.createElement("button");
     button.className = "choice";
@@ -11962,6 +12113,335 @@ function startMathtutorAnswer(entry, reveal) {
       if (state.controller === controller) state.controller = null;
       scheduleRender(entry);
     });
+}
+
+async function loadSatQuestion(entry, domain, index) {
+  resetSatAnalysis(entry);
+  const requestId = (entry.satRequestId || 0) + 1;
+  entry.satRequestId = requestId;
+  const nextIndex = Number.isFinite(Number(index)) ? Number(index) : 0;
+  entry.sat = { view: "loading", domain, index: nextIndex };
+  scheduleRender(entry);
+  try {
+    const url = `/api/sat_question?domain=${encodeURIComponent(domain)}&index=${nextIndex}`;
+    const response = await fetch(url, { cache: "no-store" });
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (_error) {
+      payload = null;
+    }
+    if (!response.ok) {
+      throw new Error(payload?.error || `HTTP ${response.status}`);
+    }
+    if (entry.satRequestId !== requestId) return;
+    entry.sat = { ...(payload || {}), answerVisible: false };
+  } catch (error) {
+    if (entry.satRequestId !== requestId) return;
+    entry.sat = {
+      view: "error",
+      domain,
+      index: nextIndex,
+      error: error?.message || String(error),
+    };
+  }
+  scheduleRender(entry);
+}
+
+function resetSatAnalysis(entry) {
+  const state = entry.satAnalysis;
+  if (state?.controller) state.controller.abort();
+  entry.satAnalysis = null;
+}
+
+function satAnalysisKey(data) {
+  const question = data?.question || {};
+  return [
+    String(data?.domain || ""),
+    String(data?.index ?? 0),
+    String(question.stable_id || ""),
+  ].join("\u0000");
+}
+
+async function ensureSatAnalysis(entry, data) {
+  const key = satAnalysisKey(data);
+  if (entry.satAnalysis?.key === key) return;
+  resetSatAnalysis(entry);
+  const state = {
+    key,
+    text: "",
+    busy: true,
+    done: false,
+    error: "",
+    controller: new AbortController(),
+  };
+  entry.satAnalysis = state;
+  scheduleRender(entry);
+  try {
+    await streamSSE(
+      "/api/sat_analysis",
+      { domain: data.domain, index: data.index },
+      {
+        delta: (payload) => {
+          if (entry.satAnalysis !== state) return;
+          state.text += String(payload?.text || "");
+          scheduleRender(entry);
+        },
+        error: (payload) => {
+          if (entry.satAnalysis !== state) return;
+          state.error = payload?.message || "The SAT analysis failed.";
+          scheduleRender(entry);
+        },
+        done: () => {
+          if (entry.satAnalysis !== state) return;
+          state.busy = false;
+          state.done = true;
+          scheduleRender(entry);
+        },
+      },
+      state.controller.signal
+    );
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    if (entry.satAnalysis !== state) return;
+    state.error = error?.message || String(error);
+  } finally {
+    if (entry.satAnalysis === state) {
+      state.busy = false;
+      scheduleRender(entry);
+    }
+  }
+}
+
+function renderSat(entry) {
+  const container = entry.satEl;
+  if (!container) return;
+  const data = entry.sat;
+  if (!data) {
+    container.hidden = true;
+    container.textContent = "";
+    return;
+  }
+  container.hidden = false;
+  container.textContent = "";
+
+  if (data.view === "domains") {
+    const head = document.createElement("div");
+    head.className = "sat-head";
+    const title = document.createElement("strong");
+    title.className = "sat-title";
+    title.textContent = "SAT Math Subjects";
+    const meta = document.createElement("span");
+    meta.className = "sat-meta";
+    const count = Array.isArray(data.domains) ? data.domains.length : 0;
+    meta.textContent = `${count} subject${count === 1 ? "" : "s"} · PineSAT`;
+    head.appendChild(title);
+    head.appendChild(meta);
+    container.appendChild(head);
+
+    const list = document.createElement("div");
+    list.className = "sat-domain-list";
+    for (const item of data.domains || []) {
+      const domain = String(item.domain || "");
+      if (!domain) continue;
+      const link = document.createElement("a");
+      link.className = "sat-domain-link";
+      link.href = item.url
+        || `/api/sat_question?domain=${encodeURIComponent(domain)}&index=0`;
+      link.title = `Show a ${domain} question`;
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        void loadSatQuestion(entry, domain, 0);
+      });
+      const name = document.createElement("span");
+      name.className = "sat-domain-name";
+      name.textContent = domain;
+      const total = document.createElement("span");
+      total.className = "sat-domain-count";
+      const n = Number(item.count) || 0;
+      total.textContent = `${n} question${n === 1 ? "" : "s"}`;
+      const url = document.createElement("span");
+      url.className = "sat-domain-url";
+      url.textContent = item.url || link.href;
+      link.appendChild(name);
+      link.appendChild(total);
+      link.appendChild(url);
+      list.appendChild(link);
+    }
+    container.appendChild(list);
+    return;
+  }
+
+  if (data.view === "loading") {
+    const head = document.createElement("div");
+    head.className = "sat-head";
+    const title = document.createElement("strong");
+    title.className = "sat-title";
+    title.textContent = "SAT";
+    const meta = document.createElement("span");
+    meta.className = "sat-meta";
+    meta.textContent = `Loading ${data.domain || "question"}…`;
+    head.appendChild(title);
+    head.appendChild(meta);
+    container.appendChild(head);
+    return;
+  }
+
+  if (data.view === "error") {
+    const head = document.createElement("div");
+    head.className = "sat-head";
+    const title = document.createElement("strong");
+    title.className = "sat-title";
+    title.textContent = "SAT";
+    head.appendChild(title);
+    container.appendChild(head);
+    const error = document.createElement("div");
+    error.className = "sat-error";
+    error.textContent = data.error || "Could not load the SAT question.";
+    container.appendChild(error);
+    return;
+  }
+
+  if (data.view !== "question") return;
+  const question = data.question || {};
+  const total = Math.max(1, Number(data.total) || 1);
+  const index = Math.max(0, Number(data.index) || 0);
+  const head = document.createElement("div");
+  head.className = "sat-question-head";
+  const where = document.createElement("span");
+  where.textContent = `${question.domain || data.domain || "SAT"} · Question ${index + 1} of ${total}`;
+  const details = document.createElement("span");
+  details.textContent = [question.difficulty, question.stable_id].filter(Boolean).join(" · ");
+  head.appendChild(where);
+  head.appendChild(details);
+  container.appendChild(head);
+
+  const body = document.createElement("div");
+  body.className = "sat-question";
+  const prompt = document.createElement("div");
+  prompt.className = "sat-question-prompt markdown";
+  prompt.appendChild(renderMarkdown(question.prompt || "", false));
+  body.appendChild(prompt);
+
+  if (Array.isArray(question.choices) && question.choices.length) {
+    const choices = document.createElement("div");
+    choices.className = "sat-choices";
+    for (const choice of question.choices) {
+      const row = document.createElement("div");
+      row.className = "sat-choice";
+      if (
+        data.answerVisible
+        && String(choice.id) === String(question.answer)
+      ) {
+        row.classList.add("correct");
+      }
+      const id = document.createElement("span");
+      id.className = "sat-choice-id";
+      id.textContent = `${choice.id})`;
+      const text = document.createElement("span");
+      appendInline(text, String(choice.text || ""), false);
+      row.appendChild(id);
+      row.appendChild(text);
+      choices.appendChild(row);
+    }
+    body.appendChild(choices);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "sat-actions";
+  const answerBtn = document.createElement("button");
+  answerBtn.type = "button";
+  answerBtn.className = "primary";
+  answerBtn.textContent = data.answerVisible ? "Hide answer" : "Answer";
+  answerBtn.addEventListener("click", () => {
+    data.answerVisible = !data.answerVisible;
+    scheduleRender(entry);
+    if (data.answerVisible) void ensureSatAnalysis(entry, data);
+  });
+  const previousBtn = document.createElement("button");
+  previousBtn.type = "button";
+  previousBtn.textContent = "Previous";
+  previousBtn.disabled = total <= 1;
+  previousBtn.addEventListener("click", () => {
+    void loadSatQuestion(entry, data.domain, index - 1);
+  });
+  const nextBtn = document.createElement("button");
+  nextBtn.type = "button";
+  nextBtn.textContent = "Next";
+  nextBtn.disabled = total <= 1;
+  nextBtn.addEventListener("click", () => {
+    void loadSatQuestion(entry, data.domain, index + 1);
+  });
+  actions.appendChild(answerBtn);
+  actions.appendChild(previousBtn);
+  actions.appendChild(nextBtn);
+  body.appendChild(actions);
+  container.appendChild(body);
+
+  if (data.answerVisible) {
+    const answer = document.createElement("div");
+    answer.className = "sat-answer";
+    const title = document.createElement("div");
+    title.className = "sat-answer-title";
+    title.textContent = `Answer: ${question.answer || "(not provided)"}`;
+    answer.appendChild(title);
+    const rationale = document.createElement("div");
+    rationale.className = "sat-answer-rationale markdown";
+    rationale.appendChild(
+      renderMarkdown(
+        question.rationale
+          || "The PineSAT bank does not include a written rationale for this question.",
+        false
+      )
+    );
+    answer.appendChild(rationale);
+    if (question.source) {
+      const source = document.createElement("div");
+      source.className = "sat-meta";
+      source.textContent = `Source: ${question.source}`;
+      answer.appendChild(source);
+    }
+
+    const analysis = entry.satAnalysis;
+    if (analysis && analysis.key === satAnalysisKey(data)) {
+      const box = document.createElement("div");
+      box.className = "sat-analysis";
+      const head = document.createElement("div");
+      head.className = "sat-analysis-head";
+      const title = document.createElement("strong");
+      title.className = "sat-analysis-title";
+      title.textContent = "Analysis";
+      const model = document.createElement("span");
+      model.className = "sat-analysis-model";
+      model.textContent = displayModelName(
+        data.analysis_model || "gpt-oss:20b"
+      );
+      head.appendChild(title);
+      head.appendChild(model);
+      box.appendChild(head);
+      if (analysis.error) {
+        const error = document.createElement("div");
+        error.className = "sat-analysis-error";
+        error.textContent = analysis.error;
+        box.appendChild(error);
+      } else if (analysis.text) {
+        const body = document.createElement("div");
+        body.className = "sat-analysis-body markdown";
+        body.appendChild(renderMarkdown(analysis.text, false));
+        box.appendChild(body);
+      }
+      if (analysis.busy) {
+        const status = document.createElement("div");
+        status.className = "sat-analysis-status";
+        status.textContent = analysis.text
+          ? "Continuing analysis…"
+          : "Preparing a teacher analysis…";
+        box.appendChild(status);
+      }
+      answer.appendChild(box);
+    }
+    container.appendChild(answer);
+  }
 }
 
 function renderMathTutor(entry) {
@@ -21870,7 +22350,9 @@ function submitText(text, fromChoice = false) {
                           ? "Math Tutor"
                           : commandName === "changelog"
                             ? "Changelog"
-                            : undefined,
+                            : commandName === "sat"
+                              ? "SAT"
+                              : undefined,
   });
   appendEntry(entry);
   resetAnswerSourceStatus();
@@ -22037,6 +22519,11 @@ function submitText(text, fromChoice = false) {
     book_library: (data) => addBookLibraryEvent(entry, data || {}),
     written_book: (data) => {
       entry.writtenBook = data || null;
+      scheduleRender(entry);
+    },
+    sat: (data) => {
+      resetSatAnalysis(entry);
+      entry.sat = { ...(data || {}), answerVisible: false };
       scheduleRender(entry);
     },
     mathtutor: (data) => {

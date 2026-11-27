@@ -6,6 +6,7 @@ Math questions come from PineSAT and are cached one JSON file per question.
 from __future__ import annotations
 
 import difflib
+import random
 from collections import defaultdict
 from .core import *
 
@@ -19,7 +20,7 @@ SAT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0 Safari/537.36"
 )
-SAT_MODEL = chat.ANSWER_MODEL
+SAT_MODEL = "gpt-oss:20b"
 SAT_NUM_CTX = chat.ANSWER_NUM_CTX
 SAT_TOP_MATCHES = 5
 SAT_CONTEXT_BUDGET_CHARS = 24_000
@@ -62,6 +63,61 @@ Requirements:
 {conversation}Student question: {question}
 
 Answer:"""
+
+SAT_ANALYSIS_PROMPT = """You are a professional SAT math teacher.
+
+The student has just seen the official answer to an SAT math question. Write a
+focused Analysis that teaches the math concepts behind it and how to solve this
+type of problem on the SAT.
+
+Requirements:
+- Explain the concept(s) or rule(s) being tested and why they apply here.
+- Walk through the solution logic step by step, including any formula or
+  definition a student should remember.
+- Point out likely mistakes or traps for this question type.
+- End with a short, practical takeaway for future SAT math questions.
+- Do not change or dispute the official answer.
+- Use Markdown. Use LaTeX with $...$ for math when helpful.
+- Keep it clear and instructional, not a restatement of the official rationale.
+"""
+
+
+def sat_analysis_prompt(question: dict) -> str:
+    """Build the teacher-analysis prompt for one answered SAT question."""
+    parts = [
+        SAT_ANALYSIS_PROMPT,
+        "",
+        f"Question ID: {question.get('stable_id') or '(unknown)'}",
+        f"Domain: {question.get('domain') or '(unknown)'}",
+        f"Difficulty: {question.get('difficulty') or '(unknown)'}",
+        "",
+        "Question:",
+        str(question.get("prompt") or ""),
+        "",
+    ]
+    choices = question.get("choices") or []
+    if choices:
+        parts.append("Choices:")
+        for choice in choices:
+            parts.append(
+                f"{choice.get('id') or '?'}) {choice.get('text') or ''}"
+            )
+        parts.append("")
+    parts.extend(
+        [
+            f"Official answer: {question.get('answer') or '(not provided)'}",
+            "",
+            "Official rationale:",
+            str(
+                question.get("rationale")
+                or "(The bank did not provide a rationale.)"
+            ),
+            "",
+            "Write the Analysis now.",
+        ]
+    )
+    return "\n".join(parts)
+
 
 _SAT_LOCK = threading.Lock()
 _SAT_QUESTIONS: list[dict] | None = None
@@ -168,6 +224,7 @@ def _sat_normalize_pinesat_question(raw: object) -> dict | None:
         "questionText": question_text,
         "passage": str(paragraph).strip(),
         "type": "multiple-choice" if choices else "free-response",
+        "choices": choices,
         "correctAnswer": correct_answer,
         "rationale": rationale,
         "difficulty": str(raw.get("difficulty") or "").strip(),
@@ -608,17 +665,8 @@ def _sat_select_question_for_request(
     return scored[0][2] if scored else None
 
 
-def sat_question_request_answer(
-    question: str, exclude_ids: list[str] | None = None
-) -> tuple[str, list[dict], dict] | None:
-    """Return one bank question without its answer for a question request."""
-    if not _sat_is_question_request(question):
-        return None
-    selected = _sat_select_question_for_request(
-        question, exclude_ids=exclude_ids
-    )
-    if selected is None:
-        return None
+def _sat_question_answer(selected: dict) -> tuple[str, list[dict], dict]:
+    """Format one bank question without revealing its answer."""
     subject, domain, skill, stable_id = _sat_question_meta(selected)
     source_name, source_url = _sat_question_source(selected)
     lines = [
@@ -667,6 +715,160 @@ def sat_question_request_answer(
         }
     ]
     return "\n".join(lines).strip() + "\n", sources, selected
+
+
+def sat_question_request_answer(
+    question: str, exclude_ids: list[str] | None = None
+) -> tuple[str, list[dict], dict] | None:
+    """Return one bank question without its answer for a question request."""
+    if not _sat_is_question_request(question):
+        return None
+    selected = _sat_select_question_for_request(
+        question, exclude_ids=exclude_ids
+    )
+    if selected is None:
+        return None
+    return _sat_question_answer(selected)
+
+
+_SAT_NEXT_QUESTION_RE = re.compile(
+    r"^(?:(?:please|show|give|present|pick|pull|get|send|display|ask)\s+)*"
+    r"(?:me\s+)?(?:(?:a|an|the)\s+)?"
+    r"(?:next|another|new|random|different)\s+"
+    r"(?:question|problem)(?:\s+please)?$",
+    re.IGNORECASE,
+)
+
+
+def sat_is_next_question_request(question: str) -> bool:
+    """Whether the student is asking for a random next bank question."""
+    text = " ".join(str(question or "").lower().split()).strip(" .!?")
+    if text in {"next", "next one", "another one"}:
+        return True
+    return bool(_SAT_NEXT_QUESTION_RE.match(text))
+
+
+def sat_random_question_answer(
+    exclude_ids: list[str] | None = None,
+) -> tuple[str, list[dict], dict] | None:
+    """Pick a random bank question, avoiding recently shown questions."""
+    questions = load_sat_bank()
+    exclude = {
+        str(value or "").strip().lower()
+        for value in (exclude_ids or [])
+        if str(value or "").strip()
+    }
+
+    def is_excluded(candidate: dict) -> bool:
+        for key in ("stableId", "questionNumber"):
+            value = str(candidate.get(key) or "").strip().lower()
+            if value and value in exclude:
+                return True
+        return False
+
+    candidates = [question for question in questions if not is_excluded(question)]
+    if not candidates:
+        candidates = list(questions)
+    if not candidates:
+        return None
+    return _sat_question_answer(random.choice(candidates))
+
+
+def _sat_domain_name(question: dict) -> str:
+    category = question.get("category") or {}
+    if isinstance(category, dict):
+        return str(category.get("domain") or "Other").strip() or "Other"
+    return "Other"
+
+
+def _sat_domain_questions(domain: str) -> list[dict]:
+    key = str(domain or "").strip().casefold()
+    if not key:
+        return []
+    questions = [
+        question
+        for question in load_sat_bank()
+        if _sat_domain_name(question).casefold() == key
+    ]
+    questions.sort(
+        key=lambda question: str(
+            question.get("stableId") or question.get("questionNumber") or ""
+        )
+    )
+    return questions
+
+
+def sat_domains() -> list[dict]:
+    """Return the bank's subject domains with counts and question URLs."""
+    counts: dict[str, int] = defaultdict(int)
+    for question in load_sat_bank():
+        counts[_sat_domain_name(question)] += 1
+    return [
+        {
+            "domain": domain,
+            "count": counts[domain],
+            "url": (
+                "/api/sat_question?domain="
+                f"{quote(domain, safe='')}&index=0"
+            ),
+        }
+        for domain in sorted(counts)
+    ]
+
+
+def sat_domain_question(domain: str, index: int = 0) -> dict | None:
+    """Return one question and its answer for a domain navigation request."""
+    questions = _sat_domain_questions(domain)
+    if not questions:
+        return None
+    total = len(questions)
+    index = int(index) % total
+    selected = questions[index]
+    category = selected.get("category") or {}
+    choices = []
+    for choice in selected.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        choices.append(
+            {
+                "id": str(choice.get("id") or "?"),
+                "text": str(choice.get("text") or ""),
+            }
+        )
+    source_name, source_url = _sat_question_source(selected)
+    return {
+        "view": "question",
+        "domain": _sat_domain_name(selected),
+        "index": index,
+        "total": total,
+        "analysis_model": SAT_MODEL,
+        "question": {
+            "stable_id": str(
+                selected.get("stableId")
+                or selected.get("questionNumber")
+                or ""
+            ),
+            "subject": str(selected.get("subject") or "math").title(),
+            "domain": _sat_domain_name(selected),
+            "skill": (
+                str(category.get("skill") or "")
+                if isinstance(category, dict)
+                else ""
+            ),
+            "difficulty": str(selected.get("difficulty") or ""),
+            "prompt": str(
+                selected.get("prompt")
+                or selected.get("questionText")
+                or selected.get("text")
+                or ""
+            ),
+            "choices": choices,
+            "answer": str(selected.get("correctAnswer") or ""),
+            "rationale": str(selected.get("rationale") or ""),
+            "source": source_name,
+            "source_url": source_url,
+        },
+    }
 
 
 def sat_reveal_answer(
