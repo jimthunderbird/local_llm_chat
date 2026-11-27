@@ -1,4 +1,20 @@
 task (completed) {
+  currently: the yt-dlp original-language fallback iterates     
+ over ALL listed subtitle languages (zh, nl, en, fr, de, ja, ko, pt, es, ab, aa, af, ak, sq, am, ar, hy, as...) — each with up to 5        
+ clients. This makes the last-resort path VERY slow when blocked
+
+  please do not do this, we only try en, that's enough
+}
+
+task.make_third_party_ip_last_resort (completed) {
+  in {directory_of_this_prompt}/../fetch_youtube_transcript.py:
+  - please make third party ip last report
+  - we first try youtube-transcript-api
+  - we then try yt-dlp
+  - last resort: A third-party transcript site (youtubetotranscript.com)
+}
+
+task (completed) {
   reference task.third_party_ip:
   in {directory_of_this_prompt}/../fetch_youtube_transcript.py:
   - add back youtube-transcript-api

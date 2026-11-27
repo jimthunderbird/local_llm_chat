@@ -9,16 +9,17 @@ Outputs:
     ./.chat/articles_cache/youtube_<youtube_video_hash>.transcript
     ./.chat/articles_cache/youtube_<youtube_video_hash>.title
 
-task.third_party_ip (prompts/youtube.prompt): this pipeline uses a
-third-party transcript site (youtubetotranscript.com) as its primary
-transcript source. The site downloads the captions from YouTube on its own
-network, so rate limits or IP blocks on YouTube never apply to that
-transcript. Later, the YouTube-specific libraries (youtube-transcript-api
-and yt-dlp) were added back as fallbacks for videos the site cannot serve.
+task.make_third_party_ip_last_resort (prompts/youtube.prompt): the
+YouTube caption libraries are the primary transcript sources;
+youtube-transcript-api first, then yt-dlp, and the third-party transcript
+site (youtubetotranscript.com) is the last resort. The site downloads the
+captions from YouTube on its own network, so rate limits or IP blocks on
+YouTube never apply to that transcript, but it stays secondary because it
+depends on external availability (Cloudflare, the Ollama cloud, Chrome).
 
 The transcript page on the third-party site asks browser clients to pass a
-verification check, so the page is read through three transports, tried in
-order:
+verification check, so when the site has to be tried it is read through
+three transports, tried in order:
 
     1. Direct HTTP request with browser-like headers (fastest when the site
        lets the request through).
@@ -31,15 +32,20 @@ order:
        in the persistent browser profile, so later runs pass automatically.
        A brief Chrome window may appear while the transcript is being read.
 
-When every third-party transport has failed, the transcript is fetched
-straight from YouTube with the two caption libraries, in order:
+The transcript sources are tried in this order:
 
-    4. youtube-transcript-api — lists the available caption tracks and reads
+    1. youtube-transcript-api — lists the available caption tracks and reads
        the English track (or the original-language track, which is then
        translated locally). Supports proxy overrides (see below).
-    5. yt-dlp — downloads the English (or original-language) captions while
-       cycling through several YouTube player clients, retrying paths that
-       YouTube's per-client blocking usually leaves open.
+    2. yt-dlp — downloads the English (en*) captions while cycling through
+       several YouTube player clients, retrying paths that YouTube's
+       per-client blocking usually leaves open. Prompted by
+       prompts/youtube.prompt, yt-dlp never iterates the other listed
+       subtitle languages: trying every language with several player
+       clients made the fallback path very slow when blocked, so English
+       is the only language yt-dlp is asked for.
+    3. Last resort: the third-party transcript site youtubetotranscript.com
+       through the three transports above.
 
 When the transcript returned by any source is not English, it is translated
 to English with the local Ollama model. This handles videos whose only
@@ -163,7 +169,6 @@ LIBRARY_NO_TRANSCRIPT_HINTS = (
     "transcriptsdisabled",
     "subtitles are disabled",
     "there are no subtitles",
-    "no original-language subtitles",
 )
 
 LIBRARY_BLOCK_HINTS = (
@@ -1014,51 +1019,6 @@ def _extract_subtitle_text(directory: Path) -> str:
     return ""
 
 
-def _ytdlp_original_languages(video_id: str) -> list[str]:
-    """Return original (non-translated) subtitle languages from yt-dlp."""
-    command = _ytdlp_command()
-    if command is None:
-        return []
-    argv = [
-        *command,
-        "--no-warnings",
-        "--no-playlist",
-        "--list-subs",
-        f"https://www.youtube.com/watch?v={video_id}",
-    ]
-    try:
-        result = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return []
-    languages: list[str] = []
-    for line in (result.stdout or "").splitlines():
-        if " from " in line.casefold():
-            # Translated tracks such as "en-zh English from Chinese" are
-            # derived from an original track; translate the original locally
-            # instead of relying on YouTube's translated caption endpoint.
-            continue
-        match = re.match(r"^([A-Za-z0-9_-]+)\s{2,}\S", line)
-        if not match:
-            continue
-        code = match.group(1)
-        if code.casefold() in {
-            "language",
-            "available",
-            "automatic",
-            "subtitles",
-            "format",
-        }:
-            continue
-        if code not in languages:
-            languages.append(code)
-    return languages
-
-
 def _fetch_with_ytdlp_languages(
     video_id: str,
     sub_langs: str,
@@ -1139,50 +1099,35 @@ def _fetch_with_ytdlp_languages(
 
 
 def _fetch_with_ytdlp(video_id: str) -> str:
-    """Fetch English captions with yt-dlp, trying alternate player clients."""
+    """Fetch English captions with yt-dlp, trying alternate player clients.
+
+    Only English (en*) caption patterns are requested — per
+    prompts/youtube.prompt the listed-but-unused non-English subtitle
+    languages are never attempted, each attempt would otherwise cycle
+    through several player clients and make the blocked fallback path
+    very slow.
+    """
     return _fetch_with_ytdlp_languages(video_id, "en.*")
-
-
-def _fetch_with_ytdlp_any(video_id: str) -> tuple[str, str, str]:
-    """Fetch an original-language transcript when English is unavailable."""
-    languages = _ytdlp_original_languages(video_id)
-    if not languages:
-        raise RuntimeError(
-            "yt-dlp found no original-language subtitle tracks"
-        )
-    for language in languages:
-        try:
-            text = _fetch_with_ytdlp_languages(
-                video_id,
-                language,
-                clients=("visionos", "android_vr", "default"),
-                label=language,
-            )
-        except Exception as exc:
-            _log(
-                f"yt-dlp could not fetch {language} captions: "
-                f"{_short_error(exc, 240)}"
-            )
-            continue
-        if text.strip():
-            return text.strip(), language, language
-    raise RuntimeError(
-        "yt-dlp could not download any original-language caption track"
-    )
 
 
 def _fetch_from_youtube_libraries(video_id: str) -> tuple[str, str, bool]:
     """Fetch the transcript straight from YouTube with the caption libraries.
 
-    Three strategies are tried in order, mirroring the pre-third-party
-    pipeline:
+    This is the primary source per task.make_third_party_ip_last_resort in
+    prompts/youtube.prompt; the third-party transcript site is only used
+    when both strategies have failed:
 
     1. youtube-transcript-api reads the English caption track (or any track,
        which the caller then translates; retries help when a proxy is set).
     2. yt-dlp downloads the English captions while cycling through several
        YouTube player clients.
-    3. yt-dlp lists the original-language tracks and downloads them; the
-       caller translates the result.
+
+    yt-dlp only tries English captions (prompts/youtube.prompt): iterating
+    every listed subtitle language with several player clients per language
+    made the last-resort path very slow when blocked, so no original-language
+    fallback is attempted here. Videos without English captions fall through
+    to the third-party transcript site, whose transcript the caller
+    translates when needed.
 
     Returns ``(text, language_name, is_non_english)``.
     """
@@ -1219,19 +1164,7 @@ def _fetch_from_youtube_libraries(video_id: str) -> tuple[str, str, bool]:
         library_errors.append(f"yt-dlp English: {_short_error(exc, 360)}")
         _log(
             f"yt-dlp English failed ({_classify_error(exc)}); "
-            "trying yt-dlp original-language fallback"
-        )
-
-    try:
-        text, language_code, language_name = _fetch_with_ytdlp_any(video_id)
-        _log(
-            f"yt-dlp returned {language_name or language_code}; "
-            "translating it to English"
-        )
-        return text, language_name or language_code, True
-    except Exception as exc:
-        library_errors.append(
-            f"yt-dlp original-language: {_short_error(exc, 360)}"
+            "the caption libraries gave up"
         )
 
     raise RuntimeError(
@@ -1365,11 +1298,12 @@ def fetch_transcript(video_id: str, use_cache: bool = True) -> str:
     A previously downloaded transcript is reused so retries and the learn
     pipeline are idempotent and do not hit the transcript site again.
 
-    The third-party transcript site is the primary source (it reads YouTube
-    captions from its own network, so local YouTube rate limits and IP
-    blocks never apply). When every site transport has failed, the caption
-    libraries youtube-transcript-api and yt-dlp fetch the transcript
-    straight from YouTube as fallbacks.
+    task.make_third_party_ip_last_resort (prompts/youtube.prompt): the
+    caption libraries are tried first — youtube-transcript-api, then yt-dlp
+    — straight from YouTube, and the third-party transcript site is the
+    last resort after both libraries have failed. The site reads YouTube
+    captions from its own network, so it still works when YouTube blocks
+    this machine's IP.
 
     When a source returns a non-English transcript, the original-language
     transcript is translated locally with Ollama. This handles videos whose
@@ -1402,26 +1336,38 @@ def fetch_transcript(video_id: str, use_cache: bool = True) -> str:
                 return text
 
     try:
-        transcript = fetch_transcript_from_site(video_id)
-    except Exception as site_error:
-        _log(
-            f"the third-party transcript site failed "
-            f"({_classify_error(site_error)}); trying the YouTube "
-            "caption libraries"
-        )
         transcript, language_name, non_english = _fetch_from_youtube_libraries(
             video_id
         )
-        if non_english:
-            return _translate_transcript(transcript, language_name)
+    except Exception as libraries_error:
+        _log(
+            f"the YouTube caption libraries failed "
+            f"({_classify_error(libraries_error)}); falling back to the "
+            "third-party transcript site"
+        )
+        try:
+            transcript = fetch_transcript_from_site(video_id)
+        except Exception as site_error:
+            raise RuntimeError(
+                f"Could not fetch a transcript for {video_id} from YouTube "
+                f"({ _classify_error(libraries_error)}: "
+                f"{_short_error(libraries_error, 240)}) or from the "
+                "third-party transcript site ("
+                f"{_classify_error(site_error)}: "
+                f"{_short_error(site_error, 360)})."
+            )
+        if _looks_non_english(transcript):
+            _log(
+                "the third-party transcript site returned a non-English "
+                "transcript; translating it to English"
+            )
+            return _translate_transcript(
+                transcript, "third-party transcript site"
+            )
         return transcript
 
-    if _looks_non_english(transcript):
-        _log(
-            "the third-party transcript site returned a non-English "
-            "transcript; translating it to English"
-        )
-        return _translate_transcript(transcript, "third-party transcript site")
+    if non_english:
+        return _translate_transcript(transcript, language_name)
     return transcript
 
 
@@ -1473,8 +1419,9 @@ def summarize(transcript: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Fetch a YouTube transcript from the third-party transcript site "
-            "and summarize it into 20 words."
+            "Fetch a YouTube transcript with youtube-transcript-api, then "
+            "yt-dlp, falling back to the third-party transcript site, and "
+            "summarize it into 20 words."
         )
     )
     parser.add_argument("youtube_video_hash", help="YouTube video ID, e.g. FTwxtyOEGyM")
