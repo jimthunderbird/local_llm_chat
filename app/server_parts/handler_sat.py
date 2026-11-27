@@ -8,6 +8,7 @@ from .sat import (
     SAT_MODEL,
     SAT_NUM_CTX,
     build_sat_context,
+    sat_answer_model_for,
     sat_answer_prompt,
     sat_analysis_prompt,
     sat_bank_ready,
@@ -15,6 +16,7 @@ from .sat import (
     sat_domains,
     sat_generated_question_answer,
     sat_is_next_question_request,
+    sat_model_for_subject,
     sat_question_request_answer,
     sat_random_question_answer,
     sat_reveal_prompt,
@@ -147,7 +149,14 @@ class HandlerSatMixin:
                     "log",
                     "[sat: solving the pending question with the local model]",
                 )
-                answer = self._stream_sat_answer(reveal_prompt)
+                answer = self._stream_sat_answer(
+                    reveal_prompt,
+                    model=sat_model_for_subject(
+                        str((state.sat_pending_question or {}).get(
+                            "subject"
+                        ) or "")
+                    ),
+                )
                 state.latest_answer = answer
                 state.latest_sources = []
                 state.latest_benchmark = None
@@ -284,7 +293,13 @@ class HandlerSatMixin:
                 limit=4,
             )
         prompt = sat_answer_prompt(resolved, context, conversation)
-        answer = self._stream_sat_answer(prompt)
+        answer_model = sat_answer_model_for(resolved)
+        if answer_model != SAT_MODEL:
+            self._sse_text(
+                "log",
+                "[sat: answering with the reading and writing model]",
+            )
+        answer = self._stream_sat_answer(prompt, model=answer_model)
         state.latest_answer = answer
         state.latest_sources = []
         state.latest_benchmark = None
@@ -307,9 +322,15 @@ class HandlerSatMixin:
             return
 
         prompt = sat_analysis_prompt(data.get("question") or {})
+        # prompts/sat.prompt: math related answers use {question_llm_math},
+        # reading and writing related answers use
+        # {question_llm_reading_and_writing}.
+        analysis_model = sat_model_for_subject(
+            str((data.get("question") or {}).get("subject") or "")
+        )
         self._begin_sse()
         request_payload = {
-            "model": SAT_MODEL,
+            "model": analysis_model,
             "prompt": prompt,
             "stream": True,
             "think": False,
@@ -356,9 +377,9 @@ class HandlerSatMixin:
         finally:
             self._sse("done", {})
 
-    def _stream_sat_answer(self, prompt: str) -> str:
+    def _stream_sat_answer(self, prompt: str, model: str = SAT_MODEL) -> str:
         payload = {
-            "model": SAT_MODEL,
+            "model": model,
             "prompt": prompt,
             "stream": True,
             "think": False,

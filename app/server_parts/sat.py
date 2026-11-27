@@ -30,6 +30,9 @@ SAT_USER_AGENT = (
     "Chrome/124.0 Safari/537.36"
 )
 SAT_MODEL = "flint:40b"
+# prompts/sat.prompt: reading and writing related answers use a different
+# {question_llm} than math answers.
+SAT_RW_MODEL = "ornith-1.5:35b"
 SAT_NUM_CTX = chat.ANSWER_NUM_CTX
 SAT_TOP_MATCHES = 5
 SAT_CONTEXT_BUDGET_CHARS = 24_000
@@ -943,10 +946,10 @@ def _sat_seed_text(question: dict) -> str:
     return "\n".join(part for part in parts if str(part).strip())
 
 
-def _sat_call_local_model(prompt: str) -> str:
-    """Run one non-streaming generate call against {question_llm}."""
+def _sat_call_local_model(prompt: str, model: str = SAT_MODEL) -> str:
+    """Run one non-streaming generate call against the given {question_llm}."""
     payload = {
-        "model": SAT_MODEL,
+        "model": model,
         "prompt": prompt,
         "stream": False,
         "think": False,
@@ -1450,6 +1453,39 @@ def sat_topic_list_answer(question: str) -> tuple[str, list[dict]] | None:
         for subject in subjects
     ]
     return answer, sources
+
+
+def sat_model_for_subject(subject: str) -> str:
+    """Return the {question_llm} for one SAT subject.
+
+    prompts/sat.prompt: math related answers use {question_llm_math}
+    (``SAT_MODEL``), reading and writing related answers use
+    {question_llm_reading_and_writing} (``SAT_RW_MODEL``).
+    """
+    normalized = " ".join(str(subject or "").casefold().split())
+    if "reading" in normalized or "writing" in normalized:
+        return SAT_RW_MODEL
+    return SAT_MODEL
+
+
+_SAT_RW_TOPIC_RE = re.compile(
+    r"\b(?:reading|writing|passage|grammar|vocabulary|rhetoric|transitions?|"
+    r"inferences?|command of evidence|words? in context|expression of ideas|"
+    r"standard english conventions)\b",
+    re.IGNORECASE,
+)
+
+
+def sat_answer_model_for(question: str) -> str:
+    """Return the {question_llm} for a free-form student question.
+
+    prompts/sat.prompt: reading and writing related answers use
+    {question_llm_reading_and_writing}; everything else stays with the math
+    model.
+    """
+    if _SAT_RW_TOPIC_RE.search(str(question or "")):
+        return SAT_RW_MODEL
+    return SAT_MODEL
 
 
 def build_sat_context(

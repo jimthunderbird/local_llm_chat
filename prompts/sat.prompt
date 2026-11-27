@@ -1,12 +1,18 @@
 question_bank_source: https://1600.now/bank
 pinesat_math_api: https://pinesat.duckdns.org/api/questions?section=MATH
-question_llm: ollama local model flint:40b
+question_llm_math: ollama local model flint:40b
+question_llm_reading_and_writing: ollama local model ornith-1.5:35b
 questions_cache_dir: {directory_of_this_prompt}/../.chat/sat
 sat_test_samples: {
   - {directory_of_this_prompt}/../.chat/sat/sample-2026
 }
 
 command: /sat
+
+task (completed) {
+  - for math related answers, use {question_llm_math}
+  - for reading and writing related answers, use {question_llm_reading_and_writing}
+}
 
 task (completed) {
   each section still seem to have maximum number of questions! we should not have that, the number of questions should be unlimited

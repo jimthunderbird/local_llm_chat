@@ -12184,6 +12184,10 @@ async function loadSatQuestion(entry, domain, index, useRandom = false) {
     }
     if (entry.satRequestId !== requestId) return;
     lastTotals[domain] = Number(payload?.total) || 0;
+    const analysisModel = String(payload?.analysis_model || "").trim();
+    if (analysisModel) {
+      (entry.satLastModel || (entry.satLastModel = {}))[domain] = analysisModel;
+    }
     entry.sat = { ...(payload || {}), answerVisible: false };
   } catch (error) {
     if (entry.satRequestId !== requestId) return;
@@ -12393,8 +12397,11 @@ function renderSat(entry) {
     title.textContent = "SAT";
     const meta = document.createElement("span");
     meta.className = "sat-meta";
+    const generationModel = displayModelName(
+      (entry.satLastModel && entry.satLastModel[data.domain]) || "flint:40b"
+    );
     meta.textContent = data.generating
-      ? `Generating a new ${data.domain || "SAT"} question with flint:40b — this can take a minute…`
+      ? `Generating a new ${data.domain || "SAT"} question with ${generationModel} — this can take a minute…`
       : `Loading ${data.domain || "question"}…`;
     head.appendChild(title);
     head.appendChild(meta);

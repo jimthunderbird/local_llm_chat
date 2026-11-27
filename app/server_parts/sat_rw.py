@@ -41,18 +41,19 @@ from .core import SCRIPT_DIR
 SAMPLES_DIR = SCRIPT_DIR / ".chat" / "sat" / "sample-2026"
 
 # prompts/sat.prompt: sections are unlimited — past the sample-test pool,
-# {question_llm} (flint:40b, resolved lazily from sat.py to avoid a circular
-# import) generates the next question on demand and it persists here in the
-# final RW-bank record shape.
+# {question_llm_reading_and_writing} (ornith-1.5:35b, resolved lazily from
+# sat.py to avoid a circular import) generates the next question on demand
+# and it persists here in the final RW-bank record shape.
 _RW_GENERATED_DIR = SAMPLES_DIR.parent / "rw_generated"
 _RW_GENERATED_META_FILE = "_meta.json"
 
-# Kept in sync with sat.SAT_MODEL; resolved lazily to avoid a circular
+# prompts/sat.prompt: Reading/Writing answers and generated questions use
+# {question_llm_reading_and_writing}; resolved lazily to avoid a circular
 # import (sat.py imports this module at startup).
 def _analysis_model() -> str:
-    from .sat import SAT_MODEL
+    from .sat import SAT_RW_MODEL
 
-    return SAT_MODEL
+    return SAT_RW_MODEL
 
 # The two subsections of the "SAT Reading And Writing" block.
 RW_READING = "Reading"
@@ -397,7 +398,7 @@ def _build_bank() -> dict:
     questions.extend(generated)
     if generated:
         sources.append(
-            f"{len(generated)} question(s) generated with flint:40b"
+            f"{len(generated)} question(s) generated with the RW model"
         )
     return {"questions": questions, "skipped": skipped, "sources": sources}
 
@@ -496,14 +497,21 @@ Rules:
 
 
 def _rw_generate_question(section: str) -> dict | None:
-    """Generate one new Reading/Writing question with {question_llm}.
+    """Generate one new Reading/Writing question with the RW {question_llm}.
 
-    The record is persisted into {questions_cache_dir}/rw_generated in the
-    final RW-bank shape, so it survives restarts and joins the section pool
-    exactly like a sample-test question (without an answer key — the
-    analysis pass stays the single source of truth).
+    prompts/sat.prompt: reading and writing related answers use
+    {question_llm_reading_and_writing} (ornith-1.5:35b), unlike the math
+    generation path.  The record is persisted into
+    {questions_cache_dir}/rw_generated in the final RW-bank shape, so it
+    survives restarts and joins the section pool exactly like a
+    sample-test question (without an answer key — the analysis pass stays
+    the single source of truth).
     """
-    from .sat import _sat_call_local_model, _sat_parse_generated_question
+    from .sat import (
+        SAT_RW_MODEL,
+        _sat_call_local_model,
+        _sat_parse_generated_question,
+    )
 
     skill_hint = (
         "Central Ideas and Details" if section == RW_READING else "Boundaries"
@@ -511,7 +519,9 @@ def _rw_generate_question(section: str) -> dict | None:
     prompt = _RW_GENERATION_PROMPT.format(
         section=section, skill_hint=skill_hint
     )
-    payload = _sat_parse_generated_question(_sat_call_local_model(prompt))
+    payload = _sat_parse_generated_question(
+        _sat_call_local_model(prompt, model=SAT_RW_MODEL)
+    )
     if not isinstance(payload, dict):
         return None
     number = _rw_next_number()
@@ -566,7 +576,7 @@ def _rw_generate_question(section: str) -> dict | None:
         "prompt": prompt_text,
         "choices": choices,
         "answer": "",
-        "source": "flint:40b (generated)",
+        "source": f"{SAT_RW_MODEL} (generated)",
         "source_pdf": "",
     }
     try:
@@ -586,7 +596,7 @@ def _rw_generate_question(section: str) -> dict | None:
                 {
                     "count": number,
                     "written_at": time.time(),
-                    "model": "flint:40b",
+                    "model": SAT_RW_MODEL,
                     "source": "generated",
                 },
                 ensure_ascii=False,
