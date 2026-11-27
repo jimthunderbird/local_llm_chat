@@ -2,7 +2,23 @@ pdf_books_dir: {directory_of_this_prompt}/../.chat/pdf_books
 pdf_books_trunks_dir: {directory_of_this_prompt}/../.chat/pdf_books/trunks
 pdf_books_chathistory_dir: {directory_of_this_prompt}/../.chat/pdf_books/chat_history
 
-task.pdf_book_chat_history {
+task.navigate_question_history_with_arrows (completed) {
+  when the question history column get focus, allow using up and down arrows to navigate the question history
+  up arrow: go to the newer question
+  down arrow: go to the older question
+
+  as the arrow hover on a question, show the corresponding answer in the right column
+}
+
+task.remove_flickering (completed) {
+  - currently when going to the next page of the book, there is a flickering happens on the screen, please come up with a way to reduce or even remove the flickering, we need a smooth transition of the page navigation!
+}
+
+task.load_only_one_question_answer_pair (completed) {
+  - when clicking on a question in the chat history, only load the question and answer pair for this particular question, currently looks like all question-answer pairs are loaded
+}
+
+task.pdf_book_chat_history (completed) {
   - for each question asked in the chat on a particular pdf book, we need to keep track of the question history, the history should be a json file containing the question and answer
   question: <the question text>
   answer: <the answer key>

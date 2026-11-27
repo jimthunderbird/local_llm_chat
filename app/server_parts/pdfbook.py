@@ -13,6 +13,8 @@ from .books import (
 from .state import ChatState
 
 PDF_BOOKS_TRUNKS_DIR = SCRIPT_DIR / ".chat" / "pdf_books" / "trunks"
+PDF_CHAT_HISTORY_DIR = SCRIPT_DIR / ".chat" / "pdf_books" / "chat_history"
+PDF_CHAT_HISTORY_LIMIT = 500
 
 PDF_LEARN_VERSION = 1
 
@@ -241,6 +243,86 @@ def get_pdf_chat_state(name: str) -> ChatState:
             PDF_CHAT_STATES.pop(oldest, None)
             gc.collect()
         return session
+
+
+def pdf_chat_history_path(name: str) -> Path:
+    """Return the per-book chat-history JSON path."""
+    book_id = pdf_book_id(name)
+    PDF_CHAT_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    return PDF_CHAT_HISTORY_DIR / f"{book_id}.json"
+
+
+def load_pdf_chat_history(name: str) -> list[dict]:
+    """Return one PDF book's saved question/answer entries, newest first."""
+    path = pdf_chat_history_path(name)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return []
+    if isinstance(raw, dict):
+        entries = raw.get("entries")
+    elif isinstance(raw, list):
+        entries = raw
+    else:
+        entries = None
+    if not isinstance(entries, list):
+        return []
+    items: list[dict] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        question = " ".join(str(entry.get("question") or "").split())
+        answer = str(entry.get("answer") or "").strip()
+        if not question:
+            continue
+        items.append(
+            {
+                "question": question,
+                "answer": answer,
+                "timestamp": str(entry.get("timestamp") or ""),
+            }
+        )
+    items.sort(key=lambda item: item["timestamp"], reverse=True)
+    return items
+
+
+def append_pdf_chat_history(
+    name: str, question: str, answer: str
+) -> list[dict]:
+    """Append one completed PDF question/answer to its history file."""
+    question = " ".join(str(question or "").split())
+    answer = str(answer or "").strip()
+    if not question or not answer:
+        return load_pdf_chat_history(name)
+    items = load_pdf_chat_history(name)
+    items.append(
+        {
+            "question": question,
+            "answer": answer,
+            "timestamp": datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            ),
+        }
+    )
+    items.sort(key=lambda item: item["timestamp"], reverse=True)
+    items = items[:PDF_CHAT_HISTORY_LIMIT]
+    path = pdf_chat_history_path(name)
+    book_path = pdf_book_path(name)
+    payload = {
+        "id": pdf_book_id(name),
+        "name": book_path.name if book_path is not None else name,
+        "entries": items,
+    }
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    except OSError:
+        pass
+    return items
 
 
 def forget_pdf_chat_state(name: str) -> None:

@@ -928,6 +928,14 @@ class HandlerCoreMixin:
                     f"Could not read the PDF book status: {exc}", 502
                 )
             return
+        if path == "/api/pdf_chat_history":
+            params = parse_qs(parsed.query)
+            name = (params.get("name") or [""])[0]
+            try:
+                self._send_pdf_chat_history(name)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 404)
+            return
         if path == "/api/pdf_book_page_image":
             params = parse_qs(parsed.query)
             name = (params.get("name") or [""])[0]

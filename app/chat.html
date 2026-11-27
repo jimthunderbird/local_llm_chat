@@ -2712,6 +2712,12 @@
     border: 1px solid #223344;
     border-radius: 6px;
     background: #fff;
+    /* Page swaps keep the old page visible until the new image is loaded,
+       then let the frame width ease to its new font-scaled size. */
+    transition: width .18s ease;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .news-figure.pdf-page .pdf-page-frame { transition: none; }
   }
   .news-figure.pdf-page img {
     display: block;
@@ -4809,23 +4815,133 @@
     flex: 1;
     min-height: 0;
     display: flex;
+    flex-direction: row;
+    overflow: hidden;
+  }
+  .chat-modal-conversation {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
     flex-direction: column;
     overflow: hidden;
   }
-  .chat-modal-body > .video-chat,
-  .chat-modal-body > .gutenberg-chat-pane,
-  .chat-modal-body > #news-chat,
-  .chat-modal-body > #video-chat,
-  .chat-modal-body > #gutenberg-chat {
+  .chat-modal-conversation > .video-chat,
+  .chat-modal-conversation > .gutenberg-chat-pane,
+  .chat-modal-conversation > #news-chat,
+  .chat-modal-conversation > #video-chat,
+  .chat-modal-conversation > #gutenberg-chat {
     flex: 1 1 auto;
     min-height: 0;
     border: 0;
     border-radius: 0;
     background: transparent;
   }
-  .chat-modal-body > .video-chat > .video-chat-head,
-  .chat-modal-body > .gutenberg-chat-pane > .gutenberg-chat-head {
+  .chat-modal-conversation > .video-chat > .video-chat-head,
+  .chat-modal-conversation > .gutenberg-chat-pane > .gutenberg-chat-head {
     display: none;
+  }
+  .chat-history {
+    flex: 0 0 280px;
+    width: 280px;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: #0a121a;
+    border-right: 1px solid #223344;
+  }
+  .chat-history[hidden] { display: none; }
+  .chat-history:focus-visible {
+    outline: 1px solid var(--accent-2);
+    outline-offset: -2px;
+  }
+  .chat-history-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid #1d2e3e;
+    color: var(--dim);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    user-select: none;
+  }
+  #chat-history-current {
+    margin-left: auto;
+    background: transparent;
+    border: 1px solid #2b4056;
+    border-radius: 5px;
+    color: var(--accent-2);
+    font-size: 10px;
+    padding: 2px 7px;
+    cursor: pointer;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  #chat-history-current:hover { color: var(--text); border-color: var(--accent-2); }
+  .chat-history-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .chat-history-item {
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: #cfdae5;
+    padding: 7px 8px;
+    font-family: inherit;
+    font-size: 11.5px;
+    line-height: 1.4;
+    cursor: pointer;
+  }
+  .chat-history-item:hover { background: #101b26; border-color: #223344; }
+  .chat-history-item.is-active {
+    background: #142334;
+    border-color: #2b4056;
+    color: #fff;
+  }
+  .chat-history-question {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .chat-history-time {
+    display: block;
+    color: var(--dimmer);
+    font-size: 9.5px;
+    margin-top: 3px;
+  }
+  .chat-history-empty {
+    color: var(--dim);
+    font-size: 11px;
+    line-height: 1.5;
+    padding: 8px;
+  }
+  .pdf-history-preview {
+    border-top: 1px dashed #2b4056;
+    margin-top: 12px;
+    padding-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .pdf-history-preview-label {
+    color: var(--dim);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+  }
+  @media (max-width: 760px) {
+    .chat-history { flex-basis: 200px; width: 200px; }
   }
   .chat-modal-body .video-chat-messages,
   .chat-modal-body .gutenberg-chat-messages,
@@ -5244,7 +5360,19 @@
       </div>
       <button id="chat-modal-close" type="button" title="Close chat (Esc)">×</button>
     </div>
-    <div id="chat-modal-body" class="chat-modal-body"></div>
+    <div id="chat-modal-body" class="chat-modal-body">
+      <aside id="chat-history" class="chat-history" tabindex="0" hidden
+             aria-label="PDF question history"
+             title="Use the Up and Down arrow keys to browse saved questions">
+        <div class="chat-history-head">
+          <span>Questions</span>
+          <button id="chat-history-current" type="button"
+                  title="Back to the live chat">Current</button>
+        </div>
+        <div id="chat-history-list" class="chat-history-list"></div>
+      </aside>
+      <div id="chat-modal-conversation" class="chat-modal-conversation"></div>
+    </div>
   </div>
 </div>
 
@@ -5599,7 +5727,11 @@ const chatModalEl = $("#chat-modal");
 const chatModalTitleEl = $("#chat-modal-title");
 const chatModalMetaEl = $("#chat-modal-meta");
 const chatModalBodyEl = $("#chat-modal-body");
+const chatModalConversationEl = $("#chat-modal-conversation");
 const chatModalCloseEl = $("#chat-modal-close");
+const chatHistoryEl = $("#chat-history");
+const chatHistoryListEl = $("#chat-history-list");
+const chatHistoryCurrentEl = $("#chat-history-current");
 const videoChatMessagesEl = $("#video-chat-messages");
 const videoChatInputEl = $("#video-chat-input");
 const videoChatSendEl = $("#video-chat-send");
@@ -12806,14 +12938,52 @@ function startPdfLearn(item) {
     });
 }
 
+function waitForPdfPageImage(figure) {
+  const image = figure?.querySelector("img");
+  if (!image) return Promise.resolve(false);
+  if (image.complete) return Promise.resolve(Boolean(image.naturalWidth));
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      image.removeEventListener("load", finish);
+      image.removeEventListener("error", finish);
+      resolve(Boolean(image.naturalWidth));
+    };
+    image.addEventListener("load", finish, { once: true });
+    image.addEventListener("error", finish, { once: true });
+    window.setTimeout(finish, 15000);
+  });
+}
+
+async function createPdfPageFigure(block) {
+  const temp = document.createElement("div");
+  const figure = appendNewsFigure(block, temp);
+  if (!figure) return null;
+  const ready = await waitForPdfPageImage(figure);
+  return ready ? figure : null;
+}
+
+function pdfPageMeta(item) {
+  const parts = [];
+  for (const part of [item.source, item.section]) {
+    if (part && !parts.includes(part)) parts.push(part);
+  }
+  if (item.published) parts.push(formatNewsDate(item.published));
+  return parts.join(" · ");
+}
+
 async function loadPdfBookPage(reader, page) {
   if (!reader?.pdf || !reader.pdfName) return;
   const requestId = (reader.pdfRequestId || 0) + 1;
   reader.pdfRequestId = requestId;
+  const oldFigure = newsBodyEl.querySelector(".news-figure.pdf-page");
   const hasVisiblePage = Array.isArray(reader.blocks)
     && reader.blocks.length > 0;
+  const failedPage = Number(page) || 1;
   reader.pdfPageLoading = true;
-  reader.pdfLoadingPage = Number(page) || 1;
+  reader.pdfLoadingPage = failedPage;
   // Keep the current page visible while the next one loads. Only the very
   // first page uses the normal article loading placeholder.
   reader.articleLoading = !hasVisiblePage;
@@ -12843,22 +13013,21 @@ async function loadPdfBookPage(reader, page) {
     }
     const data = await response.json();
     if (reader.pdfRequestId !== requestId) return;
+    const newPage = Number(data.page) || page;
+    const totalPages = Number(data.pages) || 0;
     const paragraphs = Array.isArray(data.paragraphs)
       ? data.paragraphs.map((text) => String(text || "")).filter(Boolean)
       : [];
-    reader.pdfPage = Number(data.page) || page;
-    reader.pdfPages = Number(data.pages) || 0;
-    reader.paragraphs = paragraphs;
     const words = Array.isArray(data.words) ? data.words : [];
     const wordHeights = words
       .map((word) => Number(word?.h))
       .filter((height) => Number.isFinite(height)
         && height > 0.004 && height < 0.08)
       .sort((a, b) => a - b);
-    reader.pdfRefWordHeight = wordHeights.length
+    const referenceHeight = wordHeights.length
       ? wordHeights[Math.floor(wordHeights.length / 2)]
       : 0.018;
-    reader.pdfChapters = Array.isArray(data.chapters)
+    const chapters = Array.isArray(data.chapters)
       ? data.chapters
         .map((chapter) => ({
           title: String(chapter?.title || "").trim(),
@@ -12867,21 +13036,84 @@ async function loadPdfBookPage(reader, page) {
         .filter((chapter) => chapter.title && chapter.page > 0)
       : [];
     const imageUrl = String(data.image_url || "").trim();
-    // The rendered page preserves images, colors, and bold fonts. Keep the
-    // extracted paragraphs for read-aloud and translation, but render the
-    // page image so the book looks like the PDF.
-    reader.blocks = imageUrl
-      ? [{
+    const pageBlock = imageUrl
+      ? {
         type: "image",
         url: imageUrl,
-        alt: `${reader.title} — page ${reader.pdfPage}`,
+        alt: `${reader.title} — page ${newPage}`,
         pdfPage: true,
+        page: newPage,
         words,
         links: Array.isArray(data.links) ? data.links : [],
-      }]
+      }
+      : null;
+
+    // Page-to-page navigation swaps only the rendered page, after the new
+    // image has fully loaded. The old page therefore never disappears into a
+    // blank frame, and the rest of the reader is not rebuilt.
+    if (hasVisiblePage && oldFigure && pageBlock) {
+      const newFigure = await createPdfPageFigure(pageBlock);
+      if (reader.pdfRequestId !== requestId) return;
+      if (!newFigure) {
+        throw new Error(`Could not render page ${newPage}.`);
+      }
+      const newFrame = newFigure.querySelector(".pdf-page-frame");
+      const oldFrame = oldFigure.querySelector(".pdf-page-frame");
+      const targetWidth = pdfPageWidthFor(newFrame, referenceHeight);
+      const oldWidth = oldFrame
+        ? Math.round(oldFrame.getBoundingClientRect().width)
+        : 0;
+      if (newFrame) {
+        if (oldWidth > 0) {
+          newFrame.style.width = `${oldWidth}px`;
+        } else if (targetWidth) {
+          newFrame.style.width = `${targetWidth}px`;
+        }
+      }
+      reader.pdfPage = newPage;
+      reader.pdfPages = totalPages;
+      reader.paragraphs = paragraphs;
+      reader.pdfRefWordHeight = referenceHeight;
+      reader.pdfChapters = chapters;
+      reader.blocks = [pageBlock];
+      reader.section = `Page ${newPage}`
+        + (totalPages ? ` of ${totalPages}` : "");
+      reader.pdfPageLoading = false;
+      reader.pdfLoadingPage = 0;
+      reader.articleLoading = false;
+      reader.complete = true;
+      if (newsItem === reader) {
+        const currentFigure = newsBodyEl.querySelector(
+          ".news-figure.pdf-page"
+        );
+        if (currentFigure) currentFigure.replaceWith(newFigure);
+        else newsBodyEl.appendChild(newFigure);
+        newsMetaEl.textContent = pdfPageMeta(reader);
+        updatePdfPageLoading(reader);
+        updateRestaurantNav();
+        updatePdfPageJumper();
+        syncNewsTtsButton();
+        syncNewsTranslateButton();
+        window.requestAnimationFrame(() => {
+          if (newFrame) void newFrame.offsetWidth;
+          window.requestAnimationFrame(applyPdfFontScale);
+        });
+        newsBodyEl.scrollTop = 0;
+      }
+      return;
+    }
+
+    // First page, or a fallback with no rendered page image.
+    reader.pdfPage = newPage;
+    reader.pdfPages = totalPages;
+    reader.paragraphs = paragraphs;
+    reader.pdfRefWordHeight = referenceHeight;
+    reader.pdfChapters = chapters;
+    reader.blocks = pageBlock
+      ? [pageBlock]
       : paragraphs.map((text) => ({ type: "paragraph", text }));
-    reader.section = `Page ${reader.pdfPage}`
-      + (reader.pdfPages ? ` of ${reader.pdfPages}` : "");
+    reader.section = `Page ${newPage}`
+      + (totalPages ? ` of ${totalPages}` : "");
     reader.pdfPageLoading = false;
     reader.pdfLoadingPage = 0;
     reader.articleLoading = false;
@@ -12903,11 +13135,16 @@ async function loadPdfBookPage(reader, page) {
     if (!hasVisiblePage) {
       reader.paragraphs = [];
       reader.blocks = [];
-    }
-    if (newsItem === reader) {
-      renderNewsModal(reader);
-      renderNewsAction(reader);
+      if (newsItem === reader) {
+        renderNewsModal(reader);
+        renderNewsAction(reader);
+        updateRestaurantNav();
+      }
+    } else if (newsItem === reader) {
+      updatePdfPageLoading(reader);
       updateRestaurantNav();
+      updatePdfPageJumper();
+      toast(`Could not load page ${failedPage}: ${reader.articleError}`);
     }
   }
 }
@@ -16220,7 +16457,7 @@ function appendNewsFigure(block, target) {
     || block?.caption
     || (block?.pdfPage ? "PDF page" : "Wikivoyage article image")
   );
-  image.loading = "lazy";
+  image.loading = block?.pdfPage ? "eager" : "lazy";
   image.referrerPolicy = "no-referrer";
   image.addEventListener("error", () => figure.remove(), { once: true });
 
@@ -16295,6 +16532,7 @@ function appendNewsFigure(block, target) {
     figure.appendChild(figcaption);
   }
   (target || newsBodyEl).appendChild(figure);
+  return figure;
 }
 
 function appendNewsBlocks(blocks, target) {
@@ -17437,6 +17675,19 @@ function closeKnowledgeGraph() {
   if (newsItem?.pdf) newsBodyEl.focus({ preventScroll: true });
 }
 
+function pdfPageWidthFor(frame, referenceHeight) {
+  const image = frame?.querySelector("img");
+  if (!image?.naturalWidth) return 0;
+  const available = Math.max(240, newsBodyEl.clientWidth - 8);
+  const fullHeight = available * image.naturalHeight / image.naturalWidth;
+  const fullFontPx = Number(referenceHeight || 0.018) * fullHeight;
+  if (!(fullFontPx > 0)) return 0;
+  const scale = bookFontSize / fullFontPx;
+  return Math.round(
+    Math.max(240, Math.min(available * 2.5, available * scale))
+  );
+}
+
 function applyPdfFontScale() {
   if (!newsItem?.pdf) return;
   const frame = newsBodyEl.querySelector(".pdf-page-frame");
@@ -17449,16 +17700,10 @@ function applyPdfFontScale() {
     }
     return;
   }
-  const referenceHeight = Number(newsItem.pdfRefWordHeight) || 0.018;
-  const available = Math.max(240, newsBodyEl.clientWidth - 8);
-  const fullHeight = available * image.naturalHeight / image.naturalWidth;
-  const fullFontPx = referenceHeight * fullHeight;
-  if (!(fullFontPx > 0)) return;
-  const scale = bookFontSize / fullFontPx;
-  const width = Math.max(
-    240, Math.min(available * 2.5, available * scale)
+  const width = pdfPageWidthFor(
+    frame, Number(newsItem.pdfRefWordHeight) || 0.018
   );
-  frame.style.width = `${Math.round(width)}px`;
+  if (width) frame.style.width = `${width}px`;
 }
 
 function changeBookFontSize(delta) {
@@ -19936,6 +20181,7 @@ function resetNewsChat(hide = true) {
   newsChatUserScrolledAway = false;
   if (newsChatSendEl) newsChatSendEl.disabled = false;
   if (newsChatInputEl) newsChatInputEl.value = "";
+  resetPdfChatHistoryState();
   if (newsChatMessagesEl) newsChatClearMessages();
   if (newsChatEl && hide) newsChatEl.hidden = true;
 }
@@ -19954,7 +20200,8 @@ function openNewsChat() {
   openChatModal(
     newsChatEl,
     newsItem?.title || "Chat",
-    meta
+    meta,
+    newsItem?.pdf ? { pdfName: newsItem.pdfName } : {}
   );
   newsChatScrollToBottom();
 }
@@ -19968,9 +20215,16 @@ function closeNewsChatPanel() {
  * column when the modal closes. */
 let chatModalPanel = null;
 let chatModalHome = null;
+let pdfChatHistoryActiveName = "";
+let pdfChatHistoryItems = [];
+let pdfHistoryPreviewEl = null;
+let pdfHistoryLiveNodes = [];
+let pdfHistoryPreviewActive = false;
+let pdfChatHistoryActiveEl = null;
+let pdfChatHistoryActiveIndex = -1;
 
-function openChatModal(panel, title, meta = "") {
-  if (!chatModalEl || !chatModalBodyEl || !panel) return;
+function openChatModal(panel, title, meta = "", options = {}) {
+  if (!chatModalEl || !chatModalConversationEl || !panel) return;
   if (chatModalPanel && chatModalPanel !== panel) closeChatModal();
   if (chatModalPanel !== panel) {
     chatModalHome = {
@@ -19978,13 +20232,19 @@ function openChatModal(panel, title, meta = "") {
       nextSibling: panel.nextSibling,
     };
     chatModalPanel = panel;
-    chatModalBodyEl.appendChild(panel);
+    chatModalConversationEl.appendChild(panel);
   }
   panel.hidden = false;
   panel.classList.add("in-chat-modal");
   chatModalTitleEl.textContent = title || "Chat";
   chatModalMetaEl.textContent = meta || "";
   chatModalEl.hidden = false;
+  const pdfName = String(options.pdfName || "").trim();
+  if (pdfName) {
+    loadPdfChatHistory(pdfName);
+  } else {
+    resetPdfChatHistoryState();
+  }
   const input = panel.querySelector("textarea");
   input?.focus({ preventScroll: true });
 }
@@ -20006,11 +20266,12 @@ function closeChatModal() {
   }
   chatModalPanel = null;
   chatModalHome = null;
-  if (chatModalBodyEl) {
-    while (chatModalBodyEl.firstChild) {
-      chatModalBodyEl.removeChild(chatModalBodyEl.firstChild);
+  if (chatModalConversationEl) {
+    while (chatModalConversationEl.firstChild) {
+      chatModalConversationEl.removeChild(chatModalConversationEl.firstChild);
     }
   }
+  resetPdfChatHistoryState();
   chatModalEl.hidden = true;
 }
 
@@ -20029,6 +20290,212 @@ window.addEventListener("keydown", (event) => {
   closeChatModal();
 }, true);
 
+function formatPdfHistoryTime(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return text;
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function removePdfHistoryPreviewOnly() {
+  if (pdfHistoryPreviewEl) pdfHistoryPreviewEl.remove();
+  pdfHistoryPreviewEl = null;
+}
+
+function restorePdfChatLiveView() {
+  if (!pdfHistoryPreviewActive) {
+    if (pdfChatHistoryActiveEl) {
+      pdfChatHistoryActiveEl.classList.remove("is-active");
+      pdfChatHistoryActiveEl = null;
+    }
+    return;
+  }
+  removePdfHistoryPreviewOnly();
+  if (newsChatMessagesEl) {
+    newsChatMessagesEl.textContent = "";
+    for (const node of pdfHistoryLiveNodes) {
+      newsChatMessagesEl.appendChild(node);
+    }
+  }
+  pdfHistoryLiveNodes = [];
+  pdfHistoryPreviewActive = false;
+  if (pdfChatHistoryActiveEl) {
+    pdfChatHistoryActiveEl.classList.remove("is-active");
+  }
+  pdfChatHistoryActiveEl = null;
+  pdfChatHistoryActiveIndex = -1;
+  newsChatScrollToBottom();
+}
+
+function resetPdfChatHistoryState() {
+  restorePdfChatLiveView();
+  pdfHistoryLiveNodes = [];
+  pdfHistoryPreviewActive = false;
+  pdfChatHistoryActiveIndex = -1;
+  pdfChatHistoryActiveName = "";
+  pdfChatHistoryItems = [];
+  if (chatHistoryListEl) chatHistoryListEl.textContent = "";
+  if (chatHistoryEl) chatHistoryEl.hidden = true;
+}
+
+function renderPdfChatHistory(errorMessage = "") {
+  if (!chatHistoryListEl) return;
+  chatHistoryListEl.textContent = "";
+  pdfChatHistoryActiveEl = null;
+  pdfChatHistoryActiveIndex = -1;
+  if (errorMessage) {
+    const error = document.createElement("div");
+    error.className = "chat-history-empty";
+    error.textContent = `Could not load saved questions: ${errorMessage}`;
+    chatHistoryListEl.appendChild(error);
+    return;
+  }
+  if (!pdfChatHistoryItems.length) {
+    const empty = document.createElement("div");
+    empty.className = "chat-history-empty";
+    empty.textContent =
+      "No saved questions yet. Ask a question to start this book's history.";
+    chatHistoryListEl.appendChild(empty);
+    return;
+  }
+  pdfChatHistoryItems.forEach((entry, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "chat-history-item";
+    const question = document.createElement("span");
+    question.className = "chat-history-question";
+    question.textContent = entry.question || "(untitled question)";
+    button.appendChild(question);
+    const timeText = formatPdfHistoryTime(entry.timestamp);
+    if (timeText) {
+      const time = document.createElement("span");
+      time.className = "chat-history-time";
+      time.textContent = timeText;
+      button.appendChild(time);
+    }
+    button.addEventListener("click", () => {
+      showPdfHistoryEntry(entry, button, index);
+    });
+    chatHistoryListEl.appendChild(button);
+  });
+}
+
+async function loadPdfChatHistory(name) {
+  const pdfName = String(name || "").trim();
+  if (!pdfName) return;
+  pdfChatHistoryActiveName = pdfName;
+  restorePdfChatLiveView();
+  if (chatHistoryEl) chatHistoryEl.hidden = false;
+  if (chatHistoryListEl) {
+    chatHistoryListEl.textContent = "Loading saved questions…";
+  }
+  try {
+    const response = await fetch(
+      `/api/pdf_chat_history?name=${encodeURIComponent(pdfName)}`,
+      { cache: "no-store" }
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    if (pdfChatHistoryActiveName !== pdfName) return;
+    pdfChatHistoryItems = Array.isArray(data?.items) ? data.items : [];
+    renderPdfChatHistory();
+  } catch (error) {
+    if (pdfChatHistoryActiveName !== pdfName) return;
+    pdfChatHistoryItems = [];
+    renderPdfChatHistory(error?.message || String(error));
+  }
+}
+
+function showPdfHistoryEntry(entry, button, index = -1) {
+  if (!newsItem?.pdf || newsItem.pdfName !== pdfChatHistoryActiveName) return;
+  if (newsChatBusy) {
+    toast("Wait for the current answer to finish before opening a saved question.");
+    return;
+  }
+  if (!entry?.answer) {
+    toast("This saved question has no stored answer.");
+    return;
+  }
+  if (!pdfHistoryPreviewActive) {
+    pdfHistoryLiveNodes = newsChatMessagesEl
+      ? Array.from(newsChatMessagesEl.childNodes)
+      : [];
+    pdfHistoryPreviewActive = true;
+  }
+  removePdfHistoryPreviewOnly();
+  if (pdfChatHistoryActiveEl) {
+    pdfChatHistoryActiveEl.classList.remove("is-active");
+  }
+  newsChatMessagesEl.textContent = "";
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "pdf-history-preview";
+  const label = document.createElement("div");
+  label.className = "pdf-history-preview-label";
+  label.textContent = "Saved answer";
+  wrapper.appendChild(label);
+
+  const asked = document.createElement("div");
+  asked.className = "video-chat-msg user";
+  asked.textContent = String(entry.question || "");
+  wrapper.appendChild(asked);
+
+  const answerEl = document.createElement("div");
+  answerEl.className = "video-chat-msg assistant";
+  const body = document.createElement("div");
+  body.className = "markdown";
+  body.dataset.clickable = "true";
+  body.appendChild(
+    renderMarkdown(String(entry.answer || ""), true, null, { highlight: true })
+  );
+  answerEl.appendChild(body);
+  wrapper.appendChild(answerEl);
+
+  newsChatMessagesEl.appendChild(wrapper);
+  pdfHistoryPreviewEl = wrapper;
+  pdfChatHistoryActiveEl = button;
+  pdfChatHistoryActiveIndex = index;
+  button.classList.add("is-active");
+  newsChatMessagesEl.scrollTop = 0;
+}
+
+chatHistoryCurrentEl?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  restorePdfChatLiveView();
+  newsChatScrollToBottom();
+});
+
+chatHistoryEl?.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented || event.isComposing) return;
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  if (event.altKey || event.ctrlKey || event.metaKey) return;
+  if (newsChatBusy || !pdfChatHistoryItems.length) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const direction = event.key === "ArrowUp" ? -1 : 1;
+  let index = pdfChatHistoryActiveIndex;
+  if (index < 0) {
+    index = 0;
+  } else {
+    index = Math.max(
+      0,
+      Math.min(pdfChatHistoryItems.length - 1, index + direction)
+    );
+  }
+  const button = chatHistoryListEl?.children?.[index];
+  if (!button || !button.classList.contains("chat-history-item")) return;
+  showPdfHistoryEntry(pdfChatHistoryItems[index], button, index);
+  button.focus({ preventScroll: true });
+  button.scrollIntoView({ block: "nearest" });
+});
+
 function sendNewsChatMessage() {
   const item = newsItem;
   const question = String(newsChatInputEl.value || "").trim();
@@ -20041,6 +20508,7 @@ function sendNewsChatMessage() {
   newsChatBusy = true;
   newsChatInputEl.value = "";
   newsChatSendEl.disabled = true;
+  if (isPdf) restorePdfChatLiveView();
   newsChatAppendUser(question);
   const message = newsChatAppendAssistant();
   // Position the new question/answer once. After this point the streaming
@@ -20069,6 +20537,11 @@ function sendNewsChatMessage() {
       message.streaming = false;
       message.error = data?.message || "Unknown server error.";
       scheduleNewsChatRender(message);
+    },
+    pdf_history: (data) => {
+      if (!isCurrent() || !isPdf) return;
+      pdfChatHistoryItems = Array.isArray(data?.items) ? data.items : [];
+      renderPdfChatHistory();
     },
     done: () => {
       if (!isCurrent()) return;

@@ -599,6 +599,20 @@ class HandlerBooksMixin:
             )
 
     # ---- PDF Learn / Chat ---------------------------------------------
+    def _send_pdf_chat_history(self, name: str) -> None:
+        """Return one PDF book's saved question/answer history."""
+        try:
+            items = load_pdf_chat_history(name)
+        except ValueError as exc:
+            self._send_error_json(str(exc), 404)
+            return
+        except (OSError, RuntimeError) as exc:
+            self._send_error_json(
+                f"Could not read the PDF chat history: {exc}", 502
+            )
+            return
+        self._send_json({"items": items})
+
     def _handle_pdf_learn(self, name: str) -> None:
         """Split one PDF into trunks and stream learning progress."""
         self._begin_sse()
@@ -676,6 +690,15 @@ class HandlerBooksMixin:
                 try:
                     self._sse("meta", session.snapshot())
                     self._run_question(question)
+                    answer = session.latest_answer
+                    if answer:
+                        try:
+                            history = append_pdf_chat_history(
+                                name, question, answer
+                            )
+                            self._sse("pdf_history", {"items": history})
+                        except Exception:
+                            pass
                     self._sse(
                         "done",
                         {
@@ -704,5 +727,5 @@ class HandlerBooksMixin:
 # Cross-component imports are placed after the definitions so a
 # feature module can depend on another feature module safely.
 from .books import PDF_BOOKS_DIR, WRITE_A_BOOK_ARTICLE_TIMEOUT_SECONDS, WRITE_A_BOOK_CHAPTER_PROMPT, WRITE_A_BOOK_DIGEST_CHARS, WRITE_A_BOOK_DIR, WRITE_A_BOOK_EVIDENCE_CHARS, WRITE_A_BOOK_KEYWORD_PROMPT, WRITE_A_BOOK_OUTLINE_PROMPT, WRITE_A_BOOK_REFERENCE_MAP_CHARS, WRITE_A_BOOK_RESEARCH_BUDGET_SECONDS, WRITE_A_BOOK_RESEARCH_WORKERS, WRITE_A_BOOK_SEARCH_TIMEOUT_SECONDS, _book_chapter_evidence, _book_chapter_titles, _book_filename, _book_html_document, _book_keyword_list, _book_limit_words, _book_load_source, _book_reference_map, _book_search_candidates, _book_source_digest, _book_strip_chapter_heading, _parse_write_a_book_options, _resolve_book_directory, list_manning_free_ebooks, list_pdf_books, list_written_books
-from .pdfbook import get_pdf_chat_state, learn_pdf_book, pdf_book_page_info
+from .pdfbook import append_pdf_chat_history, get_pdf_chat_state, learn_pdf_book, load_pdf_chat_history, pdf_book_page_info
 from .retrieval import ClientDisconnected
