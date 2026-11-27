@@ -28,6 +28,7 @@ stream, and Previous/Next navigation keep working unchanged.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import re
@@ -38,6 +39,13 @@ from pathlib import Path
 from .core import SCRIPT_DIR
 
 SAMPLES_DIR = SCRIPT_DIR / ".chat" / "sat" / "sample-2026"
+
+# prompts/sat.prompt: sections are unlimited — past the sample-test pool,
+# {question_llm} (flint:40b, resolved lazily from sat.py to avoid a circular
+# import) generates the next question on demand and it persists here in the
+# final RW-bank record shape.
+_RW_GENERATED_DIR = SAMPLES_DIR.parent / "rw_generated"
+_RW_GENERATED_META_FILE = "_meta.json"
 
 # Kept in sync with sat.SAT_MODEL; resolved lazily to avoid a circular
 # import (sat.py imports this module at startup).
@@ -385,6 +393,12 @@ def _build_bank() -> dict:
                     "reason": f"could not parse the PDF: {exc}",
                 }
             )
+    generated = _load_rw_generated()
+    questions.extend(generated)
+    if generated:
+        sources.append(
+            f"{len(generated)} question(s) generated with flint:40b"
+        )
     return {"questions": questions, "skipped": skipped, "sources": sources}
 
 
@@ -414,6 +428,178 @@ def _load_bank() -> dict:
 def sat_rw_bank_ready() -> bool:
     """True once at least one sample PDF was parsed into questions."""
     return bool(_load_bank().get("questions"))
+
+
+def _load_rw_generated() -> list[dict]:
+    """Load every previously generated Reading/Writing question on disk."""
+    if not _RW_GENERATED_DIR.is_dir():
+        return []
+    questions: list[dict] = []
+    for path in sorted(_RW_GENERATED_DIR.glob("*.json")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            question = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(question, dict):
+            continue
+        if question.get("section") not in (RW_READING, RW_WRITING):
+            continue
+        if not str(question.get("prompt") or "").strip():
+            continue
+        choices = question.get("choices")
+        if not isinstance(choices, list) or len(choices) < 2:
+            continue
+        questions.append(question)
+    return questions
+
+
+def _rw_next_number() -> int:
+    try:
+        meta = json.loads(
+            (_RW_GENERATED_DIR / _RW_GENERATED_META_FILE).read_text(
+                encoding="utf-8"
+            )
+        )
+        return int(meta.get("count") or 0) + 1
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return 1
+
+
+_RW_GENERATION_PROMPT = """You are writing NEW original SAT questions for an endless practice bank.
+
+Write ONE new original SAT {section} question in the style of the digital SAT
+practice tests. Return ONLY a JSON object (no markdown fences, no commentary)
+with exactly this shape:
+{{
+  "skill": "<short skill label, e.g. {skill_hint}>",
+  "passage": "<the passage the question is based on>",
+  "question": "<the question prompt about the passage>",
+  "choices": {{"A": "<text>", "B": "<text>", "C": "<text>", "D": "<text>"}},
+  "paragraph": ""
+}}
+
+For "Reading": the passage runs 60-110 words of narrative or argument; the
+question tests central ideas, inference, command of evidence, cross-text
+connections, text structure, purpose, or words in context.
+For "Writing": the passage runs 1-4 sentences and contains an editing issue;
+the question asks which choice best meets Standard English conventions
+(boundaries, agreement, punctuation) or expression of ideas (transitions,
+rhetorical synthesis, logic).
+
+Rules:
+- Exactly four choices A-D; exactly one is best, but do NOT say which one.
+- The question must be fully answerable from the passage and prompt alone.
+- Do not include an answer key, rationale, or explanation.
+"""
+
+
+def _rw_generate_question(section: str) -> dict | None:
+    """Generate one new Reading/Writing question with {question_llm}.
+
+    The record is persisted into {questions_cache_dir}/rw_generated in the
+    final RW-bank shape, so it survives restarts and joins the section pool
+    exactly like a sample-test question (without an answer key — the
+    analysis pass stays the single source of truth).
+    """
+    from .sat import _sat_call_local_model, _sat_parse_generated_question
+
+    skill_hint = (
+        "Central Ideas and Details" if section == RW_READING else "Boundaries"
+    )
+    prompt = _RW_GENERATION_PROMPT.format(
+        section=section, skill_hint=skill_hint
+    )
+    payload = _sat_parse_generated_question(_sat_call_local_model(prompt))
+    if not isinstance(payload, dict):
+        return None
+    number = _rw_next_number()
+    passage = str(payload.get("passage") or "").strip()
+    question_text = str(payload.get("question") or "").strip()
+    if passage and question_text:
+        prompt_text = f"{passage}\n\n{question_text}"
+    else:
+        prompt_text = question_text or passage
+    if len(prompt_text) < 40:
+        return None
+    raw_choices = payload.get("choices")
+    if isinstance(raw_choices, dict):
+        items = list(raw_choices.items())
+    elif isinstance(raw_choices, list):
+        items = list(enumerate(raw_choices))
+    else:
+        items = []
+    choices: list[dict[str, str]] = []
+    for item_index, item in enumerate(items):
+        key, value = item
+        text = "" if value is None else str(value).strip()
+        if not text:
+            continue
+        letter = (
+            str(key)
+            if isinstance(raw_choices, dict)
+            else chr(ord("A") + item_index)
+        )
+        choices.append({"id": letter, "text": text})
+    texts = {choice["text"].casefold() for choice in choices}
+    if len(choices) < 2 or len(texts) < 2:
+        return None
+    digest = hashlib.sha1(
+        json.dumps(
+            {
+                "p": prompt_text,
+                "c": [choice["text"] for choice in choices],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+    skill = " ".join(str(payload.get("skill") or "").split()).title()
+    question = {
+        "stable_id": (
+            f"flint-rw-{section.casefold()}-{number:06d}-{digest}"
+        ),
+        "module": f"gen-{section.casefold()}",
+        "number": number,
+        "skill": skill or skill_hint,
+        "section": section,
+        "prompt": prompt_text,
+        "choices": choices,
+        "answer": "",
+        "source": "flint:40b (generated)",
+        "source_pdf": "",
+    }
+    try:
+        _RW_GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+        path = _RW_GENERATED_DIR / (
+            f"rw-{section.casefold()}-{number:06d}-{digest}.json"
+        )
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(
+            json.dumps(question, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+        meta_path = _RW_GENERATED_DIR / _RW_GENERATED_META_FILE
+        meta_path.write_text(
+            json.dumps(
+                {
+                    "count": number,
+                    "written_at": time.time(),
+                    "model": "flint:40b",
+                    "source": "generated",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    with _BANK_LOCK:
+        if _BANK is not None:
+            _BANK.setdefault("questions", []).append(question)
+    return question
 
 
 def sat_rw_domains() -> list[dict]:
@@ -453,17 +639,40 @@ def sat_rw_question(
     if normalized not in RW_DOMAIN_NAMES:
         return None
     section_name = RW_READING if normalized == RW_READING.casefold() else RW_WRITING
-    questions = [
-        question
-        for question in (_load_bank().get("questions") or [])
-        if question.get("section") == section_name
-    ]
+
+    def section_pool() -> list[dict]:
+        return [
+            question
+            for question in (_load_bank().get("questions") or [])
+            if question.get("section") == section_name
+        ]
+
+    questions = section_pool()
     if not questions:
         return None
     total = len(questions)
-    position = index % total if total else 0
-    if random_pick and total:
+    position = int(index) if isinstance(index, int) else int(index or 0)
+    if random_pick:
         position = random.randrange(total)
+        index = position
+    # prompts/sat.prompt: a section must never carry a maximum question
+    # count — once navigation moves past the sample-test pool, {question_llm}
+    # generates the next question on demand and appends it to
+    # {questions_cache_dir}/rw_generated.  Failures fall back to the previous
+    # wrap-around behaviour.
+    guard = 0
+    while position >= total and guard < 5:
+        generated = _rw_generate_question(section_name)
+        questions = section_pool()
+        total = len(questions)
+        if generated is None or not total:
+            break
+        guard += 1
+    if not total:
+        return None
+    # Same wrap semantics as the math path (index % total); after successful
+    # on-demand generation position points exactly at the new question.
+    position = position % total
     selected = questions[position]
     return {
         "view": "question",

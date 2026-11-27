@@ -12161,7 +12161,13 @@ async function loadSatQuestion(entry, domain, index, useRandom = false) {
   const requestId = (entry.satRequestId || 0) + 1;
   entry.satRequestId = requestId;
   const nextIndex = Number.isFinite(Number(index)) ? Number(index) : 0;
-  entry.sat = { view: "loading", domain, index: nextIndex };
+  const lastTotals = entry.satLastTotal || (entry.satLastTotal = {});
+  const lastTotal = Number(lastTotals[domain] || 0);
+  // prompts/sat.prompt: sections are unlimited — when navigating past the
+  // cached pool the backend generates a new question with flint:40b, so
+  // surface a matching loading hint.
+  const generating = !useRandom && lastTotal > 0 && nextIndex >= lastTotal;
+  entry.sat = { view: "loading", domain, index: nextIndex, generating };
   scheduleRender(entry);
   try {
     const url = `/api/sat_question?domain=${encodeURIComponent(domain)}&index=${nextIndex}`
@@ -12177,6 +12183,7 @@ async function loadSatQuestion(entry, domain, index, useRandom = false) {
       throw new Error(payload?.error || `HTTP ${response.status}`);
     }
     if (entry.satRequestId !== requestId) return;
+    lastTotals[domain] = Number(payload?.total) || 0;
     entry.sat = { ...(payload || {}), answerVisible: false };
   } catch (error) {
     if (entry.satRequestId !== requestId) return;
@@ -12386,7 +12393,9 @@ function renderSat(entry) {
     title.textContent = "SAT";
     const meta = document.createElement("span");
     meta.className = "sat-meta";
-    meta.textContent = `Loading ${data.domain || "question"}…`;
+    meta.textContent = data.generating
+      ? `Generating a new ${data.domain || "SAT"} question with flint:40b — this can take a minute…`
+      : `Loading ${data.domain || "question"}…`;
     head.appendChild(title);
     head.appendChild(meta);
     container.appendChild(head);
@@ -12415,12 +12424,13 @@ function renderSat(entry) {
   if (String(question.domain || "").trim()) {
     entry.satActiveDomain = String(question.domain).trim();
   }
-  const total = Math.max(1, Number(data.total) || 1);
   const index = Math.max(0, Number(data.index) || 0);
   const head = document.createElement("div");
   head.className = "sat-question-head";
   const where = document.createElement("span");
-  where.textContent = `${question.domain || data.domain || "SAT"} · Question ${index + 1} of ${total}`;
+  // prompts/sat.prompt: no maximum — the sections carry an endless supply,
+  // so the card never shows a finite "question N of total" bound.
+  where.textContent = `${question.domain || data.domain || "SAT"} · Question ${index + 1} · endless bank`;
   const details = document.createElement("span");
   details.textContent = [question.difficulty, question.stable_id].filter(Boolean).join(" · ");
   head.appendChild(where);
@@ -12466,14 +12476,12 @@ function renderSat(entry) {
   const previousBtn = document.createElement("button");
   previousBtn.type = "button";
   previousBtn.textContent = "Previous";
-  previousBtn.disabled = total <= 1;
   previousBtn.addEventListener("click", () => {
     void loadSatQuestion(entry, data.domain, index - 1);
   });
   const nextBtn = document.createElement("button");
   nextBtn.type = "button";
   nextBtn.textContent = "Next";
-  nextBtn.disabled = total <= 1;
   nextBtn.addEventListener("click", () => {
     void loadSatQuestion(entry, data.domain, index + 1);
   });

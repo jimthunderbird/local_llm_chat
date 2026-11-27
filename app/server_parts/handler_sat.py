@@ -13,12 +13,14 @@ from .sat import (
     sat_bank_ready,
     sat_domain_question,
     sat_domains,
+    sat_generated_question_answer,
     sat_is_next_question_request,
     sat_question_request_answer,
     sat_random_question_answer,
     sat_reveal_prompt,
     sat_rw_domains,
     sat_topic_list_answer,
+    sat_unseen_question_left,
 )
 
 
@@ -152,16 +154,31 @@ class HandlerSatMixin:
                 state.record_turn(question, resolved, answer)
                 return
             next_question = sat_is_next_question_request(resolved)
-            question_request = (
-                sat_random_question_answer(
-                    exclude_ids=state.sat_recent_question_ids
-                )
-                if next_question
-                else sat_question_request_answer(
+            recent_ids = state.sat_recent_question_ids
+            if next_question:
+                if sat_unseen_question_left(exclude_ids=recent_ids):
+                    question_request = sat_random_question_answer(
+                        exclude_ids=recent_ids
+                    )
+                else:
+                    # Every question in {questions_cache_dir} was recently
+                    # shown; {question_llm} generates a similar new one so
+                    # the question supply stays unlimited.
+                    question_request = sat_generated_question_answer(
+                        "", exclude_ids=recent_ids
+                    ) or sat_random_question_answer()
+            else:
+                question_request = sat_question_request_answer(
                     resolved,
-                    exclude_ids=state.sat_recent_question_ids,
+                    exclude_ids=recent_ids,
                 )
-            )
+                if question_request is None:
+                    # No cached question matches the request; generate a
+                    # similar one with {question_llm} instead of falling
+                    # back to an ungrounded answer.
+                    question_request = sat_generated_question_answer(
+                        resolved, exclude_ids=recent_ids
+                    )
             if question_request is not None:
                 answer, sources, selected = question_request
                 state.sat_pending_question = selected
@@ -175,14 +192,26 @@ class HandlerSatMixin:
                     state.sat_recent_question_ids = (
                         state.sat_recent_question_ids[-20:]
                     )
-                self._sse_text(
-                    "log",
-                    (
-                        "[sat: presenting a random PineSAT math question]"
-                        if next_question
-                        else "[sat: showing a bank question without its answer]"
-                    ),
-                )
+                generated = str(selected.get("source") or "") == "generated"
+                if generated and next_question:
+                    log_line = (
+                        "[sat: cache exhausted — "
+                        f"{SAT_MODEL} generated a new question]"
+                    )
+                elif generated:
+                    log_line = (
+                        "[sat: no cache match — "
+                        f"{SAT_MODEL} generated a similar question]"
+                    )
+                elif next_question:
+                    log_line = (
+                        "[sat: presenting a random question from the cache]"
+                    )
+                else:
+                    log_line = (
+                        "[sat: showing a cache question without its answer]"
+                    )
+                self._sse_text("log", log_line)
                 self._sse_text("delta", answer)
                 state.latest_answer = answer
                 state.latest_sources = []
