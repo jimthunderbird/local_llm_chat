@@ -1,3 +1,7 @@
+task.try_getting_transcript (completed) {
+  can you please try your best to get the transcript of https://www.youtube.com/watch?v=tYFZLDxhynQ
+}
+
 task.detail_error_message (completed) {
   in {directory_of_this_prompt}/../fetch_youtube_transcript.py:
   when the youtube transcript fails to learn, give a detail message about what happened, currently only the exit code is given and it is not very helpful

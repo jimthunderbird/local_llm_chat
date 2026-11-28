@@ -21,11 +21,11 @@ The transcript sources are tried in this order:
        subtitle languages: trying every language with several player
        clients made the fallback path very slow when blocked, so English
        is the only language yt-dlp is asked for.
-
-The third-party transcript site (youtubetotranscript.com) is NOT used:
-per prompts/youtube.prompt the pipeline must rely solely on the two
-YouTube caption libraries above, even when YouTube blocks this machine's
-IP.
+    3. NoteGPT — a last-resort public transcript endpoint used only when
+       both YouTube caption libraries are blocked. It accepts an anonymous
+       UUID cookie and returns the available caption tracks. The
+       youtubetotranscript.com site is still NOT used, per
+       prompts/youtube.prompt.
 
 When the transcript returned by any source is not English, it is translated
 to English with the local Ollama model. This handles videos whose only
@@ -56,6 +56,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 try:
@@ -424,6 +425,100 @@ def _fetch_with_ytdlp(video_id: str) -> str:
     return _fetch_with_ytdlp_languages(video_id, "en.*")
 
 
+NOTEGPT_TRANSCRIPT_URL = (
+    "https://notegpt.io/api/v2/video-transcript-v2"
+)
+
+
+def _fetch_with_notegpt(video_id: str) -> tuple[str, str, bool]:
+    """Fetch captions from NoteGPT as the last-resort public transcript source.
+
+    NoteGPT serves the same caption tracks that YouTube exposes, behind an
+    anonymous UUID cookie.  The caller only reaches this function after both
+    YouTube caption libraries have failed (normally because YouTube returns
+    HTTP 429 for this machine's IP).  The returned tuple is
+    ``(text, language_name, is_non_english)`` so a non-English track can go
+    through the existing local translation step.
+    """
+    if requests is None:
+        raise RuntimeError(
+            "requests is not installed; cannot call the NoteGPT fallback"
+        )
+    response = requests.get(
+        NOTEGPT_TRANSCRIPT_URL,
+        params={"platform": "youtube", "video_id": video_id},
+        headers={
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://notegpt.io",
+            "Referer": "https://notegpt.io/youtube-transcript-generator",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            ),
+        },
+        cookies={"anonymous_user_id": str(uuid.uuid4())},
+        timeout=(10, 90),
+    )
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            "NoteGPT returned a non-JSON response (likely a security checkpoint)"
+        ) from exc
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict) or str(payload.get("code")) != "100000":
+        message = payload.get("message") if isinstance(payload, dict) else ""
+        raise RuntimeError(
+            "NoteGPT could not return a transcript"
+            + (f": {message}" if message else "")
+        )
+    transcripts = data.get("transcripts")
+    if not isinstance(transcripts, dict) or not transcripts:
+        raise RuntimeError("NoteGPT returned no caption tracks")
+
+    language_keys = list(transcripts)
+    language_key = next(
+        (
+            key
+            for key in language_keys
+            if str(key).lower().replace("_", "-").startswith("en")
+        ),
+        language_keys[0],
+    )
+    tracks = transcripts.get(language_key)
+    if not isinstance(tracks, dict):
+        raise RuntimeError("NoteGPT returned an unusable caption track")
+    for track_name in ("default", "auto", "custom"):
+        segments = tracks.get(track_name)
+        if not isinstance(segments, list) or not segments:
+            continue
+        text = " ".join(
+            str(segment.get("text") or "").strip()
+            for segment in segments
+            if isinstance(segment, dict)
+        )
+        text = " ".join(text.split())
+        if text:
+            language_name = ""
+            for language in data.get("language_code") or []:
+                if not isinstance(language, dict):
+                    continue
+                code = str(language.get("code") or "")
+                if code == language_key or (
+                    code.startswith("en") and language_key.startswith("en")
+                ):
+                    language_name = str(language.get("name") or "")
+                    break
+            non_english = not str(language_key).lower().replace(
+                "_", "-"
+            ).startswith("en")
+            return text, language_name or language_key, non_english
+
+    raise RuntimeError("NoteGPT returned empty transcript text")
+
+
 def _fetch_from_youtube_libraries(video_id: str) -> tuple[str, str, bool]:
     """Fetch the transcript straight from YouTube with the caption libraries.
 
@@ -439,9 +534,9 @@ def _fetch_from_youtube_libraries(video_id: str) -> tuple[str, str, bool]:
     yt-dlp only tries English captions (prompts/youtube.prompt): iterating
     every listed subtitle language with several player clients per language
     made the last-resort path very slow when blocked, so no original-language
-    fallback is attempted here. Videos without English captions fall through
-    to the third-party transcript site, whose transcript the caller
-    translates when needed.
+    fallback is attempted here. If both YouTube libraries fail, NoteGPT is
+    tried as the last-resort public transcript source; its return value is
+    translated by the caller when the available track is not English.
 
     Returns ``(text, language_name, is_non_english)``.
     """
@@ -481,8 +576,28 @@ def _fetch_from_youtube_libraries(video_id: str) -> tuple[str, str, bool]:
             "the caption libraries gave up"
         )
 
+    try:
+        text, language_name, non_english = _fetch_with_notegpt(video_id)
+        _log(
+            "fetched transcript with NoteGPT fallback"
+            + (
+                f" ({language_name}); translating it to English"
+                if non_english
+                else ""
+            )
+        )
+        return text, f"NoteGPT ({language_name})", non_english
+    except Exception as exc:
+        library_errors.append(
+            f"NoteGPT: {_classify_error(exc)} ({_short_error(exc, 300)})"
+        )
+        _log(
+            f"NoteGPT fallback failed ({_classify_error(exc)}); "
+            "all transcript sources gave up"
+        )
+
     raise RuntimeError(
-        "Both caption libraries failed for "
+        "All transcript sources failed for "
         f"{video_id}: {'; '.join(library_errors)}"
     )
 
@@ -612,12 +727,10 @@ def fetch_transcript(video_id: str, use_cache: bool = True) -> str:
     A previously downloaded transcript is reused so retries and the learn
     pipeline are idempotent and do not hit the caption libraries again.
 
-    The transcript comes straight from YouTube with the two caption
-    libraries — youtube-transcript-api first, then yt-dlp (English only).
-    Per prompts/youtube.prompt the third-party transcript site
-    (youtubetotranscript.com) is NOT used: when both libraries fail the
-    fetch fails and the caller is expected to retry later, for example
-    after IP blocking lifts or a proxy is configured.
+    The transcript comes from YouTube with youtube-transcript-api first, then
+    yt-dlp (English only). If both are blocked, the NoteGPT public transcript
+    endpoint is used as a last resort. Per prompts/youtube.prompt the
+    youtubetotranscript.com site is still NOT used.
 
     When a source returns a non-English transcript, the original-language
     transcript is translated locally with Ollama. This handles videos whose
