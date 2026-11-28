@@ -180,6 +180,26 @@ class HandlerCoreMixin:
                 }
             )
             return
+        if path == "/api/video_transcript_timeline":
+            params = parse_qs(parsed.query)
+            video_id = (params.get("id") or [""])[0].strip()
+            if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                self._send_error_json("Missing or invalid YouTube video id", 400)
+                return
+            try:
+                duration = float((params.get("duration") or ["0"])[0])
+            except (TypeError, ValueError):
+                duration = 0.0
+            try:
+                timeline = video_transcript_timeline(video_id, duration)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 404)
+                return
+            except (RuntimeError, OSError) as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json(timeline)
+            return
         if path == "/api/video_learn_status":
             params = parse_qs(parsed.query)
             video_id = (params.get("id") or [""])[0].strip()
@@ -2032,7 +2052,7 @@ from .robinhood import ZILLOW_MCP_LIMIT, ZILLOW_MCP_RADIUS_MILES, ZillowMCPError
 from .stackoverflow import fetch_stackoverflow_answers
 from .stock import fetch_stock_company_summary
 from .tts import synthesize_speech
-from .video import _video_learn_jobs_snapshot, forget_news_chat_state, refresh_news_corpus, start_video_learn_job, video_is_chat_ready
+from .video import _video_learn_jobs_snapshot, forget_news_chat_state, refresh_news_corpus, start_video_learn_job, video_is_chat_ready, video_transcript_timeline
 from .wikivoyage import fetch_wikivoyage_article
 from .youtube import add_youtube_bookmark
 from .zillow import zillow_nearby_listings

@@ -149,6 +149,11 @@ Endpoints:
                                   trunks from the saved transcript
     GET  /api/video_learn_status current background learn progress (all jobs,
                                   or ?id=<video_id> for one)
+    GET  /api/video_transcript_timeline
+                                  ?id=<video_id>&duration=<seconds> timestamped
+                                  transcript segments for the video modal's
+                                  Realtime Transcript switch, cached beside the
+                                  learned transcript
     POST /api/gutenberg_chat     SSE: answer a question about one Project
                                   Gutenberg book in a session isolated from
                                   the main chat

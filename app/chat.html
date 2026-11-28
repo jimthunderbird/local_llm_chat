@@ -3516,6 +3516,83 @@
     background: var(--accent-2);
     transition: width .25s ease;
   }
+  /* The video modal's realtime transcript panel: the switch loads the
+     timestamped transcript, and the active segment follows playback time. */
+  .video-realtime {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 12px;
+    background: #101b26;
+    border: 1px solid #223344;
+    border-radius: 8px;
+  }
+  .video-realtime-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .video-realtime-head .video-action-title { flex: 1; }
+  .video-realtime-toggle {
+    flex: 0 0 auto;
+    min-width: 44px;
+    padding: 4px 9px;
+    background: #142334;
+    color: var(--dim);
+    border: 1px solid #30465d;
+    border-radius: 999px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    line-height: 1.3;
+    cursor: pointer;
+  }
+  .video-realtime-toggle:hover { border-color: #3d6b8f; color: var(--text); }
+  .video-realtime-toggle[aria-checked="true"] {
+    background: #173247;
+    border-color: var(--accent-2);
+    color: var(--accent-2);
+  }
+  .video-realtime-status {
+    color: var(--dim);
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+  .video-realtime-status[hidden] { display: none; }
+  .video-realtime-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    max-height: min(30vh, 280px);
+    overflow-y: auto;
+    margin: 1px 0 0;
+    padding: 0;
+    scrollbar-width: thin;
+  }
+  .video-realtime-list[hidden] { display: none; }
+  .video-realtime-segment {
+    padding: 5px 7px;
+    border-left: 2px solid transparent;
+    border-radius: 4px;
+    color: var(--dim);
+    font-size: 11.5px;
+    line-height: 1.45;
+    cursor: pointer;
+  }
+  .video-realtime-segment:hover { background: #142333; color: var(--text); }
+  .video-realtime-segment.is-active {
+    background: #16283a;
+    border-left-color: var(--accent-2);
+    color: var(--text);
+  }
+  .video-realtime-time {
+    margin-right: 6px;
+    color: var(--accent-2);
+    font-family: var(--mono);
+    font-size: 10px;
+    white-space: nowrap;
+  }
+  .video-realtime-segment.is-active .video-realtime-time { color: var(--accent); }
   .video-chat {
     display: flex;
     flex-direction: column;
@@ -5858,6 +5935,15 @@
               <div id="video-action-fill" class="video-action-fill"></div>
             </div>
           </div>
+          <div id="video-realtime" class="video-realtime">
+            <div class="video-realtime-head">
+              <span class="video-action-title">Realtime Transcript</span>
+              <button id="video-realtime-toggle" class="video-realtime-toggle" type="button"
+                      role="switch" aria-checked="false" title="Show the transcript as the video plays">Off</button>
+            </div>
+            <div id="video-realtime-status" class="video-realtime-status">Turn on to follow the transcript while the video plays.</div>
+            <ol id="video-realtime-list" class="video-realtime-list" hidden></ol>
+          </div>
           <div id="video-chat" class="video-chat" hidden>
             <div class="video-chat-head">
               <span class="video-action-title">Chat about this video</span>
@@ -6187,6 +6273,10 @@ const videoChatSendEl = $("#video-chat-send");
 const videoSummaryLoadingEl = $("#video-summary-loading");
 const videoSummaryErrorEl = $("#video-summary-error");
 const videoSummaryContentEl = $("#video-summary-content");
+const videoRealtimeEl = $("#video-realtime");
+const videoRealtimeToggleEl = $("#video-realtime-toggle");
+const videoRealtimeStatusEl = $("#video-realtime-status");
+const videoRealtimeListEl = $("#video-realtime-list");
 const gutenbergPanelEl = $("#gutenberg-panel");
 const gutenbergTitleEl = $("#gutenberg-title");
 const gutenbergMetaEl = $("#gutenberg-meta");
@@ -12411,6 +12501,9 @@ function videoEmbedUrl(videoId, autoplay) {
     rel: "0",
     modestbranding: "1",
     playsinline: "1",
+    // The realtime transcript tracks playback through the iframe API's
+    // postMessage protocol (infoDelivery/getCurrentTime).
+    enablejsapi: "1",
   });
   if (autoplay) params.set("autoplay", "1");
   return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}?${params.toString()}`;
@@ -15974,6 +16067,7 @@ function openVideoModal(item, mode = "play", playlistEntry = null) {
   resetVideoAction();
   resetVideoChat();
   resetVideoBookmark();
+  resetVideoRealtime();
   setVideoMaximized(false);
   videoItem = item;
   videoPlaylistEntry = playlistEntry || null;
@@ -15996,6 +16090,9 @@ function openVideoModal(item, mode = "play", playlistEntry = null) {
   videoPanelEl.hidden = false;
   updateVideoNav();
   refreshVideoAction(item);
+  if (videoRealtime.enabled) {
+    loadVideoRealtimeTimeline(item);
+  }
 }
 
 function videoPlaylistItems() {
@@ -16046,6 +16143,7 @@ function closeVideoModal() {
   resetVideoAction();
   resetVideoChat();
   resetVideoBookmark();
+  resetVideoRealtime();
   setVideoMaximized(false);
   videoItem = null;
   videoPlaylistEntry = null;
@@ -16054,6 +16152,340 @@ function closeVideoModal() {
   videoIframeEl.src = "about:blank";
   videoSummaryEl.hidden = true;
 }
+
+/* ------------------------------------------------------------------ *
+ *  Realtime transcript in the video modal
+ *
+ *  The switch loads the learned video's timestamped transcript and follows
+ *  the embedded player. Playback time comes from YouTube's iframe
+ *  postMessage protocol; the current caption cue is highlighted and scrolled
+ *  into view in the right column. Clicking a cue seeks the player to it.
+ * ------------------------------------------------------------------ */
+const VIDEO_REALTIME_STORAGE_KEY = "video_realtime_transcript";
+const videoRealtime = {
+  enabled: false,
+  generation: 0,
+  timer: null,
+  videoId: "",
+  segments: [],
+  nodes: [],
+  activeIndex: -1,
+  currentTime: 0,
+  source: "",
+  waitingForDuration: false,
+};
+try {
+  videoRealtime.enabled =
+    window.localStorage.getItem(VIDEO_REALTIME_STORAGE_KEY) === "on";
+} catch (_) {
+  // Storage can be disabled; the switch still works for this page session.
+}
+
+function videoRealtimeTimeLabel(value) {
+  const total = Math.max(0, Math.floor(Number(value) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function syncVideoRealtimeToggle() {
+  if (!videoRealtimeToggleEl) return;
+  const enabled = videoRealtime.enabled;
+  videoRealtimeToggleEl.textContent = enabled ? "On" : "Off";
+  videoRealtimeToggleEl.setAttribute("aria-checked", enabled ? "true" : "false");
+  videoRealtimeToggleEl.title = enabled
+    ? "Turn off the realtime transcript"
+    : "Show the transcript as the video plays";
+}
+
+function stopVideoRealtimePolling() {
+  if (videoRealtime.timer !== null) {
+    window.clearInterval(videoRealtime.timer);
+    videoRealtime.timer = null;
+  }
+}
+
+function postYouTubePlayerMessage(payload) {
+  const frame = videoIframeEl?.contentWindow;
+  if (!frame) return;
+  try {
+    frame.postMessage(JSON.stringify(payload), "*");
+  } catch (_) {
+    // The iframe may have navigated away or been closed.
+  }
+}
+
+function postYouTubePlayerCommand(func, args = []) {
+  postYouTubePlayerMessage({ event: "command", func, args });
+}
+
+function sendVideoRealtimeListening() {
+  if (!videoItem?.id) return;
+  postYouTubePlayerMessage({
+    event: "listening",
+    id: videoItem.id,
+    channel: "widget",
+  });
+}
+
+function startVideoRealtimePolling() {
+  stopVideoRealtimePolling();
+  if (!videoRealtime.enabled) return;
+  sendVideoRealtimeListening();
+  postYouTubePlayerCommand("getCurrentTime");
+  videoRealtime.timer = window.setInterval(() => {
+    if (!videoRealtime.enabled) return;
+    postYouTubePlayerCommand("getCurrentTime");
+  }, 400);
+}
+
+function setVideoRealtimeStatus(text, hidden = false) {
+  if (!videoRealtimeStatusEl) return;
+  videoRealtimeStatusEl.textContent = text;
+  videoRealtimeStatusEl.hidden = Boolean(hidden);
+}
+
+function renderVideoRealtimeSegments() {
+  if (!videoRealtimeListEl) return;
+  videoRealtimeListEl.textContent = "";
+  videoRealtime.nodes = [];
+  videoRealtime.activeIndex = -1;
+  if (!videoRealtime.segments.length) {
+    videoRealtimeListEl.hidden = true;
+    return;
+  }
+  for (const [index, segment] of videoRealtime.segments.entries()) {
+    const item = document.createElement("li");
+    item.className = "video-realtime-segment";
+    item.title = `Jump to ${videoRealtimeTimeLabel(segment.start)}`;
+    const time = document.createElement("span");
+    time.className = "video-realtime-time";
+    time.textContent = videoRealtimeTimeLabel(segment.start);
+    const text = document.createElement("span");
+    text.textContent = segment.text;
+    item.appendChild(time);
+    item.appendChild(text);
+    item.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      postYouTubePlayerCommand("seekTo", [Number(segment.start) || 0, true]);
+      updateVideoRealtimeTime(Number(segment.start) || 0);
+    });
+    videoRealtime.nodes.push(item);
+    videoRealtimeListEl.appendChild(item);
+  }
+  videoRealtimeListEl.hidden = !videoRealtime.enabled;
+  if (videoRealtime.enabled) {
+    const sourceLabel = videoRealtime.source === "estimated"
+      ? "Following the stored transcript (estimated timings)"
+      : "Following the NoteGPT transcript";
+    setVideoRealtimeStatus(`${sourceLabel} · click a line to jump.`);
+    if (videoRealtime.currentTime > 0) {
+      updateVideoRealtimeTime(videoRealtime.currentTime);
+    }
+  }
+}
+
+function updateVideoRealtimeTime(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return;
+  videoRealtime.currentTime = Math.max(0, seconds);
+  if (!videoRealtime.enabled || !videoRealtime.segments.length) return;
+  let index = -1;
+  for (let i = 0; i < videoRealtime.segments.length; i += 1) {
+    if (Number(videoRealtime.segments[i].start) <= seconds + 0.15) {
+      index = i;
+    } else {
+      break;
+    }
+  }
+  if (seconds < Number(videoRealtime.segments[0].start)) index = -1;
+  if (index === videoRealtime.activeIndex) return;
+  const previous = videoRealtime.nodes[videoRealtime.activeIndex];
+  if (previous) previous.classList.remove("is-active");
+  videoRealtime.activeIndex = index;
+  const current = videoRealtime.nodes[index];
+  if (current) {
+    current.classList.add("is-active");
+    current.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function handleYouTubePlayerMessage(event) {
+  if (!videoIframeEl || event.source !== videoIframeEl.contentWindow) return;
+  let data = event.data;
+  if (typeof data === "string") {
+    try {
+      data = JSON.parse(data);
+    } catch (_) {
+      return;
+    }
+  }
+  if (!data || typeof data !== "object") return;
+  if (data.event !== "infoDelivery" && data.event !== "initialDelivery") return;
+  const info = data.info;
+  if (!info || typeof info !== "object") return;
+  if (Number.isFinite(Number(info.currentTime))) {
+    updateVideoRealtimeTime(Number(info.currentTime));
+  }
+  const duration = Number(info.duration);
+  if (
+    videoRealtime.waitingForDuration
+    && Number.isFinite(duration)
+    && duration > 0
+    && videoItem
+  ) {
+    videoRealtime.waitingForDuration = false;
+    videoRealtime.duration = duration;
+    loadVideoRealtimeTimeline(videoItem);
+  }
+}
+
+async function loadVideoRealtimeTimeline(item) {
+  if (!item?.id || !videoRealtime.enabled) return;
+  const generation = ++videoRealtime.generation;
+  videoRealtime.videoId = item.id;
+  videoRealtime.segments = [];
+  videoRealtime.nodes = [];
+  videoRealtime.activeIndex = -1;
+  videoRealtime.currentTime = 0;
+  videoRealtime.source = "";
+  videoRealtime.waitingForDuration = false;
+  stopVideoRealtimePolling();
+  if (videoRealtimeListEl) {
+    videoRealtimeListEl.textContent = "";
+    videoRealtimeListEl.hidden = true;
+  }
+  setVideoRealtimeStatus("Loading the transcript…");
+  try {
+    const duration = Number(item.duration) || Number(videoRealtime.duration) || 0;
+    const response = await fetch(
+      `/api/video_transcript_timeline?id=${encodeURIComponent(item.id)}`
+      + `&duration=${encodeURIComponent(duration)}`
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    if (generation !== videoRealtime.generation || !videoRealtime.enabled) {
+      return;
+    }
+    const segments = Array.isArray(data.segments)
+      ? data.segments
+          .map((segment) => ({
+            start: Number(segment?.start),
+            end: Number(segment?.end),
+            text: String(segment?.text || "").trim(),
+          }))
+          .filter(
+            (segment) =>
+              Number.isFinite(segment.start) && segment.text
+          )
+          .sort((a, b) => a.start - b.start)
+      : [];
+    if (!segments.length) {
+      setVideoRealtimeStatus(
+        "No timed transcript was found for this video."
+      );
+      return;
+    }
+    videoRealtime.segments = segments;
+    videoRealtime.source = String(data.source || "");
+    renderVideoRealtimeSegments();
+    startVideoRealtimePolling();
+  } catch (error) {
+    if (generation !== videoRealtime.generation || !videoRealtime.enabled) {
+      return;
+    }
+    const duration = Number(item.duration) || 0;
+    if (duration <= 0 && !Number(videoRealtime.duration)) {
+      videoRealtime.waitingForDuration = true;
+      setVideoRealtimeStatus(
+        "Waiting for the video duration to load the transcript…"
+      );
+      startVideoRealtimePolling();
+      return;
+    }
+    setVideoRealtimeStatus(
+      `Realtime transcript unavailable: ${error?.message || String(error)}`
+    );
+  }
+}
+
+function applyVideoRealtimeEnabled(enabled, persist = true) {
+  videoRealtime.enabled = Boolean(enabled);
+  if (persist) {
+    try {
+      window.localStorage.setItem(
+        VIDEO_REALTIME_STORAGE_KEY,
+        videoRealtime.enabled ? "on" : "off"
+      );
+    } catch (_) {
+      // Ignore storage failures.
+    }
+  }
+  syncVideoRealtimeToggle();
+  if (!videoRealtime.enabled) {
+    stopVideoRealtimePolling();
+    if (videoRealtimeListEl) videoRealtimeListEl.hidden = true;
+    setVideoRealtimeStatus("Realtime transcript is off.");
+    return;
+  }
+  if (!videoItem?.id) return;
+  if (
+    videoRealtime.videoId === videoItem.id
+    && videoRealtime.segments.length
+  ) {
+    if (videoRealtimeListEl) videoRealtimeListEl.hidden = false;
+    const sourceLabel = videoRealtime.source === "estimated"
+      ? "Following the stored transcript (estimated timings)"
+      : "Following the NoteGPT transcript";
+    setVideoRealtimeStatus(`${sourceLabel} · click a line to jump.`);
+    startVideoRealtimePolling();
+    return;
+  }
+  loadVideoRealtimeTimeline(videoItem);
+}
+
+function resetVideoRealtime() {
+  videoRealtime.generation += 1;
+  stopVideoRealtimePolling();
+  videoRealtime.videoId = "";
+  videoRealtime.segments = [];
+  videoRealtime.nodes = [];
+  videoRealtime.activeIndex = -1;
+  videoRealtime.currentTime = 0;
+  videoRealtime.source = "";
+  videoRealtime.waitingForDuration = false;
+  if (videoRealtimeListEl) {
+    videoRealtimeListEl.textContent = "";
+    videoRealtimeListEl.hidden = true;
+  }
+  syncVideoRealtimeToggle();
+  setVideoRealtimeStatus(
+    videoRealtime.enabled
+      ? "Turn on the video and the transcript will follow along."
+      : "Turn on to follow the transcript while the video plays."
+  );
+}
+
+videoRealtimeToggleEl?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  applyVideoRealtimeEnabled(!videoRealtime.enabled);
+});
+
+videoIframeEl.addEventListener("load", () => {
+  if (!videoRealtime.enabled || !videoItem?.id) return;
+  sendVideoRealtimeListening();
+  postYouTubePlayerCommand("getCurrentTime");
+});
+
+window.addEventListener("message", handleYouTubePlayerMessage);
 
 /* Maximize the embedded player to fill the viewport, and restore it back to
  * the modal's default size. The iframe is only resized, never reloaded, so

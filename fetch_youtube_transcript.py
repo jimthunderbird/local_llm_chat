@@ -120,14 +120,8 @@ NOTEGPT_TRANSCRIPT_URL = (
 )
 
 
-def _fetch_with_notegpt(video_id: str) -> tuple[str, str, bool]:
-    """Fetch captions from NoteGPT, the only transcript source.
-
-    NoteGPT serves the caption tracks that YouTube exposes, behind an
-    anonymous UUID cookie. The returned tuple is
-    ``(text, language_name, is_non_english)`` so a non-English track can go
-    through the existing local translation step.
-    """
+def _notegpt_data(video_id: str) -> dict:
+    """Request NoteGPT and return its validated ``data`` object."""
     if requests is None:
         raise RuntimeError(
             "requests is not installed; cannot call NoteGPT"
@@ -162,10 +156,14 @@ def _fetch_with_notegpt(video_id: str) -> tuple[str, str, bool]:
             "NoteGPT could not return a transcript"
             + (f": {message}" if message else "")
         )
+    return data
+
+
+def _notegpt_tracks(data: dict) -> tuple[str, dict, str, bool]:
+    """Pick the English caption track and describe its language."""
     transcripts = data.get("transcripts")
     if not isinstance(transcripts, dict) or not transcripts:
         raise RuntimeError("NoteGPT returned no caption tracks")
-
     language_keys = list(transcripts)
     language_key = next(
         (
@@ -178,6 +176,37 @@ def _fetch_with_notegpt(video_id: str) -> tuple[str, str, bool]:
     tracks = transcripts.get(language_key)
     if not isinstance(tracks, dict):
         raise RuntimeError("NoteGPT returned an unusable caption track")
+    language_name = ""
+    for language in data.get("language_code") or []:
+        if not isinstance(language, dict):
+            continue
+        code = str(language.get("code") or "")
+        if code == language_key or (
+            code.startswith("en") and language_key.startswith("en")
+        ):
+            language_name = str(language.get("name") or "")
+            break
+    non_english = not str(language_key).lower().replace(
+        "_", "-"
+    ).startswith("en")
+    return (
+        language_key,
+        tracks,
+        language_name or language_key,
+        non_english,
+    )
+
+
+def _fetch_with_notegpt(video_id: str) -> tuple[str, str, bool]:
+    """Fetch captions from NoteGPT, the only transcript source.
+
+    NoteGPT serves the caption tracks that YouTube exposes, behind an
+    anonymous UUID cookie. The returned tuple is
+    ``(text, language_name, is_non_english)`` so a non-English track can go
+    through the existing local translation step.
+    """
+    data = _notegpt_data(video_id)
+    _language_key, tracks, language_name, non_english = _notegpt_tracks(data)
     for track_name in ("default", "auto", "custom"):
         segments = tracks.get(track_name)
         if not isinstance(segments, list) or not segments:
@@ -189,22 +218,93 @@ def _fetch_with_notegpt(video_id: str) -> tuple[str, str, bool]:
         )
         text = " ".join(text.split())
         if text:
-            language_name = ""
-            for language in data.get("language_code") or []:
-                if not isinstance(language, dict):
-                    continue
-                code = str(language.get("code") or "")
-                if code == language_key or (
-                    code.startswith("en") and language_key.startswith("en")
-                ):
-                    language_name = str(language.get("name") or "")
-                    break
-            non_english = not str(language_key).lower().replace(
-                "_", "-"
-            ).startswith("en")
-            return text, language_name or language_key, non_english
-
+            return text, language_name, non_english
     raise RuntimeError("NoteGPT returned empty transcript text")
+
+
+def _timed_seconds(value) -> float | None:
+    """Parse NoteGPT's ``HH:MM:SS`` / ``MM:SS`` timestamp into seconds."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parts = text.split(":")
+    if len(parts) > 3:
+        return None
+    try:
+        numbers = [float(part) for part in parts]
+    except ValueError:
+        return None
+    seconds = 0.0
+    for number in numbers:
+        seconds = seconds * 60 + number
+    return seconds
+
+
+def fetch_timed_transcript(video_id: str) -> dict:
+    """Return NoteGPT's caption segments with start/end times.
+
+    The result is suitable for syncing the transcript with an embedded
+    player. It uses the same English track as ``_fetch_with_notegpt`` and
+    normalizes each segment to a contiguous time window so the browser can
+    highlight exactly one portion at a time.
+    """
+    data = _notegpt_data(video_id)
+    _language_key, tracks, language_name, non_english = _notegpt_tracks(data)
+    for track_name in ("default", "auto", "custom"):
+        raw_segments = tracks.get(track_name)
+        if not isinstance(raw_segments, list) or not raw_segments:
+            continue
+        parsed: list[dict] = []
+        for raw_segment in raw_segments:
+            if not isinstance(raw_segment, dict):
+                continue
+            text = " ".join(str(raw_segment.get("text") or "").split())
+            if not text:
+                continue
+            start = _timed_seconds(raw_segment.get("start"))
+            if start is None:
+                continue
+            end = _timed_seconds(raw_segment.get("end"))
+            parsed.append({"start": start, "end": end, "text": text})
+        if not parsed:
+            continue
+        parsed.sort(
+            key=lambda item: (
+                item["start"],
+                item["end"] if item["end"] is not None else item["start"],
+            )
+        )
+        segments: list[dict] = []
+        for index, item in enumerate(parsed):
+            start = float(item["start"])
+            next_start = (
+                float(parsed[index + 1]["start"])
+                if index + 1 < len(parsed)
+                else None
+            )
+            raw_end = item["end"]
+            if next_start is not None and next_start > start:
+                end = next_start
+            elif raw_end is not None and float(raw_end) > start:
+                end = float(raw_end)
+            else:
+                end = start + 2.0
+            segments.append(
+                {
+                    "start": round(start, 3),
+                    "end": round(end, 3),
+                    "text": item["text"],
+                }
+            )
+        return {
+            "video_id": video_id,
+            "language": language_name,
+            "source": "NoteGPT",
+            "track": track_name,
+            "non_english": non_english,
+            "segments": segments,
+        }
+    raise RuntimeError("NoteGPT returned no timed transcript segments")
 
 
 def _fetch_transcript_source(video_id: str) -> tuple[str, str, bool]:

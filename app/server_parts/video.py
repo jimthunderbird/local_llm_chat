@@ -79,6 +79,134 @@ def video_has_transcript(video_id: str) -> bool:
     transcript, _trunks = _video_files(video_id)
     return transcript.is_file()
 
+def video_timed_transcript_path(video_id: str) -> Path:
+    """Where a video's timestamped transcript is cached."""
+    return VIDEO_LEARN_TRANSCRIPT_DIR / (
+        f"{chat.YOUTUBE_PREFIX}{video_id}.timed.json"
+    )
+
+
+def _estimated_video_timeline(
+    video_id: str, transcript: str, duration: float
+) -> dict:
+    """Build an approximate timeline when NoteGPT has no cached timings.
+
+    The transcript is split into sentence-sized chunks and each chunk gets a
+    share of the video duration proportional to its character count. The
+    result is labelled ``estimated`` so the UI can tell the viewer that the
+    highlighting is approximate.
+    """
+    if duration <= 0:
+        raise RuntimeError(
+            "Timed transcript is unavailable and the video duration is unknown."
+        )
+    text = " ".join(str(transcript or "").split())
+    if not text:
+        raise RuntimeError("The stored transcript is empty.")
+    sentences = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?])\s+", text)
+        if part.strip()
+    ]
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if current and len(current) + 1 + len(sentence) > 220:
+            chunks.append(current)
+            current = sentence
+        else:
+            current = f"{current} {sentence}".strip()
+    if current:
+        chunks.append(current)
+    if not chunks:
+        chunks = [text]
+    total_chars = sum(len(chunk) for chunk in chunks) or 1
+    segments: list[dict] = []
+    consumed = 0
+    start = 0.0
+    for chunk in chunks:
+        consumed += len(chunk)
+        end = round(duration * consumed / total_chars, 3)
+        if end <= start:
+            end = min(duration, start + 1.0)
+        segments.append(
+            {"start": round(start, 3), "end": end, "text": chunk}
+        )
+        start = end
+    if segments:
+        segments[-1]["end"] = round(max(duration, segments[-1]["end"]), 3)
+    return {
+        "video_id": video_id,
+        "language": "English",
+        "source": "estimated",
+        "track": "stored transcript",
+        "segments": segments,
+    }
+
+
+def video_transcript_timeline(video_id: str, duration: float = 0.0) -> dict:
+    """Return timestamped transcript segments for a learned video.
+
+    The NoteGPT timing is cached next to the transcript after the first
+    request, so switching the realtime transcript on again is instant and does
+    not call the network. A stale cache is refreshed when the transcript file
+    is newer. If NoteGPT cannot provide English timings, the locally stored
+    English transcript is split across the known video duration and marked as
+    estimated.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise ValueError("Missing or invalid YouTube video id")
+    transcript_path, _trunks = _video_files(video_id)
+    if not transcript_path.is_file():
+        raise ValueError(
+            "This video has no locally stored transcript yet. Learn it first."
+        )
+    timed_path = video_timed_transcript_path(video_id)
+    try:
+        cache_is_current = (
+            timed_path.is_file()
+            and timed_path.stat().st_mtime >= transcript_path.stat().st_mtime
+        )
+    except OSError:
+        cache_is_current = False
+    if cache_is_current:
+        try:
+            cached = json.loads(timed_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cached = None
+        if (
+            isinstance(cached, dict)
+            and not cached.get("non_english")
+            and isinstance(cached.get("segments"), list)
+            and cached["segments"]
+        ):
+            return cached
+
+    try:
+        import fetch_youtube_transcript as transcript_module
+
+        timeline = transcript_module.fetch_timed_transcript(video_id)
+    except Exception:
+        timeline = None
+    if timeline is not None and not timeline.get("non_english"):
+        try:
+            timed_path.write_text(
+                json.dumps(timeline, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        return timeline
+
+    try:
+        transcript = transcript_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not read the stored transcript: {exc}"
+        ) from exc
+    return _estimated_video_timeline(video_id, transcript, float(duration))
+
+
 def video_is_learned(video_id: str) -> bool:
     """A video is learned once its RAG trunks exist.
 

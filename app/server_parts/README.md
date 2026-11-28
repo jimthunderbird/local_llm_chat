@@ -32,7 +32,7 @@ The split follows the feature requirements in `prompts/*.prompt`:
 | `command_config.py` | Command argument catalogues and documentation URLs | multiple |
 | `translation.py` | Paragraph translation helpers | `translation.prompt` |
 | `code.py` | Code-snippet explanation prompts | `code_snippet_block.prompt` |
-| `video.py` | Video chat state, summaries, learn jobs | `youtube.prompt` |
+| `video.py` | Video chat state, summaries, learn jobs, and realtime transcript timelines | `youtube.prompt` |
 | `image.py` | Image attachments and vision-model selection | `image.prompt` |
 | `youtube.py` | Bookmarks and YouTube result helpers | `youtube.prompt` |
 | `config.py` | Model names and feature limits | `main_llm_models_update.prompt` |

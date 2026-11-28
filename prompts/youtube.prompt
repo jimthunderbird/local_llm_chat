@@ -1,3 +1,14 @@
+task.local_transcript_speech_sync_with_realtime_transcript (completed) {
+  add a new switch "Realtime Transcript" {
+    when on {
+      for the video that has been "learned" (with transcript stored locally), as the talk moves forward, display the corresponding portion of the transcript in the right column, real time
+    }
+    when off {
+      the real time transcript display is off
+    }
+  }  
+}
+
 task.notegpt_only (completed) {
   when fetching youtube transcript, just use notegpt as the only way, no other way should be used
 }
