@@ -4258,12 +4258,20 @@
   }
   .book-cover {
     flex: 0 0 auto;
-    width: 62px;
-    height: 92px;
+    width: 64px;
+    height: 98px;
     object-fit: cover;
     border-radius: 4px;
     border: 1px solid #22384b;
     background: #152435;
+  }
+  .book-cover.placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--dim);
+    font-size: 24px;
+    line-height: 1;
   }
   .book-card:hover,
   .book-card:focus-visible {
@@ -4276,6 +4284,7 @@
     font-size: 12.5px;
     font-weight: 700;
     line-height: 1.35;
+    overflow-wrap: anywhere;
   }
   .book-url {
     color: var(--dim);
@@ -4296,6 +4305,7 @@
     white-space: nowrap;
   }
   .book-authors { color: #c5d5e3; font-size: 11.5px; }
+  .book-authors.unknown { color: var(--dim); font-style: italic; font-weight: 400; }
   .book-meta { color: var(--dim); font-size: 10.5px; line-height: 1.4; }
   .book-action {
     align-self: flex-start;
@@ -13980,6 +13990,8 @@ function addBookLibraryEvent(entry, data) {
       cover: String(data.cover || ""),
       bookUrl: String(data.book_url || ""),
       pdfReady: Boolean(data.pdf_ready),
+      author: String(data.author || ""),
+      thumbnailUrl: String(data.thumbnail_url || ""),
       url: String(data.url || ""),
       size: Number(data.size) || 0,
       modified: String(data.modified || ""),
@@ -14090,6 +14102,14 @@ async function deletePdfBookFromLibrary(entry, item, button) {
   }
 }
 
+function buildPdfCoverPlaceholder() {
+  const cover = document.createElement("div");
+  cover.className = "book-cover placeholder";
+  cover.textContent = "📖";
+  cover.setAttribute("aria-hidden", "true");
+  return cover;
+}
+
 function renderDownloadedPdfCard(entry, item) {
   const card = document.createElement("a");
   card.className = "book-card";
@@ -14099,35 +14119,58 @@ function renderDownloadedPdfCard(entry, item) {
   card.title = `Read ${item.name || item.title} page by page`;
   openPdfBookReaderOnClick(card, item);
 
+  const thumbnail = String(item.thumbnailUrl || "").trim();
+  if (thumbnail) {
+    const cover = document.createElement("img");
+    cover.className = "book-cover";
+    cover.src = thumbnail;
+    cover.alt = "";
+    cover.loading = "lazy";
+    cover.decoding = "async";
+    cover.addEventListener("error", () => {
+      cover.replaceWith(buildPdfCoverPlaceholder());
+    });
+    card.appendChild(cover);
+  } else {
+    card.appendChild(buildPdfCoverPlaceholder());
+  }
+
+  const body = document.createElement("div");
+  body.className = "book-body";
+
   const title = document.createElement("div");
   title.className = "book-title";
-  title.textContent = item.title;
-  card.appendChild(title);
+  title.textContent = item.title || item.name || "(untitled)";
+  body.appendChild(title);
+
+  const author = document.createElement("div");
+  author.className = "book-authors";
+  if (item.author) {
+    author.textContent = item.author;
+  } else {
+    author.textContent = "Author unknown";
+    author.classList.add("unknown");
+  }
+  body.appendChild(author);
 
   const meta = document.createElement("div");
-  meta.className = "book-authors";
+  meta.className = "book-meta";
   const metaParts = [];
+  if (Number(item.pages) > 0) {
+    metaParts.push(`${Number(item.pages).toLocaleString()} pages`);
+  }
+  if (item.size) metaParts.push(formatBookLibrarySize(item.size));
   if (item.lastOpened) metaParts.push(`Opened ${item.lastOpened}`);
   else if (item.modified) metaParts.push(`Saved ${item.modified}`);
-  metaParts.push(formatBookLibrarySize(item.size));
   meta.textContent = metaParts.join(" · ");
-  card.appendChild(meta);
-
-  if (item.url) {
-    const url = document.createElement("div");
-    url.className = "book-url";
-    try {
-      url.textContent = new URL(item.url, window.location.href).href;
-    } catch {
-      url.textContent = item.url;
-    }
-    card.appendChild(url);
-  }
+  body.appendChild(meta);
 
   const action = document.createElement("span");
   action.className = "book-action";
   action.textContent = "Read PDF →";
-  card.appendChild(action);
+  body.appendChild(action);
+
+  card.appendChild(body);
   appendPdfDeleteButton(entry, card, item);
   return card;
 }
@@ -14146,7 +14189,7 @@ function buildPdfBooksRefreshButton(entry) {
   refresh.type = "button";
   refresh.className = "book-group-refresh";
   refresh.textContent = "Refresh";
-  refresh.title = "Re-read .chat/pdf_books and refresh this list";
+  refresh.title = "Re-read .chat/pdf_books, rebuild book metadata, and refresh this list";
   refresh.addEventListener("click", () => {
     refreshDownloadedPdfBooks(entry, refresh);
   });
@@ -14155,13 +14198,19 @@ function buildPdfBooksRefreshButton(entry) {
 
 async function refreshDownloadedPdfBooks(entry, button) {
   if (!entry || entry.pdfBooksRefreshing) return;
+  // prompts/pdf_books.prompt task.refresh_button_and_book_metadata: the
+  // manual Refresh button asks the server to rebuild each book's metadata.
+  const rebuild = Boolean(button);
   entry.pdfBooksRefreshing = true;
   if (button) {
     button.disabled = true;
-    button.textContent = "Refreshing…";
+    button.textContent = "Rebuilding…";
   }
   try {
-    const response = await fetch("/api/pdf_books_list", { cache: "no-store" });
+    const listUrl = rebuild
+      ? "/api/pdf_books_list?rebuild=1"
+      : "/api/pdf_books_list";
+    const response = await fetch(listUrl, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
     const books = Array.isArray(payload?.books) ? payload.books : [];
@@ -14175,11 +14224,13 @@ async function refreshDownloadedPdfBooks(entry, button) {
       title: String(book.title || book.name || "(untitled)"),
       subtitle: "",
       description: "",
-      pages: "",
+      pages: Number(book.pages) || 0,
       published: "",
       cover: "",
       bookUrl: "",
       pdfReady: false,
+      author: String(book.author || ""),
+      thumbnailUrl: String(book.thumbnail_url || ""),
       url: String(book.url || ""),
       size: Number(book.size) || 0,
       modified: String(book.modified || ""),
@@ -14196,9 +14247,13 @@ async function refreshDownloadedPdfBooks(entry, button) {
     entry.bookLibraryError = "";
     renderBookLibrary(entry);
     toast(
-      `Refreshed ${books.length} downloaded PDF book${
-        books.length === 1 ? "" : "s"
-      }.`
+      rebuild
+        ? `Rebuilt metadata for ${books.length} downloaded PDF book${
+            books.length === 1 ? "" : "s"
+          }.`
+        : `Refreshed ${books.length} downloaded PDF book${
+            books.length === 1 ? "" : "s"
+          }.`
     );
   } catch (error) {
     toast(
@@ -14459,6 +14514,10 @@ function renderBookLibrary(entry) {
   const cards = document.createElement("div");
   cards.className = "book-cards";
   for (const item of items) {
+    if (item.pdf) {
+      cards.appendChild(renderDownloadedPdfCard(entry, item));
+      continue;
+    }
     const card = document.createElement("a");
     card.className = "book-card";
     card.href = item.url || "#";

@@ -895,8 +895,14 @@ class HandlerCoreMixin:
             # Lightweight listing for the "Refresh" button next to
             # "Downloaded PDF Books" in the /pdf_books view. It re-reads
             # .chat/pdf_books directly and always wins the refresh race.
+            # prompts/pdf_books.prompt task.refresh_button_and_book_metadata:
+            # ?rebuild=1 also re-extracts each book's title/author/pages.
+            params = parse_qs(parsed.query)
+            rebuild = (params.get("rebuild") or [""])[0].strip().lower() in {
+                "1", "true", "yes", "on",
+            }
             try:
-                books = list_pdf_books()
+                books = list_pdf_books(rebuild=rebuild)
             except (OSError, RuntimeError) as exc:
                 self._send_error_json(
                     f"Could not list the downloaded PDF books: {exc}", 502
@@ -972,6 +978,13 @@ class HandlerCoreMixin:
                 self._send_error_json("Missing or invalid PDF page", 400)
                 return
             self._send_pdf_page_image(name, page)
+            return
+        if path == "/api/pdf_book_thumbnail":
+            # prompts/pdf_books.prompt task.thumbnail_image_and_book_title:
+            # the downloaded-book cards show a small rendered cover.
+            params = parse_qs(parsed.query)
+            name = (params.get("name") or [""])[0]
+            self._send_pdf_thumbnail(name)
             return
         if path == "/api/pdf_concept":
             params = parse_qs(parsed.query)
@@ -1157,6 +1170,35 @@ class HandlerCoreMixin:
         self.send_header("Content-Type", "image/png")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _send_pdf_thumbnail(self, name: str) -> None:
+        """Render and serve a small cached cover image for one PDF book."""
+        try:
+            path = render_pdf_book_thumbnail(name)
+        except ValueError as exc:
+            self._send_error_json(str(exc), 404)
+            return
+        except (OSError, RuntimeError) as exc:
+            self._send_error_json(
+                f"Could not render the PDF thumbnail: {exc}", 502
+            )
+            return
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            self._send_error_json(
+                f"Cannot read the rendered PDF thumbnail: {exc}", 500
+            )
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=86400")
         self.end_headers()
         try:
             self.wfile.write(data)
@@ -1954,7 +1996,7 @@ class HandlerCoreMixin:
 # Cross-component imports are placed after the definitions so a
 # feature module can depend on another feature module safely.
 from .article import GUTENBERG_CATALOG_CACHE
-from .books import build_pdf_knowledge_graph, delete_pdf_book, download_ocean_of_pdf_book, list_pdf_books, pdf_book_path, pdf_knowledge_graph_path, read_pdf_book_page, read_pdf_concept, render_pdf_book_page, search_ocean_of_pdf, written_book_path
+from .books import build_pdf_knowledge_graph, delete_pdf_book, download_ocean_of_pdf_book, list_pdf_books, pdf_book_path, pdf_knowledge_graph_path, read_pdf_book_page, read_pdf_concept, render_pdf_book_page, render_pdf_book_thumbnail, search_ocean_of_pdf, written_book_path
 from .changelog import changelog_file_path
 from .command_config import GUTENBERG_BOOK_ID_RE, GUTENBERG_BOOK_URL, GUTENBERG_SUBCOMMANDS, OPENLIBRARY_SUBCOMMANDS, STACKOVERFLOW_SUBCOMMANDS, YOUTUBE_SUBCOMMANDS, strip_surrounding_search_quotes
 from .core import CHAT_HTML, MAX_REQUEST_BYTES, PATH_COMPLETION_LIMIT, WEB_COMMANDS

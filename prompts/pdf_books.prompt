@@ -2,6 +2,17 @@ pdf_books_dir: {directory_of_this_prompt}/../.chat/pdf_books
 pdf_books_trunks_dir: {directory_of_this_prompt}/../.chat/pdf_books/trunks
 pdf_books_chathistory_dir: {directory_of_this_prompt}/../.chat/pdf_books/chat_history
 
+task.refresh_button_and_book_metadata (completed) {
+  when clicking on the "Refresh" button, we:
+  - refresh the book list
+  - rebuild metadata for the books
+}
+
+task.thumbnail_image_and_book_title (completed) {
+  for each book in the book list, please:
+  - extract the book title, book thumbnail image and author name from the PDF file and display them nicely!
+}
+
 task.bug.history_of_philosophy (completed) {
   i tried to download "The History of Philosophy", it showed that it is downloaded, but I actually downloaded "The Prism of Science The Israel Colloquium Studies in History Philosophy and Sociology of Science Volume 2 1", why?
 }

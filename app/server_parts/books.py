@@ -17,6 +17,9 @@ WRITE_A_BOOK_DIR = SCRIPT_DIR / ".chat" / "books"
 
 PDF_BOOKS_DIR = SCRIPT_DIR / ".chat" / "pdf_books"
 PDF_BOOKS_LAST_OPEN_PATH = PDF_BOOKS_DIR / "last_open.json"
+PDF_BOOK_META_DIR = PDF_BOOKS_DIR / ".metadata"
+PDF_BOOK_THUMB_DIR = PDF_BOOKS_DIR / ".thumbnails"
+PDF_BOOK_THUMBNAIL_WIDTH = 240
 _PDF_LAST_OPEN_LOCK = threading.Lock()
 
 # task.more_horizontal_exploration in prompts/write_a_book.prompt asks for
@@ -383,8 +386,21 @@ def pdf_book_path(name: str) -> Path | None:
 
 def _pdf_book_title(name: str) -> str:
     """Use a readable filename stem as the PDF book title."""
-    stem = re.sub(r"[_-]+", " ", Path(name).stem)
-    return " ".join(stem.split()) or Path(name).stem
+    stem = Path(name).stem
+    stem = re.sub(
+        r"^[A-Za-z0-9]+\.(?:com|net|org|xyz|com\.co)[_\-\s]*",
+        "",
+        stem,
+        flags=re.IGNORECASE,
+    )
+    stem = re.sub(
+        r"\s*[\(\[]\s*PDFDrive(?:\.com)?\s*[\)\]]\s*",
+        " ",
+        stem,
+        flags=re.IGNORECASE,
+    )
+    stem = re.sub(r"[_-]+", " ", stem)
+    return " ".join(stem.split()).strip(" ._-") or Path(name).stem
 
 def _load_pdf_last_open() -> dict[str, float]:
     """Read the persisted PDF last-open timestamps, tolerating bad files."""
@@ -427,8 +443,13 @@ def record_pdf_open(name: str) -> None:
             pass
 
 
-def list_pdf_books() -> list[dict]:
-    """List every PDF in .chat/pdf_books by last open time, newest first."""
+def list_pdf_books(rebuild: bool = False) -> list[dict]:
+    """List every PDF in .chat/pdf_books by last open time, newest first.
+
+    prompts/pdf_books.prompt task.refresh_button_and_book_metadata: the
+    Refresh button passes rebuild=True so title/author/pages are read again
+    instead of coming from the per-version metadata cache.
+    """
     if not PDF_BOOKS_DIR.is_dir():
         return []
     last_open_map = _load_pdf_last_open()
@@ -442,11 +463,24 @@ def list_pdf_books() -> list[dict]:
             continue
         name = path.name
         last_open = last_open_map.get(name, 0.0)
+        metadata = _pdf_book_metadata(path, rebuild=rebuild)
+        thumbnail_version = hashlib.sha1(
+            (
+                f"{stat.st_mtime}:{metadata['title']}:{metadata['author']}:"
+                f"{metadata['pages']}:{metadata['thumbnail_page']}"
+            ).encode("utf-8")
+        ).hexdigest()[:12]
         entries.append(
             {
                 "id": name,
                 "name": name,
-                "title": _pdf_book_title(name),
+                "title": metadata["title"],
+                "author": metadata["author"],
+                "pages": metadata["pages"],
+                "thumbnail_url": (
+                    f"/api/pdf_book_thumbnail?name={quote(name)}"
+                    f"&v={thumbnail_version}"
+                ),
                 "url": f"/api/pdf_book_file?name={quote(name)}",
                 "size": stat.st_size,
                 "mtime": stat.st_mtime,
@@ -484,9 +518,24 @@ def delete_pdf_book(name: str) -> dict:
     if not path.is_file():
         raise ValueError("PDF book not found.")
     try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    try:
         path.unlink()
     except OSError as exc:
         raise RuntimeError(f"Could not delete {book_name}: {exc}") from exc
+
+    # Remove the extracted metadata and rendered thumbnails for this version.
+    cache_key = hashlib.sha1(
+        f"{book_name}:{mtime}".encode("utf-8")
+    ).hexdigest()
+    try:
+        (PDF_BOOK_META_DIR / f"{cache_key}.json").unlink(missing_ok=True)
+        for thumbnail in PDF_BOOK_THUMB_DIR.glob(f"{cache_key}-p*.png"):
+            thumbnail.unlink(missing_ok=True)
+    except OSError:
+        pass
 
     with _PDF_LAST_OPEN_LOCK:
         mapping = _load_pdf_last_open()
@@ -1413,6 +1462,761 @@ def _pdf_book_reader(path: Path) -> tuple[object, int]:
         cached = (reader, len(reader.pages))
         _PDF_BOOK_READERS[key] = cached
         return cached
+
+# prompts/pdf_books.prompt task.thumbnail_image_and_book_title: the /pdf_books
+# cards show a cover image, title, and author read from each PDF.  pypdf can
+# return the document metadata cheaply; the cover is rendered lazily by the
+# browser through /api/pdf_book_thumbnail.  Both results are cached per file
+# version so listing the library stays fast.
+_PDF_BOOK_META_LOCK = threading.Lock()
+
+_PDF_BOOK_THUMB_LOCK = threading.Lock()
+
+_PDF_TITLE_JUNK_RE = re.compile(
+    r"^(?:untitled|title|document\s*\d*|microsoft word.*|"
+    r".+\.(?:docx?|dvi|indd|qxd)|pdf|ebook|book|unknown|none|n/?a)$",
+    re.IGNORECASE,
+)
+
+_PDF_AUTHOR_JUNK_RE = re.compile(
+    r"^(?:\.|unknown|none|n/?a|administrator|admin|user|owner|microsoft|"
+    r"adobe|calibre|andi|author|.+publications?|.+press|.+books?|"
+    r".+library|.+inc\.?|.+ltd\.?|.+university|.+college|"
+    r".*\b(?:editor|publisher|production|translator|translated)\b.*|"
+    r".*rights reserved.*|.*\bcopyright\b.*)$",
+    re.IGNORECASE,
+)
+
+_PDF_BY_RE = re.compile(
+    r"^\s*(?:by|written by)\s+(.+?)\s*$", re.IGNORECASE
+)
+
+_PDF_AUTHOR_FIELD_RE = re.compile(
+    r"^\s*(?:author|authors|written by|by)\s*[:\-]\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
+
+_PDF_NAME_SPLIT_RE = re.compile(r"\s*[-\u2013\u2014]\s*")
+
+_PDF_FILENAME_SPLIT_RE = re.compile(r"\s+[-\u2013\u2014]\s+")
+
+# Words that are far more likely to belong to a book title, a publisher
+# imprint, or a place than to a person's name.
+_PDF_TITLE_STOPWORDS = frozenset(
+    {
+        "a", "action", "agents", "ai", "algebra", "an", "analytics",
+        "ancient", "applications", "area", "artificial", "authors", "basics",
+        "biology", "book",
+        "books", "calculus", "chemistry", "clarendon", "classical", "cloud",
+        "coding", "college", "companion", "complete", "components", "concise",
+        "contributing", "css", "data", "development", "developers",
+        "dictionary", "driven", "drexel", "davidson", "early", "edition",
+        "editor", "editors",
+        "eighth", "encyclopedia", "engineering", "engineers", "essentials",
+        "fifth", "fine", "first", "for", "foreword", "formulas", "foundations",
+        "fourth", "francisco", "from", "gene", "generative", "geometry", "great",
+        "guide", "handbook", "history", "illustrated", "in", "inference",
+        "intelligence", "introduction", "its", "javascript", "kubernetes", "later",
+        "learning", "letters", "linear", "llm", "machine", "manual", "mathematical",
+        "mathematics", "model", "models", "modern", "new", "notes", "novel",
+        "of", "on", "or", "paper", "papers", "part", "philosophers",
+        "philosophy", "physics", "platform", "practical", "practice", "press",
+        "principles", "production", "programming", "publications", "publisher",
+        "publishers", "reader", "reserved", "rights", "san", "science",
+        "second", "selected", "series", "seventh", "sixth", "software", "spec",
+        "stories", "story", "surface", "systems", "textbook", "the", "theory",
+        "third", "to", "transcendentals", "translated", "translator", "tuning",
+        "university", "volume", "vol", "web", "with", "world", "works", "writing",
+        "written", "york",
+    }
+)
+
+_PDF_NAME_PARTICLES = frozenset(
+    {"al", "and", "da", "de", "del", "der", "di", "du", "ibn", "la",
+     "le", "van", "von", "&"}
+)
+
+
+def _pdf_clean_text(value: str) -> str:
+    """Normalise metadata strings and undo common escaped PDF text."""
+    text = html.unescape(str(value or ""))
+    text = text.replace("\\'", "'").replace('\\"', '"')
+    text = text.replace("\u00ad", "").replace("_", " ")
+    return " ".join(text.split()).strip(" -_:;,")
+
+
+def _pdf_clean_author(value: str) -> str:
+    """Return a metadata author only when it looks like a real byline."""
+    text = _pdf_clean_text(value)
+    text = re.sub(r"\s+(?:pdf|epub|ebooks?)\s*$", "", text, flags=re.I)
+    text = text.strip(" .,;:-\u2013\u2014")
+    if not text or len(text) > 80:
+        return ""
+    if _PDF_AUTHOR_JUNK_RE.match(text):
+        return ""
+    return text
+
+
+def _pdf_looks_like_person_name(value: str, max_words: int = 3) -> bool:
+    """Heuristically decide whether a line is a person's byline."""
+    text = _pdf_clean_text(value)
+    if not text or len(text) > 64 or any(ch.isdigit() for ch in text):
+        return False
+    text = re.sub(r"\s+(?:pdf|epub|ebooks?)\s*$", "", text, flags=re.I)
+    words = [
+        word.strip(",;:()[]{}'\"")
+        for word in text.split()
+        if word.strip(",;:()[]{}'\"")
+    ]
+    if not words or len(words) > max_words:
+        return False
+    for word in words:
+        if re.fullmatch(r"[A-Z]\.", word):
+            # An initial such as the A. in A. C. Grayling is not an article.
+            continue
+        if word.casefold().strip(".") in _PDF_TITLE_STOPWORDS:
+            return False
+    for word in words:
+        if word.casefold() in _PDF_NAME_PARTICLES:
+            continue
+        if not all(ch.isalpha() or ch in ".-'\u2019" for ch in word):
+            return False
+        if len(word) < 2 and not word.endswith("."):
+            return False
+        segments = [segment for segment in re.split(r"[-'\u2019]", word) if segment]
+        if not segments:
+            return False
+        for segment in segments:
+            if segment.endswith(".") or segment.isupper():
+                continue
+            if not segment[0].isupper():
+                return False
+            upper_ratio = sum(
+                1 for ch in segment if ch.isupper()
+            ) / len(segment)
+            # Allow DasGupta and McDonald, reject things like PUBl.
+            if upper_ratio > 0.5:
+                return False
+    if len(words) >= 2:
+        return True
+    # A single all-caps surname such as SENECA or POLYA.
+    word = words[0]
+    return len(word) >= 4 and word.isupper()
+
+
+def _pdf_title_without_author(title: str, author: str) -> str:
+    """Strip a byline that leaked into a title or filename."""
+    title = _pdf_clean_text(title)
+    author = _pdf_clean_author(author)
+    if not title or not author:
+        return title
+    words = [word.strip(".,;:") for word in author.split() if word.strip(".,;:")]
+    candidates = [author]
+    if len(words) > 1:
+        candidates.append(words[-1])
+    for name in candidates:
+        matched = False
+        leading = re.compile(
+            r"^\s*" + re.escape(name) + r"\s*[-\u2013\u2014:]?\s+", re.I
+        )
+        if leading.match(title):
+            matched = True
+            stripped = leading.sub("", title, count=1).strip(" -\u2013\u2014:,")
+            if len(stripped.split()) >= 2 and len(stripped) >= 6:
+                return stripped
+        trailing = re.compile(
+            r"\s*[-\u2013\u2014]?\s*" + re.escape(name) + r"\s*$", re.I
+        )
+        if trailing.search(title):
+            matched = True
+            stripped = trailing.sub("", title, count=1).strip(" -\u2013\u2014:,")
+            if len(stripped.split()) >= 2 and len(stripped) >= 6:
+                return stripped
+        if matched:
+            # The full byline matched but the remainder was only one word
+            # (for example "AI" in "AI Russell Norvig"); do not try to strip
+            # just the surname and leave a misleading title.
+            return title
+    return title
+
+
+def _pdf_clean_title(title: str, author: str = "") -> str:
+    """Remove download-site suffixes and a byline from a title."""
+    title = _pdf_clean_text(title)
+    title = re.sub(
+        r"\s+(?:PDF|EPUB|E-?book)\s*$", "", title, flags=re.IGNORECASE
+    )
+    title = _pdf_clean_text(title)
+    author = _pdf_clean_author(author)
+    if author:
+        for separator in (" by ", " - ", " \u2013 ", " \u2014 "):
+            suffix = separator + author
+            if title.casefold().endswith(suffix.casefold()):
+                title = title[: -len(suffix)].strip(" -:,")
+                break
+        title = _pdf_title_without_author(title, author)
+    return _pdf_clean_text(title)
+
+
+def _pdf_metadata_title(raw: str, name: str, author: str) -> str:
+    """Clean a PDF title field, falling back to the filename."""
+    title = _pdf_clean_text(raw)
+    if re.match(r"^Microsoft Word\b", title, re.I):
+        title = ""
+    if re.search(r"\.(?:docx?|indd|dvi|qxd)$", title, re.I):
+        # A document filename in the title field is not a real book title.
+        title = ""
+    else:
+        title = re.sub(r"^Microsoft Word\s*-\s*", "", title, flags=re.I)
+    title = re.sub(
+        r"\s*[-\u2013\u2014]\s*PDFDrive(?:\.com)?\s*$", "", title, flags=re.I
+    )
+    title = re.sub(
+        r"\s*[\(\[]\s*PDFDrive(?:\.com)?\s*[\)\]]\s*$",
+        "",
+        title,
+        flags=re.I,
+    )
+    title = re.sub(r"\s*\(for True Epub\)\s*$", "", title, flags=re.I)
+    title = re.sub(r"\s*\([^()]*\s*/\s*[^()]*\)\s*$", "", title)
+    title = _pdf_clean_text(title)
+    stem = Path(name).stem.casefold()
+    if title and (
+        _PDF_TITLE_JUNK_RE.match(title)
+        or title.casefold() in {stem, name.casefold()}
+        or title.casefold() == "runfm"
+    ):
+        title = ""
+    title = _pdf_clean_title(title, author) if title else ""
+    return title or _pdf_book_title(name)
+
+
+def _pdf_is_title_fragment(candidate: str, title: str) -> bool:
+    """True when every word in the candidate already appears in the title."""
+    title_words = set(_ocean_title_key(title).split())
+    candidate_words = set(_ocean_title_key(candidate).split())
+    return bool(candidate_words) and candidate_words <= title_words
+
+
+def _pdf_author_from_filename(name: str) -> str:
+    """Read a byline from filenames such as 'Title by Author'."""
+    stem = _pdf_clean_text(Path(name).stem)
+    stem = re.sub(r"^\d+[=_-]\d+\s*[-_ ]\s*", "", stem)
+    # "Bryson, Bill - A Short History..." -> "Bill Bryson"
+    comma = re.search(
+        r"\b([A-Z][A-Za-z.'\u2019-]+),\s*([A-Z][A-Za-z.'\u2019-]+)\b",
+        stem,
+    )
+    if comma:
+        candidate = _pdf_clean_author(f"{comma.group(2)} {comma.group(1)}")
+        if candidate and _pdf_looks_like_person_name(candidate):
+            return candidate
+    match = re.search(r"\bby\s+(.+)$", stem, re.IGNORECASE)
+    if match:
+        candidate = _pdf_clean_author(match.group(1))
+        if candidate and _pdf_looks_like_person_name(candidate, max_words=6):
+            return candidate
+    # Only split on a hyphen that is surrounded by spaces, so a title such as
+    # "How-to-solve-it" is not mistaken for an author/title separator.
+    parts = _PDF_FILENAME_SPLIT_RE.split(stem, maxsplit=1)
+    if len(parts) == 2:
+        choices = []
+        for index, part in enumerate(parts):
+            candidate = _pdf_clean_author(part)
+            if candidate and _pdf_looks_like_person_name(candidate):
+                choices.append((len(candidate.split()), index, candidate))
+        if choices:
+            choices.sort(key=lambda item: (item[0], -item[1]))
+            return choices[0][2]
+    # "AI Russell Norvig" -> "Russell Norvig"
+    words = [word for word in re.split(r"\s+", stem) if word]
+    for size in (3, 2):
+        if len(words) <= size:
+            continue
+        candidate = _pdf_clean_author(" ".join(words[-size:]))
+        if not candidate or not _pdf_looks_like_person_name(candidate):
+            continue
+        prefix = words[:-size]
+        if not prefix or any(
+            word.strip(".,;:").casefold() in _PDF_TITLE_STOPWORDS
+            for word in prefix
+        ):
+            return candidate
+    return ""
+
+
+def _pdf_author_candidate(line: str, title: str = "") -> str:
+    """Turn one line of a title page into an author, when possible."""
+    text = _pdf_clean_text(line)
+    if not text or len(text) > 90:
+        return ""
+
+    def accept(value: str) -> str:
+        candidate = _pdf_clean_author(value)
+        if "," in candidate or ";" in candidate:
+            return ""
+        if re.search(
+            r"\b(?:editor|designer|manager|developer|director|proofreader|"
+            r"indexer|copyeditor|illustrator|photographer|assistant|publisher|"
+            r"production|translator)\b\s*:",
+            candidate,
+            re.IGNORECASE,
+        ):
+            return ""
+        if not candidate or not _pdf_looks_like_person_name(
+            candidate, max_words=6
+        ):
+            return ""
+        if title and _pdf_is_title_fragment(candidate, title):
+            title_key = _ocean_title_key(title)
+            candidate_key = _ocean_title_key(candidate)
+            # A byline can also prefix a filename-derived title, such as
+            # "Gilbert Strang Linear Algebra and Its Applications ...".
+            if not (
+                candidate_key
+                and title_key.startswith(candidate_key + " ")
+                and len(title_key.split()) >= len(candidate_key.split()) + 3
+            ):
+                return ""
+        return candidate
+
+    editor = re.match(
+        r"^(?:general\s+)?editor\s*[:\-]?\s+(.+)$", text, re.IGNORECASE
+    )
+    if editor:
+        found = accept(editor.group(1))
+        if found:
+            return found
+    match = _PDF_AUTHOR_FIELD_RE.match(text) or _PDF_BY_RE.match(text)
+    if match:
+        found = accept(match.group(1))
+        if found:
+            return found
+    if " by " in text.casefold():
+        found = accept(text.rsplit(" by ", 1)[-1])
+        if found:
+            return found
+    # "HOWARD ANTON Drexel University" -> "HOWARD ANTON"
+    words = text.split()
+    institutions = {
+        "university", "college", "institute", "department", "school",
+        "press", "publications", "publisher", "publishers",
+    }
+    for index, word in enumerate(words):
+        if index > 0 and word.strip(".,;:").casefold() in institutions:
+            # Try progressively shorter prefixes so an institution name such
+            # as "Drexel University" does not become part of the byline.
+            for end in range(index, 0, -1):
+                found = accept(" ".join(words[:end]))
+                if found:
+                    return found
+    # Avoid splitting long sentences, comma-separated affiliations, and
+    # all-caps section headings such as SPEC-DRIVEN AI DEVELOPMENT.
+    if (
+        len(text.split()) <= 6
+        and "," not in text
+        and ";" not in text
+        and not (text.isupper() and len(text.split()) > 3)
+    ):
+        parts = _PDF_NAME_SPLIT_RE.split(text, maxsplit=1)
+        if len(parts) == 2:
+            for part in parts:
+                found = accept(part.rstrip("."))
+                if found:
+                    return found
+    return accept(text.rstrip("."))
+
+
+def _pdf_page_lines(
+    reader: object, count: int, limit: int = 8
+) -> list[tuple[int, list[str]]]:
+    """Read the first pages' text lines for byline inference."""
+    pages: list[tuple[int, list[str]]] = []
+    for index in range(min(count, limit)):
+        try:
+            text = reader.pages[index].extract_text() or ""
+        except Exception:
+            text = ""
+        lines = [" ".join(line.split()) for line in text.splitlines()]
+        pages.append((index + 1, [line for line in lines if line]))
+    return pages
+
+
+_PDF_FRONT_MATTER_NOISE = (
+    "contents",
+    "table of contents",
+    "save 45%",
+    "save 50%",
+    "ebooks for $",
+    "manning publications co.",
+    "published in the series",
+    "for online information",
+    "series editors",
+    "springer texts in statistics",
+)
+
+_PDF_LINE_NOISE = (
+    "copyright",
+    "all rights reserved",
+    "isbn",
+    "library of congress",
+    "printed in",
+    "doi",
+)
+
+
+def _pdf_line_is_noise(line: str) -> bool:
+    """True for copyright and other lines that never contain the author."""
+    text = line.casefold()
+    return any(marker in text for marker in _PDF_LINE_NOISE)
+
+
+def _pdf_page_is_front_matter_noise(lines: list[str]) -> bool:
+    """True for contents, copyright, promotions, and similar pages."""
+    joined = " ".join(lines).casefold()
+    return any(marker in joined for marker in _PDF_FRONT_MATTER_NOISE)
+
+
+def _pdf_author_from_pages(reader: object, count: int, title: str = "") -> str:
+    """Find the most likely author byline on the first few pages."""
+    pages = _pdf_page_lines(reader, count)
+    # Books named after their author, such as "Seneca: Selected Letters".
+    if title:
+        words = _pdf_clean_text(title).split()
+        if len(words) >= 2:
+            first_word = words[0].strip(".,;:")
+            if (
+                len(first_word) >= 4
+                and first_word[0].isupper()
+                and first_word.casefold() not in _PDF_TITLE_STOPWORDS
+            ):
+                for _page_number, lines in pages:
+                    if any(
+                        line.strip(".,;:").casefold()
+                        == first_word.casefold()
+                        for line in lines
+                    ):
+                        return first_word
+    for _page_number, lines in pages:
+        if _pdf_page_is_front_matter_noise(lines):
+            continue
+        for line in lines[:14]:
+            if _pdf_line_is_noise(line):
+                continue
+            candidate = _pdf_author_candidate(line, title)
+            if candidate:
+                return candidate
+        for index, line in enumerate(lines[:20]):
+            if re.fullmatch(
+                r"(?:senior\s+)?contributing authors?|authors?",
+                line,
+                re.IGNORECASE,
+            ):
+                for following in lines[index + 1 : index + 4]:
+                    # "GILBERT STRANG, MASSACHUSETTS INSTITUTE..."
+                    candidate = _pdf_author_candidate(
+                        following.split(",", 1)[0], title
+                    )
+                    if candidate:
+                        return candidate
+                    candidate = _pdf_author_candidate(following, title)
+                    if candidate:
+                        return candidate
+    return ""
+
+
+def _pdf_pretty_title(title: str) -> str:
+    """Turn an all-caps page title into readable title case."""
+    title = _pdf_clean_text(title)
+    if title.isupper():
+        return " ".join(word.title() for word in title.split())
+    return title
+
+
+def _pdf_title_from_pages(reader: object, count: int, author: str) -> str:
+    """Recover a real title from the title page when the filename is weak."""
+    for _page_number, lines in _pdf_page_lines(reader, count):
+        if _pdf_page_is_front_matter_noise(lines):
+            continue
+        chosen: list[str] = []
+        for line in lines[:8]:
+            if _pdf_line_is_noise(line):
+                continue
+            if re.search(
+                r"\b(?:edition|volume|vol\.?|translated|foreword|preface)\b",
+                line,
+                re.IGNORECASE,
+            ):
+                if chosen:
+                    break
+                continue
+            if _pdf_looks_like_person_name(line, max_words=6):
+                if chosen:
+                    break
+                continue
+            if len(line) < 3 or len(line) > 70:
+                continue
+            if not re.search(r"[A-Za-z]", line):
+                continue
+            if line.count(" ") > 7:
+                continue
+            chosen.append(line)
+            if len(chosen) >= 2:
+                break
+        if chosen:
+            return _pdf_pretty_title(" ".join(chosen))
+    return ""
+
+
+def _pdf_pretty_author(author: str) -> str:
+    """Make an all-caps byline presentable while keeping initials."""
+    author = _pdf_clean_author(author)
+    if not author:
+        return ""
+    words = author.split()
+    if all(word.isupper() for word in words if len(word) > 1):
+        pretty = []
+        for word in words:
+            if "." in word or "'" in word or "-" in word:
+                pretty.append(word)
+            else:
+                pretty.append(word.title())
+    else:
+        pretty = words
+    # "Tomasz Lelek Artur Skowronski" is two authors on one line.
+    if (
+        len(pretty) == 4
+        and all("." not in word for word in pretty)
+        and "and" not in (word.casefold() for word in pretty)
+    ):
+        return f"{pretty[0]} {pretty[1]}, {pretty[2]} {pretty[3]}"
+    return " ".join(pretty)
+
+
+def _pdf_thumbnail_page(reader: object, count: int) -> int:
+    """Pick the first page that looks like a cover or title page."""
+    for index in range(min(count, 8)):
+        try:
+            if len(reader.pages[index].images) > 0:
+                return index + 1
+        except Exception:
+            continue
+    for index in range(min(count, 8)):
+        try:
+            text = (reader.pages[index].extract_text() or "").strip()
+        except Exception:
+            text = ""
+        if len(text) >= 20:
+            return index + 1
+    return 1
+
+
+def _pdf_cache_key(path: Path, mtime: float) -> str:
+    return hashlib.sha1(f"{path.name}:{mtime}".encode("utf-8")).hexdigest()
+
+
+def _pdf_metadata_cache_path(path: Path, mtime: float) -> Path:
+    return PDF_BOOK_META_DIR / f"{_pdf_cache_key(path, mtime)}.json"
+
+
+def _pdf_book_metadata(path: Path, rebuild: bool = False) -> dict:
+    """Return title, author, page count, and cover page for a PDF.
+
+    The result is cached per file version.  ``rebuild=True`` skips the cache
+    read so the Refresh button can re-extract metadata for every book.
+    """
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    cache_path = _pdf_metadata_cache_path(path, mtime)
+    if not rebuild:
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if isinstance(cached, dict) and cached.get("title"):
+                return {
+                    "title": str(cached.get("title") or _pdf_book_title(path.name)),
+                    "author": str(cached.get("author") or ""),
+                    "pages": int(cached.get("pages") or 0),
+                    "thumbnail_page": int(cached.get("thumbnail_page") or 1),
+                }
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+
+    result = {
+        "title": _pdf_book_title(path.name),
+        "author": "",
+        "pages": 0,
+        "thumbnail_page": 1,
+    }
+    try:
+        reader, count = _pdf_book_reader(path)
+    except (OSError, RuntimeError, ValueError):
+        return result
+    result["pages"] = count
+
+    raw_title = ""
+    raw_author = ""
+    try:
+        metadata = reader.metadata or {}
+        raw_title = str(metadata.get("/Title") or "")
+        raw_author = str(metadata.get("/Author") or "")
+    except Exception:
+        pass
+
+    author = _pdf_clean_author(raw_author)
+    title = _pdf_metadata_title(raw_title, path.name, author)
+    # Some PDFs put the author after the title with a dash.
+    if not author and " - " in title:
+        head, tail = title.rsplit(" - ", 1)
+        if _pdf_looks_like_person_name(tail):
+            author = _pdf_clean_author(tail)
+            title = head.strip(" -\u2013\u2014:")
+    if not author:
+        author = _pdf_author_from_filename(path.name)
+    if not author:
+        author = _pdf_author_from_pages(reader, count, title)
+    elif len(author.split()) <= 1 and not author.isupper():
+        # A single-word metadata author is often the file creator rather than
+        # the writer (for example, "Andi" in a Microsoft Word export).
+        page_author = _pdf_author_from_pages(reader, count, title)
+        if page_author and page_author.casefold() != author.casefold():
+            if not re.search(
+                r"\b" + re.escape(author) + r"\b",
+                "\n".join(
+                    line
+                    for _number, lines in _pdf_page_lines(reader, count)
+                    for line in lines
+                ),
+                re.IGNORECASE,
+            ):
+                author = page_author
+    author = _pdf_pretty_author(author)
+    title = _pdf_clean_title(title, author)
+    filename_title = _pdf_book_title(path.name)
+    # Some PDF exporters truncate the metadata title (for example "AI
+    # Russell" for "AI Russell Norvig"); prefer the longer filename then.
+    if (
+        title
+        and author
+        and len(filename_title) > len(title)
+        and filename_title.casefold().startswith(title.casefold())
+    ):
+        last_word = title.split()[-1].strip(".[],;:").casefold()
+        if last_word and last_word in _ocean_title_key(author).split():
+            title = _pdf_clean_title(filename_title, author)
+    # A filename that is only the author's surname, such as Stewart.pdf, or a
+    # filename carrying a camera timestamp, such as
+    # Gilbert_Strang_..._230928_225121.pdf.
+    if author and (
+        (
+            len(title.split()) == 1
+            and title.casefold()
+            == author.split()[-1].strip(".[],;:").casefold()
+        )
+        or re.search(r"\b\d{6,}\b", title)
+    ):
+        page_title = _pdf_title_from_pages(reader, count, author)
+        if page_title:
+            title = page_title
+    result["title"] = title or filename_title
+    result["author"] = author
+    result["thumbnail_page"] = _pdf_thumbnail_page(reader, count)
+
+    try:
+        PDF_BOOK_META_DIR.mkdir(parents=True, exist_ok=True)
+        temporary = cache_path.with_name(
+            cache_path.name + f".{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        temporary.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(cache_path)
+    except OSError:
+        pass
+    return result
+
+
+def _pdf_thumbnail_cache_path(
+    path: Path, page: int, width: int
+) -> Path:
+    key = _pdf_cache_key(path, path.stat().st_mtime)
+    return PDF_BOOK_THUMB_DIR / f"{key}-p{page}-w{width}.png"
+
+
+def render_pdf_book_thumbnail(
+    name: str, width: int = PDF_BOOK_THUMBNAIL_WIDTH
+) -> Path:
+    """Render a small, cached cover thumbnail for one PDF book."""
+    path = pdf_book_path(name)
+    if path is None or not path.is_file():
+        raise ValueError("PDF book not found")
+    metadata = _pdf_book_metadata(path)
+    count = int(metadata.get("pages") or 0)
+    page = max(1, min(int(metadata.get("thumbnail_page") or 1), count or 1))
+    width = max(120, min(int(width), 640))
+    cache_path = _pdf_thumbnail_cache_path(path, page, width)
+    with _PDF_BOOK_THUMB_LOCK:
+        try:
+            if cache_path.is_file() and cache_path.stat().st_size > 0:
+                return cache_path
+        except OSError:
+            pass
+        try:
+            PDF_BOOK_THUMB_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Cannot create the PDF thumbnail cache: {exc}"
+            ) from exc
+        tmp_prefix = PDF_BOOK_THUMB_DIR / (
+            f"tmp-{os.getpid()}-{threading.get_ident()}-{page}"
+        )
+        tmp_path = Path(str(tmp_prefix) + ".png")
+        command = [
+            "pdftoppm",
+            "-f",
+            str(page),
+            "-l",
+            str(page),
+            "-png",
+            "-scale-to",
+            str(width),
+            "-singlefile",
+            str(path),
+            str(tmp_prefix),
+        ]
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=90
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "PDF thumbnails require poppler's pdftoppm command"
+            ) from exc
+        except subprocess.SubprocessError as exc:
+            raise RuntimeError(
+                f"Could not render the PDF thumbnail: {exc}"
+            ) from exc
+        if result.returncode != 0 or not tmp_path.is_file():
+            detail = " ".join(
+                (result.stderr or result.stdout or "").split()
+            )[:300]
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise RuntimeError(
+                "Could not render the PDF thumbnail"
+                + (f": {detail}" if detail else "")
+            )
+        try:
+            tmp_path.replace(cache_path)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not store the rendered PDF thumbnail: {exc}"
+            ) from exc
+        return cache_path
 
 def _pdf_page_paragraphs(text: str) -> list[str]:
     """Join PDF line wraps into readable paragraphs for one page."""
