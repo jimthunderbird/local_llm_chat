@@ -473,12 +473,12 @@ class HandlerBooksMixin:
             )
 
     def _command_pdf_books(self, argument: str) -> None:
-        """Show downloaded PDFs and Manning's free ebook catalogue.
+        """Show the downloaded PDF books from ./.chat/pdf_books.
 
-        The first section lists every PDF in ./.chat/pdf_books. The second
-        section lists Manning's free ebooks newest-first; each card downloads
-        the publisher's direct PDF into ./.chat/pdf_books when clicked. The
-        optional argument filters both sections by title or filename/slug.
+        prompts/pdf_books.prompt task.remove_manning_books: the Manning free
+        ebook catalogue is no longer listed; the section only lists every PDF
+        in ./.chat/pdf_books. The optional argument filters by title or
+        filename.
         """
         keyword = " ".join(argument.split()).casefold()
         downloaded = list_pdf_books()
@@ -488,20 +488,6 @@ class HandlerBooksMixin:
                 for entry in downloaded
                 if keyword in entry["title"].casefold()
                 or keyword in entry["name"].casefold()
-            ]
-
-        manning_books: list[dict] = []
-        manning_error = ""
-        try:
-            manning_books = list_manning_free_ebooks()
-        except (requests.RequestException, RuntimeError, OSError) as exc:
-            manning_error = str(exc)
-        if keyword and manning_books:
-            manning_books = [
-                entry
-                for entry in manning_books
-                if keyword in str(entry.get("title") or "").casefold()
-                or keyword in str(entry.get("slug") or "").casefold()
             ]
 
         self._sse(
@@ -519,18 +505,6 @@ class HandlerBooksMixin:
                             f"No downloaded PDF books matched {keyword!r}."
                             if keyword
                             else "No PDF books downloaded yet."
-                        ),
-                    },
-                    {
-                        "id": "manning",
-                        "title": "Manning Free PDF Books",
-                        "empty": (
-                            manning_error
-                            or (
-                                f"No Manning free ebooks matched {keyword!r}."
-                                if keyword
-                                else "Manning's free ebook list is empty."
-                            )
                         ),
                     },
                 ],
@@ -554,40 +528,18 @@ class HandlerBooksMixin:
                     "pdf": True,
                 },
             )
-        for index, entry in enumerate(manning_books, 1):
-            self._sse(
-                "book_library",
-                {
-                    "type": "item",
-                    "section": "manning",
-                    "index": index,
-                    "name": entry.get("slug", ""),
-                    "slug": entry.get("slug", ""),
-                    "title": entry.get("title", ""),
-                    "subtitle": entry.get("subtitle", ""),
-                    "description": entry.get("description", ""),
-                    "pages": entry.get("pages", ""),
-                    "published": entry.get("published", ""),
-                    "cover": entry.get("cover", ""),
-                    "book_url": entry.get("book_url", ""),
-                    "pdf_ready": bool(entry.get("pdf_url")),
-                    "pdf": False,
-                },
-            )
         self._sse(
             "book_library",
             {
                 "type": "done",
-                "count": len(downloaded) + len(manning_books),
+                "count": len(downloaded),
                 "downloaded_count": len(downloaded),
-                "manning_count": len(manning_books),
-                "manning_error": manning_error,
                 "keyword": keyword,
                 "directory": str(PDF_BOOKS_DIR),
                 "pdf": True,
             },
         )
-        if not downloaded and not manning_books and not manning_error:
+        if not downloaded:
             hint = (
                 f"No PDF books matched {keyword!r}.\n"
                 if keyword
@@ -728,6 +680,6 @@ class HandlerBooksMixin:
 
 # Cross-component imports are placed after the definitions so a
 # feature module can depend on another feature module safely.
-from .books import PDF_BOOKS_DIR, WRITE_A_BOOK_ARTICLE_TIMEOUT_SECONDS, WRITE_A_BOOK_CHAPTER_PROMPT, WRITE_A_BOOK_DIGEST_CHARS, WRITE_A_BOOK_DIR, WRITE_A_BOOK_EVIDENCE_CHARS, WRITE_A_BOOK_KEYWORD_PROMPT, WRITE_A_BOOK_OUTLINE_PROMPT, WRITE_A_BOOK_REFERENCE_MAP_CHARS, WRITE_A_BOOK_RESEARCH_BUDGET_SECONDS, WRITE_A_BOOK_RESEARCH_WORKERS, WRITE_A_BOOK_SEARCH_TIMEOUT_SECONDS, _book_chapter_evidence, _book_chapter_titles, _book_filename, _book_html_document, _book_keyword_list, _book_limit_words, _book_load_source, _book_reference_map, _book_search_candidates, _book_source_digest, _book_strip_chapter_heading, _parse_write_a_book_options, _resolve_book_directory, list_manning_free_ebooks, list_pdf_books, list_written_books
+from .books import PDF_BOOKS_DIR, WRITE_A_BOOK_ARTICLE_TIMEOUT_SECONDS, WRITE_A_BOOK_CHAPTER_PROMPT, WRITE_A_BOOK_DIGEST_CHARS, WRITE_A_BOOK_DIR, WRITE_A_BOOK_EVIDENCE_CHARS, WRITE_A_BOOK_KEYWORD_PROMPT, WRITE_A_BOOK_OUTLINE_PROMPT, WRITE_A_BOOK_REFERENCE_MAP_CHARS, WRITE_A_BOOK_RESEARCH_BUDGET_SECONDS, WRITE_A_BOOK_RESEARCH_WORKERS, WRITE_A_BOOK_SEARCH_TIMEOUT_SECONDS, _book_chapter_evidence, _book_chapter_titles, _book_filename, _book_html_document, _book_keyword_list, _book_limit_words, _book_load_source, _book_reference_map, _book_search_candidates, _book_source_digest, _book_strip_chapter_heading, _parse_write_a_book_options, _resolve_book_directory, list_pdf_books, list_written_books
 from .pdfbook import append_pdf_chat_history, get_pdf_chat_state, learn_pdf_book, load_pdf_chat_history, pdf_book_page_info
 from .retrieval import ClientDisconnected

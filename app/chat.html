@@ -4314,16 +4314,6 @@
     font-size: 11.5px;
     line-height: 1.45;
   }
-  .book-card.manning {
-    cursor: default;
-    user-select: text;
-  }
-  .book-card.manning .book-description {
-    display: -webkit-box;
-    -webkit-line-clamp: 4;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
   .book-actions {
     display: flex;
     flex-wrap: wrap;
@@ -5152,6 +5142,124 @@
     .gutenberg-body { grid-template-columns: 1fr; }
     .gutenberg-text-pane { border-right: 0; border-bottom: 1px solid #223344; max-height: 36vh; }
   }
+
+/* prompts/pdf_books.prompt task.oceans_of_pdf_search: Ocean Of PDF modal */
+.ocean-pdf-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ocean-pdf-panel {
+  width: min(46rem, 92vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg, #1b1e23);
+  color: inherit;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  padding: 0.9rem 1rem 1rem;
+}
+.ocean-pdf-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+}
+.ocean-pdf-close {
+  border: 0;
+  background: transparent;
+  font-size: 1.15rem;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0.2rem 0.35rem;
+}
+.ocean-pdf-searchbar {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.7rem;
+}
+.ocean-pdf-input {
+  flex: 1;
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.45);
+  font-size: 0.95rem;
+}
+.ocean-pdf-go {
+  padding: 0.45rem 0.85rem;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.45);
+  cursor: pointer;
+}
+.ocean-pdf-results {
+  overflow-y: auto;
+  min-height: 4rem;
+  padding-right: 0.15rem;
+}
+.ocean-pdf-hint {
+  opacity: 0.75;
+  font-size: 0.9rem;
+  padding: 0.35rem 0.1rem;
+}
+.ocean-pdf-hint.ocean-pdf-error {
+  color: #e06c75;
+  opacity: 1;
+}
+.ocean-pdf-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0.55rem 0.35rem;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.2);
+}
+.ocean-pdf-doc {
+  min-width: 0;
+  flex: 1;
+}
+.ocean-pdf-title {
+  color: #7aa2f7;
+  text-decoration: none;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.ocean-pdf-title:hover {
+  text-decoration: underline;
+}
+.ocean-pdf-meta {
+  opacity: 0.7;
+  font-size: 0.82rem;
+  margin-top: 0.2rem;
+  overflow-wrap: anywhere;
+}
+.ocean-pdf-status {
+  font-size: 0.8rem;
+  margin-top: 0.25rem;
+  opacity: 0.85;
+  overflow-wrap: anywhere;
+}
+.ocean-pdf-status.error {
+  color: #e06c75;
+}
+.ocean-pdf-download {
+  white-space: nowrap;
+  padding: 0.4rem 0.7rem;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.45);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.ocean-pdf-download:disabled {
+  cursor: default;
+  opacity: 0.8;
+}
+
 </style>
 </head>
 <body>
@@ -13842,9 +13950,7 @@ function addBookLibraryEvent(entry, data) {
       size: Number(data.size) || 0,
       modified: String(data.modified || ""),
       lastOpened: String(data.last_opened || ""),
-      pdf: section === "manning"
-        ? false
-        : Boolean(data.pdf || entry.bookLibraryPdf),
+      pdf: Boolean(data.pdf || entry.bookLibraryPdf),
       downloading: false,
       downloaded: Boolean(data.downloaded),
       savedName: "",
@@ -13857,7 +13963,7 @@ function addBookLibraryEvent(entry, data) {
   }
   if (type === "done") {
     entry.bookLibraryDone = true;
-    entry.bookLibraryError = String(data.manning_error || "");
+    entry.bookLibraryError = "";
     entry.thinking = false;
     scheduleRender(entry);
     return;
@@ -13938,179 +14044,13 @@ function renderDownloadedPdfCard(item) {
   return card;
 }
 
-function renderManningBookCard(entry, item) {
-  const card = document.createElement("div");
-  card.className = "book-card manning";
-
-  if (item.cover) {
-    const cover = document.createElement("img");
-    cover.className = "book-cover";
-    cover.src = item.cover;
-    cover.alt = `${item.title} cover`;
-    cover.loading = "lazy";
-    card.appendChild(cover);
-  }
-
-  const body = document.createElement("div");
-  body.className = "book-body";
-
-  const titleRow = document.createElement("div");
-  titleRow.className = "book-title-row";
-  const title = document.createElement("div");
-  title.className = "book-title";
-  title.textContent = item.title;
-  titleRow.appendChild(title);
-  if (item.published) {
-    const published = document.createElement("span");
-    published.className = "book-publish-date";
-    published.textContent = item.published;
-    titleRow.appendChild(published);
-  }
-  body.appendChild(titleRow);
-
-  const meta = document.createElement("div");
-  meta.className = "book-authors";
-  const metaParts = [];
-  if (item.subtitle) metaParts.push(item.subtitle);
-  if (item.pages) metaParts.push(item.pages);
-  metaParts.push("Manning free ebook");
-  meta.textContent = metaParts.join(" · ");
-  body.appendChild(meta);
-
-  if (item.description) {
-    const description = document.createElement("div");
-    description.className = "book-description";
-    description.textContent = item.description;
-    body.appendChild(description);
-  }
-
-  const actions = document.createElement("div");
-  actions.className = "book-actions";
-
-  const download = document.createElement("button");
-  download.type = "button";
-  download.className = "book-download";
-  if (item.downloaded) {
-    download.classList.add("saved");
-    download.disabled = true;
-    download.textContent = "Downloaded ✓";
-  } else if (item.downloading) {
-    download.disabled = true;
-    download.textContent = "Downloading…";
-  } else if (!item.pdfReady) {
-    download.disabled = true;
-    download.textContent = "PDF unavailable";
-  } else {
-    download.textContent = "Download PDF";
-    download.addEventListener("click", () => downloadManningBook(entry, item));
-  }
-  actions.appendChild(download);
-
-  if (item.bookUrl) {
-    const pageLink = document.createElement("a");
-    pageLink.className = "book-open-link";
-    pageLink.href = item.bookUrl;
-    pageLink.target = "_blank";
-    pageLink.rel = "noopener noreferrer";
-    pageLink.textContent = "Manning page ↗";
-    actions.appendChild(pageLink);
-  }
-
-  if (item.downloaded && item.savedName) {
-    const readLink = document.createElement("a");
-    readLink.className = "book-open-link";
-    readLink.href = "#";
-    readLink.textContent = "Read now →";
-    readLink.addEventListener("click", (event) => {
-      event.preventDefault();
-      openPdfBookReader({
-        name: item.savedName,
-        title: item.savedTitle || item.title,
-        url: item.savedUrl,
-      });
-    });
-    actions.appendChild(readLink);
-  }
-  body.appendChild(actions);
-
-  if (item.downloadError || (item.downloaded && item.savedName)) {
-    const status = document.createElement("div");
-    status.className = "book-download-status";
-    if (item.downloadError) status.classList.add("error");
-    status.textContent = item.downloadError
-      ? `Download failed: ${item.downloadError}`
-      : `Saved ${item.savedName}`;
-    body.appendChild(status);
-  }
-
-  card.appendChild(body);
-  return card;
-}
-
 function renderBookLibraryGrid(entry, group, items) {
   const cards = document.createElement("div");
   cards.className = "book-cards";
   for (const item of items) {
-    const manning = group.id === "manning" || item.section === "manning";
-    cards.appendChild(
-      manning ? renderManningBookCard(entry, item) : renderDownloadedPdfCard(item)
-    );
+    cards.appendChild(renderDownloadedPdfCard(item));
   }
   return cards;
-}
-
-async function downloadManningBook(entry, item) {
-  if (!item || item.downloading || item.downloaded) return;
-  item.downloading = true;
-  item.downloadError = "";
-  scheduleRender(entry);
-  try {
-    const response = await fetch("/api/pdf_books/download", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slug: item.slug }),
-    });
-    let data = {};
-    try {
-      data = await response.json();
-    } catch {
-      data = {};
-    }
-    if (!response.ok) {
-      throw new Error(data?.error || `HTTP ${response.status}`);
-    }
-    const saved = data?.item;
-    item.downloading = false;
-    item.downloaded = true;
-    item.savedName = String(saved?.name || "");
-    item.savedUrl = String(saved?.url || "");
-    item.savedTitle = String(saved?.title || item.title || item.savedName);
-    if (saved && saved.name) {
-      const exists = entry.bookLibraryItems.some(
-        (candidate) => String(candidate.section || "downloaded") === "downloaded"
-          && candidate.name === saved.name
-      );
-      if (!exists) {
-        entry.bookLibraryItems.unshift({
-          ...saved,
-          section: "downloaded",
-          pdf: true,
-          downloading: false,
-          downloaded: true,
-          savedName: "",
-          savedUrl: "",
-          savedTitle: "",
-          downloadError: "",
-        });
-      }
-    }
-    toast(`Saved ${item.savedName || item.title} to PDF books.`);
-  } catch (error) {
-    item.downloading = false;
-    item.downloadError = error?.message || String(error);
-    toast(`Download failed: ${item.downloadError}`);
-  }
-  scheduleRender(entry);
 }
 
 function buildPdfBooksRefreshButton(entry) {
@@ -14137,12 +14077,8 @@ async function refreshDownloadedPdfBooks(entry, button) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
     const books = Array.isArray(payload?.books) ? payload.books : [];
-    // Keep the Manning catalogue as-is; only the downloaded section is
-    // re-read from .chat/pdf_books.
-    const manning = (Array.isArray(entry.bookLibraryItems)
-      ? entry.bookLibraryItems
-      : []
-    ).filter((item) => String(item?.section || "downloaded") === "manning");
+    // prompts/pdf_books.prompt task.remove_manning_books: the downloaded
+    // section is the only book list now — re-read from .chat/pdf_books.
     entry.bookLibraryItems = books.map((book, index) => ({
       index: index + 1,
       section: "downloaded",
@@ -14167,7 +14103,7 @@ async function refreshDownloadedPdfBooks(entry, button) {
       savedUrl: "",
       savedTitle: "",
       downloadError: "",
-    })).concat(manning);
+    }));
     entry.bookLibraryDone = true;
     entry.bookLibraryError = "";
     renderBookLibrary(entry);
@@ -14186,6 +14122,184 @@ async function refreshDownloadedPdfBooks(entry, button) {
       button.disabled = false;
       button.textContent = "Refresh";
     }
+  }
+}
+
+// prompts/pdf_books.prompt task.oceans_of_pdf_search: "Ocean Of PDF" opens a
+// modal that routes the search into the Ocean Of PDF catalogue; a book's PDF
+// downloads into {pdf_books_dir} when its link is clicked.
+function buildOceanPdfSearchButton(entry) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "book-group-refresh";
+  button.textContent = "Ocean Of PDF";
+  button.title = "Search the Ocean Of PDF catalogue and download books";
+  button.addEventListener("click", () => openOceanPdfSearch(entry));
+  return button;
+}
+
+function openOceanPdfSearch(entry) {
+  if (document.getElementById("ocean-pdf-modal")) return;
+  const overlay = document.createElement("div");
+  overlay.id = "ocean-pdf-modal";
+  overlay.className = "ocean-pdf-overlay";
+  overlay.innerHTML = `
+    <div class="ocean-pdf-panel" role="dialog" aria-modal="true">
+      <div class="ocean-pdf-head">
+        <strong>Ocean Of PDF &mdash; free book search</strong>
+        <button type="button" class="ocean-pdf-close" title="Close">&times;</button>
+      </div>
+      <form class="ocean-pdf-searchbar">
+        <input type="text" class="ocean-pdf-input" autocomplete="off"
+          spellcheck="false" placeholder="Search books, e.g. atomic habits">
+        <button type="submit" class="ocean-pdf-go">Search</button>
+      </form>
+      <div class="ocean-pdf-results">
+        <div class="ocean-pdf-hint">Type a book name and press Search.</div>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const panel = overlay.querySelector(".ocean-pdf-panel");
+  const form = overlay.querySelector(".ocean-pdf-searchbar");
+  const input = overlay.querySelector(".ocean-pdf-input");
+  const results = overlay.querySelector(".ocean-pdf-results");
+  let requestId = 0;
+
+  const close = () => {
+    document.removeEventListener("keydown", onKeydown);
+    overlay.remove();
+  };
+  const onKeydown = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+    }
+  };
+  document.addEventListener("keydown", onKeydown);
+  overlay.addEventListener("mousedown", (event) => {
+    if (event.target === overlay) close();
+  });
+  overlay.querySelector(".ocean-pdf-close").addEventListener("click", close);
+  panel.addEventListener("click", (event) => event.stopPropagation());
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void runOceanSearch(entry, input.value.trim(), results, ++requestId);
+  });
+  input.focus({ preventScroll: true });
+}
+
+async function runOceanSearch(entry, keyword, results, requestId) {
+  if (!keyword) {
+    results.innerHTML = "";
+    results.appendChild(oceanHint("Type a book name and press Search."));
+    return;
+  }
+  results.innerHTML = "";
+  results.appendChild(oceanHint(`Searching Ocean Of PDF for “${keyword}”…`));
+  try {
+    const response = await fetch(
+      `/api/oceanofpdf_search?q=${encodeURIComponent(keyword)}`,
+      { cache: "no-store" }
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error || `HTTP ${response.status}`);
+    }
+    const books = Array.isArray(payload?.books) ? payload.books : [];
+    results.innerHTML = "";
+    if (!books.length) {
+      results.appendChild(oceanHint(`No books found for “${keyword}”.`));
+      return;
+    }
+    for (const book of books) {
+      results.appendChild(buildOceanPdfRow(entry, book));
+    }
+  } catch (error) {
+    results.innerHTML = "";
+    results.appendChild(
+      oceanHint(
+        `Search failed: ${error?.message || String(error)}`,
+        "ocean-pdf-error"
+      )
+    );
+  }
+}
+
+function oceanHint(text, className = "") {
+  const hint = document.createElement("div");
+  hint.className = `ocean-pdf-hint ${className}`.trim();
+  hint.textContent = text;
+  return hint;
+}
+
+function buildOceanPdfRow(entry, book) {
+  const row = document.createElement("div");
+  row.className = "ocean-pdf-row";
+  const info = document.createElement("div");
+  info.className = "ocean-pdf-doc";
+  const title = document.createElement("a");
+  title.className = "ocean-pdf-title";
+  title.href = book.url || "#";
+  title.target = "_blank";
+  title.rel = "noopener noreferrer";
+  title.textContent = book.title || "(untitled)";
+  info.appendChild(title);
+  const meta = document.createElement("div");
+  meta.className = "ocean-pdf-meta";
+  meta.textContent = [book.published, book.details].filter(Boolean).join(" · ");
+  info.appendChild(meta);
+  const status = document.createElement("div");
+  status.className = "ocean-pdf-status";
+  info.appendChild(status);
+  row.appendChild(info);
+
+  const download = document.createElement("button");
+  download.type = "button";
+  download.className = "ocean-pdf-download";
+  if (!book.url) {
+    // Live site rows sometimes arrive without a page link.
+    download.disabled = true;
+    download.textContent = "Link unavailable";
+    download.title = "The book page link is not available yet; try again later.";
+  } else {
+    download.textContent = "Download PDF →";
+    download.addEventListener("click", () => {
+      if (download.disabled) return;
+      download.disabled = true;
+      download.textContent = "Downloading…";
+      status.className = "ocean-pdf-status";
+      status.textContent = "Fetching the PDF from Ocean Of PDF…";
+      void downloadOceanPdfBook(entry, book, download, status);
+    });
+  }
+  row.appendChild(download);
+  return row;
+}
+
+async function downloadOceanPdfBook(entry, book, download, status) {
+  try {
+    const response = await fetch("/api/oceanofpdf_download", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: book.url, title: book.title }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error || `HTTP ${response.status}`);
+    }
+    const saved = payload?.item || {};
+    status.className = "ocean-pdf-status";
+    status.textContent = `Saved ${saved.name || ""}`;
+    download.textContent = "Downloaded ✓";
+    toast(`Saved ${saved.name || book.title} to PDF books.`);
+    if (entry) void refreshDownloadedPdfBooks(entry, null);
+  } catch (error) {
+    status.className = "ocean-pdf-status error";
+    status.textContent = `Download failed: ${error?.message || String(error)}`;
+    toast(`Ocean Of PDF download failed: ${error?.message || String(error)}`);
+    download.disabled = false;
+    download.textContent = "Download PDF →";
   }
 }
 
@@ -14220,6 +14334,7 @@ function renderBookLibrary(entry) {
       head.appendChild(label);
       if (group.id === "downloaded") {
         head.appendChild(buildPdfBooksRefreshButton(entry));
+        head.appendChild(buildOceanPdfSearchButton(entry));
       }
       section.appendChild(head);
 

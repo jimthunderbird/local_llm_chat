@@ -894,7 +894,7 @@ class HandlerCoreMixin:
         if path == "/api/pdf_books_list":
             # Lightweight listing for the "Refresh" button next to
             # "Downloaded PDF Books" in the /pdf_books view. It re-reads
-            # .chat/pdf_books without re-scraping the Manning catalogue.
+            # .chat/pdf_books directly and always wins the refresh race.
             try:
                 books = list_pdf_books()
             except (OSError, RuntimeError) as exc:
@@ -903,6 +903,20 @@ class HandlerCoreMixin:
                 )
                 return
             self._send_json({"books": books})
+            return
+        if path == "/api/oceanofpdf_search":
+            # prompts/pdf_books.prompt task.oceans_of_pdf_search: route the
+            # search into the Ocean Of PDF catalogue for the modal.
+            params = parse_qs(parsed.query)
+            keyword = (params.get("q") or [""])[0].strip()
+            try:
+                ocean_books = search_ocean_of_pdf(keyword)
+            except (requests.RequestException, OSError, RuntimeError, ValueError) as exc:
+                self._send_error_json(
+                    f"Could not search Ocean Of PDF: {exc}", 502
+                )
+                return
+            self._send_json({"books": ocean_books})
             return
         if path == "/api/pdf_book_file":
             params = parse_qs(parsed.query)
@@ -1493,19 +1507,22 @@ class HandlerCoreMixin:
             rebuild = bool(payload.get("rebuild"))
             self._handle_pdf_knowledge_graph(name, rebuild)
             return
-        if parsed.path == "/api/pdf_books/download":
+        if parsed.path == "/api/oceanofpdf_download":
+            # prompts/pdf_books.prompt task.oceans_of_pdf_search: download
+            # the selected Ocean Of PDF book into {pdf_books_dir}.
             payload = self._read_json()
             if payload is None:
                 return
-            slug = str(payload.get("slug") or "").strip()
+            book_url = str(payload.get("url") or "").strip()
+            title = str(payload.get("title") or "").strip()
             try:
-                result = download_manning_free_ebook(slug)
+                result = download_ocean_of_pdf_book(book_url, title)
             except ValueError as exc:
                 self._send_error_json(str(exc), 400)
                 return
             except (requests.RequestException, OSError, RuntimeError) as exc:
                 self._send_error_json(
-                    f"Could not download the Manning ebook: {exc}", 502
+                    f"Could not download the Ocean Of PDF book: {exc}", 502
                 )
                 return
             self._send_json(result)
@@ -1917,7 +1934,7 @@ class HandlerCoreMixin:
 # Cross-component imports are placed after the definitions so a
 # feature module can depend on another feature module safely.
 from .article import GUTENBERG_CATALOG_CACHE
-from .books import build_pdf_knowledge_graph, download_manning_free_ebook, list_pdf_books, pdf_book_path, pdf_knowledge_graph_path, read_pdf_book_page, read_pdf_concept, render_pdf_book_page, written_book_path
+from .books import build_pdf_knowledge_graph, download_ocean_of_pdf_book, list_pdf_books, pdf_book_path, pdf_knowledge_graph_path, read_pdf_book_page, read_pdf_concept, render_pdf_book_page, search_ocean_of_pdf, written_book_path
 from .changelog import changelog_file_path
 from .command_config import GUTENBERG_BOOK_ID_RE, GUTENBERG_BOOK_URL, GUTENBERG_SUBCOMMANDS, OPENLIBRARY_SUBCOMMANDS, STACKOVERFLOW_SUBCOMMANDS, YOUTUBE_SUBCOMMANDS, strip_surrounding_search_quotes
 from .core import CHAT_HTML, MAX_REQUEST_BYTES, PATH_COMPLETION_LIMIT, WEB_COMMANDS

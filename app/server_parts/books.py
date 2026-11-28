@@ -1,4 +1,4 @@
-"""/write_a_book, PDF books, Manning free ebooks, and PDF knowledge graphs."""
+"""/write_a_book, PDF books, and PDF knowledge graphs."""
 
 from __future__ import annotations
 
@@ -469,311 +469,571 @@ def list_pdf_books() -> list[dict]:
     )
     return entries
 
-MANNING_FREE_EBOOKS_URL = "https://www.manning.com/free-ebooks"
-
-MANNING_BLOG_BASE_URL = "https://blog.manning.com"
-
-MANNING_FREE_EBOOKS_TTL = 60 * 60
-
-MANNING_FREE_EBOOKS_HEADERS = {
+# ---------------------------------------------------------------------------
+# Ocean Of PDF (prompts/pdf_books.prompt task.oceans_of_pdf_search).
+#
+# https://oceanofpdf.com/ answers with a Cloudflare challenge to plain
+# server-side requests (403), so the catalogue is read from the publisher's
+# oceanofpdf.com.co mirror, which serves the same search index without the
+# bot check.  Book pages expose their download buttons as forms posting to
+# https://zerolibrary.xyz/<token>; POSTing a token redirects to the signed
+# file URL that streams the PDF.
+OCEAN_OF_PDF_BASE = "https://oceanofpdf.com.co"
+OCEAN_ZEROLIBRARY_FORM_RE = re.compile(
+    r"action=\"https://zerolibrary\.xyz/([0-9a-f]{8,64})\"", re.IGNORECASE
+)
+OCEAN_FILE_SIZE_LIMIT = 400 * 1024 * 1024
+OCEAN_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-# The Manning catalogue changes rarely. Cache the parsed cards together with
-# the direct HubSpot PDF links so /pdf_books does not refetch every page on
-# every command.
-_MANNING_FREE_EBOOKS_CACHE: dict[str, object] = {"built": 0.0, "books": []}
+_OCEAN_NON_BOOK_RE = re.compile(
+    r"/(?:category|tag|author|page|wp-|feed|contact-us|dmca|disclaimer|"
+    r"privacy-policy|cookie-policy|books-categories|recently-added-books|"
+    r"what-are-the-best)/",
+    re.IGNORECASE,
+)
 
-_MANNING_FREE_EBOOKS_LOCK = threading.Lock()
 
-# Two cards use a blog slug that does not follow the usual free-ebook-<slug>
-# convention. Keep the aliases here so the rest of the lookup stays generic.
-_MANNING_BLOG_SLUG_ALIASES = {
-    "inside-the-llm": ["inside-the-llm"],
-    "modern-web-development": [
-        "free-ebook-modern-web-development-sampler",
-        "modern-web-development-sampler",
-    ],
-}
-
-def _manning_text(fragment: str) -> str:
-    """Return readable text from one small HTML fragment."""
-    text = re.sub(r"<[^>]+>", " ", fragment or "")
-    return " ".join(html.unescape(text).split())
-
-def _parse_manning_free_ebooks(page: str) -> list[dict]:
-    """Parse the free-ebook cards from https://www.manning.com/free-ebooks."""
-    books: list[dict] = []
-    blocks = re.findall(
-        r'<article class="free-ebook-card">(.*?)</article>', page, re.S
-    )
-    for block in blocks:
-        slug_match = re.search(r'data-slug="([^"]+)"', block)
-        if not slug_match:
-            continue
-        slug = html.unescape(slug_match.group(1)).strip()
-        if not slug:
-            continue
-        title_match = re.search(r'data-title="([^"]+)"', block)
-        if title_match:
-            title = html.unescape(title_match.group(1)).strip()
-        else:
-            title_match = re.search(
-                r'free-ebook-card-title[^>]*>\s*<a[^>]*>(.*?)</a>', block, re.S
-            )
-            title = _manning_text(title_match.group(1)) if title_match else slug
-
-        cover_match = re.search(r'data-cover="([^"]+)"', block)
-        cover = html.unescape(cover_match.group(1)).strip() if cover_match else ""
-        subtitle_match = re.search(
-            r'free-ebook-card-subtitle">(.*?)</p>', block, re.S
-        )
-        lead_match = re.search(r'free-ebook-card-lead">(.*?)</p>', block, re.S)
-        rest_match = re.search(r'free-ebook-card-rest">(.*?)</p>', block, re.S)
-        meta_match = re.search(
-            r'free-ebook-card-meta">(.*?)</div>', block, re.S
-        )
-        book_match = re.search(
-            r'<a href="([^"]+)" class="free-ebook-card-cover"', block
-        )
-        book_url = (
-            html.unescape(book_match.group(1)).strip() if book_match else ""
-        )
-        if book_url.startswith("/"):
-            book_url = f"https://www.manning.com{book_url}"
-
-        description = _manning_text(
-            rest_match.group(1) if rest_match else ""
-        ) or _manning_text(lead_match.group(1) if lead_match else "")
-        pages = _manning_text(meta_match.group(1) if meta_match else "")
-        books.append(
-            {
-                "slug": slug,
-                "title": title,
-                "subtitle": _manning_text(
-                    subtitle_match.group(1) if subtitle_match else ""
-                ),
-                "description": description,
-                "pages": pages,
-                "cover": cover,
-                "book_url": book_url,
-                "published": "",
-                "pdf_url": "",
-            }
-        )
-    return books
-
-def _manning_blog_slugs(slug: str) -> list[str]:
-    """Return blog URL slugs that may hold the direct PDF for one card."""
-    candidates = list(_MANNING_BLOG_SLUG_ALIASES.get(slug, []))
-    candidates.extend(
-        [
-            f"free-ebook-{slug}",
-            slug,
-            f"free-ebook-{slug}-sampler",
-            f"free-ebook-{slug}-sample",
-            f"{slug}-sampler",
-        ]
-    )
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for candidate in candidates:
-        candidate = candidate.strip("/")
-        if candidate and candidate not in seen:
-            seen.add(candidate)
-            ordered.append(candidate)
-    return ordered
-
-def _find_manning_pdf(slug: str) -> tuple[str, str]:
-    """Find the direct PDF link published on the Manning blog page."""
-    for blog_slug in _manning_blog_slugs(slug):
-        url = f"{MANNING_BLOG_BASE_URL}/{blog_slug}"
-        try:
-            response = requests.get(
-                url,
-                headers=MANNING_FREE_EBOOKS_HEADERS,
-                timeout=(8, 25),
-                allow_redirects=True,
-            )
-        except requests.RequestException:
-            continue
-        if response.status_code != 200:
-            continue
-        page = response.text.replace("\\/", "/")
-        pdfs: list[str] = []
-        for raw in re.findall(r'https?://[^"\'\\\s<>]+\.pdf', page, re.I):
-            candidate = html.unescape(raw).replace("\\/", "/")
-            if candidate not in pdfs:
-                pdfs.append(candidate)
-        if pdfs:
-            return pdfs[0], url
-    return "", ""
-
-def _manning_published_date(book_url: str) -> str:
-    """Read the release date from the book page's schema.org metadata."""
-    if not book_url:
-        return ""
+def _ocean_get(url: str) -> str:
     try:
         response = requests.get(
-            book_url,
-            headers=MANNING_FREE_EBOOKS_HEADERS,
-            timeout=(8, 25),
-            allow_redirects=True,
+            url, headers=OCEAN_HEADERS, timeout=(10, 60)
         )
-    except requests.RequestException:
-        return ""
-    if response.status_code != 200:
-        return ""
-    dates = re.findall(
-        r'"(?:releaseDate|datePublished)"\s*:\s*"([^"]+)"', response.text
-    )
-    dates = sorted({value.strip() for value in dates if value.strip()})
-    return dates[-1] if dates else ""
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Could not reach {url}: {exc}") from exc
+    return response.text
 
-def _enrich_manning_book(book: dict) -> dict:
-    """Add the direct PDF link and publish date to one catalogue card."""
-    enriched = dict(book)
-    pdf_url, _blog_url = _find_manning_pdf(enriched["slug"])
-    enriched["pdf_url"] = pdf_url
-    enriched["published"] = _manning_published_date(
-        str(enriched.get("book_url") or "")
-    )
-    return enriched
 
-def list_manning_free_ebooks(force: bool = False) -> list[dict]:
-    """Return Manning's free ebooks, newest publication date first."""
-    now = time.time()
-    with _MANNING_FREE_EBOOKS_LOCK:
-        built = float(_MANNING_FREE_EBOOKS_CACHE.get("built") or 0.0)
-        cached = _MANNING_FREE_EBOOKS_CACHE.get("books")
+def _ocean_title(fragment: str) -> str:
+    return html.unescape(re.sub(r"<[^>]+>", "", fragment)).strip()
+
+
+def _ocean_title_key(value: str) -> str:
+    """Return a collision-safe key for matching titles across the two sites."""
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def _ollama_web_fetch(url: str) -> dict | None:
+    """Fetch a URL through the local Ollama experimental web_fetch API.
+
+    The live https://oceanofpdf.com/ pages answer with a Cloudflare challenge
+    to plain requests, so the live search runs through this fetcher (its
+    browser-like backend passes the bot check).  Returns None on any failure
+    so callers gracefully fall back to the mirror.
+    """
+    try:
+        response = requests.post(
+            f"{chat.OLLAMA_HOST}/api/experimental/web_fetch",
+            json={"url": url},
+            timeout=(5, 120),
+        )
+        if response.status_code != 200:
+            return None
+        payload = response.json()
+    except (requests.RequestException, ValueError, OSError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+_OCEAN_LIVE_LINK_RE = re.compile(
+    r"^https://oceanofpdf\.com/(?!category/|tag/|page/|feed/|wp-)[^\s\"'#]+",
+)
+_OCEAN_DATE_RE = re.compile(
+    r"\b([A-Z][a-z]+ [0-9]{1,2}, [0-9]{4})\b"
+)
+
+
+def _ocean_live_results(content: str, links: list[str]) -> list[dict]:
+    """Parse the live site's search markdown into result rows.
+
+    The fetcher strips download buttons from a book page, and it exposes at
+    most a handful of link tags, so the first results in reading order pick
+    their book-page URL from the link pool.
+    """
+    if not content or "Search Results" not in content:
+        return []
+    segments = [
+        part.strip() for part in content.split("\n## ") if part.strip()
+    ]
+    pool: list[str] = []
+    seen_urls: set[str] = set()
+    for link in links or []:
+        link = html.unescape(str(link)).split("#", 1)[0].strip()
         if (
-            not force
-            and isinstance(cached, list)
-            and cached
-            and now - built < MANNING_FREE_EBOOKS_TTL
+            link
+            and link not in seen_urls
+            and _OCEAN_LIVE_LINK_RE.match(link)
+            and not _OCEAN_NON_BOOK_RE.search(link)
         ):
-            return [dict(book) for book in cached]
+            seen_urls.add(link)
+            pool.append(link)
+    results: list[dict] = []
+    seen_keys: set[str] = set()
+    for segment in segments[1:]:
+        lines = [line.strip() for line in segment.splitlines() if line.strip()]
+        if not lines:
+            continue
+        title = lines[0].lstrip("#").strip()
+        if not title or "download" not in segment.casefold():
+            continue
+        key = _ocean_title_key(title)
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        date = ""
+        details = ""
+        for line in lines[1:]:
+            if not date:
+                date_match = _OCEAN_DATE_RE.search(line)
+                if date_match:
+                    date = date_match.group(1)
+            if line.startswith("Author:"):
+                details = line
+            if line.lower().startswith("[read more"):
+                break
+        url = pool.pop(0) if pool else ""
+        results.append(
+            {
+                "title": title,
+                "url": url,
+                "published": date,
+                "details": details,
+                "source": "live",
+            }
+        )
+        if len(results) >= 12:
+            break
+    return results
 
+
+def search_ocean_of_pdf(keyword: str) -> list[dict]:
+    """Search the Ocean Of PDF catalogue and return downloadable books."""
+    keyword = " ".join(str(keyword or "").split())
+    if not keyword:
+        return []
+    page = _ocean_get(f"{OCEAN_OF_PDF_BASE}/?s={quote_plus(keyword)}")
+    matches = list(
+        re.finditer(
+            r'<h2 class="entry-title"[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>'
+            r"(.*?)</a>",
+            page,
+            re.DOTALL,
+        )
+    )
+    results: list[dict] = []
+    seen: set[str] = set()
+    for index, match in enumerate(matches):
+        block = page[
+            match.start() : matches[index + 1].start()
+            if index + 1 < len(matches)
+            else match.end() + 6000
+        ]
+        url = html.unescape(match.group(1)).strip()
+        title = _ocean_title(match.group(2))
+        if not title or url in seen or _OCEAN_NON_BOOK_RE.search(url):
+            continue
+        # Non-book pages (guides, listicles, notices) never advertise a
+        # free downloadable PDF.
+        if "download" not in block.casefold():
+            continue
+        flat = html.unescape(re.sub(r"\s+", " ", block))
+        date_match = re.search(
+            r'datetime="([0-9]{4}-[0-9]{2}-[0-9]{2})', flat
+        )
+        details = [
+            _ocean_title(item)
+            for item in re.findall(r"<li>(.*?)</li>", flat, re.DOTALL)
+        ]
+        seen.add(url)
+        results.append(
+            {
+                "index": len(results) + 1,
+                "url": url,
+                "title": title,
+                "published": date_match.group(1) if date_match else "",
+                "details": " \u00b7 ".join(details[:8]),
+            }
+        )
+        if len(results) >= 12:
+            break
+
+    # prompts/pdf_books.prompt task.bug.six_math_essentials: the mirror's
+    # search index lags the live site (newer books such as Six Math
+    # Essentials appear only on oceanofpdf.com), so live results are merged
+    # in through the Ollama web fetch; titles already found on the mirror
+    # collapse into one row.
+    live_fetch = _ollama_web_fetch(
+        f"https://oceanofpdf.com/?s={quote_plus(keyword)}"
+    )
+    live_results = (
+        _ocean_live_results(
+            str(live_fetch.get("content") or ""),
+            list(live_fetch.get("links") or []),
+        )
+        if live_fetch
+        else []
+    )
+    for row in live_results:
+        key = _ocean_title_key(row["title"])
+        merged = next(
+            (
+                item
+                for item in results
+                if _ocean_title_key(item["title"]) == key
+            ),
+            None,
+        )
+        if merged is not None:
+            merged["details"] = merged["details"] or row["details"]
+            merged["published"] = merged["published"] or row["published"]
+            continue
+        results.append(
+            {
+                "index": len(results) + 1,
+                "url": row["url"],
+                "title": row["title"],
+                "published": row["published"],
+                "details": row["details"],
+                "source": "live",
+            }
+        )
+    for index, row in enumerate(results, 1):
+        row["index"] = index
+    return results[:12]
+
+
+def _ocean_safe_filename(name: str) -> str:
+    stem = unquote(str(name or "")).strip()
+    # The file hosts their own branding prefixes (e.g. "Allepub.com___")
+    # before the real book filename.
+    stem = re.sub(
+        r"^[A-Za-z0-9]+\.(?:com|net|org|xyz|com\.co)[_\-\s]*", "", stem
+    )
+    if stem.casefold().endswith(".pdf"):
+        stem = stem[:-4]
+    stem = re.sub(r"[^A-Za-z0-9. _-]+", "_", stem)
+    stem = re.sub(r"_{2,}", "_", stem).strip("._ -")[:120]
+    return f"{stem or 'ocean_of_pdf_book'}.pdf"
+
+
+def _ocean_pdf_token(page: str, book_url: str) -> str:
+    """Return the PDF download token from one book page."""
+    found: list[tuple[str, str]] = []
+    for match in OCEAN_ZEROLIBRARY_FORM_RE.finditer(page):
+        prefix = page[max(0, match.start() - 400) : match.start()].upper()
+        if "EPUB" in prefix.rsplit("PDF", 1)[0][-200:]:
+            label = "EPUB"
+        elif "PDF" in prefix[-200:]:
+            label = "PDF"
+        else:
+            label = ""
+        found.append((label, match.group(1)))
+    wanted = next(
+        (token for label, token in found if label == "PDF"), None
+    )
+    if wanted is None and len(found) == 1:
+        wanted = found[0][1]
+    if wanted is None and len(found) >= 2:
+        wanted = found[-1][1]
+    if not wanted:
+        raise ValueError(
+            f"No PDF download form was found on {book_url}."
+        )
+    return wanted
+
+
+def _ocean_mirror_page_for_live_book(book_url: str, title: str) -> str:
+    """Find the same book's page on the mirror by title, if it exists.
+
+    The live site's pages answer with a Cloudflare challenge to plain
+    requests, so downloads for live-only listings resolve through the
+    mirror, which shares the download-button infrastructure.
+    """
+    title = str(title or "").strip()
+    if not title:
+        return ""
+    page = _ocean_get(f"{OCEAN_OF_PDF_BASE}/?s={quote_plus(title)}")
+    wanted = _ocean_title_key(title)
+    for url_match in re.finditer(
+        r'<h2 class="entry-title"[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+        page,
+        re.DOTALL,
+    ):
+        url = html.unescape(url_match.group(1)).strip()
+        candidate = _ocean_title_key(_ocean_title(url_match.group(2)))
+        if url and candidate and candidate == wanted:
+            return url
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Alternate download source for live-only Ocean Of PDF listings
+# (prompts/pdf_books.prompt task.bug.book_not_found).
+#
+# Some books exist on oceanofpdf.com but not on the mirror, so the live page's
+# zerolibrary form token cannot be read without a Cloudflare-capable browser.
+# Library Genesis indexes many of those same files and exposes a public IPFS
+# CID.  The fallback searches Libgen by title, reads the CID from the file
+# page, and downloads it through a public IPFS gateway.
+LIBGEN_SEARCH_URL = "https://libgen.li/index.php"
+LIBGEN_FILE_URL = "https://libgen.li/file.php"
+LIBGEN_IPFS_GATEWAYS = (
+    "https://ipfs.filebase.io/ipfs/",
+    "https://gateway.pinata.cloud/ipfs/",
+)
+_LIBGEN_IPFS_RE = re.compile(r"/ipfs/((?:bafy|Qm)[A-Za-z0-9]+)")
+
+
+def _libgen_title(value: str) -> str:
+    """Normalise a Libgen title and drop Ocean Of PDF's format prefixes."""
+    title = html.unescape(re.sub(r"<[^>]+>", " ", str(value or "")))
+    title = re.sub(r"^\s*\[(?:pdf|epub)\]\s*", "", title, flags=re.I)
+    return " ".join(title.split())
+
+
+def _libgen_get(url: str) -> str:
+    """Fetch a Libgen page, retrying the occasionally slow file pages."""
+    last_error: Exception | None = None
+    for attempt in range(3):
         try:
             response = requests.get(
-                MANNING_FREE_EBOOKS_URL,
-                headers=MANNING_FREE_EBOOKS_HEADERS,
-                timeout=(10, 35),
-                allow_redirects=True,
+                url, headers=OCEAN_HEADERS, timeout=(10, 90)
             )
             response.raise_for_status()
+            return response.text
         except requests.RequestException as exc:
-            raise RuntimeError(
-                f"Could not load Manning free ebooks: {exc}"
-            ) from exc
+            last_error = exc
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(f"Could not reach {url}: {last_error}")
 
-        books = _parse_manning_free_ebooks(response.text)
-        if not books:
-            raise RuntimeError("Manning returned no free ebooks.")
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            enriched = list(executor.map(_enrich_manning_book, books))
-        enriched.sort(key=lambda book: str(book.get("title") or "").casefold())
-        enriched.sort(
-            key=lambda book: str(book.get("published") or ""), reverse=True
+
+def _libgen_candidates(title: str) -> list[dict]:
+    """Return Libgen PDF rows ranked by title overlap with ``title``."""
+    wanted = _ocean_title_key(_libgen_title(title))
+    wanted_tokens = set(wanted.split())
+    if not wanted_tokens:
+        return []
+    page = _libgen_get(f"{LIBGEN_SEARCH_URL}?req={quote_plus(title)}")
+    candidates: list[dict] = []
+    for row_match in re.finditer(r"<tr[^>]*>(.*?)</tr>", page, re.S | re.I):
+        row = row_match.group(1)
+        md5_match = re.search(r"ads\.php\?md5=([0-9a-f]{32})", row, re.I)
+        if not md5_match:
+            continue
+        row_text = _libgen_title(row).casefold()
+        if "pdf" not in row_text:
+            continue
+        title_match = re.search(
+            r'<a\b.*?href="edition\.php\?id=\d+".*?>(.*?)</a>',
+            row,
+            re.S | re.I,
         )
-        _MANNING_FREE_EBOOKS_CACHE["built"] = time.time()
-        _MANNING_FREE_EBOOKS_CACHE["books"] = [dict(book) for book in enriched]
-        return [dict(book) for book in enriched]
-
-def _manning_pdf_filename(title: str) -> str:
-    """Turn an ebook title into a safe PDF filename."""
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(title or ""))
-    stem = stem.strip("._")
-    return f"{stem or 'manning_free_ebook'}.pdf"
-
-def download_manning_free_ebook(slug: str) -> dict:
-    """Download one Manning free ebook into .chat/pdf_books."""
-    slug = str(slug or "").strip()
-    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,119}", slug):
-        raise ValueError("Invalid Manning ebook slug.")
-    books = list_manning_free_ebooks()
-    book = next((item for item in books if item.get("slug") == slug), None)
-    if book is None:
-        raise ValueError("That Manning free ebook is not in the catalogue.")
-    pdf_url = str(book.get("pdf_url") or "").strip()
-    if not pdf_url:
-        raise RuntimeError(
-            "Manning does not expose a direct PDF link for this ebook yet."
+        if not title_match:
+            continue
+        candidate_title = _libgen_title(title_match.group(1))
+        candidate_key = _ocean_title_key(candidate_title)
+        candidate_tokens = set(candidate_key.split())
+        if not candidate_tokens:
+            continue
+        coverage = len(wanted_tokens & candidate_tokens) / len(wanted_tokens)
+        if coverage < 0.5:
+            continue
+        score = coverage
+        if candidate_key == wanted:
+            score += 2
+        elif wanted in candidate_key or candidate_key in wanted:
+            score += 1
+        if "english" in row_text:
+            score += 0.25
+        file_match = re.search(r"/file\.php\?id=(\d+)", row)
+        candidates.append(
+            {
+                "title": candidate_title,
+                "md5": md5_match.group(1),
+                "file_id": file_match.group(1) if file_match else "",
+                "score": score,
+            }
         )
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    return candidates
 
-    target = PDF_BOOKS_DIR / _manning_pdf_filename(str(book.get("title") or ""))
-    if target.is_file():
+
+def _libgen_ipfs_cid(file_id: str, md5: str) -> str:
+    """Read a Libgen file page and return its public IPFS CID."""
+    if file_id:
+        page = _libgen_get(f"{LIBGEN_FILE_URL}?id={file_id}")
+    else:
+        page = _libgen_get(f"{LIBGEN_SEARCH_URL}?req={quote_plus(md5)}")
+    cids = _LIBGEN_IPFS_RE.findall(page)
+    preferred = [cid for cid in cids if cid.startswith("bafy")]
+    return (preferred or cids or [""])[0]
+
+
+def _download_libgen_pdf(title: str) -> dict:
+    """Download a live-only Ocean Of PDF book from Libgen's IPFS copy."""
+    title = _libgen_title(title)
+    if not title:
+        raise RuntimeError("The book title is empty, so no alternate source could be searched.")
+    candidates = _libgen_candidates(title)
+    if not candidates:
+        raise RuntimeError("No matching PDF was found in Library Genesis.")
+    last_error = ""
+    for candidate in candidates[:3]:
         try:
-            with target.open("rb") as handle:
-                header = handle.read(5)
-            if header.startswith(b"%PDF-"):
-                entries = list_pdf_books()
-                item = next(
-                    (entry for entry in entries if entry["name"] == target.name),
-                    None,
-                )
-                return {
-                    "downloaded": False,
-                    "already_downloaded": True,
-                    "item": item,
-                    "pdf_url": pdf_url,
-                }
-        except OSError:
-            pass
-
-    PDF_BOOKS_DIR.mkdir(parents=True, exist_ok=True)
-    part = target.with_name(target.name + ".part")
-    try:
-        with requests.get(
-            pdf_url,
-            headers=MANNING_FREE_EBOOKS_HEADERS,
-            stream=True,
-            timeout=(10, 180),
-            allow_redirects=True,
-        ) as response:
-            response.raise_for_status()
-            first = True
-            total = 0
-            with part.open("wb") as handle:
-                for chunk in response.iter_content(chunk_size=65536):
-                    if not chunk:
-                        continue
-                    if first:
-                        if not chunk.startswith(b"%PDF-"):
-                            raise RuntimeError(
-                                "The Manning download is not a PDF file."
-                            )
-                        first = False
-                    total += len(chunk)
-                    if total > 400 * 1024 * 1024:
-                        raise RuntimeError(
-                            "The Manning PDF is too large to download."
+            target = PDF_BOOKS_DIR / _ocean_safe_filename(candidate["title"])
+            if target.is_file():
+                try:
+                    with target.open("rb") as handle:
+                        header = handle.read(5)
+                    if header.startswith(b"%PDF-"):
+                        entries = list_pdf_books()
+                        item = next(
+                            (entry for entry in entries if entry["name"] == target.name),
+                            None,
                         )
-                    handle.write(chunk)
-        if not part.is_file() or part.stat().st_size == 0:
-            raise RuntimeError("The Manning PDF download was empty.")
-        os.replace(part, target)
+                        return {
+                            "downloaded": False,
+                            "already_downloaded": True,
+                            "item": item,
+                            "source_url": f"https://libgen.li/file.php?id={candidate['file_id']}",
+                        }
+                except OSError:
+                    pass
+            cid = _libgen_ipfs_cid(candidate["file_id"], candidate["md5"])
+            if not cid:
+                raise RuntimeError("The Library Genesis record has no IPFS copy.")
+            PDF_BOOKS_DIR.mkdir(parents=True, exist_ok=True)
+            part = target.with_name(target.name + ".part")
+            last_error = ""
+            for gateway in LIBGEN_IPFS_GATEWAYS:
+                try:
+                    with requests.get(
+                        f"{gateway}{cid}",
+                        headers={**OCEAN_HEADERS, "Accept": "application/pdf,*/*"},
+                        stream=True,
+                        timeout=(10, 300),
+                        allow_redirects=True,
+                    ) as response:
+                        response.raise_for_status()
+                        total = 0
+                        with part.open("wb") as handle:
+                            for chunk in response.iter_content(chunk_size=65536):
+                                if not chunk:
+                                    continue
+                                if total == 0 and not chunk.lstrip()[:5].startswith(b"%PDF-"):
+                                    raise RuntimeError("The alternate source did not return a PDF.")
+                                total += len(chunk)
+                                if total > OCEAN_FILE_SIZE_LIMIT:
+                                    raise RuntimeError("The alternate PDF is too large to download.")
+                                handle.write(chunk)
+                    if not part.is_file() or part.stat().st_size == 0:
+                        raise RuntimeError("The alternate PDF download was empty.")
+                    os.replace(part, target)
+                    entries = list_pdf_books()
+                    item = next(
+                        (entry for entry in entries if entry["name"] == target.name),
+                        None,
+                    )
+                    return {
+                        "downloaded": True,
+                        "already_downloaded": False,
+                        "item": item,
+                        "source_url": f"https://libgen.li/file.php?id={candidate['file_id']}",
+                    }
+                except (requests.RequestException, RuntimeError, OSError) as exc:
+                    last_error = str(exc)
+                    try:
+                        part.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        except (requests.RequestException, RuntimeError, OSError, ValueError) as exc:
+            last_error = str(exc)
+    raise RuntimeError(last_error or "The alternate source could not download this book.")
+
+
+def download_ocean_of_pdf_book(book_url: str, title: str = "") -> dict:
+    """Download one Ocean Of PDF book into {pdf_books_dir}.
+
+    Book pages come from either the live oceanofpdf.com or the
+    oceanofpdf.com.co mirror; the mirror always serves plain HTML, while a
+    live URL resolves through the mirror's title search.
+    """
+    host = urlparse(str(book_url or "")).netloc
+    if host not in {"oceanofpdf.com", "oceanofpdf.com.co"}:
+        raise ValueError("Not an Ocean Of PDF book page URL.")
+    if host == "oceanofpdf.com":
+        mirror_url = _ocean_mirror_page_for_live_book(book_url, title)
+        if not mirror_url:
+            # This listing only exists on the live site.  Resolve the same
+            # title through Libgen instead of failing on the unavailable
+            # zerolibrary form token.
+            return _download_libgen_pdf(title)
+        book_url = mirror_url
+    page = _ocean_get(book_url)
+    token = _ocean_pdf_token(page, book_url)
+    try:
+        response = requests.post(
+            f"https://zerolibrary.xyz/{token}",
+            headers=OCEAN_HEADERS,
+            stream=True,
+            timeout=(10, 300),
+            allow_redirects=True,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Could not start the download: {exc}") from exc
+    filename = _ocean_safe_filename(
+        unquote(urlparse(response.url).path.rpartition("/")[2])
+    )
+    PDF_BOOKS_DIR.mkdir(parents=True, exist_ok=True)
+    target = PDF_BOOKS_DIR / filename
+    part = target.with_name(target.name + ".part")
+    total = 0
+    try:
+        with part.open("wb") as handle:
+            for chunk in response.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                if total == 0 and not chunk.lstrip()[:5].startswith(b"%PDF-"):
+                    raise RuntimeError(
+                        "That Ocean Of PDF download did not return a PDF."
+                    )
+                total += len(chunk)
+                if total > OCEAN_FILE_SIZE_LIMIT:
+                    raise RuntimeError(
+                        "The Ocean Of PDF file is too large to download."
+                    )
+                handle.write(chunk)
     except Exception:
         try:
             part.unlink(missing_ok=True)
         except OSError:
             pass
         raise
-
+    if not part.is_file() or part.stat().st_size == 0:
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError("The Ocean Of PDF download was empty.")
+    os.replace(part, target)
     entries = list_pdf_books()
     item = next(
-        (entry for entry in entries if entry["name"] == target.name), None
+        (entry for entry in entries if entry["name"] == target.name),
+        None,
     )
     return {
         "downloaded": True,
         "already_downloaded": False,
         "item": item,
-        "pdf_url": pdf_url,
+        "source_url": book_url,
     }
 
 # Page extraction opens the PDF once per file version. pypdf extracts one page

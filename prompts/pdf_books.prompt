@@ -2,6 +2,28 @@ pdf_books_dir: {directory_of_this_prompt}/../.chat/pdf_books
 pdf_books_trunks_dir: {directory_of_this_prompt}/../.chat/pdf_books/trunks
 pdf_books_chathistory_dir: {directory_of_this_prompt}/../.chat/pdf_books/chat_history
 
+task.bug.book_not_found (completed) {
+  I can find this book: 1001 Inventions That Changed the World
+  But when I download the pdf, it said:
+  "Download failed: This book is only listed on the live Ocean Of PDF site and its download form is not served by the mirror yet. Please try again later."
+  please make it work!
+}
+
+task.bug.six_math_essentials (completed) {
+  in "https://oceanofpdf.com", i can to the book "Six Math Essentials", but why in the search box in the modal of "Ocean Of PDF", it is not working?
+}
+
+task.oceans_of_pdf_search (completed) {
+  next to the "Refresh" button, add a button "Ocean Of PDF", when clicked {
+    - open a modal with a search bar, it will route the search to the search in https://oceanofpdf.com/
+    - after typing in the book name, if it exists in "https://oceanofpdf.com/", show its pdf download link, when click on the link, download the pdf to {pdf_books_dir}
+  }
+}
+
+task.remove_manning_books (completed) {
+  please remove the manning book list section after typing /pdf_books command
+}
+
 task (completed) {
   add a "Refresh" button next to "Downloaded PDF Books", when click {
     refresh the book list
