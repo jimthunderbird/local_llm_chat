@@ -2014,6 +2014,117 @@
     user-select: none;
   }
   #changelog-close:hover { color: var(--text); }
+  /* /system_design_and_architecture: the topic list lives in the chat
+     transcript. Clicking a topic opens its chapter in a modal. */
+  .system-design-group-title {
+    margin: 16px 0 6px;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+  }
+  .system-design-topic {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .system-design-topic:hover,
+  .system-design-topic:focus-within {
+    background: #101a24;
+    border-color: #24384c;
+  }
+  .system-design-topic-main {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .system-design-topic-title {
+    display: block;
+    width: 100%;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    border: 0;
+    color: var(--text);
+    font: inherit;
+    font-size: 13.5px;
+    font-weight: 600;
+    line-height: 1.35;
+    text-align: left;
+    cursor: pointer;
+  }
+  .system-design-topic-meta {
+    margin-top: 2px;
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.4;
+    word-break: break-all;
+  }
+  .system-design-topic-open {
+    flex: 0 0 auto;
+    color: var(--accent);
+    font-size: 11px;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .system-design-topic-open:hover { text-decoration: underline; }
+  #system-design-topic-close {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 3px;
+    user-select: none;
+  }
+  #system-design-topic-close:hover { color: var(--text); }
+  #system-design-topic-panel {
+    position: fixed;
+    inset: 0;
+    z-index: 75;
+    background: rgba(2, 6, 10, .82);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  #system-design-topic-panel[hidden] { display: none; }
+  .system-design-topic-card {
+    width: min(1080px, 100%);
+    height: min(90vh, 960px);
+    display: flex;
+    flex-direction: column;
+    background: #0d151e;
+    border: 1px solid #2b4056;
+    border-radius: 10px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.75);
+    overflow: hidden;
+  }
+  #system-design-topic-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 18px 24px 28px;
+    font-size: 14px;
+    line-height: 1.65;
+  }
+  #system-design-topic-body .markdown-figure a { width: 100%; }
+  #system-design-topic-body .markdown-figure img { max-height: 70vh; }
+  #system-design-topic-status {
+    padding: 6px 24px 14px;
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  #system-design-topic-status[hidden] { display: none; }
   #news-panel {
     position: fixed;
     inset: 0;
@@ -5627,6 +5738,21 @@
   </div>
 </div>
 
+<div id="system-design-topic-panel" hidden>
+  <div class="system-design-topic-card" role="dialog" aria-modal="true" aria-labelledby="system-design-topic-title">
+    <div class="news-head">
+      <div class="news-head-main">
+        <div id="system-design-topic-title" class="news-modal-title">Topic</div>
+        <div id="system-design-topic-meta" class="news-modal-meta"></div>
+      </div>
+      <a id="system-design-topic-open" class="news-link" href="#" target="_blank" rel="noopener noreferrer">Open on GitHub ↗</a>
+      <button id="system-design-topic-close" type="button" title="Close (Esc)">×</button>
+    </div>
+    <div id="system-design-topic-body" class="markdown"></div>
+    <div id="system-design-topic-status" hidden></div>
+  </div>
+</div>
+
 <div id="gutenberg-panel" hidden>
   <div class="gutenberg-card" role="dialog" aria-modal="true" aria-labelledby="gutenberg-title">
     <div class="gutenberg-head">
@@ -6017,6 +6143,13 @@ const changelogMetaEl = $("#changelog-meta");
 const changelogOpenEl = $("#changelog-open");
 const changelogFrameEl = $("#changelog-frame");
 const changelogCloseEl = $("#changelog-close");
+const systemDesignTopicPanelEl = $("#system-design-topic-panel");
+const systemDesignTopicTitleEl = $("#system-design-topic-title");
+const systemDesignTopicMetaEl = $("#system-design-topic-meta");
+const systemDesignTopicOpenEl = $("#system-design-topic-open");
+const systemDesignTopicBodyEl = $("#system-design-topic-body");
+const systemDesignTopicStatusEl = $("#system-design-topic-status");
+const systemDesignTopicCloseEl = $("#system-design-topic-close");
 const videoPanelEl = $("#video-panel");
 const videoModalTitleEl = $("#video-modal-title");
 const videoBookmarkEl = $("#video-bookmark");
@@ -8516,6 +8649,11 @@ function makeEntry(kind, options = {}) {
     changelogSource: "",
     changelogDirectory: "",
     changelogDone: false,
+    systemDesignTopics: [],
+    systemDesignGroups: [],
+    systemDesignCount: 0,
+    systemDesignDone: false,
+    systemDesignError: "",
     dictionaryHistoryItems: [],
     videos: [],
     videosKeyword: "",
@@ -8543,6 +8681,7 @@ function makeEntry(kind, options = {}) {
     sat: null,
     newsEl: document.createElement("div"),
     changelogEl: document.createElement("div"),
+    systemDesignEl: document.createElement("div"),
     dictionaryHistoryEl: document.createElement("div"),
     el: document.createElement("div"),
     logsEl: document.createElement("div"),
@@ -8645,6 +8784,8 @@ function makeEntry(kind, options = {}) {
   entry.newsEl.className = "news-list";
   entry.changelogEl.className = "news-list";
   entry.changelogEl.hidden = true;
+  entry.systemDesignEl.className = "news-list system-design-list";
+  entry.systemDesignEl.hidden = true;
   entry.dictionaryHistoryEl.className = "news-list dictionary-history";
   entry.dictionaryHistoryEl.hidden = true;
   entry.videosEl = document.createElement("div");
@@ -8667,6 +8808,7 @@ function makeEntry(kind, options = {}) {
   entry.satEl.hidden = true;
   entry.bodyEl.appendChild(entry.newsEl);
   entry.bodyEl.appendChild(entry.changelogEl);
+  entry.bodyEl.appendChild(entry.systemDesignEl);
   entry.bodyEl.appendChild(entry.dictionaryHistoryEl);
   entry.bodyEl.appendChild(entry.videosEl);
   entry.bodyEl.appendChild(entry.booksEl);
@@ -8780,6 +8922,7 @@ function renderEntry(entry) {
   entry.choicesEl.textContent = "";
   renderNewsList(entry);
   renderChangelogList(entry);
+  renderSystemDesignList(entry);
   renderDictionaryHistoryList(entry);
   renderVideoResults(entry);
   renderBookResults(entry);
@@ -9312,6 +9455,248 @@ function closeChangelogModal() {
   changelogPanelEl.hidden = true;
   changelogFrameEl.src = "about:blank";
   changelogItem = null;
+}
+
+/* ------------------------------------------------------------------ *
+ *  /system_design_and_architecture reader
+ * ------------------------------------------------------------------ */
+const SYSTEM_DESIGN_DEFAULT_REPO =
+  "https://github.com/puncsky/system-design-and-architecture";
+let systemDesignTopicGeneration = 0;
+
+function systemDesignGroupOrder(entry) {
+  const order = [];
+  const seen = new Set();
+  for (const group of entry.systemDesignGroups || []) {
+    const value = String(group || "Topics");
+    if (seen.has(value)) continue;
+    seen.add(value);
+    order.push(value);
+  }
+  for (const topic of entry.systemDesignTopics || []) {
+    const value = String(topic.group || "Topics");
+    if (seen.has(value)) continue;
+    seen.add(value);
+    order.push(value);
+  }
+  return order;
+}
+
+function addSystemDesignEvent(entry, data) {
+  const type = String(data?.type || "");
+  if (type === "start") {
+    entry.systemDesignTopics = [];
+    entry.systemDesignGroups = Array.isArray(data.groups)
+      ? data.groups.map((group) => String(group || "Topics"))
+      : [];
+    entry.systemDesignCount = Number(data.count) || 0;
+    entry.systemDesignDone = false;
+    entry.systemDesignError = "";
+    scheduleRender(entry);
+    return;
+  }
+  if (type === "item") {
+    const path = String(data.path || "").trim();
+    if (
+      path
+      && !entry.systemDesignTopics.some((topic) => topic.path === path)
+    ) {
+      entry.systemDesignTopics.push({
+        index:
+          Number(data.index) || entry.systemDesignTopics.length + 1,
+        title: String(data.title || path),
+        path,
+        group: String(data.group || "Topics"),
+        url: String(data.url || ""),
+        raw_url: String(data.raw_url || ""),
+      });
+    }
+    scheduleRender(entry);
+    return;
+  }
+  if (type === "done") {
+    entry.systemDesignDone = true;
+    entry.systemDesignCount = entry.systemDesignCount
+      || entry.systemDesignTopics.length;
+    entry.thinking = false;
+    scheduleRender(entry);
+    return;
+  }
+  if (type === "error") {
+    entry.systemDesignError = String(
+      data.message || "Could not load the System Design topics."
+    );
+    scheduleRender(entry);
+  }
+}
+
+function renderSystemDesignList(entry) {
+  const container = entry.systemDesignEl;
+  if (!container) return;
+  container.textContent = "";
+  const items = Array.isArray(entry.systemDesignTopics)
+    ? entry.systemDesignTopics
+    : [];
+  // The list lives in the main chat output. There is no separate panel: the
+  // command's topic list is part of its transcript entry, and each row opens
+  // the chapter in the per-topic modal.
+  if (
+    !items.length
+    && !entry.systemDesignError
+    && !entry.systemDesignCount
+  ) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+
+  const head = document.createElement("div");
+  head.className = "news-list-head";
+  const label = document.createElement("span");
+  label.textContent = "System Design and Architecture";
+  const note = document.createElement("span");
+  note.className = "news-list-note";
+  const total = entry.systemDesignCount || items.length;
+  note.textContent = entry.systemDesignError
+    ? "error"
+    : entry.systemDesignDone
+      ? `${items.length} topic${items.length === 1 ? "" : "s"}`
+      : `${items.length}${total ? ` / ${total}` : ""} loaded…`;
+  head.appendChild(label);
+  head.appendChild(note);
+  container.appendChild(head);
+
+  if (entry.systemDesignError) {
+    const error = document.createElement("div");
+    error.className = "error-text";
+    error.textContent = entry.systemDesignError;
+    container.appendChild(error);
+    return;
+  }
+
+  const topicsByGroup = new Map();
+  for (const topic of items) {
+    const group = String(topic.group || "Topics");
+    if (!topicsByGroup.has(group)) topicsByGroup.set(group, []);
+    topicsByGroup.get(group).push(topic);
+  }
+  for (const group of systemDesignGroupOrder(entry)) {
+    const topics = topicsByGroup.get(group) || [];
+    if (!topics.length) continue;
+    const heading = document.createElement("div");
+    heading.className = "system-design-group-title";
+    heading.textContent = group;
+    container.appendChild(heading);
+
+    for (const topic of topics) {
+      const row = document.createElement("div");
+      row.className = "system-design-topic";
+      const main = document.createElement("div");
+      main.className = "system-design-topic-main";
+      const title = document.createElement("button");
+      title.type = "button";
+      title.className = "system-design-topic-title";
+      title.textContent = topic.title || topic.path || "(untitled)";
+      main.appendChild(title);
+      const meta = document.createElement("div");
+      meta.className = "system-design-topic-meta";
+      meta.textContent = topic.path || "";
+      main.appendChild(meta);
+      row.appendChild(main);
+
+      const openLink = document.createElement("a");
+      openLink.className = "system-design-topic-open";
+      openLink.href = topic.url || SYSTEM_DESIGN_DEFAULT_REPO;
+      openLink.target = "_blank";
+      openLink.rel = "noopener noreferrer";
+      openLink.textContent = "GitHub ↗";
+      openLink.title = topic.url || "";
+      row.appendChild(openLink);
+
+      row.addEventListener("click", (event) => {
+        if (event.target.closest("a")) return;
+        event.preventDefault();
+        event.stopPropagation();
+        openSystemDesignTopic(topic);
+      });
+      title.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openSystemDesignTopic(topic);
+      });
+      container.appendChild(row);
+    }
+  }
+}
+
+function closeSystemDesignTopicPanel() {
+  systemDesignTopicGeneration += 1;
+  if (!systemDesignTopicPanelEl) return;
+  systemDesignTopicPanelEl.hidden = true;
+  if (systemDesignTopicBodyEl) systemDesignTopicBodyEl.textContent = "";
+  if (systemDesignTopicStatusEl) {
+    systemDesignTopicStatusEl.hidden = true;
+    systemDesignTopicStatusEl.textContent = "";
+  }
+}
+
+async function openSystemDesignTopic(topic) {
+  if (!systemDesignTopicPanelEl || !topic) return;
+  const generation = ++systemDesignTopicGeneration;
+  if (systemDesignTopicTitleEl) {
+    systemDesignTopicTitleEl.textContent = topic.title || topic.path || "Topic";
+  }
+  if (systemDesignTopicMetaEl) {
+    systemDesignTopicMetaEl.textContent = [topic.group, topic.path]
+      .filter(Boolean)
+      .join(" · ");
+  }
+  if (systemDesignTopicOpenEl) {
+    systemDesignTopicOpenEl.href = topic.url || SYSTEM_DESIGN_DEFAULT_REPO;
+  }
+  if (systemDesignTopicBodyEl) systemDesignTopicBodyEl.textContent = "";
+  if (systemDesignTopicStatusEl) {
+    systemDesignTopicStatusEl.hidden = false;
+    systemDesignTopicStatusEl.textContent = "Loading the chapter…";
+  }
+  systemDesignTopicPanelEl.hidden = false;
+
+  try {
+    const response = await fetch(
+      `/api/system_design_topic?path=${encodeURIComponent(topic.path || "")}`
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    if (generation !== systemDesignTopicGeneration) return;
+    if (systemDesignTopicTitleEl && data.title) {
+      systemDesignTopicTitleEl.textContent = String(data.title);
+    }
+    if (systemDesignTopicOpenEl && data.url) {
+      systemDesignTopicOpenEl.href = String(data.url);
+    }
+    const markdown = String(data.markdown || "");
+    if (systemDesignTopicBodyEl) {
+      systemDesignTopicBodyEl.textContent = "";
+      systemDesignTopicBodyEl.appendChild(renderMarkdown(markdown, false));
+      for (const link of systemDesignTopicBodyEl.querySelectorAll("a[href]")) {
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+      }
+    }
+    if (systemDesignTopicStatusEl) {
+      systemDesignTopicStatusEl.hidden = true;
+      systemDesignTopicStatusEl.textContent = "";
+    }
+  } catch (error) {
+    if (generation !== systemDesignTopicGeneration) return;
+    if (systemDesignTopicStatusEl) {
+      systemDesignTopicStatusEl.hidden = false;
+      systemDesignTopicStatusEl.textContent =
+        `Could not load this chapter: ${error?.message || String(error)}`;
+    }
+  }
 }
 
 function openStatusModal() {
@@ -21835,6 +22220,14 @@ changelogCloseEl.addEventListener("click", (event) => {
   event.stopPropagation();
   closeChangelogModal();
 });
+systemDesignTopicPanelEl?.addEventListener("click", (event) => {
+  if (event.target === systemDesignTopicPanelEl) closeSystemDesignTopicPanel();
+});
+systemDesignTopicCloseEl?.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  closeSystemDesignTopicPanel();
+});
 statusBtnEl.addEventListener("click", (event) => {
   event.preventDefault();
   event.stopPropagation();
@@ -22679,6 +23072,27 @@ function submitText(text, fromChoice = false) {
   const image = fromChoice ? null : pendingImage;
   const question = trimmed || (image ? "Describe this image in detail." : "");
   if (!question) return;
+  // The System Design reader keeps the topic list in the chat and opens
+  // chapters in a modal. Typing "off" with that modal open returns to the
+  // main chat without sending a question to the model.
+  if (
+    !fromChoice
+    && trimmed.toLowerCase() === "off"
+    && systemDesignTopicPanelEl
+    && !systemDesignTopicPanelEl.hidden
+  ) {
+    inputEl.value = "";
+    syncInputDisplay();
+    vim.lastValue = "";
+    vim.undo = [];
+    vim.anchor = null;
+    hideCompletion();
+    hideNewsSourcePicker();
+    closeSystemDesignTopicPanel();
+    toast("Back to the main chat.");
+    setMode("insert", { moveCaret: false });
+    return;
+  }
   if (image && question.startsWith("/")) {
     toast("Remove the attached image to run a command, or ask a question about it.");
     return;
@@ -22806,6 +23220,8 @@ function submitText(text, fromChoice = false) {
                           ? "Math Tutor"
                           : commandName === "changelog"
                             ? "Changelog"
+                            : commandName === "system_design_and_architecture"
+                            ? "System Design"
                             : commandName === "sat"
                               ? "SAT"
                               : undefined,
@@ -22944,6 +23360,14 @@ function submitText(text, fromChoice = false) {
     },
     news: (data) => addNewsEvent(entry, data || {}),
     changelog: (data) => addChangelogEvent(entry, data || {}),
+    system_design: (data) => {
+      const type = String(data?.type || "");
+      if (type === "off") {
+        closeSystemDesignTopicPanel();
+        return;
+      }
+      addSystemDesignEvent(entry, data || {});
+    },
     dictionary_history: (data) => {
       entry.dictionaryHistoryItems = Array.isArray(data?.items)
         ? data.items
@@ -23661,6 +24085,12 @@ function handleKeyDown(event) {
     return;
   }
 
+  if (!systemDesignTopicPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeSystemDesignTopicPanel();
+    return;
+  }
+
   if (!videoPanelEl.hidden && key === "Escape") {
     event.preventDefault();
     closeVideoModal();
@@ -24123,6 +24553,12 @@ document.addEventListener("keydown", (event) => {
     closeChangelogModal();
     return;
   }
+
+  if (!systemDesignTopicPanelEl.hidden && key === "Escape") {
+    event.preventDefault();
+    closeSystemDesignTopicPanel();
+    return;
+  }
   if (!videoPanelEl.hidden && key === "Escape") {
     event.preventDefault();
     closeVideoModal();
@@ -24195,6 +24631,7 @@ inputEl.addEventListener("blur", () => {
       !gamePanelEl.hidden ||
       !newsPanelEl.hidden ||
       !changelogPanelEl.hidden ||
+      !systemDesignTopicPanelEl.hidden ||
       !statusPanelEl.hidden ||
       !videoPanelEl.hidden
     ) return;

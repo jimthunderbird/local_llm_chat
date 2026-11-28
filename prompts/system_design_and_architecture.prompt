@@ -1,0 +1,27 @@
+main_git_repo: https://github.com/puncsky/system-design-and-architecture
+
+command: /system_design_and_architecture
+
+after each task is completed, restart chat server
+
+task.no_initial_modal (completed) {
+  currently, after typing the command {command}, it shows a modal with a list of topics, please do not display the modal, instead, show the list of topics in the main chat
+  but please keep the per-topic modal
+}
+
+task.diagram_missing (completed) {
+  in the actual {main_git_repo}, for each .md file, the diagrams are working, but in the topic modal, the diagrams are missing  
+}
+
+task (completed) {
+  create command: /system_design_and_architecture {
+    - once enter:
+      - clear current chat context
+      - give me a list of all topics with url based on {main_git_repo}
+      - for each topic url:
+        - when clicked, open a modal and show the corresponding english markdown file content, with text and images
+
+    - option: off
+      - quite the command context and back to the main chat
+  }
+}

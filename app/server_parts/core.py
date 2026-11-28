@@ -130,6 +130,7 @@ WEB_COMMANDS = {
     "/article": "open an article URL in the reader popup or use a local article file as context (/article <url|path>; --simple disables the local-file evidence loop)",
     "/mathtutor": "upload Microsoft Word test papers and practice similar math problems with detailed answers",
     "/changelog": "list completed-task summaries from .logs (newest first); click one to read it",
+    "/system_design_and_architecture": "read the English System Design and Architecture chapters from puncsky/system-design-and-architecture; /system_design_and_architecture off returns to the main chat",
     "/stackoverflow": "search Stack Overflow: /stackoverflow tag <tag> or /stackoverflow search <keywords>",
     "/reddit": "search Reddit posts by keywords: /reddit <keywords>; also searches related subreddits; click a post to read it",
     "/tablelog": "japan food and restaurant guide for travelers - search Tabelog restaurant pages by keywords: /tablelog <keywords>",

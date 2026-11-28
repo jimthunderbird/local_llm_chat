@@ -38,6 +38,7 @@ COMMAND_ARGUMENTS = {
     "/united_healthcare",
     "/write_a_book",
     "/settings",
+    "/system_design_and_architecture",
 }
 
 # Subcommands grouped under /gutenberg and /openlibrary.

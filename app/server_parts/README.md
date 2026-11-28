@@ -27,6 +27,7 @@ The split follows the feature requirements in `prompts/*.prompt`:
 | `map.py` | Geocoding, nearby places, restaurants, routes | `map.prompt` |
 | `game.py` | Map explorer games and place modals | `game.prompt`, `games/*.prompt` |
 | `changelog.py` | `.logs` summary pages | `changelog.prompt` |
+| `system_design.py` | System Design and Architecture topic list and Markdown reader | `system_design_and_architecture.prompt` |
 | `mathtutor.py` | Math tutor uploads and practice problems | `mathtutor.prompt` |
 | `command_config.py` | Command argument catalogues and documentation URLs | multiple |
 | `translation.py` | Paragraph translation helpers | `translation.prompt` |
@@ -60,6 +61,7 @@ The split follows the feature requirements in `prompts/*.prompt`:
 | `handler_commands_c.py` | Article, dictionary, code, video, settings commands | `article_loading.prompt`, `dictionary.prompt`, `code_snippet_block.prompt`, `programming*.prompt`, `youtube.prompt` |
 | `handler_moonbit.py` | MoonBit documentation mode requests | `moonbit.prompt` |
 | `handler_sat.py` | PineSAT SAT math question-bank mode requests | `sat.prompt` |
+| `handler_system_design.py` | System Design and Architecture reading-mode requests | `system_design_and_architecture.prompt` |
 
 ## Dependency direction
 

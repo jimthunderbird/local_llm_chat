@@ -6,7 +6,7 @@ Ollama streaming, transcript/article scoping, history, /memory,
 /status, /sources, /benchmark, /youtube, /news, /mdn, /britanica,
 /stackoverflow, /reddit, /tablelog, /stock, /googlenews, /gkg, /medium,
 /gutenberg, /openlibrary, /internet_archive, /changelog, /wikivoyage, /map,
-/game, /wiki,
+/game, /system_design_and_architecture, /wiki,
 /wiki_article, /deepresearch, /write_a_book, /books, /pdf_books, /robinhood,
 /article, /dict, /dictionary_history, and /ask. The browser is a
 pure HTML/CSS/JavaScript single-page app served from ./app/chat.html.
@@ -30,6 +30,10 @@ Endpoints:
     GET  /api/transcripts?q=...  ag title search results
     GET  /api/changelog_file     ?name=<summary.html> one completed-task page
                                   used by /changelog's detail modal
+    GET  /api/system_design_topic ?path=<en/chapter.md> one English chapter
+                                  from puncsky/system-design-and-architecture
+                                  for the /system_design_and_architecture
+                                  reader modal, with images made absolute
     GET  /api/book_file          ?name=<book.html> one book written by
                                   /write_a_book
     GET  /api/pdf_book_file      ?name=<book.pdf> one PDF from .chat/pdf_books
@@ -209,6 +213,7 @@ from server_parts.handler_commands_b import HandlerCommandsBMixin
 from server_parts.handler_commands_c import HandlerCommandsCMixin
 from server_parts.handler_moonbit import HandlerMoonbitMixin
 from server_parts.handler_sat import HandlerSatMixin
+from server_parts.handler_system_design import HandlerSystemDesignMixin
 from server_parts.article import _iterative_paragraph_chunks
 from server_parts.tts import _keepalive_watchdog, _prewarm_tts
 
@@ -225,6 +230,7 @@ class ChatRequestHandler(
     HandlerCommandsCMixin,
     HandlerMoonbitMixin,
     HandlerSatMixin,
+    HandlerSystemDesignMixin,
     BaseHTTPRequestHandler,
 ):
     """One HTTP handler per request; SSE responses stream from Ollama."""

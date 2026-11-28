@@ -1541,6 +1541,8 @@ class HandlerAskMixin:
             self._command_internet_archive(argument)
         elif name == "/changelog":
             self._command_changelog(argument)
+        elif name == "/system_design_and_architecture":
+            self._command_system_design_and_architecture(argument)
         elif name == "/wiki":
             self._command_wiki(argument)
         elif name == "/wiki_article":

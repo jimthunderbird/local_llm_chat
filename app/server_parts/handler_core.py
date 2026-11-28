@@ -885,6 +885,19 @@ class HandlerCoreMixin:
             name = (params.get("name") or [""])[0]
             self._send_changelog_file(name)
             return
+        if path == "/api/system_design_topic":
+            params = parse_qs(parsed.query)
+            topic_path = (params.get("path") or [""])[0].strip()
+            try:
+                topic = system_design_topic(topic_path)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except (RuntimeError, OSError) as exc:
+                self._send_error_json(str(exc), 502)
+                return
+            self._send_json(topic)
+            return
         if path == "/api/book_file":
             params = parse_qs(parsed.query)
             name = (params.get("name") or [""])[0]
@@ -1998,6 +2011,7 @@ class HandlerCoreMixin:
 from .article import GUTENBERG_CATALOG_CACHE
 from .books import build_pdf_knowledge_graph, delete_pdf_book, download_ocean_of_pdf_book, list_pdf_books, pdf_book_path, pdf_knowledge_graph_path, read_pdf_book_page, read_pdf_concept, render_pdf_book_page, render_pdf_book_thumbnail, search_ocean_of_pdf, written_book_path
 from .changelog import changelog_file_path
+from .system_design import system_design_topic
 from .command_config import GUTENBERG_BOOK_ID_RE, GUTENBERG_BOOK_URL, GUTENBERG_SUBCOMMANDS, OPENLIBRARY_SUBCOMMANDS, STACKOVERFLOW_SUBCOMMANDS, YOUTUBE_SUBCOMMANDS, strip_surrounding_search_quotes
 from .core import CHAT_HTML, MAX_REQUEST_BYTES, PATH_COMPLETION_LIMIT, WEB_COMMANDS
 from .directory_anthem import _anthem_provider_detail
