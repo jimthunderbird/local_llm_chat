@@ -1507,6 +1507,25 @@ class HandlerCoreMixin:
             rebuild = bool(payload.get("rebuild"))
             self._handle_pdf_knowledge_graph(name, rebuild)
             return
+        if parsed.path == "/api/pdf_books/delete":
+            # prompts/pdf_books.prompt task.allow_deleting_a_book: remove one
+            # PDF book from .chat/pdf_books via its trash button.
+            payload = self._read_json()
+            if payload is None:
+                return
+            name = str(payload.get("name") or "").strip()
+            try:
+                result = delete_pdf_book(name)
+            except ValueError as exc:
+                self._send_error_json(str(exc), 400)
+                return
+            except (OSError, RuntimeError) as exc:
+                self._send_error_json(
+                    f"Could not delete the PDF book: {exc}", 500
+                )
+                return
+            self._send_json(result)
+            return
         if parsed.path == "/api/oceanofpdf_download":
             # prompts/pdf_books.prompt task.oceans_of_pdf_search: download
             # the selected Ocean Of PDF book into {pdf_books_dir}.
@@ -1515,8 +1534,9 @@ class HandlerCoreMixin:
                 return
             book_url = str(payload.get("url") or "").strip()
             title = str(payload.get("title") or "").strip()
+            details = str(payload.get("details") or "").strip()
             try:
-                result = download_ocean_of_pdf_book(book_url, title)
+                result = download_ocean_of_pdf_book(book_url, title, details)
             except ValueError as exc:
                 self._send_error_json(str(exc), 400)
                 return
@@ -1934,7 +1954,7 @@ class HandlerCoreMixin:
 # Cross-component imports are placed after the definitions so a
 # feature module can depend on another feature module safely.
 from .article import GUTENBERG_CATALOG_CACHE
-from .books import build_pdf_knowledge_graph, download_ocean_of_pdf_book, list_pdf_books, pdf_book_path, pdf_knowledge_graph_path, read_pdf_book_page, read_pdf_concept, render_pdf_book_page, search_ocean_of_pdf, written_book_path
+from .books import build_pdf_knowledge_graph, delete_pdf_book, download_ocean_of_pdf_book, list_pdf_books, pdf_book_path, pdf_knowledge_graph_path, read_pdf_book_page, read_pdf_concept, render_pdf_book_page, search_ocean_of_pdf, written_book_path
 from .changelog import changelog_file_path
 from .command_config import GUTENBERG_BOOK_ID_RE, GUTENBERG_BOOK_URL, GUTENBERG_SUBCOMMANDS, OPENLIBRARY_SUBCOMMANDS, STACKOVERFLOW_SUBCOMMANDS, YOUTUBE_SUBCOMMANDS, strip_surrounding_search_quotes
 from .core import CHAT_HTML, MAX_REQUEST_BYTES, PATH_COMPLETION_LIMIT, WEB_COMMANDS

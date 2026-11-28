@@ -469,6 +469,87 @@ def list_pdf_books() -> list[dict]:
     )
     return entries
 
+
+def delete_pdf_book(name: str) -> dict:
+    """Delete one PDF book and its derived trunks, graph, and chat history.
+
+    prompts/pdf_books.prompt task.allow_deleting_a_book: the trash button in
+    the /pdf_books list removes the PDF from .chat/pdf_books.  Associated
+    caches are removed too so a later re-download starts clean.
+    """
+    path = pdf_book_path(name)
+    if path is None:
+        raise ValueError("Invalid PDF book name.")
+    book_name = path.name
+    if not path.is_file():
+        raise ValueError("PDF book not found.")
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise RuntimeError(f"Could not delete {book_name}: {exc}") from exc
+
+    with _PDF_LAST_OPEN_LOCK:
+        mapping = _load_pdf_last_open()
+        if mapping.pop(book_name, None) is not None:
+            try:
+                PDF_BOOKS_LAST_OPEN_PATH.parent.mkdir(
+                    parents=True, exist_ok=True
+                )
+                temporary = PDF_BOOKS_LAST_OPEN_PATH.with_name(
+                    PDF_BOOKS_LAST_OPEN_PATH.name + ".tmp"
+                )
+                temporary.write_text(
+                    json.dumps(mapping, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                temporary.replace(PDF_BOOKS_LAST_OPEN_PATH)
+            except OSError:
+                pass
+
+    try:
+        (PDF_BOOKS_DIR / f"{book_name}.knowlege_graph.json").unlink(
+            missing_ok=True
+        )
+    except OSError:
+        pass
+
+    # Imported locally because pdfbook imports this module at load time.
+    try:
+        from .pdfbook import (
+            PDF_BOOKS_TRUNKS_DIR,
+            PDF_CHAT_HISTORY_DIR,
+            forget_pdf_chat_state,
+            pdf_book_id,
+        )
+
+        book_id = pdf_book_id(book_name)
+        forget_pdf_chat_state(book_name)
+        for old in PDF_BOOKS_TRUNKS_DIR.glob(f"{book_id}.*.trunk"):
+            try:
+                old.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            (PDF_BOOKS_TRUNKS_DIR / f"{book_id}.meta.json").unlink(
+                missing_ok=True
+            )
+        except OSError:
+            pass
+        try:
+            (PDF_CHAT_HISTORY_DIR / f"{book_id}.json").unlink(
+                missing_ok=True
+            )
+        except OSError:
+            pass
+    except (ImportError, OSError, ValueError):
+        pass
+
+    return {
+        "deleted": True,
+        "name": book_name,
+        "title": _pdf_book_title(book_name),
+    }
+
 # ---------------------------------------------------------------------------
 # Ocean Of PDF (prompts/pdf_books.prompt task.oceans_of_pdf_search).
 #
@@ -788,6 +869,17 @@ LIBGEN_IPFS_GATEWAYS = (
     "https://gateway.pinata.cloud/ipfs/",
 )
 _LIBGEN_IPFS_RE = re.compile(r"/ipfs/((?:bafy|Qm)[A-Za-z0-9]+)")
+_AUTHOR_DETAILS_RE = re.compile(
+    r"\bAuthors?\s*:\s*(.+?)"
+    r"(?:\s+Language\s*:|\s*[·|]\s*Language\s*:|\s+Genre\s*:|$)",
+    re.IGNORECASE,
+)
+
+
+def _ocean_details_author(details: str) -> str:
+    """Read the author from an Ocean Of PDF result's details line."""
+    match = _AUTHOR_DETAILS_RE.search(str(details or ""))
+    return " ".join(match.group(1).split())[:200] if match else ""
 
 
 def _libgen_title(value: str) -> str:
@@ -814,13 +906,22 @@ def _libgen_get(url: str) -> str:
     raise RuntimeError(f"Could not reach {url}: {last_error}")
 
 
-def _libgen_candidates(title: str) -> list[dict]:
-    """Return Libgen PDF rows ranked by title overlap with ``title``."""
+def _libgen_candidates(title: str, author: str = "") -> list[dict]:
+    """Return Libgen PDF rows that really match this title and author.
+
+    A title-only search can return books that merely mention all the same
+    words, so the fallback requires an exact title match when no author is
+    known.  When the Ocean Of PDF result includes an author, that author is
+    added to the query and used to reject same-title books by other writers.
+    """
     wanted = _ocean_title_key(_libgen_title(title))
     wanted_tokens = set(wanted.split())
     if not wanted_tokens:
         return []
-    page = _libgen_get(f"{LIBGEN_SEARCH_URL}?req={quote_plus(title)}")
+    author_key = _ocean_title_key(author)
+    author_tokens = set(author_key.split())
+    query = title + (f" {author}" if author else "")
+    page = _libgen_get(f"{LIBGEN_SEARCH_URL}?req={quote_plus(query)}")
     candidates: list[dict] = []
     for row_match in re.finditer(r"<tr[^>]*>(.*?)</tr>", page, re.S | re.I):
         row = row_match.group(1)
@@ -842,13 +943,31 @@ def _libgen_candidates(title: str) -> list[dict]:
         candidate_tokens = set(candidate_key.split())
         if not candidate_tokens:
             continue
+        cells = [
+            _libgen_title(cell)
+            for cell in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S | re.I)
+        ]
+        candidate_author = cells[1] if len(cells) > 1 else ""
+        candidate_author_tokens = set(
+            _ocean_title_key(candidate_author).split()
+        )
+        author_match = bool(author_tokens and candidate_author_tokens) and (
+            len(author_tokens & candidate_author_tokens)
+            >= max(1, min(2, len(author_tokens)))
+        )
+        if author_tokens and candidate_author_tokens and not author_match:
+            continue
         coverage = len(wanted_tokens & candidate_tokens) / len(wanted_tokens)
-        if coverage < 0.5:
+        exact = candidate_key == wanted
+        starts_with_title = candidate_key.startswith(wanted + " ")
+        if not exact and not (author_match and coverage >= 0.5):
             continue
         score = coverage
-        if candidate_key == wanted:
-            score += 2
-        elif wanted in candidate_key or candidate_key in wanted:
+        if exact:
+            score += 5
+        if author_match:
+            score += 3
+        if starts_with_title:
             score += 1
         if "english" in row_text:
             score += 0.25
@@ -856,6 +975,7 @@ def _libgen_candidates(title: str) -> list[dict]:
         candidates.append(
             {
                 "title": candidate_title,
+                "author": candidate_author,
                 "md5": md5_match.group(1),
                 "file_id": file_match.group(1) if file_match else "",
                 "score": score,
@@ -876,14 +996,229 @@ def _libgen_ipfs_cid(file_id: str, md5: str) -> str:
     return (preferred or cids or [""])[0]
 
 
-def _download_libgen_pdf(title: str) -> dict:
-    """Download a live-only Ocean Of PDF book from Libgen's IPFS copy."""
+ARCHIVE_ORG_SEARCH_URL = "https://archive.org/advancedsearch.php"
+ARCHIVE_ORG_METADATA_URL = "https://archive.org/metadata"
+ARCHIVE_ORG_DOWNLOAD_URL = "https://archive.org/download"
+
+
+def _archive_org_items(title: str, author: str = "") -> list[dict]:
+    """Return archive.org items whose titles really match this book.
+
+    Libgen records can exist without a public IPFS copy, and its CDN mirror
+    (cdn3.booksdl.lc) is frequently down.  Archive.org has open-source copies
+    of many of the same books, so it is used as the last download fallback.
+    The title must still match strictly; an author match only strengthens the
+    ranking, because archive.org metadata often omits the creator.
+    """
+    wanted_title = _libgen_title(title)
+    wanted = _ocean_title_key(wanted_title)
+    wanted_tokens = set(wanted.split())
+    if not wanted_tokens:
+        return []
+    author_tokens = [
+        token for token in _ocean_title_key(author).split() if len(token) >= 3
+    ]
+    surname = author_tokens[-1] if author_tokens else ""
+    phrase = re.sub(r"[^A-Za-z0-9 \-]+", " ", wanted_title)
+    phrase = " ".join(phrase.split())
+    if not phrase:
+        return []
+    queries = []
+    if surname:
+        queries.append(f'title:("{phrase}") AND {surname}')
+        if len(author_tokens) > 1:
+            queries.append(
+                f'title:("{phrase}") AND '
+                + " AND ".join(dict.fromkeys(author_tokens))
+            )
+    queries.append(f'title:("{phrase}")')
+    seen: set[str] = set()
+    items: list[dict] = []
+    for query in queries:
+        try:
+            response = requests.get(
+                ARCHIVE_ORG_SEARCH_URL,
+                headers=OCEAN_HEADERS,
+                params={
+                    "q": query,
+                    "fl[]": ["identifier", "title", "creator"],
+                    "rows": 50,
+                    "output": "json",
+                },
+                timeout=(10, 60),
+            )
+            response.raise_for_status()
+            docs = response.json().get("response", {}).get("docs", [])
+        except (requests.RequestException, ValueError):
+            continue
+        for doc in docs:
+            identifier = " ".join(str(doc.get("identifier") or "").split())
+            if not identifier or identifier in seen:
+                continue
+            seen.add(identifier)
+            item_title = _libgen_title(doc.get("title") or "")
+            item_key = _ocean_title_key(item_title)
+            item_tokens = set(item_key.split())
+            if not item_tokens:
+                continue
+            coverage = len(wanted_tokens & item_tokens) / len(wanted_tokens)
+            reverse_coverage = len(wanted_tokens & item_tokens) / len(item_tokens)
+            author_match = bool(surname and surname in item_key)
+            if author_tokens:
+                # An author query already filtered the results, so a title
+                # word overlap is enough to reject same-topic books.
+                if coverage < 0.75:
+                    continue
+            else:
+                # Title-only results must not add words that the requested
+                # title does not have (e.g. "... in Islam").
+                if reverse_coverage < 1.0 or coverage < 0.5:
+                    continue
+            items.append(
+                {
+                    "identifier": identifier,
+                    "title": item_title,
+                    "author_match": author_match,
+                    "score": coverage + (2 if author_match else 0),
+                }
+            )
+        if items:
+            break
+    items.sort(key=lambda item: item["score"], reverse=True)
+    return items
+
+
+def _archive_org_pdf_files(identifier: str, wanted_tokens: set[str]) -> list[dict]:
+    """List the downloadable PDF files of one archive.org item."""
+    response = requests.get(
+        f"{ARCHIVE_ORG_METADATA_URL}/{quote(identifier)}",
+        headers=OCEAN_HEADERS,
+        timeout=(10, 60),
+    )
+    response.raise_for_status()
+    files: list[dict] = []
+    for entry in response.json().get("files", []):
+        name = str(entry.get("name") or "")
+        if not name.casefold().endswith(".pdf") or entry.get("private"):
+            continue
+        try:
+            size = int(entry.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        name_tokens = set(_ocean_title_key(name).split())
+        coverage = (
+            len(wanted_tokens & name_tokens) / len(wanted_tokens)
+            if wanted_tokens
+            else 0
+        )
+        files.append({"name": name, "size": size, "coverage": coverage})
+    files.sort(key=lambda item: (item["coverage"], item["size"]), reverse=True)
+    return files
+
+
+def _download_archive_org_pdf(title: str, author: str = "") -> dict:
+    """Download the matching PDF from an open archive.org item."""
+    wanted_tokens = set(_ocean_title_key(_libgen_title(title)).split())
+    items = _archive_org_items(title, author)
+    if not items:
+        raise RuntimeError("No matching PDF was found on archive.org.")
+    last_error = ""
+    for item in items[:5]:
+        try:
+            files = _archive_org_pdf_files(item["identifier"], wanted_tokens)
+        except (requests.RequestException, ValueError) as exc:
+            last_error = str(exc)
+            continue
+        if not files:
+            continue
+        source_url = f"https://archive.org/details/{item['identifier']}"
+        target = PDF_BOOKS_DIR / _ocean_safe_filename(title)
+        if target.is_file():
+            try:
+                with target.open("rb") as handle:
+                    header = handle.read(5)
+                if header.startswith(b"%PDF-"):
+                    entries = list_pdf_books()
+                    existing = next(
+                        (entry for entry in entries if entry["name"] == target.name),
+                        None,
+                    )
+                    return {
+                        "downloaded": False,
+                        "already_downloaded": True,
+                        "item": existing,
+                        "source_url": source_url,
+                    }
+            except OSError:
+                pass
+        PDF_BOOKS_DIR.mkdir(parents=True, exist_ok=True)
+        part = target.with_name(target.name + ".part")
+        url = (
+            f"{ARCHIVE_ORG_DOWNLOAD_URL}/{quote(item['identifier'])}/"
+            f"{quote(files[0]['name'])}"
+        )
+        try:
+            with requests.get(
+                url,
+                headers={**OCEAN_HEADERS, "Accept": "application/pdf,*/*"},
+                stream=True,
+                timeout=(10, 300),
+                allow_redirects=True,
+            ) as response:
+                response.raise_for_status()
+                total = 0
+                with part.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=65536):
+                        if not chunk:
+                            continue
+                        if total == 0 and not chunk.lstrip()[:5].startswith(
+                            b"%PDF-"
+                        ):
+                            raise RuntimeError(
+                                "The archive.org copy did not return a PDF."
+                            )
+                        total += len(chunk)
+                        if total > OCEAN_FILE_SIZE_LIMIT:
+                            raise RuntimeError(
+                                "The archive.org PDF is too large to download."
+                            )
+                        handle.write(chunk)
+            if not part.is_file() or part.stat().st_size == 0:
+                raise RuntimeError("The archive.org PDF download was empty.")
+            os.replace(part, target)
+            entries = list_pdf_books()
+            existing = next(
+                (entry for entry in entries if entry["name"] == target.name),
+                None,
+            )
+            return {
+                "downloaded": True,
+                "already_downloaded": False,
+                "item": existing,
+                "source_url": source_url,
+            }
+        except (requests.RequestException, RuntimeError, OSError) as exc:
+            last_error = str(exc)
+            try:
+                part.unlink(missing_ok=True)
+            except OSError:
+                pass
+    raise RuntimeError(
+        last_error or "archive.org could not download this book."
+    )
+
+
+def _download_libgen_pdf(title: str, details: str = "") -> dict:
+    """Download a live-only Ocean Of PDF book from Libgen or archive.org."""
     title = _libgen_title(title)
     if not title:
         raise RuntimeError("The book title is empty, so no alternate source could be searched.")
-    candidates = _libgen_candidates(title)
-    if not candidates:
-        raise RuntimeError("No matching PDF was found in Library Genesis.")
+    author = _ocean_details_author(details)
+    candidates = _libgen_candidates(title, author)
+    if not candidates and author:
+        # Author spellings vary between Ocean Of PDF and Libgen.  Retry by
+        # title only, but the matcher still requires an exact title then.
+        candidates = _libgen_candidates(title)
     last_error = ""
     for candidate in candidates[:3]:
         try:
@@ -955,10 +1290,20 @@ def _download_libgen_pdf(title: str) -> dict:
                         pass
         except (requests.RequestException, RuntimeError, OSError, ValueError) as exc:
             last_error = str(exc)
-    raise RuntimeError(last_error or "The alternate source could not download this book.")
+    # Libgen records without an IPFS copy, and its down CDN mirror, are common
+    # enough that a second independent source is tried before giving up.
+    try:
+        return _download_archive_org_pdf(title, author)
+    except (requests.RequestException, RuntimeError, OSError, ValueError) as exc:
+        last_error = str(exc) or last_error
+    raise RuntimeError(
+        last_error or "The alternate source could not download this book."
+    )
 
 
-def download_ocean_of_pdf_book(book_url: str, title: str = "") -> dict:
+def download_ocean_of_pdf_book(
+    book_url: str, title: str = "", details: str = ""
+) -> dict:
     """Download one Ocean Of PDF book into {pdf_books_dir}.
 
     Book pages come from either the live oceanofpdf.com or the
@@ -974,7 +1319,7 @@ def download_ocean_of_pdf_book(book_url: str, title: str = "") -> dict:
             # This listing only exists on the live site.  Resolve the same
             # title through Libgen instead of failing on the unavailable
             # zerolibrary form token.
-            return _download_libgen_pdf(title)
+            return _download_libgen_pdf(title, details)
         book_url = mirror_url
     page = _ocean_get(book_url)
     token = _ocean_pdf_token(page, book_url)

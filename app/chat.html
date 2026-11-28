@@ -4304,6 +4304,24 @@
     font-size: 10.5px;
     border-bottom: 1px dotted #3d6b8f;
   }
+  .book-delete {
+    align-self: flex-start;
+    margin-top: 1px;
+    padding: 0 6px;
+    color: var(--warn);
+    background: #251f12;
+    border: 1px solid #5a4a2f;
+    border-radius: 5px;
+    font: inherit;
+    font-size: 11px;
+    line-height: 1.5;
+    cursor: pointer;
+  }
+  .book-delete:hover:not(:disabled) {
+    background: #332817;
+    border-color: #7a6239;
+  }
+  .book-delete:disabled { cursor: default; opacity: .55; }
   .book-card[href] {
     color: inherit;
     text-decoration: none;
@@ -14019,7 +14037,60 @@ function refreshPdfBookLibraryOrder(pdfName) {
   }
 }
 
-function renderDownloadedPdfCard(item) {
+function appendPdfDeleteButton(entry, card, item) {
+  const name = String(item?.name || "").trim();
+  if (!name) return;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "book-delete";
+  remove.textContent = "🗑";
+  remove.title = `Delete ${item.title || name} from PDF books`;
+  remove.setAttribute("aria-label", remove.title);
+  remove.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void deletePdfBookFromLibrary(entry, item, remove);
+  });
+  card.appendChild(remove);
+}
+
+async function deletePdfBookFromLibrary(entry, item, button) {
+  const name = String(item?.name || "").trim();
+  if (!name || item.deleting) return;
+  if (!window.confirm(`Delete "${item.title || name}" from PDF books?`)) return;
+  item.deleting = true;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "…";
+  }
+  try {
+    const response = await fetch("/api/pdf_books/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error || `HTTP ${response.status}`);
+    }
+    const section = String(item.section || "downloaded");
+    entry.bookLibraryItems = (entry.bookLibraryItems || []).filter((candidate) => (
+      !(String(candidate?.name || "") === name
+        && String(candidate?.section || "downloaded") === section)
+    ));
+    renderBookLibrary(entry);
+    toast(`Deleted ${name} from PDF books.`);
+  } catch (error) {
+    item.deleting = false;
+    if (button && button.isConnected) {
+      button.disabled = false;
+      button.textContent = "🗑";
+    }
+    toast(`Could not delete ${name}: ${error?.message || error}`);
+  }
+}
+
+function renderDownloadedPdfCard(entry, item) {
   const card = document.createElement("a");
   card.className = "book-card";
   card.href = item.url || "#";
@@ -14057,6 +14128,7 @@ function renderDownloadedPdfCard(item) {
   action.className = "book-action";
   action.textContent = "Read PDF →";
   card.appendChild(action);
+  appendPdfDeleteButton(entry, card, item);
   return card;
 }
 
@@ -14064,7 +14136,7 @@ function renderBookLibraryGrid(entry, group, items) {
   const cards = document.createElement("div");
   cards.className = "book-cards";
   for (const item of items) {
-    cards.appendChild(renderDownloadedPdfCard(item));
+    cards.appendChild(renderDownloadedPdfCard(entry, item));
   }
   return cards;
 }
@@ -14298,7 +14370,7 @@ async function downloadOceanPdfBook(entry, book, download, status) {
     const response = await fetch("/api/oceanofpdf_download", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: book.url, title: book.title }),
+      body: JSON.stringify({ url: book.url, title: book.title, details: book.details }),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -14430,6 +14502,7 @@ function renderBookLibrary(entry) {
     action.className = "book-action";
     action.textContent = item.pdf ? "Read PDF →" : "Read book →";
     card.appendChild(action);
+    if (item.pdf) appendPdfDeleteButton(entry, card, item);
     cards.appendChild(card);
   }
   container.appendChild(cards);

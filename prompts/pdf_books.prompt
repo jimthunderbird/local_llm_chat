@@ -2,6 +2,17 @@ pdf_books_dir: {directory_of_this_prompt}/../.chat/pdf_books
 pdf_books_trunks_dir: {directory_of_this_prompt}/../.chat/pdf_books/trunks
 pdf_books_chathistory_dir: {directory_of_this_prompt}/../.chat/pdf_books/chat_history
 
+task.bug.history_of_philosophy (completed) {
+  i tried to download "The History of Philosophy", it showed that it is downloaded, but I actually downloaded "The Prism of Science The Israel Colloquium Studies in History Philosophy and Sociology of Science Volume 2 1", why?
+}
+
+task.allow_deleting_a_book (completed) {
+  for each pdf book:
+  - next to "Read PDF" url, add a trash can button, when click {
+    delete this particular pdf book from {pdf_books_dir}
+  }
+}
+
 task.bug.book_not_found (completed) {
   I can find this book: 1001 Inventions That Changed the World
   But when I download the pdf, it said:
