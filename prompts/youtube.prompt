@@ -1,3 +1,7 @@
+task.notegpt_only (completed) {
+  when fetching youtube transcript, just use notegpt as the only way, no other way should be used
+}
+
 task.try_getting_transcript (completed) {
   can you please try your best to get the transcript of https://www.youtube.com/watch?v=tYFZLDxhynQ
 }

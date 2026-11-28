@@ -9,53 +9,23 @@ Outputs:
     ./.chat/articles_cache/youtube_<youtube_video_hash>.transcript
     ./.chat/articles_cache/youtube_<youtube_video_hash>.title
 
-The transcript sources are tried in this order:
-
-    1. youtube-transcript-api — lists the available caption tracks and reads
-       the English track (or the original-language track, which is then
-       translated locally). Supports proxy overrides (see below).
-    2. yt-dlp — downloads the English (en*) captions while cycling through
-       several YouTube player clients, retrying paths that YouTube's
-       per-client blocking usually leaves open. Prompted by
-       prompts/youtube.prompt, yt-dlp never iterates the other listed
-       subtitle languages: trying every language with several player
-       clients made the fallback path very slow when blocked, so English
-       is the only language yt-dlp is asked for.
-    3. NoteGPT — a last-resort public transcript endpoint used only when
-       both YouTube caption libraries are blocked. It accepts an anonymous
-       UUID cookie and returns the available caption tracks. The
-       youtubetotranscript.com site is still NOT used, per
-       prompts/youtube.prompt.
-
-When the transcript returned by any source is not English, it is translated
-to English with the local Ollama model. This handles videos whose only
-English option is a translated caption track.
+The transcript source is NoteGPT's public YouTube transcript endpoint. It is
+the only source this pipeline uses, per prompts/youtube.prompt. A fresh
+anonymous UUID cookie is sent with each request because NoteGPT may accept
+only one transcript per anonymous visitor. The response contains the video's
+available caption tracks; the English track is preferred and a non-English
+track is translated locally with Ollama.
 
 Optional environment variables:
     OLLAMA_HOST               Ollama address (default: http://localhost:11434)
     OLLAMA_YOUTUBE_MODEL      title-summary / translation model
                               (default: ornith-1.5:35b)
-    WEBSHARE_PROXY_USERNAME   Webshare proxy used by youtube-transcript-api
-    WEBSHARE_PROXY_PASSWORD
-    YT_PROXY_URL              generic proxy URL for youtube-transcript-api
-                              and yt-dlp
-    YT_COOKIES_FROM_BROWSER   browser name yt-dlp copies YouTube cookies
-                              from (for example "chrome")
-    YT_COOKIES_FILE           cookies file yt-dlp sends to YouTube
 """
 
 import argparse
-import html
-import importlib.util
-import json
 import os
-import random
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
-import time
 import uuid
 from pathlib import Path
 
@@ -63,17 +33,6 @@ try:
     import requests
 except ImportError:  # pragma: no cover - dependency guard
     requests = None
-
-try:
-    from youtube_transcript_api import YouTubeTranscriptApi
-    from youtube_transcript_api.proxies import (
-        GenericProxyConfig,
-        WebshareProxyConfig,
-    )
-except ImportError:  # pragma: no cover - yt-dlp may still be available
-    YouTubeTranscriptApi = None
-    GenericProxyConfig = None
-    WebshareProxyConfig = None
 
 
 def normalize_argv(argv):
@@ -99,9 +58,8 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/"
 if not OLLAMA_HOST.startswith(("http://", "https://")):
     OLLAMA_HOST = f"http://{OLLAMA_HOST}"
 
-# Fallback hints for the YouTube caption libraries (youtube-transcript-api
-# and yt-dlp). The YouTube-specific messages do not always name a transport,
-# so they are classified separately.
+# Error hints from NoteGPT and YouTube. They let the caller distinguish a
+# missing transcript from an IP/rate-limit refusal in the log message.
 LIBRARY_NO_TRANSCRIPT_HINTS = (
     "no english transcript",
     "no transcript",
@@ -157,292 +115,22 @@ def _title_path(video_id: str) -> Path:
     return OUTPUT_DIR / f"{_storage_id(video_id)}.title"
 
 
-def _proxy_config():
-    """Build a youtube-transcript-api proxy config from the environment."""
-    if YouTubeTranscriptApi is None:
-        return None
-
-    username = os.environ.get("WEBSHARE_PROXY_USERNAME")
-    password = os.environ.get("WEBSHARE_PROXY_PASSWORD")
-    if username and password and WebshareProxyConfig is not None:
-        return WebshareProxyConfig(
-            proxy_username=username,
-            proxy_password=password,
-        )
-
-    proxy_url = os.environ.get("YT_PROXY_URL")
-    if proxy_url and GenericProxyConfig is not None:
-        return GenericProxyConfig(http_url=proxy_url, https_url=proxy_url)
-
-    return None
-
-
-def _make_api():
-    proxy_config = _proxy_config()
-    if proxy_config is not None:
-        return YouTubeTranscriptApi(proxy_config=proxy_config)
-    return YouTubeTranscriptApi()
-
-
-def _fetch_with_api_any(video_id: str) -> tuple[str, str, str]:
-    """Fetch any available transcript, preferring English.
-
-    Returns ``(text, language_code, language_name)``.  When the video has no
-    English track, the caller translates the original-language transcript.
-    """
-    if YouTubeTranscriptApi is None:
-        raise RuntimeError("youtube-transcript-api is not installed")
-
-    tries = 3 if _proxy_config() is not None else 1
-    last_error: BaseException | None = None
-
-    for attempt in range(tries):
-        try:
-            api = _make_api()
-            transcripts = list(api.list(video_id))
-            if not transcripts:
-                raise RuntimeError(f"No transcripts are available for {video_id}")
-
-            english = [
-                transcript
-                for transcript in transcripts
-                if str(transcript.language_code).lower().startswith("en")
-            ]
-            ordered = english + [
-                transcript
-                for transcript in transcripts
-                if transcript not in english
-            ]
-            chosen = None
-            fetched = None
-            for transcript in ordered:
-                try:
-                    fetched = transcript.fetch()
-                except Exception as exc:
-                    last_error = exc
-                    continue
-                chosen = transcript
-                break
-            if chosen is None or fetched is None:
-                if last_error is not None:
-                    raise last_error
-                raise RuntimeError(f"Could not fetch a transcript for {video_id}")
-
-            text = " ".join(
-                " ".join(snippet.text.split()) for snippet in fetched
-            )
-            if not text.strip():
-                raise RuntimeError(f"Transcript for {video_id} is empty")
-            return (
-                text.strip(),
-                str(chosen.language_code),
-                str(getattr(chosen, "language", "") or chosen.language_code),
-            )
-        except Exception as exc:
-            last_error = exc
-            if attempt == tries - 1 or _classify_error(exc) != "blocked":
-                raise
-            delay = min(12.0, 2 ** attempt) + random.uniform(0.0, 1.5)
-            _log(
-                f"transcript API attempt {attempt + 1}/{tries} failed "
-                f"({_classify_error(exc)}); retrying in {delay:.1f}s"
-            )
-            time.sleep(delay)
-
-    assert last_error is not None
-    raise last_error
-
-
-# YouTube rejects the transcript API from some residential/cloud IPs.  These
-# player clients are handled differently by yt-dlp, so trying them in turn
-# usually gets the captions even when one client is blocked.
-YT_DLP_CLIENTS = ("ios", "web_embedded", "mweb", "android_vr", "default")
-
-
-def _ytdlp_command() -> list[str] | None:
-    if importlib.util.find_spec("yt_dlp") is not None:
-        return [sys.executable, "-m", "yt_dlp"]
-    executable = shutil.which("yt-dlp")
-    return [executable] if executable else None
-
-
-def _parse_json3(payload: dict) -> str:
-    """Convert YouTube's json3 caption format to plain text."""
-    parts: list[str] = []
-    for event in payload.get("events", []):
-        segments = event.get("segs")
-        if not segments:
-            continue
-        # aAppend events only mark a line break; the text lives in the
-        # preceding event.
-        if event.get("aAppend"):
-            continue
-        text = "".join(segment.get("utf8", "") for segment in segments)
-        text = " ".join(text.split())
-        if text:
-            parts.append(text)
-    return " ".join(parts)
-
-
-def _parse_vtt(content: str) -> str:
-    """Convert WebVTT captions to plain text (fallback for older yt-dlp)."""
-    lines: list[str] = []
-    for raw_line in content.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line == "WEBVTT" or line.startswith(("Kind:", "Language:", "NOTE")):
-            continue
-        if "-->" in line or re.fullmatch(r"\d+", line):
-            continue
-        line = re.sub(r"<[^>]+>", "", line)
-        line = html.unescape(line)
-        line = " ".join(line.split())
-        if not line:
-            continue
-        if lines and lines[-1] == line:
-            continue
-        lines.append(line)
-    return " ".join(lines)
-
-
-def _preferred(files: list[Path]) -> list[Path]:
-    """Prefer the plain English track over en-orig/other variants."""
-    return sorted(files, key=lambda path: (".en." not in path.name, path.name))
-
-
-def _extract_subtitle_text(directory: Path) -> str:
-    json3_files = _preferred(list(directory.glob("*.json3")))
-    for path in json3_files:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            text = _parse_json3(payload)
-        except (OSError, ValueError):
-            continue
-        if text.strip():
-            return text.strip()
-
-    vtt_files = _preferred(list(directory.glob("*.vtt")))
-    for path in vtt_files:
-        try:
-            text = _parse_vtt(path.read_text(encoding="utf-8"))
-        except OSError:
-            continue
-        if text.strip():
-            return text.strip()
-
-    return ""
-
-
-def _fetch_with_ytdlp_languages(
-    video_id: str,
-    sub_langs: str,
-    *,
-    clients: tuple[str, ...] | None = None,
-    label: str = "English",
-) -> str:
-    """Fetch captions for one language pattern with yt-dlp."""
-    command = _ytdlp_command()
-    if command is None:
-        raise RuntimeError("yt-dlp is not installed")
-
-    last_error = f"no {label} captions were found"
-    proxy = os.environ.get("YT_PROXY_URL")
-    cookies_browser = os.environ.get("YT_COOKIES_FROM_BROWSER")
-    cookies_file = os.environ.get("YT_COOKIES_FILE")
-    for client in clients or YT_DLP_CLIENTS:
-        with tempfile.TemporaryDirectory(prefix="yt-transcript-") as tmp:
-            output_template = str(Path(tmp) / "%(id)s.%(ext)s")
-            argv = [
-                *command,
-                "--no-warnings",
-                "--no-playlist",
-                "--ignore-no-formats-error",
-                "--skip-download",
-                "--write-subs",
-                "--write-auto-subs",
-                "--sub-langs",
-                sub_langs,
-                "--sub-format",
-                "json3/vtt",
-                "-o",
-                output_template,
-            ]
-            if client != "default":
-                argv.extend(
-                    ["--extractor-args", f"youtube:player_client={client}"]
-                )
-            if proxy:
-                argv.extend(["--proxy", proxy])
-            if cookies_browser:
-                argv.extend(["--cookies-from-browser", cookies_browser])
-            if cookies_file:
-                argv.extend(["--cookies", cookies_file])
-            argv.append(f"https://www.youtube.com/watch?v={video_id}")
-
-            try:
-                result = subprocess.run(
-                    argv,
-                    capture_output=True,
-                    text=True,
-                    timeout=180,
-                )
-            except subprocess.TimeoutExpired:
-                last_error = f"yt-dlp timed out (client={client})"
-                continue
-            except OSError as exc:
-                raise RuntimeError(f"could not run yt-dlp: {exc}") from exc
-
-            text = _extract_subtitle_text(Path(tmp))
-            if text:
-                _log(f"fetched {label} captions with yt-dlp (client={client})")
-                return text
-
-            details = " ".join(
-                (result.stderr or result.stdout or "").split()
-            )
-            last_error = (
-                details[-500:]
-                if details
-                else f"yt-dlp returned no captions (client={client})"
-            )
-            time.sleep(random.uniform(0.2, 0.8))
-
-    raise RuntimeError(
-        f"yt-dlp could not fetch a {label} transcript: {last_error}"
-    )
-
-
-def _fetch_with_ytdlp(video_id: str) -> str:
-    """Fetch English captions with yt-dlp, trying alternate player clients.
-
-    Only English (en*) caption patterns are requested — per
-    prompts/youtube.prompt the listed-but-unused non-English subtitle
-    languages are never attempted, each attempt would otherwise cycle
-    through several player clients and make the blocked fallback path
-    very slow.
-    """
-    return _fetch_with_ytdlp_languages(video_id, "en.*")
-
-
 NOTEGPT_TRANSCRIPT_URL = (
     "https://notegpt.io/api/v2/video-transcript-v2"
 )
 
 
 def _fetch_with_notegpt(video_id: str) -> tuple[str, str, bool]:
-    """Fetch captions from NoteGPT as the last-resort public transcript source.
+    """Fetch captions from NoteGPT, the only transcript source.
 
-    NoteGPT serves the same caption tracks that YouTube exposes, behind an
-    anonymous UUID cookie.  The caller only reaches this function after both
-    YouTube caption libraries have failed (normally because YouTube returns
-    HTTP 429 for this machine's IP).  The returned tuple is
+    NoteGPT serves the caption tracks that YouTube exposes, behind an
+    anonymous UUID cookie. The returned tuple is
     ``(text, language_name, is_non_english)`` so a non-English track can go
     through the existing local translation step.
     """
     if requests is None:
         raise RuntimeError(
-            "requests is not installed; cannot call the NoteGPT fallback"
+            "requests is not installed; cannot call NoteGPT"
         )
     response = requests.get(
         NOTEGPT_TRANSCRIPT_URL,
@@ -519,87 +207,25 @@ def _fetch_with_notegpt(video_id: str) -> tuple[str, str, bool]:
     raise RuntimeError("NoteGPT returned empty transcript text")
 
 
-def _fetch_from_youtube_libraries(video_id: str) -> tuple[str, str, bool]:
-    """Fetch the transcript straight from YouTube with the caption libraries.
+def _fetch_transcript_source(video_id: str) -> tuple[str, str, bool]:
+    """Fetch the transcript from NoteGPT, the only supported source.
 
-    This is the primary source per task.make_third_party_ip_last_resort in
-    prompts/youtube.prompt; the third-party transcript site is only used
-    when both strategies have failed:
-
-    1. youtube-transcript-api reads the English caption track (or any track,
-       which the caller then translates; retries help when a proxy is set).
-    2. yt-dlp downloads the English captions while cycling through several
-       YouTube player clients.
-
-    yt-dlp only tries English captions (prompts/youtube.prompt): iterating
-    every listed subtitle language with several player clients per language
-    made the last-resort path very slow when blocked, so no original-language
-    fallback is attempted here. If both YouTube libraries fail, NoteGPT is
-    tried as the last-resort public transcript source; its return value is
-    translated by the caller when the available track is not English.
-
-    Returns ``(text, language_name, is_non_english)``.
+    Returns ``(text, language_name, is_non_english)``. The caller translates
+    the text when NoteGPT only supplied a non-English caption track.
     """
-    library_errors: list[str] = []
-
-    try:
-        text, language_code, language_name = _fetch_with_api_any(video_id)
-        if _is_english_language(language_code):
-            _log(
-                "fetched English transcript with youtube-transcript-api "
-                f"({language_code})"
-            )
-            return text, "youtube-transcript-api", False
-        _log(
-            f"youtube-transcript-api returned {language_name or language_code}; "
-            "translating it to English"
-        )
-        return text, language_name or language_code, True
-    except Exception as exc:
-        library_errors.append(
-            f"youtube-transcript-api: {_classify_error(exc)} "
-            f"({_short_error(exc, 300)})"
-        )
-        _log(
-            f"youtube-transcript-api failed ({_classify_error(exc)}); "
-            "trying yt-dlp"
-        )
-
-    try:
-        text = _fetch_with_ytdlp(video_id)
-        _log("fetched English transcript with yt-dlp")
-        return text, "yt-dlp", False
-    except Exception as exc:
-        library_errors.append(f"yt-dlp English: {_short_error(exc, 360)}")
-        _log(
-            f"yt-dlp English failed ({_classify_error(exc)}); "
-            "the caption libraries gave up"
-        )
-
     try:
         text, language_name, non_english = _fetch_with_notegpt(video_id)
-        _log(
-            "fetched transcript with NoteGPT fallback"
-            + (
-                f" ({language_name}); translating it to English"
-                if non_english
-                else ""
-            )
-        )
-        return text, f"NoteGPT ({language_name})", non_english
     except Exception as exc:
-        library_errors.append(
-            f"NoteGPT: {_classify_error(exc)} ({_short_error(exc, 300)})"
-        )
-        _log(
-            f"NoteGPT fallback failed ({_classify_error(exc)}); "
-            "all transcript sources gave up"
-        )
-
-    raise RuntimeError(
-        "All transcript sources failed for "
-        f"{video_id}: {'; '.join(library_errors)}"
+        raise RuntimeError(
+            "NoteGPT could not fetch a transcript for "
+            f"{video_id}: {_classify_error(exc)} ({_short_error(exc, 500)})"
+        ) from exc
+    _log(
+        "fetched transcript with NoteGPT"
+        + (f" ({language_name})" if language_name else "")
+        + ("; translating it to English" if non_english else "")
     )
+    return text, f"NoteGPT ({language_name})", non_english
 
 
 def _chunk_text(text: str, max_chars: int = 1600) -> list[str]:
@@ -701,12 +327,6 @@ def _translate_transcript(text: str, language_name: str) -> str:
     return result
 
 
-def _is_english_language(code: str) -> bool:
-    """Return True for English language codes, including en-xx variants."""
-    normalized = str(code or "").strip().lower().replace("_", "-")
-    return normalized == "en" or normalized.startswith("en-")
-
-
 def _looks_non_english(text: str) -> bool:
     """Detect a cached transcript that is mostly a non-Latin script."""
     sample = str(text or "")[:6000]
@@ -725,16 +345,10 @@ def fetch_transcript(video_id: str, use_cache: bool = True) -> str:
     """Return the video's English transcript as plain text.
 
     A previously downloaded transcript is reused so retries and the learn
-    pipeline are idempotent and do not hit the caption libraries again.
+    pipeline are idempotent and do not hit NoteGPT again.
 
-    The transcript comes from YouTube with youtube-transcript-api first, then
-    yt-dlp (English only). If both are blocked, the NoteGPT public transcript
-    endpoint is used as a last resort. Per prompts/youtube.prompt the
-    youtubetotranscript.com site is still NOT used.
-
-    When a source returns a non-English transcript, the original-language
-    transcript is translated locally with Ollama. This handles videos whose
-    only English option is a translated caption track.
+    NoteGPT is the only transcript source, per prompts/youtube.prompt. When it
+    returns a non-English track, the text is translated locally with Ollama.
     """
     if use_cache:
         cached = _transcript_path(video_id)
@@ -762,7 +376,7 @@ def fetch_transcript(video_id: str, use_cache: bool = True) -> str:
                 _log("using cached transcript")
                 return text
 
-    transcript, language_name, non_english = _fetch_from_youtube_libraries(
+    transcript, language_name, non_english = _fetch_transcript_source(
         video_id
     )
 
@@ -819,8 +433,8 @@ def summarize(transcript: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Fetch a YouTube transcript with youtube-transcript-api, then "
-            "yt-dlp (English captions only), and summarize it into 20 words."
+            "Fetch a YouTube transcript with NoteGPT and summarize it into "
+            "20 words."
         )
     )
     parser.add_argument("youtube_video_hash", help="YouTube video ID, e.g. FTwxtyOEGyM")
