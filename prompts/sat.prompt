@@ -10,6 +10,10 @@ sat_test_samples: {
 command: /sat
 
 task (completed) {
+  for all the words in question text and answer text, make them dictionary searchable
+}
+
+task (completed) {
   - for math related answers, use {question_llm_math}
   - for reading and writing related answers, use {question_llm_reading_and_writing}
 }

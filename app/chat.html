@@ -12554,9 +12554,21 @@ function renderSat(entry) {
 
   const body = document.createElement("div");
   body.className = "sat-question";
+  // prompts/sat.prompt: every word in the SAT question text and its
+  // answer/analysis should open the same streaming /dict popup as chat
+  // answers.  The context passed to /dict is the SAT question (prompt and
+  // choices) or that question plus the streamed analysis.
+  const choiceTexts = Array.isArray(question.choices)
+    ? question.choices.map((choice) => String(choice.text || "")).filter(Boolean)
+    : [];
+  const questionContext = [String(question.prompt || ""), ...choiceTexts]
+    .filter(Boolean)
+    .join("\n");
+  body.dataset.clickable = "true";
+  body.dataset.dictContext = questionContext;
   const prompt = document.createElement("div");
   prompt.className = "sat-question-prompt markdown";
-  prompt.appendChild(renderMarkdown(question.prompt || "", false));
+  prompt.appendChild(renderMarkdown(question.prompt || "", true));
   body.appendChild(prompt);
 
   if (Array.isArray(question.choices) && question.choices.length) {
@@ -12569,7 +12581,7 @@ function renderSat(entry) {
       id.className = "sat-choice-id";
       id.textContent = `${choice.id})`;
       const text = document.createElement("span");
-      appendInline(text, String(choice.text || ""), false);
+      appendInline(text, String(choice.text || ""), true);
       row.appendChild(id);
       row.appendChild(text);
       choices.appendChild(row);
@@ -12635,7 +12647,11 @@ function renderSat(entry) {
     } else if (current && analysis.text) {
       const body = document.createElement("div");
       body.className = "sat-analysis-body markdown";
-      const rendered = renderMarkdown(analysis.text, false);
+      body.dataset.clickable = "true";
+      body.dataset.dictContext = [questionContext, analysis.text]
+        .filter(Boolean)
+        .join("\n\n");
+      const rendered = renderMarkdown(analysis.text, true);
       const answerNodes = rendered.querySelectorAll(
         "h1, h2, h3, h4, h5, h6, strong, p"
       );
@@ -24151,7 +24167,7 @@ outputEl.addEventListener("click", (event) => {
   event.stopPropagation();
   openDictionaryPopup(
     wordEl.dataset.word || wordEl.textContent,
-    entry.text,
+    clickableParent.dataset.dictContext || entry.text,
     wordEl
   );
 });
